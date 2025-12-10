@@ -160,10 +160,12 @@ async fn handle_peer(
                                         subs.write().await.insert(sub.id.clone(), sub.clone());
                                     }
                                 }
-                                NetworkMessage::MasternodeAnnouncement { address, reward_address, tier, public_key } => {
-                                    tracing::info!("📨 Received masternode announcement from {}", address);
+                                NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
+                                    // Use the peer's actual connection address, not the announced address
+                                    let actual_address = peer.addr.clone();
+                                    tracing::info!("📨 Received masternode announcement from {}", actual_address);
                                     let mn = crate::types::Masternode {
-                                        address: address.clone(),
+                                        address: actual_address,
                                         wallet_address: reward_address.clone(),
                                         collateral: tier.collateral(),
                                         tier: tier.clone(),
