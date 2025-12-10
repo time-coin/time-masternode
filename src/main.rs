@@ -340,9 +340,10 @@ async fn main() {
     let rpc_consensus = consensus.clone();
     let rpc_utxo = utxo_mgr.clone();
     let rpc_addr_clone = rpc_addr.clone();
+    let rpc_network = network_type;
 
     tokio::spawn(async move {
-        match RpcServer::new(&rpc_addr_clone, rpc_consensus, rpc_utxo).await {
+        match RpcServer::new(&rpc_addr_clone, rpc_consensus, rpc_utxo, rpc_network).await {
             Ok(mut server) => {
                 let _ = server.run().await;
             }

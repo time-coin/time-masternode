@@ -1,6 +1,7 @@
 use super::handler::RpcHandler;
 use crate::consensus::ConsensusEngine;
 use crate::utxo_manager::UTXOStateManager;
+use crate::NetworkType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -41,9 +42,10 @@ impl RpcServer {
         addr: &str,
         consensus: Arc<ConsensusEngine>,
         utxo_manager: Arc<UTXOStateManager>,
+        network: NetworkType,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
-        let handler = Arc::new(RpcHandler::new(consensus, utxo_manager));
+        let handler = Arc::new(RpcHandler::new(consensus, utxo_manager, network));
 
         Ok(Self { listener, handler })
     }
