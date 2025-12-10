@@ -83,11 +83,11 @@ impl PeerManager {
                 if let Ok(peer_list) = response.json::<Vec<String>>().await {
                     let mut added = 0;
                     for peer_addr in peer_list {
-                        if self.add_peer(peer_addr.clone()).await {
+                        if self.add_peer_candidate(peer_addr.clone()).await {
                             added += 1;
                         }
                     }
-                    info!("✓ Discovered {} new peer(s) from server", added);
+                    info!("✓ Discovered {} new peer candidate(s) from server (will verify on connection)", added);
                     Ok(())
                 } else {
                     warn!("⚠️  Failed to parse peer list from server");
@@ -101,7 +101,13 @@ impl PeerManager {
         }
     }
 
-    /// Add a peer to the manager
+    /// Add a peer to the manager (only adds to candidate list, not saved until connection succeeds)
+    pub async fn add_peer_candidate(&self, address: String) -> bool {
+        let mut peers = self.peers.write().await;
+        peers.insert(address)
+    }
+
+    /// Add a verified peer (after successful connection)
     pub async fn add_peer(&self, address: String) -> bool {
         let mut peers = self.peers.write().await;
         if peers.insert(address.clone()) {
@@ -117,11 +123,12 @@ impl PeerManager {
 
             self.peer_info.write().await.push(peer_info.clone());
 
-            // Save to disk
+            // Save to disk only after successful connection
             if let Err(e) = self.save_peer_to_disk(&peer_info).await {
                 error!("Failed to save peer to disk: {}", e);
             }
 
+            info!("✓ Verified and saved peer: {}", address);
             true
         } else {
             false
