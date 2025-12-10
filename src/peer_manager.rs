@@ -56,14 +56,12 @@ impl PeerManager {
         let tree = self.db.open_tree("peers").map_err(|e| e.to_string())?;
 
         let mut loaded_count = 0;
-        for item in tree.iter() {
-            if let Ok((key, value)) = item {
-                if let Ok(peer_info) = bincode::deserialize::<PeerInfo>(&value) {
-                    let address = String::from_utf8_lossy(&key).to_string();
-                    self.peers.write().await.insert(address.clone());
-                    self.peer_info.write().await.push(peer_info);
-                    loaded_count += 1;
-                }
+        for (key, value) in tree.iter().flatten() {
+            if let Ok(peer_info) = bincode::deserialize::<PeerInfo>(&value) {
+                let address = String::from_utf8_lossy(&key).to_string();
+                self.peers.write().await.insert(address.clone());
+                self.peer_info.write().await.push(peer_info);
+                loaded_count += 1;
             }
         }
 

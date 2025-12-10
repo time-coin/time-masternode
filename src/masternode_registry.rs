@@ -37,6 +37,7 @@ pub struct MasternodeRegistry {
     db: Arc<Db>,
     network: NetworkType,
     block_period_start: Arc<RwLock<u64>>,
+    peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>,
 }
 
 impl MasternodeRegistry {
@@ -60,6 +61,7 @@ impl MasternodeRegistry {
             db,
             network,
             block_period_start: Arc::new(RwLock::new(now)),
+            peer_manager: Arc::new(RwLock::new(None)),
         };
 
         // Start heartbeat monitor
@@ -246,6 +248,19 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    pub async fn set_peer_manager(&self, peer_manager: Arc<crate::peer_manager::PeerManager>) {
+        *self.peer_manager.write().await = Some(peer_manager);
+    }
+
+    pub async fn active_count(&self) -> usize {
+        self.masternodes
+            .read()
+            .await
+            .values()
+            .filter(|info| info.is_active)
+            .count()
+    }
+
     #[allow(dead_code)]
     pub async fn list_by_tier(&self, tier: MasternodeTier) -> Vec<MasternodeInfo> {
         self.masternodes
@@ -287,6 +302,7 @@ impl Clone for MasternodeRegistry {
             db: self.db.clone(),
             network: self.network,
             block_period_start: self.block_period_start.clone(),
+            peer_manager: self.peer_manager.clone(),
         }
     }
 }

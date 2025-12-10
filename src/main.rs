@@ -278,10 +278,14 @@ async fn main() {
 
     // Initialize peer manager
     println!("🔍 Initializing peer manager...");
-    let peer_manager = Arc::new(PeerManager::new(Arc::new(block_storage.db()), config.network.clone()));
+    let peer_manager = Arc::new(PeerManager::new(
+        Arc::new(block_storage.db()),
+        config.network.clone(),
+    ));
     if let Err(e) = peer_manager.initialize().await {
         eprintln!("⚠️ Peer manager initialization warning: {}", e);
     }
+    println!("  ✅ Peer manager initialized");
     println!();
 
     // Open sled database for masternode registry
@@ -294,8 +298,11 @@ async fn main() {
         }
     });
 
-    // Initialize masternode registry
+    // Initialize masternode registry with peer manager
     let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
+
+    // Connect registry to peer manager
+    registry.set_peer_manager(peer_manager.clone()).await;
 
     // Register this node if running as masternode
     if let Some(ref mn) = masternode_info {
