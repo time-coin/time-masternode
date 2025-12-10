@@ -3,7 +3,7 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::types::{Transaction, TxOutput};
 use crate::vdf::{compute_vdf, VDFConfig, VDFProof};
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -370,49 +370,6 @@ impl Blockchain {
                 (mn.reward_address.clone(), share as u64)
             })
             .collect()
-    }
-
-    pub async fn start_block_production(&self) -> Result<(), String> {
-        let blockchain = Arc::new(self.clone());
-
-        tokio::spawn(async move {
-            loop {
-                // Calculate next block time (on 10-minute boundary)
-                let now = Utc::now().timestamp();
-                let next_block_time = ((now / BLOCK_TIME_SECONDS) + 1) * BLOCK_TIME_SECONDS;
-                let wait_seconds = next_block_time - now;
-
-                tracing::info!(
-                    "⏰ Next block in {}s (at {})",
-                    wait_seconds,
-                    Utc.timestamp_opt(next_block_time, 0).unwrap().to_rfc3339()
-                );
-
-                tokio::time::sleep(tokio::time::Duration::from_secs(wait_seconds as u64)).await;
-
-                match blockchain.produce_block().await {
-                    Ok(block) => {
-                        if let Err(e) = blockchain.save_block(&block) {
-                            tracing::error!("❌ Failed to save block: {}", e);
-                        } else {
-                            let mut height = blockchain.current_height.write().await;
-                            *height = block.header.height;
-                            tracing::info!(
-                                "✅ Block {} produced: {} ({} rewards)",
-                                block.header.height,
-                                hex::encode(block.hash()),
-                                block.masternode_rewards.len()
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ Block production failed: {}", e);
-                    }
-                }
-            }
-        });
-
-        Ok(())
     }
 
     fn save_block(&self, block: &Block) -> Result<(), String> {

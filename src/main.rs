@@ -327,12 +327,9 @@ async fn main() {
 
         if let Err(e) = blockchain_init.catchup_blocks().await {
             tracing::error!("❌ Block catchup failed: {}", e);
-            return;
         }
 
-        if let Err(e) = blockchain_init.start_block_production().await {
-            tracing::error!("❌ Block production failed: {}", e);
-        }
+        // Block production is handled by the timer task below
     });
 
     // Perform initial time check BEFORE starting anything else
