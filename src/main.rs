@@ -569,20 +569,23 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
     }
 }
 
-// Custom timer that includes hostname after the uptime
+// Custom timer that shows UTC time and hostname
 struct CustomTimer {
     hostname: String,
 }
 
 impl tracing_subscriber::fmt::time::FormatTime for CustomTimer {
     fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
-        // Get uptime
-        use std::time::Instant;
-        static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        let start = START_TIME.get_or_init(Instant::now);
-        let elapsed = start.elapsed();
+        // Get current UTC time using chrono (system time)
+        use chrono::Utc;
+        let now = Utc::now();
         
-        // Format: "uptime [hostname]" e.g. "  12.345678s [server1]"
-        write!(w, "{:>12.9}s [{}]", elapsed.as_secs_f64(), self.hostname)
+        // Format: "YYYY-MM-DD HH:MM:SS.mmm [hostname]"
+        // Example: "2025-12-10 18:09:43.150 [server1]"
+        write!(w, "{}.{:03} [{}]", 
+            now.format("%Y-%m-%d %H:%M:%S"),
+            now.timestamp_subsec_millis(),
+            self.hostname
+        )
     }
 }
