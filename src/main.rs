@@ -62,6 +62,16 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
+    // Print hostname at startup BEFORE any logging
+    if let Ok(hostname) = hostname::get() {
+        if let Ok(hostname_str) = hostname.into_string() {
+            let short_name = hostname_str.split('.').next().unwrap_or(&hostname_str);
+            eprintln!("\n╔═══════════════════════════════════════════╗");
+            eprintln!("║  🖥️  NODE: {:<30} ║", short_name);
+            eprintln!("╚═══════════════════════════════════════════╝\n");
+        }
+    }
+
     // Determine network type from config file or default to testnet
     let network_type = if let Ok(cfg) = Config::load_from_file(&args.config) {
         cfg.node.network_type()
