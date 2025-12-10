@@ -83,6 +83,7 @@ pub struct Masternode {
     pub collateral: u64,
     pub public_key: VerifyingKey,
     pub tier: MasternodeTier,
+    pub registered_at: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

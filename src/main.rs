@@ -2,6 +2,7 @@ mod address;
 mod block;
 mod config;
 mod consensus;
+mod masternode_registry;
 mod network;
 mod network_type;
 mod rpc;
@@ -15,6 +16,7 @@ mod wallet;
 use clap::Parser;
 use config::Config;
 use consensus::ConsensusEngine;
+use masternode_registry::MasternodeRegistry;
 use network::server::NetworkServer;
 use network_type::NetworkType;
 use rpc::server::RpcServer;
@@ -119,6 +121,7 @@ async fn main() {
 
     // Initialize masternode list
     let mut masternodes = Vec::new();
+    let mut masternode_info: Option<types::Masternode> = None;
 
     // If masternode mode is enabled in config, register this node
     if config.masternode.enabled {
@@ -152,15 +155,20 @@ async fn main() {
 
         let masternode = types::Masternode {
             address: config.network.listen_address.clone(),
-            wallet_address,
+            wallet_address: wallet_address.clone(),
             collateral,
             tier: tier.clone(),
             public_key: *wallet.public_key(),
+            registered_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
         };
 
-        masternodes.push(masternode);
+        masternodes.push(masternode.clone());
+        masternode_info = Some(masternode);
         println!("✓ Running as {:?} masternode", tier);
-        println!("  └─ Wallet: {}", config.masternode.wallet_address);
+        println!("  └─ Wallet: {}", wallet_address);
         println!("  └─ Collateral: {} TIME", collateral);
     } else {
         println!("⚠ No masternodes registered - node will run in observer mode");
@@ -245,6 +253,35 @@ async fn main() {
 
     // Start background NTP time synchronization
     time_sync.start_sync_task();
+
+    // Open sled database for masternode registry
+    let registry_db_path = format!("{}/registry", config.storage.data_dir);
+    let registry_db = Arc::new(match sled::open(&registry_db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("❌ Failed to open registry database: {}", e);
+            std::process::exit(1);
+        }
+    });
+
+    // Initialize masternode registry
+    let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
+
+    // Register this node if running as masternode
+    if let Some(ref mn) = masternode_info {
+        match registry.register(mn.clone()).await {
+            Ok(()) => {
+                tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
+            }
+            Err(masternode_registry::RegistryError::AlreadyRegistered) => {
+                tracing::info!("✓ Masternode already registered: {}", mn.wallet_address);
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to register masternode: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     let consensus = Arc::new(ConsensusEngine::new(masternodes, utxo_mgr.clone()));
 
@@ -332,6 +369,48 @@ async fn main() {
         println!();
     }
 
+    // Start block production timer (every 10 minutes)
+    let block_consensus = consensus.clone();
+    let block_registry = registry.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
+        let mut height = 1u64;
+
+        loop {
+            interval.tick().await;
+
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+
+            // Get all registered masternodes
+            let masternodes = block_registry.list_all().await;
+
+            tracing::info!(
+                "🧱 Producing block {} at {} with {} masternodes",
+                height,
+                now,
+                masternodes.len()
+            );
+
+            match block_consensus
+                .generate_deterministic_block_with_masternodes(height, now, masternodes)
+                .await
+            {
+                block => {
+                    tracing::info!(
+                        "✅ Block {} produced: {} transactions, {} masternode rewards",
+                        height,
+                        block.transactions.len(),
+                        block.masternode_rewards.len()
+                    );
+                    height += 1;
+                }
+            }
+        }
+    });
+
     // Start network server
 
     println!("🌐 Starting P2P network server...");
@@ -339,11 +418,20 @@ async fn main() {
     // Start RPC server
     let rpc_consensus = consensus.clone();
     let rpc_utxo = utxo_mgr.clone();
+    let rpc_registry = registry.clone();
     let rpc_addr_clone = rpc_addr.clone();
     let rpc_network = network_type;
 
     tokio::spawn(async move {
-        match RpcServer::new(&rpc_addr_clone, rpc_consensus, rpc_utxo, rpc_network).await {
+        match RpcServer::new(
+            &rpc_addr_clone,
+            rpc_consensus,
+            rpc_utxo,
+            rpc_network,
+            rpc_registry,
+        )
+        .await
+        {
             Ok(mut server) => {
                 let _ = server.run().await;
             }

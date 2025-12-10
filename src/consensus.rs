@@ -149,4 +149,25 @@ impl ConsensusEngine {
             base_reward,
         )
     }
+
+    pub async fn generate_deterministic_block_with_masternodes(
+        &self,
+        height: u64,
+        _timestamp: i64,
+        masternodes: Vec<Masternode>,
+    ) -> Block {
+        use crate::block::generator::DeterministicBlockGenerator;
+
+        let finalized_txs = self.get_finalized_transactions_for_block().await;
+        let previous_hash = [0u8; 32];
+        let base_reward = 100;
+
+        DeterministicBlockGenerator::generate(
+            height,
+            previous_hash,
+            finalized_txs,
+            masternodes,
+            base_reward,
+        )
+    }
 }

@@ -1,5 +1,6 @@
 use super::server::{RpcError, RpcRequest, RpcResponse};
 use crate::consensus::ConsensusEngine;
+use crate::masternode_registry::MasternodeRegistry;
 use crate::types::Transaction;
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
@@ -11,6 +12,7 @@ use std::time::SystemTime;
 pub struct RpcHandler {
     consensus: Arc<ConsensusEngine>,
     utxo_manager: Arc<UTXOStateManager>,
+    registry: Arc<MasternodeRegistry>,
     start_time: SystemTime,
     network: NetworkType,
     mempool: Arc<tokio::sync::RwLock<HashMap<[u8; 32], Transaction>>>,
@@ -21,10 +23,12 @@ impl RpcHandler {
         consensus: Arc<ConsensusEngine>,
         utxo_manager: Arc<UTXOStateManager>,
         network: NetworkType,
+        registry: Arc<MasternodeRegistry>,
     ) -> Self {
         Self {
             consensus,
             utxo_manager,
+            registry,
             start_time: SystemTime::now(),
             network,
             mempool: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -410,18 +414,23 @@ impl RpcHandler {
     }
 
     async fn masternode_list(&self) -> Result<Value, RpcError> {
-        let list: Vec<Value> = self
-            .consensus
-            .masternodes
+        let masternodes = self.registry.list_all().await;
+        let list: Vec<Value> = masternodes
             .iter()
             .map(|mn| {
                 json!({
                     "address": mn.address,
-                    "collateral": mn.collateral
+                    "wallet_address": mn.wallet_address,
+                    "collateral": mn.collateral,
+                    "tier": format!("{:?}", mn.tier),
+                    "registered_at": mn.registered_at
                 })
             })
             .collect();
-        Ok(json!(list))
+        Ok(json!({
+            "total": masternodes.len(),
+            "masternodes": list
+        }))
     }
 
     async fn uptime(&self) -> Result<Value, RpcError> {
