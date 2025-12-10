@@ -234,6 +234,11 @@ async fn main() {
     let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
     registry.set_peer_manager(peer_manager.clone()).await;
 
+    // Start network client for outbound connections and masternode announcements
+    let network_client =
+        network::client::NetworkClient::new(peer_manager.clone(), registry.clone());
+    network_client.start().await;
+
     // Register this node if running as masternode
     if let Some(ref mn) = masternode_info {
         match registry

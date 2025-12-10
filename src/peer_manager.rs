@@ -189,6 +189,16 @@ impl PeerManager {
             .collect()
     }
 
+    /// Get all peer addresses
+    pub async fn get_all_peers(&self) -> Vec<String> {
+        self.peer_info
+            .read()
+            .await
+            .iter()
+            .map(|p| p.address.clone())
+            .collect()
+    }
+
     /// Get count of connected masternodes
     #[allow(dead_code)]
     pub async fn masternode_count(&self) -> usize {

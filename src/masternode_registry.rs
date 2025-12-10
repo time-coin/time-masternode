@@ -252,6 +252,35 @@ impl MasternodeRegistry {
         *self.peer_manager.write().await = Some(peer_manager);
     }
 
+    pub async fn get_local_masternode(&self) -> Option<MasternodeInfo> {
+        // Return the first masternode registered locally (usually only one)
+        self.masternodes.read().await.values().next().cloned()
+    }
+
+    pub async fn register_masternode(
+        &self,
+        address: String,
+        reward_address: String,
+        tier: MasternodeTier,
+        public_key: ed25519_dalek::VerifyingKey,
+    ) -> Result<(), RegistryError> {
+        let masternode = Masternode {
+            address: address.clone(),
+            wallet_address: reward_address.clone(),
+            collateral: match tier {
+                MasternodeTier::Free => 0,
+                MasternodeTier::Bronze => 1_000,
+                MasternodeTier::Silver => 10_000,
+                MasternodeTier::Gold => 100_000,
+            },
+            tier,
+            public_key,
+            registered_at: Self::now(),
+        };
+
+        self.register(masternode, reward_address).await
+    }
+
     #[allow(dead_code)]
     pub async fn active_count(&self) -> usize {
         self.masternodes
