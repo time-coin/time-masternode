@@ -143,11 +143,10 @@ async fn maintain_peer_connection(
         tracing::info!("📡 Announced masternode to {}", address);
     }
 
-    // Send heartbeat every 30 seconds
-    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(30));
+    // Send heartbeat and sync check every 2 minutes (blocks are every 10 minutes)
+    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(120));
 
-    // Request blocks if we're behind
-    let local_height = blockchain.get_height().await;
+    // Initial height request
     let sync_msg = NetworkMessage::GetBlockHeight;
     let msg_json =
         serde_json::to_string(&sync_msg).map_err(|e| format!("Failed to serialize: {}", e))?;
@@ -160,7 +159,7 @@ async fn maintain_peer_connection(
         .await
         .map_err(|e| format!("Flush failed: {}", e))?;
 
-    tracing::debug!("📡 Requested block height from {}", address);
+    tracing::debug!("📡 Requested initial block height from {}", address);
 
     // Read responses
     let mut line = String::new();
@@ -168,9 +167,11 @@ async fn maintain_peer_connection(
 
     loop {
         tokio::select! {
-            // Send periodic heartbeat
+            // Send periodic heartbeat and sync check
             _ = heartbeat_interval.tick() => {
                 tracing::debug!("💓 Sending heartbeat to {}", address);
+
+                // Send masternode announcement
                 if let Some(local_mn) = masternode_registry.get_local_masternode().await {
                     let heartbeat_msg = NetworkMessage::MasternodeAnnouncement {
                         address: local_mn.masternode.address.clone(),
@@ -187,6 +188,19 @@ async fn maintain_peer_connection(
                             tracing::warn!("❌ Failed to flush heartbeat to {}: {}", address, e);
                             break;
                         }
+                    }
+                }
+
+                // Request peer height for sync check
+                let sync_msg = NetworkMessage::GetBlockHeight;
+                if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
+                    if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+                        tracing::warn!("❌ Failed to write sync request to {}: {}", address, e);
+                        break;
+                    }
+                    if let Err(e) = writer.flush().await {
+                        tracing::warn!("❌ Failed to flush sync request to {}: {}", address, e);
+                        break;
                     }
                 }
             }
@@ -208,6 +222,7 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::BlockHeightResponse(remote_height) => {
+                                    let local_height = blockchain.get_height().await;
                                     if remote_height > local_height {
                                         tracing::info!("📥 Peer has height {}, we have {}. Requesting blocks...", remote_height, local_height);
                                         let req = NetworkMessage::GetBlocks(local_height + 1, remote_height);

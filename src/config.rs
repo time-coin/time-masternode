@@ -66,6 +66,7 @@ impl NodeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub listen_address: String,
+    pub external_address: Option<String>,
     pub max_peers: u32,
     pub enable_upnp: bool,
     pub enable_peer_discovery: bool,
@@ -83,6 +84,21 @@ impl NetworkConfig {
                 network_type.default_p2p_port()
             )
         }
+    }
+
+    pub fn full_external_address(&self, network_type: &NetworkType) -> String {
+        if let Some(ref ext_addr) = self.external_address {
+            if !ext_addr.is_empty() {
+                if ext_addr.contains(':') {
+                    return ext_addr.clone();
+                } else {
+                    return format!("{}:{}", ext_addr, network_type.default_p2p_port());
+                }
+            }
+        }
+        // If no external address configured or empty string, fall back to listen address
+        // (which may be 0.0.0.0, but at least we tried)
+        self.full_listen_address(network_type)
     }
 }
 
@@ -174,6 +190,7 @@ impl Config {
             },
             network: NetworkConfig {
                 listen_address: "0.0.0.0".to_string(),
+                external_address: None,
                 max_peers: 50,
                 enable_upnp: false,
                 enable_peer_discovery: true,

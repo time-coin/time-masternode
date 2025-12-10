@@ -10,6 +10,9 @@ network = "mainnet"
 # Port is auto-selected based on network type unless explicitly set:
 # - Mainnet: 24000
 listen_address = "0.0.0.0"  # Will use port 24000
+# External address that other nodes can connect to (required for masternodes)
+# Leave unset if you want to use listen_address (only works if not 0.0.0.0)
+external_address = ""  # Example: "your-public-ip" or "your-domain.com"
 max_peers = 50
 enable_upnp = false
 enable_peer_discovery = true

@@ -81,7 +81,7 @@ impl MasternodeRegistry {
     }
 
     async fn monitor_heartbeats(&self) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
         loop {
             interval.tick().await;
 

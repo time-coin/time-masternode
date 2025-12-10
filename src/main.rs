@@ -159,7 +159,7 @@ async fn main() {
         };
 
         let masternode = types::Masternode {
-            address: config.network.full_listen_address(&network_type),
+            address: config.network.full_external_address(&network_type),
             wallet_address: wallet_address.clone(),
             collateral: tier.collateral(),
             tier: tier.clone(),
@@ -495,6 +495,47 @@ async fn main() {
             Err(e) => {
                 eprintln!("  ❌ Failed to start RPC server: {}", e);
             }
+        }
+    });
+
+    // Periodic status report - logs at :05, :15, :25, :35, :45, :55 (midway between block times)
+    let status_blockchain = blockchain_server.clone();
+    let status_registry = registry.clone();
+    tokio::spawn(async move {
+        loop {
+            // Wait until next 5-minute mark (:05, :15, :25, :35, :45, :55)
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let minute = (now / 60) % 60;
+            let second = now % 60;
+
+            // Calculate seconds until next 5-minute mark (at :05, :15, :25, :35, :45, :55)
+            let target_minute = ((minute / 10) * 10) + 5;
+            let next_target = if minute < target_minute {
+                target_minute
+            } else {
+                ((minute / 10) * 10) + 15
+            };
+
+            let minutes_until = if next_target > minute {
+                next_target - minute
+            } else {
+                60 - minute + next_target
+            };
+
+            let seconds_until = (minutes_until * 60) - second;
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)).await;
+
+            let height = status_blockchain.get_height().await;
+            let mn_count = status_registry.list_active().await.len();
+            tracing::info!(
+                "📊 Status: Height={}, Active Masternodes={}",
+                height,
+                mn_count
+            );
         }
     });
 
