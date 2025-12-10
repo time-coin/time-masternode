@@ -14,6 +14,7 @@ const SATOSHIS_PER_TIME: u64 = 100_000_000;
 const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct GenesisBlock {
     pub network: String,
     pub version: u32,

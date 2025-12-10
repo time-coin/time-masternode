@@ -14,6 +14,7 @@ pub trait UtxoStorage: Send + Sync {
 }
 
 #[async_trait::async_trait]
+#[allow(dead_code)]
 pub trait BlockStorage: Send + Sync {
     async fn get_block(&self, height: u64) -> Option<Block>;
     async fn store_block(&self, block: &Block) -> Result<(), String>;
@@ -97,10 +98,12 @@ impl UtxoStorage for SledUtxoStorage {
     }
 }
 
+#[allow(dead_code)]
 pub struct SledBlockStorage {
     db: sled::Db,
 }
 
+#[allow(dead_code)]
 impl SledBlockStorage {
     pub fn new(path: &str) -> Result<Self, String> {
         let db = sled::open(path).map_err(|e| e.to_string())?;

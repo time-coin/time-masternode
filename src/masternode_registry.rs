@@ -252,6 +252,7 @@ impl MasternodeRegistry {
         *self.peer_manager.write().await = Some(peer_manager);
     }
 
+    #[allow(dead_code)]
     pub async fn active_count(&self) -> usize {
         self.masternodes
             .read()

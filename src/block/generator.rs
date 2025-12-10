@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 pub struct DeterministicBlockGenerator;
 
+#[allow(dead_code)]
 impl DeterministicBlockGenerator {
     /// Calculate total masternode reward using logarithmic scaling
     /// Formula: BASE * ln(1 + count / SCALE)

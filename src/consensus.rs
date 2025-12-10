@@ -299,10 +299,12 @@ impl ConsensusEngine {
         (pending, finalized)
     }
 
+    #[allow(dead_code)]
     pub async fn get_active_masternodes(&self) -> Vec<Masternode> {
         self.masternodes.clone()
     }
 
+    #[allow(dead_code)]
     pub async fn generate_deterministic_block(&self, height: u64, _timestamp: i64) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 

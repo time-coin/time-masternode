@@ -138,6 +138,7 @@ impl PeerManager {
     }
 
     /// Update peer info when we connect
+    #[allow(dead_code)]
     pub async fn update_peer_connected(&self, address: &str, version: String, is_masternode: bool) {
         let mut peer_info = self.peer_info.write().await;
         if let Some(info) = peer_info.iter_mut().find(|p| p.address == address) {
@@ -153,6 +154,7 @@ impl PeerManager {
     }
 
     /// Mark a connection attempt
+    #[allow(dead_code)]
     pub async fn mark_connection_attempt(&self, address: &str, success: bool) {
         let mut peer_info = self.peer_info.write().await;
         if let Some(info) = peer_info.iter_mut().find(|p| p.address == address) {
@@ -176,6 +178,7 @@ impl PeerManager {
     }
 
     /// Get list of active masternodes
+    #[allow(dead_code)]
     pub async fn get_masternodes(&self) -> Vec<String> {
         self.peer_info
             .read()
@@ -187,6 +190,7 @@ impl PeerManager {
     }
 
     /// Get count of connected masternodes
+    #[allow(dead_code)]
     pub async fn masternode_count(&self) -> usize {
         self.peer_info
             .read()

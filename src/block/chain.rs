@@ -7,6 +7,7 @@ use crate::NetworkType;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[allow(dead_code)]
 pub struct BlockChain {
     storage: Arc<dyn BlockStorage>,
     tip_hash: Arc<RwLock<Hash256>>,
@@ -14,6 +15,7 @@ pub struct BlockChain {
     network: NetworkType,
 }
 
+#[allow(dead_code)]
 impl BlockChain {
     pub async fn new(storage: Arc<dyn BlockStorage>, network: NetworkType) -> Result<Self, String> {
         // Check if genesis block exists
