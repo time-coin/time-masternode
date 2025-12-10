@@ -11,6 +11,8 @@ pub struct TransactionPool {
     finalized: Arc<RwLock<HashMap<Hash256, Transaction>>>,
     /// Rejected transactions
     rejected: Arc<RwLock<HashMap<Hash256, String>>>,
+    /// Transaction fees (txid -> fee in satoshis)
+    fees: Arc<RwLock<HashMap<Hash256, u64>>>,
 }
 
 impl TransactionPool {
@@ -19,14 +21,16 @@ impl TransactionPool {
             pending: Arc::new(RwLock::new(HashMap::new())),
             finalized: Arc::new(RwLock::new(HashMap::new())),
             rejected: Arc::new(RwLock::new(HashMap::new())),
+            fees: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Add transaction to pending pool
+    /// Add transaction to pending pool with fee
     #[allow(dead_code)]
-    pub async fn add_pending(&self, tx: Transaction) {
+    pub async fn add_pending(&self, tx: Transaction, fee: u64) {
         let txid = tx.txid();
         self.pending.write().await.insert(txid, tx);
+        self.fees.write().await.insert(txid, fee);
     }
 
     /// Move transaction from pending to finalized
@@ -85,5 +89,21 @@ impl TransactionPool {
     #[allow(dead_code)]
     pub async fn get_rejection_reason(&self, txid: &Hash256) -> Option<String> {
         self.rejected.read().await.get(txid).cloned()
+    }
+
+    /// Get total fees from finalized transactions
+    pub async fn get_total_fees(&self) -> u64 {
+        let fees = self.fees.read().await;
+        let finalized = self.finalized.read().await;
+        finalized
+            .keys()
+            .filter_map(|txid| fees.get(txid).copied())
+            .sum()
+    }
+
+    /// Get fee for a specific transaction
+    #[allow(dead_code)]
+    pub async fn get_fee(&self, txid: &Hash256) -> Option<u64> {
+        self.fees.read().await.get(txid).copied()
     }
 }

@@ -66,6 +66,19 @@ impl ConsensusEngine {
         }
 
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        
+        // Calculate required fee (0.1% of transaction amount)
+        let fee_rate = 1000; // 0.1% = 1/1000
+        let min_fee = output_sum / fee_rate;
+        let actual_fee = input_sum.saturating_sub(output_sum);
+        
+        if actual_fee < min_fee {
+            return Err(format!(
+                "Insufficient fee: {} satoshis < {} satoshis required (0.1% of {})",
+                actual_fee, min_fee, output_sum
+            ));
+        }
+        
         if input_sum < output_sum {
             return Err(format!(
                 "Insufficient funds: {} < {}",
@@ -90,6 +103,16 @@ impl ConsensusEngine {
         // Step 1: Validate transaction
         self.validate_transaction(&tx).await?;
 
+        // Calculate fee
+        let mut input_sum = 0u64;
+        for input in &tx.inputs {
+            if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                input_sum += utxo.value;
+            }
+        }
+        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        let fee = input_sum.saturating_sub(output_sum);
+
         // Step 2: Lock UTXOs
         for input in &tx.inputs {
             self.utxo_manager
@@ -107,8 +130,8 @@ impl ConsensusEngine {
             });
         }
 
-        // Step 3: Add to pending pool and broadcast
-        self.tx_pool.add_pending(tx.clone()).await;
+        // Step 3: Add to pending pool with fee and broadcast
+        self.tx_pool.add_pending(tx.clone(), fee).await;
         self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()));
 
         // Step 4: Process transaction through consensus

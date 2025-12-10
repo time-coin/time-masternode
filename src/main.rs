@@ -1,5 +1,6 @@
 mod address;
 mod block;
+mod blockchain;
 mod config;
 mod consensus;
 mod masternode_registry;
@@ -15,6 +16,7 @@ mod utxo_manager;
 mod vdf;
 mod wallet;
 
+use blockchain::Blockchain;
 use chrono::Timelike;
 use clap::Parser;
 use config::Config;
@@ -25,10 +27,12 @@ use network_type::NetworkType;
 use peer_manager::PeerManager;
 use rpc::server::RpcServer;
 use std::sync::Arc;
-use storage::{InMemoryUtxoStorage, SledBlockStorage, UtxoStorage};
+use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
+use tokio::sync::RwLock;
 use types::*;
 use utxo_manager::UTXOStateManager;
+use vdf::VDFConfig;
 use wallet::WalletManager;
 
 #[derive(Parser, Debug)]
@@ -207,37 +211,91 @@ async fn main() {
 
     // Initialize block storage
     let block_storage_path = format!("{}/blocks", config.storage.data_dir);
-    let block_storage = Arc::new(match SledBlockStorage::new(&block_storage_path) {
+    let block_storage = match sled::open(&block_storage_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("❌ Failed to initialize block storage: {}", e);
             std::process::exit(1);
         }
-    });
+    };
 
-    // Initialize blockchain with genesis block
-    let blockchain = match block::chain::BlockChain::new(block_storage.clone(), network_type).await
-    {
-        Ok(bc) => {
-            let height = bc.get_height().await;
-            println!("✓ Blockchain initialized");
-            println!("  └─ Current height: {}", height);
-            println!(
-                "  └─ Genesis hash: {}",
-                hex::encode(bc.get_tip_hash().await)
-            );
-            Arc::new(bc)
-        }
+    // Initialize masternode registry  
+    let masternode_registry_path = format!("{}/masternodes", config.storage.data_dir);
+    let masternode_db = match sled::open(&masternode_registry_path) {
+        Ok(db) => Arc::new(db),
         Err(e) => {
-            eprintln!("❌ Failed to initialize blockchain: {}", e);
+            eprintln!("❌ Failed to initialize masternode registry: {}", e);
             std::process::exit(1);
         }
     };
-    println!();
+    let masternode_registry = Arc::new(RwLock::new(MasternodeRegistry::new(masternode_db, network_type)));
+
+    // Register this node as a masternode if configured
+    if config.masternode.enabled {
+        let tier = match config.masternode.tier.as_str() {
+            "free" => MasternodeTier::Free,
+            "bronze" => MasternodeTier::Bronze,
+            "silver" => MasternodeTier::Silver,
+            "gold" => MasternodeTier::Gold,
+            _ => MasternodeTier::Free,
+        };
+
+        let wallet_addr = wallet.address();
+        let network_type = config.node.network_type();
+        let listen_addr = config.network.full_listen_address(&network_type);
+        
+        let masternode = Masternode {
+            address: listen_addr,
+            wallet_address: wallet_addr.to_string(),
+            collateral: tier.collateral(),
+            tier,
+            public_key: *wallet.public_key(),
+            registered_at: chrono::Utc::now().timestamp() as u64,
+        };
+
+        masternode_registry.write().await.register(masternode, wallet_addr.to_string()).await;
+    }
 
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
     println!("✓ Ready to process transactions\n");
+
+    // Initialize consensus before blockchain
+    let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
+
+    // Initialize blockchain
+    let vdf_config = match network_type {
+        NetworkType::Mainnet => VDFConfig::mainnet(),
+        NetworkType::Testnet => VDFConfig::testnet(),
+    };
+
+    let blockchain = Arc::new(Blockchain::new(
+        block_storage,
+        consensus_engine.clone(),
+        masternode_registry.clone(),
+        vdf_config,
+    ));
+
+    println!("✓ Blockchain initialized");
+    println!();
+
+    // Initialize genesis and catchup in background
+    let blockchain_init = blockchain.clone();
+    tokio::spawn(async move {
+        if let Err(e) = blockchain_init.initialize_genesis().await {
+            tracing::error!("❌ Genesis initialization failed: {}", e);
+            return;
+        }
+
+        if let Err(e) = blockchain_init.catchup_blocks().await {
+            tracing::error!("❌ Block catchup failed: {}", e);
+            return;
+        }
+
+        if let Err(e) = blockchain_init.start_block_production().await {
+            tracing::error!("❌ Block production failed: {}", e);
+        }
+    });
 
     // Perform initial time check BEFORE starting anything else
     println!("🕐 Checking system time synchronization...");
@@ -278,8 +336,13 @@ async fn main() {
 
     // Initialize peer manager
     println!("🔍 Initializing peer manager...");
+    let peer_db = Arc::new(
+        sled::open(format!("{}/peers", config.storage.data_dir))
+            .map_err(|e| format!("Failed to open peer database: {}", e))
+            .unwrap()
+    );
     let peer_manager = Arc::new(PeerManager::new(
-        Arc::new(block_storage.db()),
+        peer_db,
         config.network.clone(),
     ));
     if let Err(e) = peer_manager.initialize().await {
@@ -486,34 +549,17 @@ async fn main() {
                     "⏩ Chain is behind! Generating {} catchup blocks...",
                     expected_height - current_height
                 );
-                match block_blockchain
-                    .generate_catchup_blocks(masternodes.clone())
-                    .await
-                {
-                    Ok(blocks) => {
-                        tracing::info!("✅ Generated {} catchup blocks", blocks.len());
-                        for block in blocks {
-                            tracing::info!(
-                                "   Block {}: {} transactions, {} rewards",
-                                block.header.height,
-                                block.transactions.len(),
-                                block.masternode_rewards.len()
-                            );
-                        }
+                match block_blockchain.catchup_blocks().await {
+                    Ok(()) => {
+                        tracing::info!("✅ Catchup complete");
                     }
                     Err(e) => {
-                        tracing::error!("❌ Failed to generate catchup blocks: {}", e);
+                        tracing::error!("❌ Failed to catchup blocks: {}", e);
                     }
                 }
             } else {
-                // Generate next block with finalized transactions
-                // TODO: Get finalized transactions from transaction pool
-                let finalized_txs = Vec::new();
-
-                match block_blockchain
-                    .generate_next_block(finalized_txs, masternodes)
-                    .await
-                {
+                // Produce next block (includes finalized transactions and fees)
+                match block_blockchain.produce_block().await {
                     Ok(block) => {
                         tracing::info!(
                             "✅ Block {} produced: {} transactions, {} masternode rewards",
@@ -523,7 +569,7 @@ async fn main() {
                         );
                     }
                     Err(e) => {
-                        tracing::error!("❌ Failed to generate block: {}", e);
+                        tracing::error!("❌ Failed to produce block: {}", e);
                     }
                 }
             }

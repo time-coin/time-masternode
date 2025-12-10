@@ -50,12 +50,16 @@ impl DeterministicBlockGenerator {
         let mut txs_sorted = final_transactions;
         txs_sorted.sort_by_key(|a| a.txid());
 
+        // Calculate total fees collected from transactions
+        // Fees = inputs - outputs (already validated during transaction processing)
         let total_fees: u64 = txs_sorted
             .iter()
-            .map(|tx| {
-                let input_sum: u64 = 0;
-                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-                input_sum.saturating_sub(output_sum)
+            .filter(|_tx| !_tx.inputs.is_empty()) // Skip coinbase
+            .map(|_tx| {
+                // Note: Input values would need to be looked up from UTXO set
+                // For now, fee is implicit in transaction (inputs - outputs)
+                // This will be calculated during validation
+                0u64 // Placeholder - actual fee tracking needs UTXO lookups
             })
             .sum();
 
