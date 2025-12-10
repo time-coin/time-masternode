@@ -6,7 +6,6 @@ pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
-    pub treasury_allocation: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

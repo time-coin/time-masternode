@@ -265,8 +265,7 @@ async fn main() {
             &::hex::encode(block.hash())[..16]
         );
         println!("     Transactions: {}", block.transactions.len());
-        println!("     MN Rewards:   {}", block.masternode_rewards.len());
-        println!("     Treasury:     {} TIME\n", block.treasury_allocation);
+        println!("     MN Rewards:   {}\n", block.masternode_rewards.len());
     } else {
         println!("✓ Ready to process transactions\n");
     }
