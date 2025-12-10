@@ -1,18 +1,17 @@
 use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeRegistry;
+use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
 use crate::peer_manager::PeerManager;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 pub struct NetworkClient {
     peer_manager: Arc<PeerManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
+    connection_manager: Arc<ConnectionManager>,
 }
 
 impl NetworkClient {
@@ -25,6 +24,7 @@ impl NetworkClient {
             peer_manager,
             masternode_registry,
             blockchain,
+            connection_manager: Arc::new(ConnectionManager::new()),
         }
     }
 
@@ -33,9 +33,7 @@ impl NetworkClient {
         let peer_manager = self.peer_manager.clone();
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
-
-        // Track active connections to prevent duplicates
-        let active_connections: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let connection_manager = self.connection_manager.clone();
 
         tokio::spawn(async move {
             loop {
@@ -44,35 +42,61 @@ impl NetworkClient {
 
                 // Connect to each peer if not already connected
                 for peer_addr in peers.iter().take(6) {
-                    let mut connections = active_connections.lock().await;
+                    // Extract IP from address
+                    let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
+                        &peer_addr[..colon_pos]
+                    } else {
+                        continue;
+                    };
 
-                    // Skip if already connected
-                    if connections.contains(peer_addr) {
+                    // Skip if already connected/connecting
+                    if connection_manager.is_connected(ip).await {
                         continue;
                     }
 
-                    // Mark as connected
-                    connections.insert(peer_addr.clone());
-                    drop(connections);
+                    // Mark as connecting
+                    if !connection_manager.mark_connecting(ip).await {
+                        continue; // Already connecting
+                    }
 
-                    let pm = peer_manager.clone();
+                    let cm = connection_manager.clone();
                     let mr = masternode_registry.clone();
                     let bc = blockchain.clone();
-                    let addr = peer_addr.clone();
-                    let active_conns = active_connections.clone();
+                    let ip_str = ip.to_string();
 
+                    // Spawn persistent connection task
                     tokio::spawn(async move {
-                        // Single connection attempt - no reconnection loop
-                        match maintain_peer_connection(&addr, pm.clone(), mr.clone(), bc.clone())
+                        loop {
+                            match maintain_peer_connection(
+                                &ip_str,
+                                cm.clone(),
+                                mr.clone(),
+                                bc.clone(),
+                            )
                             .await
-                        {
-                            Ok(_) => {}
-                            Err(e) => tracing::debug!("Connection to {} failed: {}", addr, e),
-                        }
+                            {
+                                Ok(_) => {
+                                    tracing::info!("Connection to {} ended gracefully", ip_str);
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Connection to {} failed: {}", ip_str, e);
+                                }
+                            }
 
-                        // Remove from active connections when done
-                        active_conns.lock().await.remove(&addr);
+                            // Mark as disconnected
+                            cm.mark_disconnected(&ip_str).await;
+
+                            // Wait before reconnecting
+                            tracing::info!("Reconnecting to {} in 30s...", ip_str);
+                            sleep(Duration::from_secs(30)).await;
+
+                            // Mark as connecting again
+                            cm.mark_connecting(&ip_str).await;
+                        }
                     });
+
+                    // Small delay between connection attempts
+                    sleep(Duration::from_millis(100)).await;
                 }
 
                 // Check for new peers every 60 seconds
@@ -84,17 +108,18 @@ impl NetworkClient {
 
 /// Maintain a persistent connection to a peer
 async fn maintain_peer_connection(
-    address: &str,
-    _peer_manager: Arc<PeerManager>,
+    ip: &str,
+    connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
 ) -> Result<(), String> {
-    // Try to connect
-    let stream = TcpStream::connect(address)
+    // Connect directly - connection manager just tracks we're connected
+    let addr = format!("{}:24100", ip);
+    let stream = tokio::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
-    tracing::info!("✓ Connected to peer: {}", address);
+    tracing::info!("✓ Connected to peer: {}", ip);
 
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -117,7 +142,7 @@ async fn maintain_peer_connection(
         .await
         .map_err(|e| format!("Failed to flush handshake: {}", e))?;
 
-    tracing::debug!("📡 Sent handshake to {}", address);
+    tracing::debug!("📡 Sent handshake to {}", ip);
 
     // Announce our masternode if we are one
     if let Some(local_mn) = masternode_registry.get_local_masternode().await {
@@ -140,7 +165,7 @@ async fn maintain_peer_connection(
             .await
             .map_err(|e| format!("Flush failed: {}", e))?;
 
-        tracing::info!("📡 Announced masternode to {}", address);
+        tracing::info!("📡 Announced masternode to {}", ip);
     }
 
     // Send heartbeat and sync check every 2 minutes (blocks are every 10 minutes)
@@ -159,17 +184,17 @@ async fn maintain_peer_connection(
         .await
         .map_err(|e| format!("Flush failed: {}", e))?;
 
-    tracing::debug!("📡 Requested initial block height from {}", address);
+    tracing::debug!("📡 Requested initial block height from {}", ip);
 
     // Read responses
     let mut line = String::new();
-    tracing::info!("🔄 Starting message loop for peer {}", address);
+    tracing::info!("🔄 Starting message loop for peer {}", ip);
 
     loop {
         tokio::select! {
             // Send periodic heartbeat and sync check
             _ = heartbeat_interval.tick() => {
-                tracing::debug!("💓 Sending heartbeat to {}", address);
+                tracing::debug!("💓 Sending heartbeat to {}", ip);
 
                 // Send masternode announcement
                 if let Some(local_mn) = masternode_registry.get_local_masternode().await {
@@ -181,11 +206,11 @@ async fn maintain_peer_connection(
                     };
                     if let Ok(msg_json) = serde_json::to_string(&heartbeat_msg) {
                         if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                            tracing::warn!("❌ Failed to write heartbeat to {}: {}", address, e);
+                            tracing::warn!("❌ Failed to write heartbeat to {}: {}", ip, e);
                             break;
                         }
                         if let Err(e) = writer.flush().await {
-                            tracing::warn!("❌ Failed to flush heartbeat to {}: {}", address, e);
+                            tracing::warn!("❌ Failed to flush heartbeat to {}: {}", ip, e);
                             break;
                         }
                     }
@@ -195,11 +220,11 @@ async fn maintain_peer_connection(
                 let sync_msg = NetworkMessage::GetBlockHeight;
                 if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
                     if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                        tracing::warn!("❌ Failed to write sync request to {}: {}", address, e);
+                        tracing::warn!("❌ Failed to write sync request to {}: {}", ip, e);
                         break;
                     }
                     if let Err(e) = writer.flush().await {
-                        tracing::warn!("❌ Failed to flush sync request to {}: {}", address, e);
+                        tracing::warn!("❌ Failed to flush sync request to {}: {}", ip, e);
                         break;
                     }
                 }
@@ -209,11 +234,11 @@ async fn maintain_peer_connection(
             result = reader.read_line(&mut line) => {
                 match result {
                     Ok(0) => {
-                        tracing::info!("🔌 Connection to {} closed by peer (EOF)", address);
+                        tracing::info!("🔌 Connection to {} closed by peer (EOF)", ip);
                         break;
                     }
                     Ok(n) => {
-                        tracing::debug!("📨 Received {} bytes from {}: {}", n, address, line.trim());
+                        tracing::debug!("📨 Received {} bytes from {}: {}", n, ip, line.trim());
                         if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
                             match msg {
                                 NetworkMessage::MasternodeAnnouncement { address: mn_addr, reward_address, tier, public_key } => {
@@ -248,13 +273,16 @@ async fn maintain_peer_connection(
                         line.clear();
                     }
                     Err(e) => {
-                        tracing::info!("🔌 Connection to {} ended: {}", address, e);
+                        tracing::info!("🔌 Connection to {} ended: {}", ip, e);
                         break;
                     }
                 }
             }
         }
     }
+
+    // Mark as disconnected when done
+    connection_manager.mark_disconnected(ip).await;
 
     Ok(())
 }

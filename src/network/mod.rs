@@ -1,5 +1,6 @@
 pub mod blacklist;
 pub mod client;
+pub mod connection_manager;
 pub mod message;
 pub mod peer_discovery;
 pub mod rate_limiter;

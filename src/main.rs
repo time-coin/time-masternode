@@ -206,9 +206,13 @@ async fn main() {
         }
     };
 
-    // Initialize block storage
+    // Initialize block storage with increased cache to suppress warnings
     let block_storage_path = format!("{}/blocks", config.storage.data_dir);
-    let block_storage = match sled::open(&block_storage_path) {
+    let block_storage = match sled::Config::new()
+        .path(&block_storage_path)
+        .cache_capacity(1024 * 1024 * 1024) // 1GB cache
+        .open()
+    {
         Ok(s) => s,
         Err(e) => {
             eprintln!("❌ Failed to initialize block storage: {}", e);
@@ -218,31 +222,41 @@ async fn main() {
 
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
-    // Initialize peer manager
-    println!("🔍 Initializing peer manager...");
+    // Initialize peer manager (suppress sled output)
     let peer_db = Arc::new(
-        sled::open(format!("{}/peers", config.storage.data_dir))
+        sled::Config::new()
+            .path(format!("{}/peers", config.storage.data_dir))
+            .cache_capacity(1024 * 1024 * 1024)
+            .open()
             .map_err(|e| format!("Failed to open peer database: {}", e))
             .unwrap(),
     );
     let peer_manager = Arc::new(PeerManager::new(peer_db, config.network.clone()));
+
+    // Initialize masternode registry (suppress sled output)
+    let registry_db_path = format!("{}/registry", config.storage.data_dir);
+    let registry_db = Arc::new(
+        match sled::Config::new()
+            .path(&registry_db_path)
+            .cache_capacity(1024 * 1024 * 1024)
+            .open()
+        {
+            Ok(db) => db,
+            Err(e) => {
+                eprintln!("❌ Failed to open registry database: {}", e);
+                std::process::exit(1);
+            }
+        },
+    );
+
+    println!("🔍 Initializing peer manager...");
     if let Err(e) = peer_manager.initialize().await {
         eprintln!("⚠️ Peer manager initialization warning: {}", e);
     }
-    println!("  ✅ Peer manager initialized");
-    println!();
-
-    // Initialize masternode registry
-    let registry_db_path = format!("{}/registry", config.storage.data_dir);
-    let registry_db = Arc::new(match sled::open(&registry_db_path) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("❌ Failed to open registry database: {}", e);
-            std::process::exit(1);
-        }
-    });
     let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
     registry.set_peer_manager(peer_manager.clone()).await;
+    println!("  ✅ Peer manager initialized");
+    println!();
 
     println!("✓ Ready to process transactions\n");
 
