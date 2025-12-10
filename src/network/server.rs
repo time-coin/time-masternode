@@ -116,6 +116,7 @@ async fn handle_peer(
     rate_limiter: Arc<RwLock<RateLimiter>>,
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
 ) -> Result<(), std::io::Error> {
+    tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);

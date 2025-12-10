@@ -5,6 +5,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkMessage {
+    // Block sync
+    GetGenesisHash,
+    GenesisHashResponse(Hash256),
+    GetBlocks {
+        start_height: u64,
+        count: u32,
+    },
+    BlocksResponse(Vec<Block>),
     // First message must be handshake with magic bytes
     Handshake {
         magic: [u8; 4],
