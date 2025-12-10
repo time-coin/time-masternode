@@ -1,5 +1,5 @@
 use crate::block::types::Block;
-use crate::types::{MasternodeTier, OutPoint, Transaction, UTXOState, Vote, UTXO};
+use crate::types::{Hash256, MasternodeTier, OutPoint, Transaction, UTXOState, Vote, UTXO};
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
@@ -44,8 +44,6 @@ pub enum NetworkMessage {
     BlockResponse(Block),
     GetUTXOSet,
     UTXOSetResponse(Vec<UTXO>),
-    GetBlocks(u64, u64),
-    BlocksResponse(Vec<Block>),
     MasternodeAnnouncement {
         address: String,
         reward_address: String,
