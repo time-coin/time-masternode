@@ -299,11 +299,14 @@ async fn handle_peer(
                                             .as_secs(),
                                     };
 
-                                    if let Err(e) = masternode_registry.register(
-                                        mn,
-                                        reward_address.clone()
-                                    ).await {
-                                        tracing::warn!("Failed to register masternode: {}", e);
+                                    match masternode_registry.register(mn, reward_address.clone()).await {
+                                        Ok(()) => {
+                                            let count = masternode_registry.total_count().await;
+                                            tracing::info!("✅ Registered masternode {} (total: {})", address, count);
+                                        },
+                                        Err(e) => {
+                                            tracing::warn!("❌ Failed to register masternode {}: {}", address, e);
+                                        }
                                     }
                                 }
                                 _ => {}
