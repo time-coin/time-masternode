@@ -87,10 +87,10 @@ pub struct Masternode {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MasternodeTier {
-    Free = 0,       // Can receive rewards, cannot vote on governance
-    Bronze = 1000,  // Can vote on governance, 10x rewards vs Free
-    Silver = 10000, // Can vote on governance, 100x rewards vs Free
-    Gold = 100000,  // Can vote on governance, 1000x rewards vs Free
+    Free = 0,       // Can receive rewards (0.1x weight vs Bronze), cannot vote on governance
+    Bronze = 1000,  // Can vote on governance, 1x baseline reward weight
+    Silver = 10000, // Can vote on governance, 10x reward weight
+    Gold = 100000,  // Can vote on governance, 100x reward weight
 }
 
 impl MasternodeTier {
@@ -110,13 +110,15 @@ impl MasternodeTier {
         }
     }
 
-    /// Reward weight for block reward distribution (proportional to collateral for fair APY)
+    /// Reward weight for block reward distribution
+    /// Free nodes get 0.1x weight compared to Bronze (100 vs 1000)
+    /// But if ONLY free nodes exist, they share 100% of rewards
     pub fn reward_weight(&self) -> u64 {
         match self {
-            MasternodeTier::Free => 1,       // Minimal weight
-            MasternodeTier::Bronze => 1000,  // Proportional to collateral
-            MasternodeTier::Silver => 10000, // Proportional to collateral
-            MasternodeTier::Gold => 100000,  // Proportional to collateral
+            MasternodeTier::Free => 100,     // 0.1x relative to Bronze
+            MasternodeTier::Bronze => 1000,  // 1x (baseline)
+            MasternodeTier::Silver => 10000, // 10x
+            MasternodeTier::Gold => 100000,  // 100x
         }
     }
 
