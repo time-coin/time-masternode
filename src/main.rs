@@ -23,7 +23,7 @@ use network::server::NetworkServer;
 use network_type::NetworkType;
 use rpc::server::RpcServer;
 use std::sync::Arc;
-use storage::{InMemoryUtxoStorage, UtxoStorage};
+use storage::{InMemoryUtxoStorage, SledBlockStorage, UtxoStorage};
 use time_sync::TimeSync;
 use types::*;
 use utxo_manager::UTXOStateManager;
@@ -203,50 +203,37 @@ async fn main() {
         }
     };
 
+    // Initialize block storage
+    let block_storage_path = format!("{}/blocks", config.storage.data_dir);
+    let block_storage = Arc::new(match SledBlockStorage::new(&block_storage_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("❌ Failed to initialize block storage: {}", e);
+            std::process::exit(1);
+        }
+    });
+
     // Initialize blockchain with genesis block
-    let genesis_block = block::genesis::GenesisBlock::for_network(network_type);
-    println!("✓ Initialized genesis block");
-    println!("  └─ Height: {}", genesis_block.header.height);
-    println!("  └─ Hash: {}", hex::encode(genesis_block.hash()));
-    println!("  └─ Timestamp: {}", genesis_block.header.timestamp);
-    println!(
-        "  └─ Pre-mine: {} satoshis\n",
-        genesis_block.header.block_reward
-    );
+    let blockchain = match block::chain::BlockChain::new(block_storage.clone(), network_type).await
+    {
+        Ok(bc) => {
+            let height = bc.get_height().await;
+            println!("✓ Blockchain initialized");
+            println!("  └─ Current height: {}", height);
+            println!(
+                "  └─ Genesis hash: {}",
+                hex::encode(bc.get_tip_hash().await)
+            );
+            Arc::new(bc)
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to initialize blockchain: {}", e);
+            std::process::exit(1);
+        }
+    };
+    println!();
 
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
-
-    // Add genesis coinbase UTXO to UTXO set
-    if let Some(coinbase_tx) = genesis_block.transactions.first() {
-        for (vout, output) in coinbase_tx.outputs.iter().enumerate() {
-            let utxo = UTXO {
-                outpoint: OutPoint {
-                    txid: coinbase_tx.txid(),
-                    vout: vout as u32,
-                },
-                value: output.value,
-                script_pubkey: output.script_pubkey.clone(),
-                address: "genesis".to_string(),
-            };
-            utxo_mgr.add_utxo(utxo).await;
-        }
-    }
-
-    // Add genesis coinbase UTXO to UTXO set
-    if let Some(coinbase_tx) = genesis_block.transactions.first() {
-        for (vout, output) in coinbase_tx.outputs.iter().enumerate() {
-            let utxo = UTXO {
-                outpoint: OutPoint {
-                    txid: coinbase_tx.txid(),
-                    vout: vout as u32,
-                },
-                value: output.value,
-                script_pubkey: output.script_pubkey.clone(),
-                address: "genesis".to_string(),
-            };
-            utxo_mgr.add_utxo(utxo).await;
-        }
-    }
 
     println!("✓ Ready to process transactions\n");
 
@@ -421,8 +408,9 @@ async fn main() {
     }
 
     // Start block production timer (every 10 minutes)
-    let block_consensus = consensus.clone();
+    let _block_consensus = consensus.clone();
     let block_registry = registry.clone();
+    let block_blockchain = blockchain.clone();
     tokio::spawn(async move {
         // Calculate time until next 10-minute boundary
         let now = chrono::Utc::now();
@@ -435,8 +423,6 @@ async fn main() {
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        let mut height = 1u64;
 
         loop {
             interval.tick().await;
@@ -454,26 +440,78 @@ async fn main() {
 
             // Get masternodes eligible for rewards (active for entire block period)
             let eligible = block_registry.get_eligible_for_rewards().await;
+            let masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _)| mn.clone()).collect();
+
+            // Require at least 3 masternodes for block production
+            if masternodes.len() < 3 {
+                tracing::warn!(
+                    "⚠️ Skipping block production: only {} masternodes active (minimum 3 required)",
+                    masternodes.len()
+                );
+                continue;
+            }
+
+            let current_height = block_blockchain.get_height().await;
+            let expected_height =
+                block::generator::DeterministicBlockGenerator::calculate_expected_height();
 
             tracing::info!(
-                "🧱 Producing block {} at {} ({}:{}0) with {} eligible masternodes",
-                height,
+                "🧱 Producing block at height {} (expected: {}) at {} ({}:{}0) with {} eligible masternodes",
+                current_height + 1,
+                expected_height,
                 timestamp,
                 now.hour(),
                 (now.minute() / 10),
-                eligible.len()
+                masternodes.len()
             );
 
-            let block = block_consensus
-                .generate_deterministic_block_with_eligible(height, timestamp, eligible)
-                .await;
-            tracing::info!(
-                "✅ Block {} produced: {} transactions, {} masternode rewards",
-                height,
-                block.transactions.len(),
-                block.masternode_rewards.len()
-            );
-            height += 1;
+            // Generate catchup blocks if needed
+            if current_height < expected_height {
+                tracing::warn!(
+                    "⏩ Chain is behind! Generating {} catchup blocks...",
+                    expected_height - current_height
+                );
+                match block_blockchain
+                    .generate_catchup_blocks(masternodes.clone())
+                    .await
+                {
+                    Ok(blocks) => {
+                        tracing::info!("✅ Generated {} catchup blocks", blocks.len());
+                        for block in blocks {
+                            tracing::info!(
+                                "   Block {}: {} transactions, {} rewards",
+                                block.header.height,
+                                block.transactions.len(),
+                                block.masternode_rewards.len()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to generate catchup blocks: {}", e);
+                    }
+                }
+            } else {
+                // Generate next block with finalized transactions
+                // TODO: Get finalized transactions from transaction pool
+                let finalized_txs = Vec::new();
+
+                match block_blockchain
+                    .generate_next_block(finalized_txs, masternodes)
+                    .await
+                {
+                    Ok(block) => {
+                        tracing::info!(
+                            "✅ Block {} produced: {} transactions, {} masternode rewards",
+                            block.header.height,
+                            block.transactions.len(),
+                            block.masternode_rewards.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to generate block: {}", e);
+                    }
+                }
+            }
         }
     });
 

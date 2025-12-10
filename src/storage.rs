@@ -1,3 +1,4 @@
+use crate::block::types::Block;
 use crate::types::{OutPoint, UTXO};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,6 +11,14 @@ pub trait UtxoStorage: Send + Sync {
     async fn add_utxo(&self, utxo: UTXO) -> Result<(), String>;
     async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), String>;
     async fn list_utxos(&self) -> Vec<UTXO>;
+}
+
+#[async_trait::async_trait]
+pub trait BlockStorage: Send + Sync {
+    async fn get_block(&self, height: u64) -> Option<Block>;
+    async fn store_block(&self, block: &Block) -> Result<(), String>;
+    async fn get_tip(&self) -> Result<Block, String>;
+    async fn get_height(&self) -> u64;
 }
 
 pub struct InMemoryUtxoStorage {
@@ -85,5 +94,59 @@ impl UtxoStorage for SledUtxoStorage {
                 bincode::deserialize(&value).ok()
             })
             .collect()
+    }
+}
+
+pub struct SledBlockStorage {
+    db: sled::Db,
+}
+
+impl SledBlockStorage {
+    pub fn new(path: &str) -> Result<Self, String> {
+        let db = sled::open(path).map_err(|e| e.to_string())?;
+        Ok(Self { db })
+    }
+}
+
+#[async_trait::async_trait]
+impl BlockStorage for SledBlockStorage {
+    async fn get_block(&self, height: u64) -> Option<Block> {
+        let key = format!("block:{}", height);
+        let value = self.db.get(key.as_bytes()).ok()??;
+        bincode::deserialize(&value).ok()
+    }
+
+    async fn store_block(&self, block: &Block) -> Result<(), String> {
+        let key = format!("block:{}", block.header.height);
+        let value = bincode::serialize(block).map_err(|e| e.to_string())?;
+        self.db
+            .insert(key.as_bytes(), value)
+            .map_err(|e| e.to_string())?;
+
+        // Update tip
+        self.db
+            .insert(b"tip_height", block.header.height.to_le_bytes().as_ref())
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    async fn get_tip(&self) -> Result<Block, String> {
+        let height = self.get_height().await;
+        self.get_block(height)
+            .await
+            .ok_or_else(|| "Tip block not found".to_string())
+    }
+
+    async fn get_height(&self) -> u64 {
+        self.db
+            .get(b"tip_height")
+            .ok()
+            .flatten()
+            .and_then(|bytes| {
+                let arr: [u8; 8] = bytes.as_ref().try_into().ok()?;
+                Some(u64::from_le_bytes(arr))
+            })
+            .unwrap_or(0)
     }
 }

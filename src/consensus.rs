@@ -297,6 +297,7 @@ impl ConsensusEngine {
         )
     }
 
+    #[allow(dead_code)]
     pub async fn generate_deterministic_block_with_eligible(
         &self,
         height: u64,

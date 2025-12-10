@@ -146,4 +146,62 @@ impl DeterministicBlockGenerator {
         }
         hashes[0]
     }
+
+    /// Calculate next block timestamp (clock-aligned every 10 minutes)
+    pub fn next_block_time() -> i64 {
+        let now = chrono::Utc::now();
+        let minute = now.minute();
+        let aligned_minute = ((minute / 10) + 1) * 10; // Next 10-minute mark
+
+        if aligned_minute >= 60 {
+            now.date_naive()
+                .and_hms_opt(now.hour() + 1, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        } else {
+            now.date_naive()
+                .and_hms_opt(now.hour(), aligned_minute, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        }
+    }
+
+    /// Calculate expected block height based on genesis time
+    pub fn calculate_expected_height() -> u64 {
+        const GENESIS_TIMESTAMP: i64 = 1733011200; // 2025-12-01T00:00:00Z
+        const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
+
+        let now = chrono::Utc::now().timestamp();
+        let elapsed = (now - GENESIS_TIMESTAMP).max(0);
+        (elapsed / BLOCK_TIME_SECONDS) as u64
+    }
+
+    /// Validate block timestamp (not in future, aligned to 10-minute intervals)
+    pub fn validate_block_time(timestamp: i64) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp();
+
+        // Reject blocks more than 30 seconds in the future
+        if timestamp > now + 30 {
+            return Err(format!(
+                "Block timestamp {} is too far in the future (now: {})",
+                timestamp, now
+            ));
+        }
+
+        // Verify 10-minute alignment
+        let dt = chrono::DateTime::from_timestamp(timestamp, 0)
+            .ok_or_else(|| "Invalid timestamp".to_string())?;
+        let minute = dt.minute();
+
+        if minute % 10 != 0 {
+            return Err(format!(
+                "Block timestamp not aligned to 10-minute intervals: minute={}",
+                minute
+            ));
+        }
+
+        Ok(())
+    }
 }
