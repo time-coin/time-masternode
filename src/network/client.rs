@@ -2,9 +2,11 @@ use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::message::NetworkMessage;
 use crate::peer_manager::PeerManager;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 
 pub struct NetworkClient {
@@ -32,120 +34,44 @@ impl NetworkClient {
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
 
-        // Periodic sync check - request block heights from peers every 30 seconds
-        let blockchain_sync = self.blockchain.clone();
-        let peer_manager_sync = self.peer_manager.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-
-                let peers = peer_manager_sync.get_all_peers().await;
-                if peers.is_empty() {
-                    continue;
-                }
-
-                let local_height = blockchain_sync.get_height().await;
-
-                // Pick a random peer and check their height
-                if let Some(peer_addr) = peers.first() {
-                    if let Ok(stream) = TcpStream::connect(peer_addr).await {
-                        let (reader, writer) = stream.into_split();
-                        let mut reader = BufReader::new(reader);
-                        let mut writer = BufWriter::new(writer);
-
-                        let sync_msg = NetworkMessage::GetBlockHeight;
-                        if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
-                            if writer
-                                .write_all(format!("{}\n", msg_json).as_bytes())
-                                .await
-                                .is_ok()
-                                && writer.flush().await.is_ok()
-                            {
-                                let mut line = String::new();
-                                if tokio::time::timeout(
-                                    Duration::from_secs(5),
-                                    reader.read_line(&mut line),
-                                )
-                                .await
-                                .is_ok()
-                                {
-                                    if let Ok(NetworkMessage::BlockHeightResponse(remote_height)) =
-                                        serde_json::from_str::<NetworkMessage>(&line)
-                                    {
-                                        if remote_height > local_height {
-                                            tracing::info!(
-                                                "🔄 Sync check: peer at height {}, we're at {} - requesting blocks",
-                                                remote_height, local_height
-                                            );
-
-                                            let req = NetworkMessage::GetBlocks(
-                                                local_height + 1,
-                                                remote_height,
-                                            );
-                                            if let Ok(json) = serde_json::to_string(&req) {
-                                                let _ = writer
-                                                    .write_all(format!("{}\n", json).as_bytes())
-                                                    .await;
-                                                let _ = writer.flush().await;
-
-                                                // Read blocks response
-                                                line.clear();
-                                                if reader.read_line(&mut line).await.is_ok() {
-                                                    if let Ok(NetworkMessage::BlocksResponse(
-                                                        blocks,
-                                                    )) = serde_json::from_str::<NetworkMessage>(
-                                                        &line,
-                                                    ) {
-                                                        tracing::info!("📦 Received {} blocks during sync check", blocks.len());
-                                                        for block in blocks {
-                                                            if let Err(e) = blockchain_sync
-                                                                .add_block(block)
-                                                                .await
-                                                            {
-                                                                tracing::warn!("Failed to add block during sync: {}", e);
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        // Track active connections to prevent duplicates
+        let active_connections: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
 
         tokio::spawn(async move {
             loop {
                 // Get list of known peers
                 let peers = peer_manager.get_all_peers().await;
 
-                // Connect to each peer in a persistent connection
+                // Connect to each peer if not already connected
                 for peer_addr in peers.iter().take(6) {
+                    let mut connections = active_connections.lock().await;
+
+                    // Skip if already connected
+                    if connections.contains(peer_addr) {
+                        continue;
+                    }
+
+                    // Mark as connected
+                    connections.insert(peer_addr.clone());
+                    drop(connections);
+
                     let pm = peer_manager.clone();
                     let mr = masternode_registry.clone();
                     let bc = blockchain.clone();
                     let addr = peer_addr.clone();
+                    let active_conns = active_connections.clone();
 
                     tokio::spawn(async move {
-                        loop {
-                            match maintain_peer_connection(
-                                &addr,
-                                pm.clone(),
-                                mr.clone(),
-                                bc.clone(),
-                            )
+                        // Single connection attempt - no reconnection loop
+                        match maintain_peer_connection(&addr, pm.clone(), mr.clone(), bc.clone())
                             .await
-                            {
-                                Ok(_) => tracing::info!("Connection to {} ended", addr),
-                                Err(e) => tracing::debug!("Connection to {} failed: {}", addr, e),
-                            }
-                            // Reconnect after 10 seconds
-                            sleep(Duration::from_secs(10)).await;
+                        {
+                            Ok(_) => tracing::info!("Connection to {} ended gracefully", addr),
+                            Err(e) => tracing::debug!("Connection to {} failed: {}", addr, e),
                         }
+
+                        // Remove from active connections when done
+                        active_conns.lock().await.remove(&addr);
                     });
                 }
 
