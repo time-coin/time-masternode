@@ -488,10 +488,10 @@ async fn main() {
             println!("\n╔═══════════════════════════════════════════════════════╗");
             println!("║  🎉 TIME Coin Daemon is Running!                      ║");
             println!("╠═══════════════════════════════════════════════════════╣");
-            println!("║  Network:    {:<41} ║", format!("{:?}", network_type));
-            println!("║  Storage:    {:<41} ║", config.storage.backend);
-            println!("║  P2P Port:   {:<41} ║", p2p_addr);
-            println!("║  RPC Port:   {:<41} ║", rpc_addr);
+            println!("║  Network:    {:<40} ║", format!("{:?}", network_type));
+            println!("║  Storage:    {:<40} ║", config.storage.backend);
+            println!("║  P2P Port:   {:<40} ║", p2p_addr);
+            println!("║  RPC Port:   {:<40} ║", rpc_addr);
             println!("║  Consensus:  BFT (2/3 quorum)                         ║");
             println!("║  Finality:   Instant (<3 seconds)                     ║");
             println!("╚═══════════════════════════════════════════════════════╝");

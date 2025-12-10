@@ -34,6 +34,12 @@ impl InMemoryUtxoStorage {
     }
 }
 
+impl Default for InMemoryUtxoStorage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl UtxoStorage for InMemoryUtxoStorage {
     async fn get_utxo(&self, outpoint: &OutPoint) -> Option<UTXO> {
