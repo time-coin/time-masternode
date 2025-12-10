@@ -62,20 +62,19 @@ impl Blockchain {
 
         tracing::info!("⏳ Waiting for 3+ masternodes to register...");
 
-        // Wait for 3 masternodes
+        // Wait for 3 masternodes (count all registered, not just active with heartbeats)
         loop {
-            let active_masternodes = self.masternode_registry.list_active().await;
-            let active_count = active_masternodes.len();
+            let total_count = self.masternode_registry.total_count().await;
 
             tracing::info!(
-                "⏳ Waiting for genesis: {} active masternode(s) registered (need 3+)",
-                active_count
+                "⏳ Waiting for genesis: {} masternode(s) registered (need 3+)",
+                total_count
             );
 
-            if active_count >= 3 {
+            if total_count >= 3 {
                 tracing::info!(
                     "✅ {} masternodes registered, creating genesis block",
-                    active_count
+                    total_count
                 );
                 break;
             }

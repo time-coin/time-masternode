@@ -38,6 +38,26 @@ pub enum NetworkMessage {
         tier: MasternodeTier,
         public_key: VerifyingKey,
     },
+    Version {
+        version: String,
+        commit_date: String,
+        commit_count: String,
+        protocol_version: u32,
+        network: String,
+        listen_addr: String,
+        timestamp: i64,
+        capabilities: Vec<String>,
+        wallet_address: Option<String>,
+        genesis_hash: Option<String>,
+    },
+    Ping {
+        nonce: u64,
+        timestamp: i64,
+    },
+    Pong {
+        nonce: u64,
+        timestamp: i64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -262,6 +262,12 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    /// Count all registered masternodes (not just active ones)
+    /// Used during genesis and catchup when heartbeat requirements are relaxed
+    pub async fn total_count(&self) -> usize {
+        self.masternodes.read().await.len()
+    }
+
     pub async fn set_peer_manager(&self, peer_manager: Arc<crate::peer_manager::PeerManager>) {
         *self.peer_manager.write().await = Some(peer_manager);
     }
