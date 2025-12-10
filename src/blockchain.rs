@@ -1,6 +1,6 @@
 use crate::block::types::{Block, BlockHeader};
 use crate::consensus::ConsensusEngine;
-use crate::masternode_registry::{MasternodeRegistry, MasternodeInfo};
+use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::types::{Transaction, TxOutput};
 use crate::vdf::{compute_vdf, VDFConfig, VDFProof};
 use chrono::{TimeZone, Utc};
@@ -24,7 +24,7 @@ pub struct GenesisBlock {
 pub struct Blockchain {
     storage: sled::Db,
     consensus: Arc<ConsensusEngine>,
-    masternode_registry: Arc<RwLock<MasternodeRegistry>>,
+    masternode_registry: Arc<MasternodeRegistry>,
     vdf_config: VDFConfig,
     current_height: Arc<RwLock<u64>>,
 }
@@ -33,7 +33,7 @@ impl Blockchain {
     pub fn new(
         storage: sled::Db,
         consensus: Arc<ConsensusEngine>,
-        masternode_registry: Arc<RwLock<MasternodeRegistry>>,
+        masternode_registry: Arc<MasternodeRegistry>,
         vdf_config: VDFConfig,
     ) -> Self {
         Self {
@@ -63,8 +63,7 @@ impl Blockchain {
 
         // Wait for 3 masternodes
         loop {
-            let registry = self.masternode_registry.read().await;
-            let active_masternodes = registry.list_active().await;
+            let active_masternodes = self.masternode_registry.list_active().await;
             let active_count = active_masternodes.len();
 
             if active_count >= 3 {
@@ -72,11 +71,9 @@ impl Blockchain {
                     "✓ {} masternodes registered, creating genesis block",
                     active_count
                 );
-                drop(registry);
                 break;
             }
 
-            drop(registry);
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
 
@@ -90,8 +87,7 @@ impl Blockchain {
     }
 
     async fn create_genesis_block(&self) -> Result<Block, String> {
-        let registry = self.masternode_registry.read().await;
-        let masternodes = registry.list_active().await;
+        let masternodes = self.masternode_registry.list_active().await;
 
         let mut outputs = Vec::new();
         let rewards = self.calculate_rewards_from_info(&masternodes);
@@ -172,8 +168,7 @@ impl Blockchain {
 
     async fn create_catchup_block(&self, height: u64, timestamp: i64) -> Result<Block, String> {
         let prev_hash = self.get_block_hash(height - 1)?;
-        let registry = self.masternode_registry.read().await;
-        let masternodes = registry.list_active().await;
+        let masternodes = self.masternode_registry.list_active().await;
 
         let mut outputs = Vec::new();
         let rewards = self.calculate_rewards_from_info(&masternodes);
@@ -246,8 +241,7 @@ impl Blockchain {
         }
 
         // Verify 3+ masternodes
-        let registry = self.masternode_registry.read().await;
-        let masternodes = registry.list_active().await;
+        let masternodes = self.masternode_registry.list_active().await;
         if masternodes.len() < 3 {
             return Err(format!(
                 "Insufficient masternodes: {} (need 3)",
@@ -267,7 +261,7 @@ impl Blockchain {
         // Calculate rewards including fees
         let base_reward = BLOCK_REWARD_SATOSHIS;
         let total_reward = base_reward + total_fees;
-        
+
         let mut outputs = Vec::new();
         let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
 
@@ -316,7 +310,10 @@ impl Blockchain {
             return vec![];
         }
 
-        let total_weight: u64 = masternodes.iter().map(|mn| mn.masternode.tier.reward_weight()).sum();
+        let total_weight: u64 = masternodes
+            .iter()
+            .map(|mn| mn.masternode.tier.reward_weight())
+            .sum();
 
         masternodes
             .iter()

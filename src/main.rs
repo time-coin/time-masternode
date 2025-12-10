@@ -29,7 +29,6 @@ use rpc::server::RpcServer;
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
-use tokio::sync::RwLock;
 use types::*;
 use utxo_manager::UTXOStateManager;
 use vdf::VDFConfig;
@@ -127,14 +126,9 @@ async fn main() {
     };
     println!();
 
-    // Initialize masternode list
-    let mut masternodes = Vec::new();
-    let mut masternode_info: Option<types::Masternode> = None;
-
-    // If masternode mode is enabled in config, register this node
-    if config.masternode.enabled {
+    // Initialize masternode info for later registration
+    let masternode_info: Option<types::Masternode> = if config.masternode.enabled {
         let wallet_address = if config.masternode.wallet_address.is_empty() {
-            // Use wallet address if not specified in config
             wallet.address().to_string()
         } else {
             config.masternode.wallet_address.clone()
@@ -154,17 +148,10 @@ async fn main() {
             }
         };
 
-        let collateral = match tier {
-            types::MasternodeTier::Free => 0,
-            types::MasternodeTier::Bronze => 1_000,
-            types::MasternodeTier::Silver => 10_000,
-            types::MasternodeTier::Gold => 100_000,
-        };
-
         let masternode = types::Masternode {
-            address: config.network.listen_address.clone(),
+            address: config.network.full_listen_address(&network_type),
             wallet_address: wallet_address.clone(),
-            collateral,
+            collateral: tier.collateral(),
             tier: tier.clone(),
             public_key: *wallet.public_key(),
             registered_at: std::time::SystemTime::now()
@@ -173,15 +160,15 @@ async fn main() {
                 .as_secs(),
         };
 
-        masternodes.push(masternode.clone());
-        masternode_info = Some(masternode);
         println!("✓ Running as {:?} masternode", tier);
         println!("  └─ Wallet: {}", wallet_address);
-        println!("  └─ Collateral: {} TIME", collateral);
+        println!("  └─ Collateral: {} TIME", tier.collateral());
+        Some(masternode)
     } else {
-        println!("⚠ No masternodes registered - node will run in observer mode");
+        println!("⚠ No masternode configured - node will run in observer mode");
         println!("  To enable: Set masternode.enabled = true in config.toml");
-    }
+        None
+    };
 
     let storage: Arc<dyn UtxoStorage> = match config.storage.backend.as_str() {
         "memory" => {
@@ -219,48 +206,69 @@ async fn main() {
         }
     };
 
-    // Initialize masternode registry  
-    let masternode_registry_path = format!("{}/masternodes", config.storage.data_dir);
-    let masternode_db = match sled::open(&masternode_registry_path) {
-        Ok(db) => Arc::new(db),
+    let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
+
+    // Initialize peer manager
+    println!("🔍 Initializing peer manager...");
+    let peer_db = Arc::new(
+        sled::open(format!("{}/peers", config.storage.data_dir))
+            .map_err(|e| format!("Failed to open peer database: {}", e))
+            .unwrap(),
+    );
+    let peer_manager = Arc::new(PeerManager::new(peer_db, config.network.clone()));
+    if let Err(e) = peer_manager.initialize().await {
+        eprintln!("⚠️ Peer manager initialization warning: {}", e);
+    }
+    println!("  ✅ Peer manager initialized");
+    println!();
+
+    // Initialize masternode registry
+    let registry_db_path = format!("{}/registry", config.storage.data_dir);
+    let registry_db = Arc::new(match sled::open(&registry_db_path) {
+        Ok(db) => db,
         Err(e) => {
-            eprintln!("❌ Failed to initialize masternode registry: {}", e);
+            eprintln!("❌ Failed to open registry database: {}", e);
             std::process::exit(1);
         }
-    };
-    let masternode_registry = Arc::new(RwLock::new(MasternodeRegistry::new(masternode_db, network_type)));
+    });
+    let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
+    registry.set_peer_manager(peer_manager.clone()).await;
 
-    // Register this node as a masternode if configured
-    if config.masternode.enabled {
-        let tier = match config.masternode.tier.as_str() {
-            "free" => MasternodeTier::Free,
-            "bronze" => MasternodeTier::Bronze,
-            "silver" => MasternodeTier::Silver,
-            "gold" => MasternodeTier::Gold,
-            _ => MasternodeTier::Free,
-        };
+    // Register this node if running as masternode
+    if let Some(ref mn) = masternode_info {
+        match registry
+            .register(mn.clone(), mn.wallet_address.clone())
+            .await
+        {
+            Ok(()) => {
+                tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
+            }
+            Err(masternode_registry::RegistryError::AlreadyRegistered) => {
+                tracing::info!("✓ Masternode already registered: {}", mn.wallet_address);
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to register masternode: {}", e);
+                std::process::exit(1);
+            }
+        }
 
-        let wallet_addr = wallet.address();
-        let network_type = config.node.network_type();
-        let listen_addr = config.network.full_listen_address(&network_type);
-        
-        let masternode = Masternode {
-            address: listen_addr,
-            wallet_address: wallet_addr.to_string(),
-            collateral: tier.collateral(),
-            tier,
-            public_key: *wallet.public_key(),
-            registered_at: chrono::Utc::now().timestamp() as u64,
-        };
-
-        masternode_registry.write().await.register(masternode, wallet_addr.to_string()).await;
+        // Start heartbeat task for this masternode
+        let registry_clone = registry.clone();
+        let mn_address = mn.address.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Err(e) = registry_clone.heartbeat(&mn_address).await {
+                    tracing::warn!("❌ Failed to send heartbeat: {}", e);
+                }
+            }
+        });
     }
-
-    let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
     println!("✓ Ready to process transactions\n");
 
-    // Initialize consensus before blockchain
+    // Initialize consensus engine
     let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
 
     // Initialize blockchain
@@ -272,7 +280,7 @@ async fn main() {
     let blockchain = Arc::new(Blockchain::new(
         block_storage,
         consensus_engine.clone(),
-        masternode_registry.clone(),
+        registry.clone(),
         vdf_config,
     ));
 
@@ -334,137 +342,6 @@ async fn main() {
     // Start background NTP time synchronization
     time_sync.start_sync_task();
 
-    // Initialize peer manager
-    println!("🔍 Initializing peer manager...");
-    let peer_db = Arc::new(
-        sled::open(format!("{}/peers", config.storage.data_dir))
-            .map_err(|e| format!("Failed to open peer database: {}", e))
-            .unwrap()
-    );
-    let peer_manager = Arc::new(PeerManager::new(
-        peer_db,
-        config.network.clone(),
-    ));
-    if let Err(e) = peer_manager.initialize().await {
-        eprintln!("⚠️ Peer manager initialization warning: {}", e);
-    }
-    println!("  ✅ Peer manager initialized");
-    println!();
-
-    // Open sled database for masternode registry
-    let registry_db_path = format!("{}/registry", config.storage.data_dir);
-    let registry_db = Arc::new(match sled::open(&registry_db_path) {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("❌ Failed to open registry database: {}", e);
-            std::process::exit(1);
-        }
-    });
-
-    // Initialize masternode registry with peer manager
-    let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
-
-    // Connect registry to peer manager
-    registry.set_peer_manager(peer_manager.clone()).await;
-
-    // Register this node if running as masternode
-    if let Some(ref mn) = masternode_info {
-        match registry
-            .register(mn.clone(), mn.wallet_address.clone())
-            .await
-        {
-            Ok(()) => {
-                tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
-            }
-            Err(masternode_registry::RegistryError::AlreadyRegistered) => {
-                tracing::info!("✓ Masternode already registered: {}", mn.wallet_address);
-            }
-            Err(e) => {
-                tracing::error!("❌ Failed to register masternode: {}", e);
-                std::process::exit(1);
-            }
-        }
-
-        // Start heartbeat task for this masternode
-        let registry_clone = registry.clone();
-        let mn_address = mn.address.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                if let Err(e) = registry_clone.heartbeat(&mn_address).await {
-                    tracing::warn!("❌ Failed to send heartbeat: {}", e);
-                }
-            }
-        });
-    }
-
-    let consensus = Arc::new(ConsensusEngine::new(masternodes, utxo_mgr.clone()));
-
-    // Demo transaction (optional)
-    if args.demo {
-        println!("\n📡 Running demo transaction...");
-
-        let tx = Transaction {
-            version: 1,
-            inputs: vec![TxInput {
-                previous_output: OutPoint {
-                    txid: [0u8; 32],
-                    vout: 0,
-                },
-                script_sig: vec![],
-                sequence: 0xFFFFFFFF,
-            }],
-            outputs: vec![
-                TxOutput {
-                    value: 400_000_000_000, // 4000 TIME in satoshis
-                    script_pubkey: vec![],
-                },
-                TxOutput {
-                    value: 99_900_000_000, // 999 TIME in satoshis (fee: 1 TIME)
-                    script_pubkey: vec![],
-                },
-            ],
-            lock_time: 0,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-        };
-
-        match consensus.process_transaction(tx.clone()).await {
-            Ok(_) => {
-                println!("  ✅ Transaction finalized with BFT consensus!");
-                println!("  └─ TXID: {}", ::hex::encode(tx.txid()));
-            }
-            Err(e) => {
-                println!("  ❌ Transaction failed: {}", e);
-            }
-        }
-
-        println!("\n🧱 Generating deterministic block...");
-        let block = consensus
-            .generate_deterministic_block(
-                1,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs() as i64,
-            )
-            .await;
-
-        println!("  ✅ Block produced:");
-        println!("     Height:       {}", block.header.height);
-        println!(
-            "     Hash:         {}...",
-            &::hex::encode(block.hash())[..16]
-        );
-        println!("     Transactions: {}", block.transactions.len());
-        println!("     MN Rewards:   {}\n", block.masternode_rewards.len());
-    } else {
-        println!("✓ Ready to process transactions\n");
-    }
-
     // Peer discovery
     if config.network.enable_peer_discovery {
         println!("🔍 Discovering peers from time-coin.io...");
@@ -486,7 +363,6 @@ async fn main() {
     }
 
     // Start block production timer (every 10 minutes)
-    let _block_consensus = consensus.clone();
     let block_registry = registry.clone();
     let block_blockchain = blockchain.clone();
     tokio::spawn(async move {
@@ -581,7 +457,7 @@ async fn main() {
     println!("🌐 Starting P2P network server...");
 
     // Start RPC server
-    let rpc_consensus = consensus.clone();
+    let rpc_consensus = consensus_engine.clone();
     let rpc_utxo = utxo_mgr.clone();
     let rpc_registry = registry.clone();
     let rpc_addr_clone = rpc_addr.clone();
@@ -606,7 +482,7 @@ async fn main() {
         }
     });
 
-    match NetworkServer::new(&p2p_addr, utxo_mgr.clone(), consensus.clone()).await {
+    match NetworkServer::new(&p2p_addr, utxo_mgr.clone(), consensus_engine.clone()).await {
         Ok(mut server) => {
             println!("  ✅ Network server listening on {}", p2p_addr);
             println!("\n╔═══════════════════════════════════════════════════════╗");

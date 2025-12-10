@@ -66,19 +66,19 @@ impl ConsensusEngine {
         }
 
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-        
+
         // Calculate required fee (0.1% of transaction amount)
         let fee_rate = 1000; // 0.1% = 1/1000
         let min_fee = output_sum / fee_rate;
         let actual_fee = input_sum.saturating_sub(output_sum);
-        
+
         if actual_fee < min_fee {
             return Err(format!(
                 "Insufficient fee: {} satoshis < {} satoshis required (0.1% of {})",
                 actual_fee, min_fee, output_sum
             ));
         }
-        
+
         if input_sum < output_sum {
             return Err(format!(
                 "Insufficient funds: {} < {}",
