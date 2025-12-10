@@ -46,6 +46,7 @@ pub struct KeypairData {
 
 pub struct Wallet {
     data: WalletData,
+    #[allow(dead_code)]
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
 }
@@ -142,6 +143,7 @@ impl Wallet {
     }
 
     /// Get signing key (for signing transactions)
+    #[allow(dead_code)]
     pub fn signing_key(&self) -> &SigningKey {
         &self.signing_key
     }

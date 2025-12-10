@@ -491,7 +491,7 @@ impl RpcHandler {
         }
 
         // Create transaction
-        use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
+        use crate::types::{Transaction, TxInput, TxOutput};
 
         let inputs: Vec<TxInput> = selected_utxos
             .iter()
