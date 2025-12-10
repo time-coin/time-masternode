@@ -217,8 +217,10 @@ async fn maintain_peer_connection(
                         if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
                             match msg {
                                 NetworkMessage::MasternodeAnnouncement { address: mn_addr, reward_address, tier, public_key } => {
-                                    if let Err(e) = masternode_registry.register_masternode(mn_addr.clone(), reward_address, tier, public_key).await {
-                                        tracing::warn!("Failed to register masternode {}: {}", mn_addr, e);
+                                    // Extract just IP from the announced address
+                                    let ip = mn_addr.split(':').next().unwrap_or(&mn_addr).to_string();
+                                    if let Err(e) = masternode_registry.register_masternode(ip.clone(), reward_address, tier, public_key).await {
+                                        tracing::warn!("Failed to register masternode {}: {}", ip, e);
                                     }
                                 }
                                 NetworkMessage::BlockHeightResponse(remote_height) => {

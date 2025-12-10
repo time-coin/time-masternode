@@ -284,20 +284,19 @@ async fn handle_peer(
                                         let _ = writer.flush().await;
                                     }
                                 }
-                                NetworkMessage::MasternodeAnnouncement { address, reward_address, tier, public_key } => {
-                                    // If they announce 0.0.0.0, use their actual connection IP instead
-                                    let actual_address = if address.starts_with("0.0.0.0:") {
-                                        // Extract their real IP from the connection
-                                        let peer_ip = peer.addr.split(':').next().unwrap_or("");
-                                        let port = address.split(':').nth(1).unwrap_or("24100");
-                                        format!("{}:{}", peer_ip, port)
-                                    } else {
-                                        address.clone()
-                                    };
+                                NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
+                                    // Extract just the IP (no port) from the peer connection
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
 
-                                    tracing::info!("📨 Received masternode announcement from {} (listen: {})", peer.addr, actual_address);
+                                    if peer_ip.is_empty() {
+                                        tracing::warn!("❌ Invalid peer IP from {}", peer.addr);
+                                        continue;
+                                    }
+
+                                    tracing::info!("📨 Received masternode announcement from {} (IP: {})", peer.addr, peer_ip);
+
                                     let mn = crate::types::Masternode {
-                                        address: actual_address.clone(),
+                                        address: peer_ip.clone(), // Store only IP
                                         wallet_address: reward_address.clone(),
                                         collateral: tier.collateral(),
                                         tier: tier.clone(),
@@ -311,10 +310,10 @@ async fn handle_peer(
                                     match masternode_registry.register(mn, reward_address.clone()).await {
                                         Ok(()) => {
                                             let count = masternode_registry.total_count().await;
-                                            tracing::info!("✅ Registered masternode {} (total: {})", actual_address, count);
+                                            tracing::info!("✅ Registered masternode {} (total: {})", peer_ip, count);
                                         },
                                         Err(e) => {
-                                            tracing::warn!("❌ Failed to register masternode {}: {}", actual_address, e);
+                                            tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);
                                         }
                                     }
                                 }
