@@ -12,7 +12,13 @@
    - Or install via chocolatey: `choco install cmake`
    - Add CMake to PATH during installation
 
-3. **Rust** (latest stable)
+3. **NASM** (Netwide Assembler)
+   - Download from: https://www.nasm.us/pub/nasm/releasebuilds/
+   - Or install via chocolatey: `choco install nasm`
+   - Required for cryptographic library compilation (ring, etc.)
+   - Add NASM to PATH during installation
+
+4. **Rust** (latest stable)
    - Download from: https://rustup.rs/
    - Use `rustup-init.exe`
 
@@ -22,19 +28,25 @@
 
 ## Build Steps
 
-### 1. Install CMake
+### 1. Install CMake and NASM
 ```powershell
 # Via chocolatey (recommended)
 choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+choco install nasm
 
-# Or download installer from cmake.org
-# Make sure to check "Add CMake to system PATH" during installation
+# Or download installers manually:
+# CMake: https://cmake.org/download/
+# NASM: https://www.nasm.us/pub/nasm/releasebuilds/
+# Make sure to check "Add to system PATH" during installation
 ```
 
-### 2. Verify CMake Installation
+### 2. Verify Installation
 ```powershell
 cmake --version
 # Should output: cmake version 3.x.x or higher
+
+nasm -v
+# Should output: NASM version 2.x.x or higher
 ```
 
 ### 3. Clone Repository
@@ -54,14 +66,16 @@ cargo build --release
 
 ## Common Issues
 
-### Issue: "CMake not found"
-**Solution**: Add CMake to PATH
+### Issue: "CMake not found" or "NASM not found"
+**Solution**: Add CMake and NASM to PATH
 ```powershell
 # Temporary fix (current session only)
-$env:Path += ";C:\Program Files\CMake\bin"
+$env:Path += ";C:\Program Files\CMake\bin;C:\Program Files\NASM"
 
 # Permanent fix: Add to system environment variables
-# System Properties > Environment Variables > Path > Add: C:\Program Files\CMake\bin
+# System Properties > Environment Variables > Path > Add:
+#   C:\Program Files\CMake\bin
+#   C:\Program Files\NASM
 ```
 
 ### Issue: "VCPKG or MSBuild not found"
