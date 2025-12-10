@@ -4,45 +4,7 @@ use sha2::{Digest, Sha256};
 
 pub type Hash256 = [u8; 32];
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum NetworkType {
-    Mainnet,
-    Testnet,
-}
-
-impl NetworkType {
-    #[allow(dead_code)]
-    pub fn magic_bytes(&self) -> [u8; 4] {
-        match self {
-            NetworkType::Mainnet => [0xC0, 0x1D, 0x7E, 0x4D], // "COLD TIME"
-            NetworkType::Testnet => [0x7E, 0x57, 0x7E, 0x4D], // "TEST TIME"
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn default_p2p_port(&self) -> u16 {
-        match self {
-            NetworkType::Mainnet => 24000,
-            NetworkType::Testnet => 24100,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn default_rpc_port(&self) -> u16 {
-        match self {
-            NetworkType::Mainnet => 24001,
-            NetworkType::Testnet => 24101,
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn address_prefix(&self) -> &'static str {
-        match self {
-            NetworkType::Mainnet => "TIME1",
-            NetworkType::Testnet => "TIME0",
-        }
-    }
-}
+// NetworkType is defined in network_type.rs module
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct OutPoint {
@@ -117,6 +79,7 @@ pub enum UTXOState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Masternode {
     pub address: String,
+    pub wallet_address: String,
     pub collateral: u64,
     pub public_key: VerifyingKey,
     pub tier: MasternodeTier,

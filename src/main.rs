@@ -1,3 +1,4 @@
+mod address;
 mod block;
 mod config;
 mod consensus;
@@ -7,16 +8,19 @@ mod rpc;
 mod storage;
 mod types;
 mod utxo_manager;
+mod wallet;
 
 use clap::Parser;
 use config::Config;
 use consensus::ConsensusEngine;
 use network::server::NetworkServer;
+use network_type::NetworkType;
 use rpc::server::RpcServer;
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use types::*;
 use utxo_manager::UTXOStateManager;
+use wallet::WalletManager;
 
 #[derive(Parser, Debug)]
 #[command(name = "timed")]
@@ -46,6 +50,13 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
+    // Determine network type from config file or default to testnet
+    let network_type = if let Ok(cfg) = Config::load_from_file(&args.config) {
+        cfg.node.network_type()
+    } else {
+        NetworkType::Testnet
+    };
+
     if args.generate_config {
         let config = Config::default();
         match config.save_to_file(&args.config) {
@@ -60,14 +71,15 @@ async fn main() {
         }
     }
 
-    let config = match Config::load_from_file(&args.config) {
+    // Load or create config with network-specific data directory
+    let config = match Config::load_or_create(&args.config, &network_type) {
         Ok(cfg) => {
             println!("✓ Loaded configuration from {}", args.config);
             cfg
         }
-        Err(_e) => {
-            println!("⚠ Using default configuration");
-            Config::default()
+        Err(e) => {
+            eprintln!("❌ Failed to load config: {}", e);
+            std::process::exit(1);
         }
     };
 
@@ -83,6 +95,23 @@ async fn main() {
     println!("📡 Network: {:?}", network_type);
     println!("  └─ Magic Bytes: {:?}", network_type.magic_bytes());
     println!("  └─ Address Prefix: {}", network_type.address_prefix());
+    println!("  └─ Data Dir: {}", config.storage.data_dir);
+    println!();
+
+    // Initialize wallet manager
+    let wallet_manager = WalletManager::new(config.storage.data_dir.clone());
+    let wallet = match wallet_manager.get_or_create_wallet(network_type) {
+        Ok(w) => {
+            println!("✓ Wallet initialized");
+            println!("  └─ Address: {}", w.address());
+            println!("  └─ File: {}", wallet_manager.default_wallet_path());
+            w
+        }
+        Err(e) => {
+            eprintln!("❌ Failed to initialize wallet: {}", e);
+            std::process::exit(1);
+        }
+    };
     println!();
 
     // Initialize masternode list
@@ -90,17 +119,12 @@ async fn main() {
 
     // If masternode mode is enabled in config, register this node
     if config.masternode.enabled {
-        use ed25519_dalek::SigningKey;
-
-        if config.masternode.wallet_address.is_empty() {
-            eprintln!("❌ Error: masternode.enabled = true but wallet_address is empty");
-            eprintln!("   Please set masternode.wallet_address in config.toml");
-            std::process::exit(1);
-        }
-
-        // Generate or load keypair (in production, load from file)
-        let signing_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
-        let public_key = signing_key.verifying_key();
+        let wallet_address = if config.masternode.wallet_address.is_empty() {
+            // Use wallet address if not specified in config
+            wallet.address().to_string()
+        } else {
+            config.masternode.wallet_address.clone()
+        };
 
         let tier = match config.masternode.tier.to_lowercase().as_str() {
             "free" => types::MasternodeTier::Free,
@@ -125,9 +149,10 @@ async fn main() {
 
         let masternode = types::Masternode {
             address: config.network.listen_address.clone(),
+            wallet_address,
             collateral,
             tier: tier.clone(),
-            public_key,
+            public_key: *wallet.public_key(),
         };
 
         masternodes.push(masternode);
