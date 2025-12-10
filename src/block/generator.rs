@@ -31,7 +31,8 @@ impl DeterministicBlockGenerator {
         masternodes: Vec<Masternode>,
         _base_reward: u64, // Ignored, use logarithmic calculation instead
     ) -> Block {
-        let timestamp = Self::midnight_utc();
+        // 10 minute blocks, not 24-hour blocks
+        let timestamp = chrono::Utc::now().timestamp();
 
         let mut masternodes_sorted = masternodes;
         masternodes_sorted.sort_by(|a, b| a.address.cmp(&b.address));
@@ -58,8 +59,8 @@ impl DeterministicBlockGenerator {
             .map(|mn| mn.tier.reward_weight())
             .sum();
 
-        // 100% of block rewards go to masternodes (per spec)
-        // Treasury funding comes from governance proposals, not pre-allocation
+        // 100% of block rewards go to masternodes
+        // No treasury or governance allocations
         let masternode_pool = total_reward;
 
         // Distribute masternode rewards proportionally by weight
@@ -107,13 +108,6 @@ impl DeterministicBlockGenerator {
             transactions: all_txs,
             masternode_rewards,
         }
-    }
-
-    fn midnight_utc() -> i64 {
-        use chrono::Utc;
-        let now = Utc::now();
-        let midnight = now.date_naive().and_hms_opt(0, 0, 0).unwrap();
-        midnight.and_utc().timestamp()
     }
 
     fn merkle_root(txs: &[Transaction]) -> Hash256 {

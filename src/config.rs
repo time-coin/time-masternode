@@ -123,7 +123,7 @@ pub struct ConsensusConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockConfig {
-    pub target_time_utc: String,
+    pub block_time_seconds: u64, // 600 = 10 minutes
     pub max_block_size_kb: usize,
     pub max_transactions_per_block: usize,
 }
@@ -195,7 +195,7 @@ impl Config {
                 quorum_percentage: 67,
             },
             block: BlockConfig {
-                target_time_utc: "00:00:00".to_string(),
+                block_time_seconds: 600, // 10 minutes
                 max_block_size_kb: 1024,
                 max_transactions_per_block: 10000,
             },
