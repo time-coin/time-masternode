@@ -7,13 +7,6 @@ use tracing::{error, info};
 pub struct PeerInfo {
     pub address: String,
     pub port: u16,
-    pub last_seen: i64,
-    pub version: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct PeerListResponse {
-    peers: Vec<PeerInfo>,
 }
 
 pub struct PeerDiscovery {
@@ -41,10 +34,27 @@ impl PeerDiscovery {
                     return Err(format!("API returned error status: {}", status));
                 }
 
-                match response.json::<PeerListResponse>().await {
-                    Ok(peer_list) => {
-                        info!("✅ Discovered {} peers", peer_list.peers.len());
-                        Ok(peer_list.peers)
+                // Parse as array of strings: ["ip:port", "ip:port"]
+                match response.json::<Vec<String>>().await {
+                    Ok(peer_strings) => {
+                        let peers: Vec<PeerInfo> = peer_strings
+                            .iter()
+                            .filter_map(|s| {
+                                let parts: Vec<&str> = s.split(':').collect();
+                                if parts.len() == 2 {
+                                    if let Ok(port) = parts[1].parse::<u16>() {
+                                        return Some(PeerInfo {
+                                            address: parts[0].to_string(),
+                                            port,
+                                        });
+                                    }
+                                }
+                                None
+                            })
+                            .collect();
+
+                        info!("✅ Discovered {} peers", peers.len());
+                        Ok(peers)
                     }
                     Err(e) => {
                         error!("❌ Failed to parse peer list: {}", e);
@@ -74,8 +84,6 @@ impl PeerDiscovery {
                         PeerInfo {
                             address: parts[0].to_string(),
                             port: parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(24100),
-                            last_seen: chrono::Utc::now().timestamp(),
-                            version: "unknown".to_string(),
                         }
                     })
                     .collect()
