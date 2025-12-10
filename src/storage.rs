@@ -106,6 +106,10 @@ impl SledBlockStorage {
         let db = sled::open(path).map_err(|e| e.to_string())?;
         Ok(Self { db })
     }
+
+    pub fn db(&self) -> sled::Db {
+        self.db.clone()
+    }
 }
 
 #[async_trait::async_trait]

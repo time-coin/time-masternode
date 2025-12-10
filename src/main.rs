@@ -5,6 +5,7 @@ mod consensus;
 mod masternode_registry;
 mod network;
 mod network_type;
+mod peer_manager;
 mod rpc;
 mod storage;
 mod time_sync;
@@ -21,6 +22,7 @@ use consensus::ConsensusEngine;
 use masternode_registry::MasternodeRegistry;
 use network::server::NetworkServer;
 use network_type::NetworkType;
+use peer_manager::PeerManager;
 use rpc::server::RpcServer;
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, SledBlockStorage, UtxoStorage};
@@ -271,10 +273,16 @@ async fn main() {
     }
     println!();
 
-    println!("✓ Ready to process transactions\n");
-
     // Start background NTP time synchronization
     time_sync.start_sync_task();
+
+    // Initialize peer manager
+    println!("🔍 Initializing peer manager...");
+    let peer_manager = Arc::new(PeerManager::new(Arc::new(block_storage.db()), config.network.clone()));
+    if let Err(e) = peer_manager.initialize().await {
+        eprintln!("⚠️ Peer manager initialization warning: {}", e);
+    }
+    println!();
 
     // Open sled database for masternode registry
     let registry_db_path = format!("{}/registry", config.storage.data_dir);
