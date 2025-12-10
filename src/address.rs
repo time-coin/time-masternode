@@ -118,7 +118,8 @@ impl Address {
         while num > num_bigint::BigUint::from(0u32) {
             let remainder = &num % &base;
             num /= &base;
-            let idx = remainder.to_u32_digits()[0] as usize;
+            let digits = remainder.to_u32_digits();
+            let idx = if digits.is_empty() { 0 } else { digits[0] } as usize;
             result.insert(0, BASE58_ALPHABET[idx] as char);
         }
 
