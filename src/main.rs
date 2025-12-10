@@ -14,6 +14,7 @@ mod utxo_manager;
 mod vdf;
 mod wallet;
 
+use chrono::Timelike;
 use clap::Parser;
 use config::Config;
 use consensus::ConsensusEngine;
@@ -202,19 +203,52 @@ async fn main() {
         }
     };
 
+    // Initialize blockchain with genesis block
+    let genesis_block = block::genesis::GenesisBlock::for_network(network_type);
+    println!("✓ Initialized genesis block");
+    println!("  └─ Height: {}", genesis_block.header.height);
+    println!("  └─ Hash: {}", hex::encode(genesis_block.hash()));
+    println!("  └─ Timestamp: {}", genesis_block.header.timestamp);
+    println!(
+        "  └─ Pre-mine: {} satoshis\n",
+        genesis_block.header.block_reward
+    );
+
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
-    let initial_utxo = UTXO {
-        outpoint: OutPoint {
-            txid: [0u8; 32],
-            vout: 0,
-        },
-        value: 5000,
-        script_pubkey: vec![],
-        address: "sender".to_string(),
-    };
-    utxo_mgr.add_utxo(initial_utxo).await;
-    println!("✓ Created initial UTXO (5000 TIME)\n");
+    // Add genesis coinbase UTXO to UTXO set
+    if let Some(coinbase_tx) = genesis_block.transactions.first() {
+        for (vout, output) in coinbase_tx.outputs.iter().enumerate() {
+            let utxo = UTXO {
+                outpoint: OutPoint {
+                    txid: coinbase_tx.txid(),
+                    vout: vout as u32,
+                },
+                value: output.value,
+                script_pubkey: output.script_pubkey.clone(),
+                address: "genesis".to_string(),
+            };
+            utxo_mgr.add_utxo(utxo).await;
+        }
+    }
+
+    // Add genesis coinbase UTXO to UTXO set
+    if let Some(coinbase_tx) = genesis_block.transactions.first() {
+        for (vout, output) in coinbase_tx.outputs.iter().enumerate() {
+            let utxo = UTXO {
+                outpoint: OutPoint {
+                    txid: coinbase_tx.txid(),
+                    vout: vout as u32,
+                },
+                value: output.value,
+                script_pubkey: output.script_pubkey.clone(),
+                address: "genesis".to_string(),
+            };
+            utxo_mgr.add_utxo(utxo).await;
+        }
+    }
+
+    println!("✓ Ready to process transactions\n");
 
     // Perform initial time check BEFORE starting anything else
     println!("🕐 Checking system time synchronization...");
@@ -318,11 +352,11 @@ async fn main() {
             }],
             outputs: vec![
                 TxOutput {
-                    value: 4000,
+                    value: 400_000_000_000, // 4000 TIME in satoshis
                     script_pubkey: vec![],
                 },
                 TxOutput {
-                    value: 999,
+                    value: 99_900_000_000, // 999 TIME in satoshis (fee: 1 TIME)
                     script_pubkey: vec![],
                 },
             ],
@@ -390,7 +424,18 @@ async fn main() {
     let block_consensus = consensus.clone();
     let block_registry = registry.clone();
     tokio::spawn(async move {
+        // Calculate time until next 10-minute boundary
+        let now = chrono::Utc::now();
+        let minute = now.minute();
+        let seconds_into_period = (minute % 10) * 60 + now.second();
+        let seconds_until_next = 600 - seconds_into_period;
+
+        // Wait until the next 10-minute boundary
+        tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until_next as u64)).await;
+
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         let mut height = 1u64;
 
         loop {
@@ -399,23 +444,28 @@ async fn main() {
             // Mark start of new block period
             block_registry.start_new_block_period().await;
 
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let now = chrono::Utc::now();
+            let timestamp = now
+                .date_naive()
+                .and_hms_opt(now.hour(), (now.minute() / 10) * 10, 0)
                 .unwrap()
-                .as_secs() as i64;
+                .and_utc()
+                .timestamp();
 
             // Get masternodes eligible for rewards (active for entire block period)
             let eligible = block_registry.get_eligible_for_rewards().await;
 
             tracing::info!(
-                "🧱 Producing block {} at {} with {} eligible masternodes",
+                "🧱 Producing block {} at {} ({}:{}0) with {} eligible masternodes",
                 height,
-                now,
+                timestamp,
+                now.hour(),
+                (now.minute() / 10),
                 eligible.len()
             );
 
             let block = block_consensus
-                .generate_deterministic_block_with_eligible(height, now, eligible)
+                .generate_deterministic_block_with_eligible(height, timestamp, eligible)
                 .await;
             tracing::info!(
                 "✅ Block {} produced: {} transactions, {} masternode rewards",

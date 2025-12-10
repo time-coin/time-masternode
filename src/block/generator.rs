@@ -1,5 +1,6 @@
 use crate::block::types::{Block, BlockHeader};
 use crate::types::{Hash256, Masternode, Transaction, TxOutput};
+use chrono::Timelike;
 use sha2::{Digest, Sha256};
 
 pub struct DeterministicBlockGenerator;
@@ -31,8 +32,17 @@ impl DeterministicBlockGenerator {
         masternodes: Vec<Masternode>,
         _base_reward: u64, // Ignored, use logarithmic calculation instead
     ) -> Block {
-        // 10 minute blocks, not 24-hour blocks
-        let timestamp = chrono::Utc::now().timestamp();
+        // Align to 10-minute clock intervals: 0, 10, 20, 30, 40, 50 minutes
+        let now = chrono::Utc::now();
+        let minute = now.minute();
+        let aligned_minute = (minute / 10) * 10; // Round down to nearest 10
+
+        let timestamp = now
+            .date_naive()
+            .and_hms_opt(now.hour(), aligned_minute, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
 
         let mut masternodes_sorted = masternodes;
         masternodes_sorted.sort_by(|a, b| a.address.cmp(&b.address));
@@ -95,19 +105,23 @@ impl DeterministicBlockGenerator {
         let merkle_root = Self::merkle_root(&all_txs);
 
         let header = BlockHeader {
-            version: 1,
+            version: 2,
             height,
             previous_hash,
             merkle_root,
             timestamp,
             block_reward: total_reward,
-            proof_of_time: None, // VDF will be computed separately if needed
         };
 
         Block {
             header,
             transactions: all_txs,
             masternode_rewards,
+            vdf_proof: crate::vdf::VDFProof {
+                output: vec![0u8; 32], // Will be computed by VDF prover
+                iterations: 0,
+                checkpoints: vec![],
+            },
         }
     }
 

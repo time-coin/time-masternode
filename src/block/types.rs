@@ -7,6 +7,7 @@ pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
+    pub vdf_proof: VDFProof,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -17,8 +18,6 @@ pub struct BlockHeader {
     pub merkle_root: Hash256,
     pub timestamp: i64,
     pub block_reward: u64,
-    /// VDF Proof-of-Time (prevents instant rollback attacks)
-    pub proof_of_time: Option<VDFProof>,
 }
 
 impl Block {
