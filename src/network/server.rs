@@ -184,13 +184,10 @@ async fn handle_peer(
                         // Check if this looks like old protocol (starts with ~W~M)
                         if !handshake_done && line.starts_with("~W~M") {
                             tracing::warn!("🚫 Rejecting {} - old protocol detected (~W~M magic bytes)", peer.addr);
-                            let should_ban = blacklist.write().await.record_violation(
+                            blacklist.write().await.record_violation(
                                 ip,
                                 "Old protocol magic bytes (~W~M)"
                             );
-                            if should_ban {
-                                tracing::warn!("🔨 IP {} auto-banned for repeated violations", ip);
-                            }
                             break;
                         }
 
@@ -222,13 +219,10 @@ async fn handle_peer(
                                     }
                                     _ => {
                                         tracing::warn!("🚫 Rejecting {} - first message must be handshake", peer.addr);
-                                        let should_ban = blacklist.write().await.record_violation(
+                                        blacklist.write().await.record_violation(
                                             ip,
                                             "No handshake sent"
                                         );
-                                        if should_ban {
-                                            tracing::warn!("🔨 IP {} auto-banned", ip);
-                                        }
                                         break;
                                     }
                                 }
