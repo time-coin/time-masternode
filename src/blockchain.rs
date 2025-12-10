@@ -48,13 +48,20 @@ impl Blockchain {
 
     /// Wait for 3+ masternodes, then create genesis block with initial rewards
     pub async fn initialize_genesis(&self) -> Result<(), String> {
-        // Check if genesis already exists
+        // Check if genesis already exists (check current height, not just block_0)
+        let height = self.load_chain_height()?;
+        if height > 0 {
+            *self.current_height.write().await = height;
+            tracing::info!("✓ Genesis block already exists (height: {})", height);
+            return Ok(());
+        }
+
+        // Also check if block 0 exists explicitly
         if self
             .storage
-            .contains_key(b"block_0")
+            .contains_key("block_0".as_bytes())
             .map_err(|e| e.to_string())?
         {
-            let height = self.load_chain_height()?;
             *self.current_height.write().await = height;
             tracing::info!("✓ Genesis block already exists (height: {})", height);
             return Ok(());
