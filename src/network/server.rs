@@ -214,6 +214,15 @@ async fn handle_peer(
                                         }
                                         tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
                                         handshake_done = true;
+
+                                        // Request peer list for peer discovery
+                                        let get_peers_msg = NetworkMessage::GetPeers;
+                                        if let Ok(json) = serde_json::to_string(&get_peers_msg) {
+                                            let _ = writer.write_all(json.as_bytes()).await;
+                                            let _ = writer.write_all(b"\n").await;
+                                            let _ = writer.flush().await;
+                                        }
+
                                         line.clear();
                                         continue;
                                     }
@@ -325,6 +334,51 @@ async fn handle_peer(
                                         Err(e) => {
                                             tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);
                                         }
+                                    }
+                                }
+                                NetworkMessage::GetPeers => {
+                                    // Share our known peers (excluding the requester)
+                                    let all_peers = peer_manager.get_all_peers().await;
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("");
+                                    let peer_list: Vec<String> = all_peers
+                                        .into_iter()
+                                        .filter(|p| !p.starts_with(peer_ip)) // Don't send them their own IP
+                                        .map(|ip| format!("{}:24100", ip)) // Add port
+                                        .collect();
+
+                                    tracing::info!("📤 Sending {} peer(s) to {}", peer_list.len(), peer.addr);
+                                    let reply = NetworkMessage::PeersResponse(peer_list);
+                                    if let Err(e) = write_message(&mut writer, &reply).await {
+                                        tracing::warn!("❌ Failed to send peers response: {}", e);
+                                    }
+                                }
+                                NetworkMessage::PeersResponse(peers) => {
+                                    tracing::info!("📥 Received {} peer(s) from {}", peers.len(), peer.addr);
+                                    let mut new_peers = 0;
+
+                                    // Add new peers to our peer manager and attempt connections
+                                    for peer_addr in peers {
+                                        // Add to peer manager
+                                        if let Err(e) = peer_manager.add_peer(&peer_addr).await {
+                                            tracing::debug!("Failed to add peer {}: {}", peer_addr, e);
+                                            continue;
+                                        }
+
+                                        new_peers += 1;
+
+                                        // Extract IP and attempt connection
+                                        let peer_ip = peer_addr.split(':').next().unwrap_or(&peer_addr).to_string();
+
+                                        // Spawn connection attempt in background
+                                        let conn_manager_clone = connection_manager.clone();
+                                        let peer_ip_clone = peer_ip.clone();
+                                        tokio::spawn(async move {
+                                            let _ = conn_manager_clone.connect(&peer_ip_clone).await;
+                                        });
+                                    }
+
+                                    if new_peers > 0 {
+                                        tracing::info!("🔍 Discovered {} new peer(s), connecting...", new_peers);
                                     }
                                 }
                                 _ => {}

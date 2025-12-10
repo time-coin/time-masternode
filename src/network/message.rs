@@ -71,6 +71,9 @@ pub enum NetworkMessage {
     },
     GetPendingTransactions,
     PendingTransactionsResponse(Vec<Transaction>),
+    // Peer exchange
+    GetPeers,
+    PeersResponse(Vec<String>), // List of peer addresses (IP:port)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

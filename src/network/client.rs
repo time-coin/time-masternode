@@ -222,6 +222,21 @@ async fn maintain_peer_connection(
 
     tracing::debug!("📡 Requested pending transactions from {}", ip);
 
+    // Request peer list for peer discovery
+    let peers_request = NetworkMessage::GetPeers;
+    let msg_json =
+        serde_json::to_string(&peers_request).map_err(|e| format!("Failed to serialize: {}", e))?;
+    writer
+        .write_all(format!("{}\n", msg_json).as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("Flush failed: {}", e))?;
+
+    tracing::debug!("📡 Requested peer list from {}", ip);
+
     // Read responses
     let mut line = String::new();
     tracing::info!("🔄 Starting message loop for peer {}", ip);
