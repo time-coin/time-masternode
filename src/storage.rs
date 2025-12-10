@@ -67,7 +67,20 @@ pub struct SledUtxoStorage {
 
 impl SledUtxoStorage {
     pub fn new(path: &str) -> Result<Self, String> {
-        let db = sled::open(path).map_err(|e| e.to_string())?;
+        use sysinfo::System;
+
+        let mut sys = System::new_all();
+        sys.refresh_memory();
+        let available_memory = sys.available_memory();
+        let cache_size = std::cmp::min(available_memory / 10, 512 * 1024 * 1024);
+
+        let db = sled::Config::new()
+            .path(path)
+            .cache_capacity(cache_size)
+            .flush_every_ms(Some(1000))
+            .open()
+            .map_err(|e| e.to_string())?;
+
         Ok(Self { db })
     }
 }
@@ -112,7 +125,29 @@ pub struct SledBlockStorage {
 #[allow(dead_code)]
 impl SledBlockStorage {
     pub fn new(path: &str) -> Result<Self, String> {
-        let db = sled::open(path).map_err(|e| e.to_string())?;
+        use sysinfo::System;
+
+        // Get available system memory
+        let mut sys = System::new_all();
+        sys.refresh_memory();
+        let available_memory = sys.available_memory();
+
+        // Use 10% of available memory for cache, capped at 512MB
+        let cache_size = std::cmp::min(available_memory / 10, 512 * 1024 * 1024);
+
+        tracing::info!(
+            "📊 Configuring sled cache: {} MB (available memory: {} MB)",
+            cache_size / (1024 * 1024),
+            available_memory / (1024 * 1024)
+        );
+
+        let db = sled::Config::new()
+            .path(path)
+            .cache_capacity(cache_size)
+            .flush_every_ms(Some(1000))
+            .open()
+            .map_err(|e| e.to_string())?;
+
         Ok(Self { db })
     }
 
