@@ -5,6 +5,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum NetworkMessage {
+    // First message must be handshake with magic bytes
+    Handshake {
+        magic: [u8; 4],
+        protocol_version: u32,
+        network: String,
+    },
     TransactionBroadcast(Transaction),
     TransactionVoteRequest([u8; 32]),
     TransactionVote(Vote),

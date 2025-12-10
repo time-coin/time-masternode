@@ -75,7 +75,11 @@ impl Blockchain {
             // Debug: show which masternodes are registered
             if !all_mns.is_empty() {
                 for mn in all_mns.iter().take(5) {
-                    tracing::debug!("  Registered: {} ({})", mn.masternode.address, mn.masternode.wallet_address);
+                    tracing::debug!(
+                        "  Registered: {} ({})",
+                        mn.masternode.address,
+                        mn.masternode.wallet_address
+                    );
                 }
             }
 

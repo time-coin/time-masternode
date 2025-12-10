@@ -10,7 +10,7 @@ impl NetworkType {
     pub fn magic_bytes(&self) -> [u8; 4] {
         match self {
             NetworkType::Mainnet => [0xC0, 0x1D, 0x7E, 0x4D], // "COLD TIME"
-            NetworkType::Testnet => [0x7E, 0x57, 0x7E, 0x4D], // "TEST TIME"
+            NetworkType::Testnet => [0x54, 0x49, 0x4D, 0x45], // "TIME" in ASCII
         }
     }
 

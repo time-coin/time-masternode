@@ -267,7 +267,7 @@ impl MasternodeRegistry {
     pub async fn total_count(&self) -> usize {
         self.masternodes.read().await.len()
     }
-    
+
     pub async fn get_all(&self) -> Vec<MasternodeInfo> {
         self.masternodes.read().await.values().cloned().collect()
     }
