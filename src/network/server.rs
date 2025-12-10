@@ -285,10 +285,19 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::MasternodeAnnouncement { address, reward_address, tier, public_key } => {
-                                    // Use the announced address (their listen address), not the ephemeral connection port
-                                    tracing::info!("📨 Received masternode announcement from {} (listen: {})", peer.addr, address);
+                                    // If they announce 0.0.0.0, use their actual connection IP instead
+                                    let actual_address = if address.starts_with("0.0.0.0:") {
+                                        // Extract their real IP from the connection
+                                        let peer_ip = peer.addr.split(':').next().unwrap_or("");
+                                        let port = address.split(':').nth(1).unwrap_or("24100");
+                                        format!("{}:{}", peer_ip, port)
+                                    } else {
+                                        address.clone()
+                                    };
+
+                                    tracing::info!("📨 Received masternode announcement from {} (listen: {})", peer.addr, actual_address);
                                     let mn = crate::types::Masternode {
-                                        address: address.clone(),
+                                        address: actual_address.clone(),
                                         wallet_address: reward_address.clone(),
                                         collateral: tier.collateral(),
                                         tier: tier.clone(),
@@ -302,10 +311,10 @@ async fn handle_peer(
                                     match masternode_registry.register(mn, reward_address.clone()).await {
                                         Ok(()) => {
                                             let count = masternode_registry.total_count().await;
-                                            tracing::info!("✅ Registered masternode {} (total: {})", address, count);
+                                            tracing::info!("✅ Registered masternode {} (total: {})", actual_address, count);
                                         },
                                         Err(e) => {
-                                            tracing::warn!("❌ Failed to register masternode {}: {}", address, e);
+                                            tracing::warn!("❌ Failed to register masternode {}: {}", actual_address, e);
                                         }
                                     }
                                 }
