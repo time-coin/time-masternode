@@ -10,7 +10,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
-#[allow(dead_code)]
 pub struct NetworkServer {
     pub listener: TcpListener,
     pub peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
@@ -20,6 +19,7 @@ pub struct NetworkServer {
     pub consensus: Arc<ConsensusEngine>,
     pub rate_limiter: Arc<RwLock<RateLimiter>>,
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+    pub blockchain: Arc<crate::blockchain::Blockchain>,
 }
 
 pub struct PeerConnection {
@@ -34,6 +34,7 @@ impl NetworkServer {
         utxo_manager: Arc<UTXOStateManager>,
         consensus: Arc<ConsensusEngine>,
         masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+        blockchain: Arc<crate::blockchain::Blockchain>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -47,6 +48,7 @@ impl NetworkServer {
             consensus,
             rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
             masternode_registry: masternode_registry.clone(),
+            blockchain,
         })
     }
 
@@ -66,6 +68,7 @@ impl NetworkServer {
             let consensus = self.consensus.clone();
             let rate_limiter = self.rate_limiter.clone();
             let mn_registry = self.masternode_registry.clone();
+            let blockchain = self.blockchain.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -78,6 +81,7 @@ impl NetworkServer {
                     consensus,
                     rate_limiter,
                     mn_registry,
+                    blockchain,
                 )
                 .await;
             });
@@ -115,6 +119,7 @@ async fn handle_peer(
     consensus: Arc<ConsensusEngine>,
     rate_limiter: Arc<RwLock<RateLimiter>>,
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+    blockchain: Arc<crate::blockchain::Blockchain>,
 ) -> Result<(), std::io::Error> {
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let (reader, writer) = stream.into_split();
@@ -163,12 +168,34 @@ async fn handle_peer(
                                         subs.write().await.insert(sub.id.clone(), sub.clone());
                                     }
                                 }
-                                NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
-                                    // Use the peer's actual connection address, not the announced address
-                                    let actual_address = peer.addr.clone();
-                                    tracing::info!("📨 Received masternode announcement from {}", actual_address);
+                                NetworkMessage::GetBlockHeight => {
+                                    let height = blockchain.get_height().await;
+                                    let reply = NetworkMessage::BlockHeightResponse(height);
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                    }
+                                }
+                                NetworkMessage::GetBlocks(start, end) => {
+                                    let mut blocks = Vec::new();
+                                    for h in *start..=(*end).min(start + 100) {
+                                        if let Ok(block) = blockchain.get_block_by_height(h).await {
+                                            blocks.push(block);
+                                        }
+                                    }
+                                    let reply = NetworkMessage::BlocksResponse(blocks);
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                    }
+                                }
+                                NetworkMessage::MasternodeAnnouncement { address, reward_address, tier, public_key } => {
+                                    // Use the announced address (their listen address), not the ephemeral connection port
+                                    tracing::info!("📨 Received masternode announcement from {} (listen: {})", peer.addr, address);
                                     let mn = crate::types::Masternode {
-                                        address: actual_address,
+                                        address: address.clone(),
                                         wallet_address: reward_address.clone(),
                                         collateral: tier.collateral(),
                                         tier: tier.clone(),

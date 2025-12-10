@@ -234,9 +234,33 @@ async fn main() {
     let registry = Arc::new(MasternodeRegistry::new(registry_db.clone(), network_type));
     registry.set_peer_manager(peer_manager.clone()).await;
 
+    println!("✓ Ready to process transactions\n");
+
+    // Initialize consensus engine
+    let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
+
+    // Initialize blockchain
+    let vdf_config = match network_type {
+        NetworkType::Mainnet => VDFConfig::mainnet(),
+        NetworkType::Testnet => VDFConfig::testnet(),
+    };
+
+    let blockchain = Arc::new(Blockchain::new(
+        block_storage,
+        consensus_engine.clone(),
+        registry.clone(),
+        vdf_config,
+    ));
+
+    println!("✓ Blockchain initialized");
+    println!();
+
     // Start network client for outbound connections and masternode announcements
-    let network_client =
-        network::client::NetworkClient::new(peer_manager.clone(), registry.clone());
+    let network_client = network::client::NetworkClient::new(
+        peer_manager.clone(),
+        registry.clone(),
+        blockchain.clone(),
+    );
     network_client.start().await;
 
     // Register this node if running as masternode
@@ -268,29 +292,9 @@ async fn main() {
         });
     }
 
-    println!("✓ Ready to process transactions\n");
-
-    // Initialize consensus engine
-    let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
-
-    // Initialize blockchain
-    let vdf_config = match network_type {
-        NetworkType::Mainnet => VDFConfig::mainnet(),
-        NetworkType::Testnet => VDFConfig::testnet(),
-    };
-
-    let blockchain = Arc::new(Blockchain::new(
-        block_storage,
-        consensus_engine.clone(),
-        registry.clone(),
-        vdf_config,
-    ));
-
-    println!("✓ Blockchain initialized");
-    println!();
-
     // Initialize genesis and catchup in background
     let blockchain_init = blockchain.clone();
+    let blockchain_server = blockchain_init.clone();
     tokio::spawn(async move {
         if let Err(e) = blockchain_init.initialize_genesis().await {
             tracing::error!("❌ Genesis initialization failed: {}", e);
@@ -489,6 +493,7 @@ async fn main() {
         utxo_mgr.clone(),
         consensus_engine.clone(),
         registry.clone(),
+        blockchain_server.clone(),
     )
     .await
     {
@@ -524,12 +529,22 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
     let level = if verbose { "trace" } else { &config.level };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
+    // Get hostname and set as environment variable for logging context
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
+
     match config.format.as_str() {
         "json" => {
-            fmt().json().with_env_filter(filter).init();
+            fmt()
+                .json()
+                .with_env_filter(filter)
+                .with_thread_ids(false)
+                .init();
         }
         _ => {
-            // Pretty format with less clutter
+            // Pretty format with hostname prefix in timestamp field
             fmt()
                 .with_env_filter(filter)
                 .with_target(false) // Hide module targets
@@ -537,8 +552,12 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
                 .with_thread_names(false)
                 .with_file(false) // Hide file locations
                 .with_line_number(false)
+                .with_timer(fmt::time::uptime())
                 .compact() // Use compact format
                 .init();
+
+            // Print hostname once at startup
+            tracing::info!("🖥️  Hostname: {}", hostname);
         }
     }
 }

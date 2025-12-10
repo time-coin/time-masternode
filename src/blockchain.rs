@@ -455,6 +455,49 @@ impl Blockchain {
     pub async fn get_height(&self) -> u64 {
         *self.current_height.read().await
     }
+
+    pub async fn get_block_by_height(
+        &self,
+        height: u64,
+    ) -> Result<crate::block::types::Block, String> {
+        self.get_block(height)
+    }
+
+    /// Add a block received from peers (with validation)
+    pub async fn add_block(&self, block: Block) -> Result<(), String> {
+        let current_height = *self.current_height.read().await;
+
+        // Allow adding next block or filling in gaps
+        if block.header.height <= current_height {
+            tracing::debug!(
+                "Skipping block {} (already have height {})",
+                block.header.height,
+                current_height
+            );
+            return Ok(());
+        }
+
+        // Store the block
+        self.save_block(&block)?;
+
+        // Update height if this is the next sequential block
+        if block.header.height == current_height + 1 {
+            *self.current_height.write().await = block.header.height;
+            tracing::info!(
+                "✅ Added block {} to chain (hash: {})",
+                block.header.height,
+                hex::encode(block.hash())
+            );
+        } else {
+            tracing::info!(
+                "📦 Stored block {} (gap - current height: {})",
+                block.header.height,
+                current_height
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl Clone for Blockchain {

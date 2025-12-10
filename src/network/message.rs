@@ -8,10 +8,9 @@ pub enum NetworkMessage {
     // Block sync
     GetGenesisHash,
     GenesisHashResponse(Hash256),
-    GetBlocks {
-        start_height: u64,
-        count: u32,
-    },
+    GetBlockHeight,
+    BlockHeightResponse(u64),
+    GetBlocks(u64, u64), // (start_height, end_height)
     BlocksResponse(Vec<Block>),
     // First message must be handshake with magic bytes
     Handshake {
