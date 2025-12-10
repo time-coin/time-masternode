@@ -539,11 +539,12 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
     let level = if verbose { "trace" } else { &config.level };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
-    // Get hostname and set as environment variable for logging context
+    // Get hostname - shorten to first part before dot
     let hostname = hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "unknown".to_string());
+    let short_hostname = hostname.split('.').next().unwrap_or(&hostname).to_string();
 
     match config.format.as_str() {
         "json" => {
@@ -554,20 +555,34 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
                 .init();
         }
         _ => {
-            // Pretty format with hostname prefix in timestamp field
             fmt()
                 .with_env_filter(filter)
-                .with_target(false) // Hide module targets
+                .with_target(false)
                 .with_thread_ids(false)
                 .with_thread_names(false)
-                .with_file(false) // Hide file locations
+                .with_file(false)
                 .with_line_number(false)
-                .with_timer(fmt::time::uptime())
-                .compact() // Use compact format
+                .with_timer(CustomTimer { hostname: short_hostname })
+                .compact()
                 .init();
-
-            // Print hostname once at startup
-            tracing::info!("🖥️  Hostname: {}", hostname);
         }
+    }
+}
+
+// Custom timer that includes hostname after the uptime
+struct CustomTimer {
+    hostname: String,
+}
+
+impl tracing_subscriber::fmt::time::FormatTime for CustomTimer {
+    fn format_time(&self, w: &mut tracing_subscriber::fmt::format::Writer<'_>) -> std::fmt::Result {
+        // Get uptime
+        use std::time::Instant;
+        static START_TIME: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let start = START_TIME.get_or_init(Instant::now);
+        let elapsed = start.elapsed();
+        
+        // Format: "uptime [hostname]" e.g. "  12.345678s [server1]"
+        write!(w, "{:>12.9}s [{}]", elapsed.as_secs_f64(), self.hostname)
     }
 }
