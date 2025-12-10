@@ -127,7 +127,9 @@ async fn handle_peer(
                 match result {
                     Ok(0) => break,
                     Ok(_) => {
+                        tracing::debug!("📥 Received raw message from {}: {}", peer.addr, line.trim());
                         if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
+                            tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
                             let ip = &peer.addr;
                             let mut limiter = rate_limiter.write().await;
 
@@ -185,10 +187,15 @@ async fn handle_peer(
                                 }
                                 _ => {}
                             }
+                        } else {
+                            tracing::warn!("❌ Failed to parse message from {}: {}", peer.addr, line.trim());
                         }
                         line.clear();
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::warn!("❌ Read error from {}: {}", peer.addr, e);
+                        break;
+                    }
                 }
             }
 

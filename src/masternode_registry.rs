@@ -12,8 +12,6 @@ const MAX_MISSED_HEARTBEATS: u64 = 3; // Allow 3 missed heartbeats before markin
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
-    #[error("Masternode already registered")]
-    AlreadyRegistered,
     #[error("Masternode not found")]
     NotFound,
     #[error("Invalid collateral amount")]
@@ -135,12 +133,28 @@ impl MasternodeRegistry {
         }
 
         let mut nodes = self.masternodes.write().await;
+        let now = Self::now();
 
-        if nodes.contains_key(&masternode.address) {
-            return Err(RegistryError::AlreadyRegistered);
+        // If already registered, update heartbeat (treat as heartbeat)
+        if let Some(existing) = nodes.get_mut(&masternode.address) {
+            existing.last_heartbeat = now;
+            if !existing.is_active {
+                existing.is_active = true;
+                existing.uptime_start = now;
+                info!("✓ Masternode {} reactivated", masternode.address);
+            }
+
+            // Update on disk
+            let key = format!("masternode:{}", masternode.address);
+            let value =
+                bincode::serialize(&existing).map_err(|e| RegistryError::Storage(e.to_string()))?;
+            self.db
+                .insert(key.as_bytes(), value)
+                .map_err(|e| RegistryError::Storage(e.to_string()))?;
+
+            return Ok(());
         }
 
-        let now = Self::now();
         let info = MasternodeInfo {
             masternode: masternode.clone(),
             reward_address,

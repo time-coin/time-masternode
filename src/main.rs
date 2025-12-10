@@ -248,9 +248,6 @@ async fn main() {
             Ok(()) => {
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
             }
-            Err(masternode_registry::RegistryError::AlreadyRegistered) => {
-                tracing::info!("✓ Masternode already registered: {}", mn.wallet_address);
-            }
             Err(e) => {
                 tracing::error!("❌ Failed to register masternode: {}", e);
                 std::process::exit(1);
