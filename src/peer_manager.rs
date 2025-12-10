@@ -108,6 +108,7 @@ impl PeerManager {
     }
 
     /// Add a verified peer (after successful connection)
+    #[allow(dead_code)]
     pub async fn add_peer(&self, address: String) -> bool {
         let mut peers = self.peers.write().await;
         if peers.insert(address.clone()) {
