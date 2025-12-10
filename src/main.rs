@@ -562,7 +562,9 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
                 .with_thread_names(false)
                 .with_file(false)
                 .with_line_number(false)
-                .with_timer(CustomTimer { hostname: short_hostname })
+                .with_timer(CustomTimer {
+                    hostname: short_hostname,
+                })
                 .compact()
                 .init();
         }
@@ -579,10 +581,12 @@ impl tracing_subscriber::fmt::time::FormatTime for CustomTimer {
         // Get current UTC time using chrono (system time)
         use chrono::Utc;
         let now = Utc::now();
-        
+
         // Format: "YYYY-MM-DD HH:MM:SS.mmm [hostname]"
         // Example: "2025-12-10 18:09:43.150 [server1]"
-        write!(w, "{}.{:03} [{}]", 
+        write!(
+            w,
+            "{}.{:03} [{}]",
             now.format("%Y-%m-%d %H:%M:%S"),
             now.timestamp_subsec_millis(),
             self.hostname

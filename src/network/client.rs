@@ -190,7 +190,7 @@ async fn maintain_peer_connection(
         .flush()
         .await
         .map_err(|e| format!("Failed to flush handshake: {}", e))?;
-    
+
     tracing::debug!("📡 Sent handshake to {}", address);
 
     // Announce our masternode if we are one
@@ -239,7 +239,7 @@ async fn maintain_peer_connection(
     // Read responses
     let mut line = String::new();
     tracing::info!("🔄 Starting message loop for peer {}", address);
-    
+
     loop {
         tokio::select! {
             // Send periodic heartbeat

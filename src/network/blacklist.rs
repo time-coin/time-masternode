@@ -46,20 +46,20 @@ impl IPBlacklist {
     /// Returns true if the IP should be disconnected (auto-banned)
     pub fn record_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
         let now = Instant::now();
-        
+
         // Get or create violation record
         let (count, last_time) = self.violations.entry(ip).or_insert((0, now));
-        
+
         // Reset count if last violation was over 1 hour ago
         if now.duration_since(*last_time) > Duration::from_secs(3600) {
             *count = 0;
         }
-        
+
         *count += 1;
         *last_time = now;
-        
+
         tracing::warn!("⚠️  Violation #{} from {}: {}", count, ip, reason);
-        
+
         // Auto-ban based on violation count
         match *count {
             3 => {
@@ -107,10 +107,10 @@ impl IPBlacklist {
     /// Clean up expired temporary bans and old violations (call periodically)
     pub fn cleanup(&mut self) {
         let now = Instant::now();
-        
+
         // Remove expired temp bans
         self.temp_blacklist.retain(|_, (expiry, _)| now < *expiry);
-        
+
         // Remove violations older than 24 hours
         self.violations.retain(|_, (_, last_time)| {
             now.duration_since(*last_time) < Duration::from_secs(86400)
@@ -118,6 +118,7 @@ impl IPBlacklist {
     }
 
     /// Get statistics
+    #[allow(dead_code)]
     pub fn stats(&self) -> (usize, usize, usize) {
         (
             self.permanent_blacklist.len(),

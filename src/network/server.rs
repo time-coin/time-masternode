@@ -65,14 +65,14 @@ impl NetworkServer {
                 blacklist_cleanup.write().await.cleanup();
             }
         });
-        
+
         loop {
             let (stream, addr) = self.listener.accept().await?;
             let addr_str = addr.to_string();
-            
+
             // Extract IP address
             let ip: IpAddr = addr.ip();
-            
+
             // Check blacklist BEFORE accepting connection
             {
                 let mut blacklist = self.blacklist.write().await;
@@ -82,7 +82,7 @@ impl NetworkServer {
                     continue;
                 }
             }
-            
+
             let peer = PeerConnection {
                 addr: addr_str.clone(),
                 is_masternode: false,
@@ -152,10 +152,13 @@ async fn handle_peer(
     blockchain: Arc<crate::blockchain::Blockchain>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
-    let ip: IpAddr = peer.addr.split(':').next()
+    let ip: IpAddr = peer
+        .addr
+        .split(':')
+        .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
-    
+
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -163,7 +166,7 @@ async fn handle_peer(
     let mut line = String::new();
     let mut failed_parse_count = 0;
     let mut handshake_done = false;
-    
+
     // Define expected magic bytes for our protocol
     const MAGIC_BYTES: [u8; 4] = *b"TIME";
 
@@ -177,7 +180,7 @@ async fn handle_peer(
                     }
                     Ok(n) => {
                         tracing::debug!("📥 Received {} bytes from {}: {}", n, peer.addr, line.trim());
-                        
+
                         // Check if this looks like old protocol (starts with ~W~M)
                         if !handshake_done && line.starts_with("~W~M") {
                             tracing::warn!("🚫 Rejecting {} - old protocol detected (~W~M magic bytes)", peer.addr);
@@ -190,7 +193,7 @@ async fn handle_peer(
                             }
                             break;
                         }
-                        
+
                         if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
                             // First message MUST be a valid handshake
                             if !handshake_done {
@@ -230,7 +233,7 @@ async fn handle_peer(
                                     }
                                 }
                             }
-                            
+
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
                             let ip_str = &peer.addr;
                             let mut limiter = rate_limiter.write().await;
