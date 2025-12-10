@@ -101,6 +101,7 @@ impl DeterministicBlockGenerator {
             merkle_root,
             timestamp,
             block_reward: total_reward,
+            proof_of_time: None, // VDF will be computed separately if needed
         };
 
         Block {

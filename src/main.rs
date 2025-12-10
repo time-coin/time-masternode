@@ -6,8 +6,10 @@ mod network;
 mod network_type;
 mod rpc;
 mod storage;
+mod time_sync;
 mod types;
 mod utxo_manager;
+mod vdf;
 mod wallet;
 
 use clap::Parser;
@@ -18,6 +20,7 @@ use network_type::NetworkType;
 use rpc::server::RpcServer;
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, UtxoStorage};
+use time_sync::TimeSync;
 use types::*;
 use utxo_manager::UTXOStateManager;
 use wallet::WalletManager;
@@ -203,6 +206,12 @@ async fn main() {
     };
     utxo_mgr.add_utxo(initial_utxo).await;
     println!("✓ Created initial UTXO (5000 TIME)\n");
+
+    println!("✓ Ready to process transactions\n");
+
+    // Start NTP time synchronization
+    let time_sync = TimeSync::new();
+    time_sync.start_sync_task();
 
     let consensus = Arc::new(ConsensusEngine::new(masternodes, utxo_mgr.clone()));
 

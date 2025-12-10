@@ -1,4 +1,5 @@
 use crate::types::{Hash256, Transaction};
+use crate::vdf::VDFProof;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -16,6 +17,8 @@ pub struct BlockHeader {
     pub merkle_root: Hash256,
     pub timestamp: i64,
     pub block_reward: u64,
+    /// VDF Proof-of-Time (prevents instant rollback attacks)
+    pub proof_of_time: Option<VDFProof>,
 }
 
 impl Block {
