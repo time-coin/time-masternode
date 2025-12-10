@@ -7,9 +7,21 @@ pub enum NetworkMessage {
     TransactionBroadcast(Transaction),
     TransactionVoteRequest([u8; 32]),
     TransactionVote(Vote),
+    TransactionFinalized {
+        txid: [u8; 32],
+        votes: u32,
+    },
+    TransactionRejected {
+        txid: [u8; 32],
+        reason: String,
+    },
     UTXOStateQuery(Vec<OutPoint>),
     UTXOStateResponse(Vec<(OutPoint, UTXOState)>),
     UTXOStateNotification(UTXOStateChange),
+    UTXOStateUpdate {
+        outpoint: OutPoint,
+        state: UTXOState,
+    },
     Subscribe(Subscription),
     Unsubscribe(String),
     BlockAnnouncement(Block),

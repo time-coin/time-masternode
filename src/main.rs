@@ -8,6 +8,7 @@ mod network_type;
 mod rpc;
 mod storage;
 mod time_sync;
+mod transaction_pool;
 mod types;
 mod utxo_manager;
 mod vdf;
