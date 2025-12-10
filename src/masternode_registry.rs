@@ -44,12 +44,10 @@ impl MasternodeRegistry {
         let now = Self::now();
         // Load existing masternodes from disk
         let mut nodes: HashMap<String, MasternodeInfo> = HashMap::new();
-        for result in db.scan_prefix(b"masternode:") {
-            if let Ok((key, value)) = result {
-                if let Ok(info) = bincode::deserialize::<MasternodeInfo>(&value) {
-                    let addr = String::from_utf8_lossy(&key[11..]).to_string();
-                    nodes.insert(addr, info);
-                }
+        for (key, value) in db.scan_prefix(b"masternode:").flatten() {
+            if let Ok(info) = bincode::deserialize::<MasternodeInfo>(&value) {
+                let addr = String::from_utf8_lossy(&key[11..]).to_string();
+                nodes.insert(addr, info);
             }
         }
 
@@ -210,6 +208,7 @@ impl MasternodeRegistry {
         info!("✓ Started new block reward period at {}", now);
     }
 
+    #[allow(dead_code)]
     pub async fn unregister(&self, address: &str) -> Result<(), RegistryError> {
         let mut nodes = self.masternodes.write().await;
 
@@ -227,6 +226,7 @@ impl MasternodeRegistry {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get(&self, address: &str) -> Option<MasternodeInfo> {
         self.masternodes.read().await.get(address).cloned()
     }
@@ -235,6 +235,7 @@ impl MasternodeRegistry {
         self.masternodes.read().await.values().cloned().collect()
     }
 
+    #[allow(dead_code)]
     pub async fn list_active(&self) -> Vec<MasternodeInfo> {
         self.masternodes
             .read()
@@ -245,6 +246,7 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub async fn list_by_tier(&self, tier: MasternodeTier) -> Vec<MasternodeInfo> {
         self.masternodes
             .read()
@@ -257,10 +259,12 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    #[allow(dead_code)]
     pub async fn count(&self) -> usize {
         self.masternodes.read().await.len()
     }
 
+    #[allow(dead_code)]
     pub async fn count_active(&self) -> usize {
         self.masternodes
             .read()
@@ -270,6 +274,7 @@ impl MasternodeRegistry {
             .count()
     }
 
+    #[allow(dead_code)]
     pub async fn is_registered(&self, address: &str) -> bool {
         self.masternodes.read().await.contains_key(address)
     }

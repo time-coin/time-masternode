@@ -27,6 +27,7 @@ impl ConsensusEngine {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_broadcast_callback<F>(&mut self, callback: F)
     where
         F: Fn(NetworkMessage) + Send + Sync + 'static,
@@ -82,6 +83,7 @@ impl ConsensusEngine {
     /// 3. Broadcast to network
     /// 4. Collect votes from masternodes
     /// 5. Finalize (2/3 quorum) or reject
+    #[allow(dead_code)]
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
         let txid = tx.txid();
 
@@ -239,6 +241,7 @@ impl ConsensusEngine {
     }
 
     /// Handle incoming transaction from network
+    #[allow(dead_code)]
     pub async fn handle_network_transaction(&self, tx: Transaction) -> Result<(), String> {
         let txid = tx.txid();
 
@@ -252,6 +255,7 @@ impl ConsensusEngine {
     }
 
     /// Handle incoming UTXO state update from network
+    #[allow(dead_code)]
     pub async fn handle_utxo_state_update(&self, outpoint: OutPoint, state: UTXOState) {
         self.utxo_manager.update_state(&outpoint, state).await;
     }
@@ -260,10 +264,12 @@ impl ConsensusEngine {
         self.tx_pool.get_finalized_transactions().await
     }
 
+    #[allow(dead_code)]
     pub async fn clear_finalized_transactions(&self) {
         self.tx_pool.clear_finalized().await;
     }
 
+    #[allow(dead_code)]
     pub async fn get_mempool_info(&self) -> (usize, usize) {
         let pending = self.tx_pool.pending_count().await;
         let finalized = self.tx_pool.finalized_count().await;
@@ -315,6 +321,7 @@ impl ConsensusEngine {
         )
     }
 
+    #[allow(dead_code)]
     pub async fn generate_deterministic_block_with_masternodes(
         &self,
         height: u64,

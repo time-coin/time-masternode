@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum UtxoError {
     #[error("UTXO already locked or spent")]
     AlreadyUsed,
@@ -42,6 +43,7 @@ impl UTXOStateManager {
             .insert(outpoint, UTXOState::Unspent);
     }
 
+    #[allow(dead_code)]
     pub async fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
         let mut states = self.utxo_states.write().await;
         match states.get(outpoint) {
@@ -73,6 +75,7 @@ impl UTXOStateManager {
             .insert(outpoint.clone(), state);
     }
 
+    #[allow(dead_code)]
     pub async fn get_finalized_transactions(&self) -> Vec<Transaction> {
         Vec::new()
     }

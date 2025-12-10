@@ -23,6 +23,7 @@ impl TransactionPool {
     }
 
     /// Add transaction to pending pool
+    #[allow(dead_code)]
     pub async fn add_pending(&self, tx: Transaction) {
         let txid = tx.txid();
         self.pending.write().await.insert(txid, tx);
@@ -51,31 +52,37 @@ impl TransactionPool {
     }
 
     /// Clear finalized transactions (after block inclusion)
+    #[allow(dead_code)]
     pub async fn clear_finalized(&self) {
         self.finalized.write().await.clear();
     }
 
     /// Get pending transaction count
+    #[allow(dead_code)]
     pub async fn pending_count(&self) -> usize {
         self.pending.read().await.len()
     }
 
     /// Get finalized transaction count
+    #[allow(dead_code)]
     pub async fn finalized_count(&self) -> usize {
         self.finalized.read().await.len()
     }
 
     /// Check if transaction is pending
+    #[allow(dead_code)]
     pub async fn is_pending(&self, txid: &Hash256) -> bool {
         self.pending.read().await.contains_key(txid)
     }
 
     /// Check if transaction is finalized
+    #[allow(dead_code)]
     pub async fn is_finalized(&self, txid: &Hash256) -> bool {
         self.finalized.read().await.contains_key(txid)
     }
 
     /// Get rejection reason
+    #[allow(dead_code)]
     pub async fn get_rejection_reason(&self, txid: &Hash256) -> Option<String> {
         self.rejected.read().await.get(txid).cloned()
     }

@@ -414,20 +414,16 @@ async fn main() {
                 eligible.len()
             );
 
-            match block_consensus
+            let block = block_consensus
                 .generate_deterministic_block_with_eligible(height, now, eligible)
-                .await
-            {
-                block => {
-                    tracing::info!(
-                        "✅ Block {} produced: {} transactions, {} masternode rewards",
-                        height,
-                        block.transactions.len(),
-                        block.masternode_rewards.len()
-                    );
-                    height += 1;
-                }
-            }
+                .await;
+            tracing::info!(
+                "✅ Block {} produced: {} transactions, {} masternode rewards",
+                height,
+                block.transactions.len(),
+                block.masternode_rewards.len()
+            );
+            height += 1;
         }
     });
 
