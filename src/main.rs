@@ -269,7 +269,10 @@ async fn main() {
 
     // Register this node if running as masternode
     if let Some(ref mn) = masternode_info {
-        match registry.register(mn.clone()).await {
+        match registry
+            .register(mn.clone(), mn.wallet_address.clone())
+            .await
+        {
             Ok(()) => {
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
             }
@@ -281,6 +284,19 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+
+        // Start heartbeat task for this masternode
+        let registry_clone = registry.clone();
+        let mn_address = mn.address.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                if let Err(e) = registry_clone.heartbeat(&mn_address).await {
+                    tracing::warn!("❌ Failed to send heartbeat: {}", e);
+                }
+            }
+        });
     }
 
     let consensus = Arc::new(ConsensusEngine::new(masternodes, utxo_mgr.clone()));
@@ -379,23 +395,26 @@ async fn main() {
         loop {
             interval.tick().await;
 
+            // Mark start of new block period
+            block_registry.start_new_block_period().await;
+
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs() as i64;
 
-            // Get all registered masternodes
-            let masternodes = block_registry.list_all().await;
+            // Get masternodes eligible for rewards (active for entire block period)
+            let eligible = block_registry.get_eligible_for_rewards().await;
 
             tracing::info!(
-                "🧱 Producing block {} at {} with {} masternodes",
+                "🧱 Producing block {} at {} with {} eligible masternodes",
                 height,
                 now,
-                masternodes.len()
+                eligible.len()
             );
 
             match block_consensus
-                .generate_deterministic_block_with_masternodes(height, now, masternodes)
+                .generate_deterministic_block_with_eligible(height, now, eligible)
                 .await
             {
                 block => {

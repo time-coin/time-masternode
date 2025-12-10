@@ -419,11 +419,15 @@ impl RpcHandler {
             .iter()
             .map(|mn| {
                 json!({
-                    "address": mn.address,
-                    "wallet_address": mn.wallet_address,
-                    "collateral": mn.collateral,
-                    "tier": format!("{:?}", mn.tier),
-                    "registered_at": mn.registered_at
+                    "address": mn.masternode.address,
+                    "wallet_address": mn.masternode.wallet_address,
+                    "collateral": mn.masternode.collateral,
+                    "tier": format!("{:?}", mn.masternode.tier),
+                    "registered_at": mn.masternode.registered_at,
+                    "is_active": mn.is_active,
+                    "last_heartbeat": mn.last_heartbeat,
+                    "uptime_start": mn.uptime_start,
+                    "total_uptime": mn.total_uptime,
                 })
             })
             .collect();
