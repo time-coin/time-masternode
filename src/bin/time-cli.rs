@@ -110,6 +110,14 @@ enum Commands {
         #[arg(short, long)]
         verbose: bool,
     },
+
+    /// Send TIME to an address
+    SendToAddress {
+        /// Recipient address
+        address: String,
+        /// Amount to send (in TIME)
+        amount: f64,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -176,6 +184,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Uptime => ("uptime", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
+        Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
     };
 
     let request = RpcRequest {

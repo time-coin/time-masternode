@@ -63,6 +63,7 @@ impl RpcHandler {
             "uptime" => self.uptime().await,
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool().await,
+            "sendtoaddress" => self.send_to_address(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -443,5 +444,95 @@ impl RpcHandler {
             .unwrap()
             .as_secs();
         Ok(json!(uptime))
+    }
+
+    async fn send_to_address(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // Parse parameters: sendtoaddress "address" amount
+        let to_address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected address".to_string(),
+            })?;
+
+        let amount = params
+            .get(1)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected amount".to_string(),
+            })?;
+
+        // Convert TIME to smallest unit (like satoshis)
+        let amount_units = (amount * 100_000_000.0) as u64;
+
+        // Get UTXOs for this wallet
+        let utxos = self.utxo_manager.list_all_utxos().await;
+
+        // Find sufficient UTXOs
+        let mut selected_utxos = Vec::new();
+        let mut total_input = 0u64;
+        let fee = 1_000; // 0.00001 TIME fee
+
+        for utxo in utxos {
+            selected_utxos.push(utxo.clone());
+            total_input += utxo.value;
+            if total_input >= amount_units + fee {
+                break;
+            }
+        }
+
+        if total_input < amount_units + fee {
+            return Err(RpcError {
+                code: -6,
+                message: "Insufficient funds".to_string(),
+            });
+        }
+
+        // Create transaction
+        use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
+
+        let inputs: Vec<TxInput> = selected_utxos
+            .iter()
+            .map(|utxo| TxInput {
+                previous_output: utxo.outpoint.clone(),
+                script_sig: vec![], // TODO: Sign with wallet key
+                sequence: 0xFFFFFFFF,
+            })
+            .collect();
+
+        let mut outputs = vec![TxOutput {
+            value: amount_units,
+            script_pubkey: to_address.as_bytes().to_vec(),
+        }];
+
+        // Add change output if necessary
+        let change = total_input - amount_units - fee;
+        if change > 0 {
+            outputs.push(TxOutput {
+                value: change,
+                script_pubkey: vec![], // TODO: Get wallet's own address
+            });
+        }
+
+        let tx = Transaction {
+            version: 1,
+            inputs,
+            outputs,
+            lock_time: 0,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        let txid = tx.txid();
+
+        // Broadcast transaction to consensus engine
+        match self.consensus.process_transaction(tx).await {
+            Ok(_) => Ok(json!(hex::encode(txid))),
+            Err(e) => Err(RpcError {
+                code: -26,
+                message: format!("Transaction rejected: {}", e),
+            }),
+        }
     }
 }
