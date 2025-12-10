@@ -174,6 +174,25 @@ async fn maintain_peer_connection(
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
 
+    // Send handshake FIRST
+    let handshake = NetworkMessage::Handshake {
+        magic: *b"TIME",
+        protocol_version: 1,
+        network: "Testnet".to_string(),
+    };
+    let handshake_json = serde_json::to_string(&handshake)
+        .map_err(|e| format!("Failed to serialize handshake: {}", e))?;
+    writer
+        .write_all(format!("{}\n", handshake_json).as_bytes())
+        .await
+        .map_err(|e| format!("Failed to send handshake: {}", e))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("Failed to flush handshake: {}", e))?;
+    
+    tracing::debug!("📡 Sent handshake to {}", address);
+
     // Announce our masternode if we are one
     if let Some(local_mn) = masternode_registry.get_local_masternode().await {
         let announce_msg = NetworkMessage::MasternodeAnnouncement {
@@ -219,10 +238,13 @@ async fn maintain_peer_connection(
 
     // Read responses
     let mut line = String::new();
+    tracing::info!("🔄 Starting message loop for peer {}", address);
+    
     loop {
         tokio::select! {
             // Send periodic heartbeat
             _ = heartbeat_interval.tick() => {
+                tracing::debug!("💓 Sending heartbeat to {}", address);
                 if let Some(local_mn) = masternode_registry.get_local_masternode().await {
                     let heartbeat_msg = NetworkMessage::MasternodeAnnouncement {
                         address: local_mn.masternode.address.clone(),
@@ -231,8 +253,14 @@ async fn maintain_peer_connection(
                         public_key: local_mn.masternode.public_key,
                     };
                     if let Ok(msg_json) = serde_json::to_string(&heartbeat_msg) {
-                        let _ = writer.write_all(format!("{}\n", msg_json).as_bytes()).await;
-                        let _ = writer.flush().await;
+                        if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+                            tracing::warn!("❌ Failed to write heartbeat to {}: {}", address, e);
+                            break;
+                        }
+                        if let Err(e) = writer.flush().await {
+                            tracing::warn!("❌ Failed to flush heartbeat to {}: {}", address, e);
+                            break;
+                        }
                     }
                 }
             }
@@ -240,8 +268,12 @@ async fn maintain_peer_connection(
             // Read incoming messages
             result = reader.read_line(&mut line) => {
                 match result {
-                    Ok(0) => break,
-                    Ok(_) => {
+                    Ok(0) => {
+                        tracing::info!("🔌 Connection to {} closed by peer (EOF)", address);
+                        break;
+                    }
+                    Ok(n) => {
+                        tracing::debug!("📨 Received {} bytes from {}: {}", n, address, line.trim());
                         if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
                             match msg {
                                 NetworkMessage::MasternodeAnnouncement { address: mn_addr, reward_address, tier, public_key } => {
@@ -272,11 +304,15 @@ async fn maintain_peer_connection(
                         }
                         line.clear();
                     }
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::warn!("❌ Read error from {}: {}", address, e);
+                        break;
+                    }
                 }
             }
         }
     }
 
+    tracing::info!("🔌 Connection to {} ended", address);
     Ok(())
 }

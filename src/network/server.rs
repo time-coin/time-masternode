@@ -126,15 +126,54 @@ async fn handle_peer(
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
     let mut line = String::new();
+    let mut failed_parse_count = 0;
+    let mut handshake_done = false;
+    
+    // Define expected magic bytes for our protocol
+    const MAGIC_BYTES: [u8; 4] = *b"TIME";
 
     loop {
         tokio::select! {
             result = reader.read_line(&mut line) => {
                 match result {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        tracing::debug!("📥 Received raw message from {}: {}", peer.addr, line.trim());
+                    Ok(0) => {
+                        tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
+                        break;
+                    }
+                    Ok(n) => {
+                        tracing::debug!("📥 Received {} bytes from {}: {}", n, peer.addr, line.trim());
+                        
+                        // Check if this looks like old protocol (starts with ~W~M)
+                        if !handshake_done && line.starts_with("~W~M") {
+                            tracing::warn!("🚫 Rejecting {} - old protocol detected (~W~M magic bytes)", peer.addr);
+                            break;
+                        }
+                        
                         if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
+                            // First message MUST be a valid handshake
+                            if !handshake_done {
+                                match &msg {
+                                    NetworkMessage::Handshake { magic, protocol_version, network } => {
+                                        if magic != &MAGIC_BYTES {
+                                            tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
+                                            break;
+                                        }
+                                        if protocol_version != &1 {
+                                            tracing::warn!("🚫 Rejecting {} - unsupported protocol version: {}", peer.addr, protocol_version);
+                                            break;
+                                        }
+                                        tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
+                                        handshake_done = true;
+                                        line.clear();
+                                        continue;
+                                    }
+                                    _ => {
+                                        tracing::warn!("🚫 Rejecting {} - first message must be handshake", peer.addr);
+                                        break;
+                                    }
+                                }
+                            }
+                            
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
                             let ip = &peer.addr;
                             let mut limiter = rate_limiter.write().await;
@@ -216,7 +255,13 @@ async fn handle_peer(
                                 _ => {}
                             }
                         } else {
-                            tracing::warn!("❌ Failed to parse message from {}: {}", peer.addr, line.trim());
+                            failed_parse_count += 1;
+                            tracing::warn!("❌ Failed to parse message {} from {}: {}", failed_parse_count, peer.addr, line.trim());
+                            // If we get 3 failed parse attempts, disconnect incompatible client
+                            if failed_parse_count >= 3 {
+                                tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts (incompatible protocol)", peer.addr, failed_parse_count);
+                                break;
+                            }
                         }
                         line.clear();
                     }
@@ -242,5 +287,6 @@ async fn handle_peer(
         }
     }
 
+    tracing::info!("🔌 Connection from {} ended", peer.addr);
     Ok(())
 }
