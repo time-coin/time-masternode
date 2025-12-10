@@ -487,7 +487,14 @@ async fn main() {
         }
     });
 
-    match NetworkServer::new(&p2p_addr, utxo_mgr.clone(), consensus_engine.clone()).await {
+    match NetworkServer::new(
+        &p2p_addr,
+        utxo_mgr.clone(),
+        consensus_engine.clone(),
+        registry.clone(),
+    )
+    .await
+    {
         Ok(mut server) => {
             println!("  ✅ Network server listening on {}", p2p_addr);
             println!("\n╔═══════════════════════════════════════════════════════╗");

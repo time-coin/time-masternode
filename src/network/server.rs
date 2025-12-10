@@ -19,6 +19,7 @@ pub struct NetworkServer {
     pub utxo_manager: Arc<UTXOStateManager>,
     pub consensus: Arc<ConsensusEngine>,
     pub rate_limiter: Arc<RwLock<RateLimiter>>,
+    pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
 }
 
 pub struct PeerConnection {
@@ -32,6 +33,7 @@ impl NetworkServer {
         bind_addr: &str,
         utxo_manager: Arc<UTXOStateManager>,
         consensus: Arc<ConsensusEngine>,
+        masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -44,6 +46,7 @@ impl NetworkServer {
             utxo_manager,
             consensus,
             rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
+            masternode_registry: masternode_registry.clone(),
         })
     }
 
@@ -62,6 +65,7 @@ impl NetworkServer {
             let utxo_mgr = self.utxo_manager.clone();
             let consensus = self.consensus.clone();
             let rate_limiter = self.rate_limiter.clone();
+            let mn_registry = self.masternode_registry.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -73,6 +77,7 @@ impl NetworkServer {
                     utxo_mgr,
                     consensus,
                     rate_limiter,
+                    mn_registry,
                 )
                 .await;
             });
@@ -109,6 +114,7 @@ async fn handle_peer(
     utxo_mgr: Arc<UTXOStateManager>,
     consensus: Arc<ConsensusEngine>,
     rate_limiter: Arc<RwLock<RateLimiter>>,
+    masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
 ) -> Result<(), std::io::Error> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -152,6 +158,27 @@ async fn handle_peer(
                                 NetworkMessage::Subscribe(sub) => {
                                     if limiter.check("subscribe", ip) {
                                         subs.write().await.insert(sub.id.clone(), sub.clone());
+                                    }
+                                }
+                                NetworkMessage::MasternodeAnnouncement { address, reward_address, tier, public_key } => {
+                                    tracing::info!("📨 Received masternode announcement from {}", address);
+                                    let mn = crate::types::Masternode {
+                                        address: address.clone(),
+                                        wallet_address: reward_address.clone(),
+                                        collateral: tier.collateral(),
+                                        tier: tier.clone(),
+                                        public_key: *public_key,
+                                        registered_at: std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .unwrap()
+                                            .as_secs(),
+                                    };
+
+                                    if let Err(e) = masternode_registry.register(
+                                        mn,
+                                        reward_address.clone()
+                                    ).await {
+                                        tracing::warn!("Failed to register masternode: {}", e);
                                     }
                                 }
                                 _ => {}
