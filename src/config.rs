@@ -96,8 +96,28 @@ impl NetworkConfig {
                 }
             }
         }
-        // If no external address configured or empty string, fall back to listen address
+
+        // If no external address configured, try to auto-detect public IP
+        if let Ok(public_ip) = std::process::Command::new("curl")
+            .args(["-s", "https://api.ipify.org"])
+            .output()
+        {
+            if public_ip.status.success() {
+                if let Ok(ip_str) = String::from_utf8(public_ip.stdout) {
+                    let ip_str = ip_str.trim();
+                    if !ip_str.is_empty() && ip_str.parse::<std::net::IpAddr>().is_ok() {
+                        tracing::info!("🌐 Auto-detected public IP: {}", ip_str);
+                        return format!("{}:{}", ip_str, network_type.default_p2p_port());
+                    }
+                }
+            }
+        }
+
+        // If auto-detection failed, fall back to listen address
         // (which may be 0.0.0.0, but at least we tried)
+        tracing::warn!(
+            "⚠️ Could not detect public IP, using listen address (this may not work if behind NAT)"
+        );
         self.full_listen_address(network_type)
     }
 }

@@ -9,7 +9,7 @@ pub struct GenesisBlock;
 impl GenesisBlock {
     /// Testnet genesis block - December 1, 2025
     pub fn testnet() -> Block {
-        let genesis_timestamp = 1733011200; // 2025-12-01T00:00:00Z
+        let genesis_timestamp = 1764547200; // 2025-12-01T00:00:00Z
 
         // Coinbase transaction with genesis reward
         let coinbase = Transaction {
@@ -44,7 +44,7 @@ impl GenesisBlock {
 
     /// Mainnet genesis block - TBD
     pub fn mainnet() -> Block {
-        let genesis_timestamp = 1735689600; // 2025-01-01T00:00:00Z (placeholder)
+        let genesis_timestamp = 1764547200; // 2025-12-01T00:00:00Z
 
         let coinbase = Transaction {
             version: 1,

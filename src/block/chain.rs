@@ -170,7 +170,7 @@ impl BlockChain {
                 self.get_tip_hash().await
             };
 
-            const GENESIS_TIMESTAMP: i64 = 1733011200;
+            const GENESIS_TIMESTAMP: i64 = 1764547200; // 2025-12-01 00:00:00 UTC
             const BLOCK_TIME_SECONDS: i64 = 600;
             let _timestamp = GENESIS_TIMESTAMP + (height as i64 * BLOCK_TIME_SECONDS);
 

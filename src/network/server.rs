@@ -330,7 +330,7 @@ async fn handle_peer(
                         line.clear();
                     }
                     Err(e) => {
-                        tracing::warn!("❌ Read error from {}: {}", peer.addr, e);
+                        tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
                         break;
                     }
                 }
@@ -351,6 +351,5 @@ async fn handle_peer(
         }
     }
 
-    tracing::info!("🔌 Connection from {} ended", peer.addr);
     Ok(())
 }

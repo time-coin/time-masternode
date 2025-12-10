@@ -66,7 +66,7 @@ impl NetworkClient {
                         match maintain_peer_connection(&addr, pm.clone(), mr.clone(), bc.clone())
                             .await
                         {
-                            Ok(_) => tracing::info!("Connection to {} ended gracefully", addr),
+                            Ok(_) => {}
                             Err(e) => tracing::debug!("Connection to {} failed: {}", addr, e),
                         }
 
@@ -246,7 +246,7 @@ async fn maintain_peer_connection(
                         line.clear();
                     }
                     Err(e) => {
-                        tracing::warn!("❌ Read error from {}: {}", address, e);
+                        tracing::info!("🔌 Connection to {} ended: {}", address, e);
                         break;
                     }
                 }
@@ -254,6 +254,5 @@ async fn maintain_peer_connection(
         }
     }
 
-    tracing::info!("🔌 Connection to {} ended", address);
     Ok(())
 }
