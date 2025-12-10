@@ -19,6 +19,7 @@ pub struct VDFConfig {
 
 impl VDFConfig {
     /// Testnet: 2-minute VDF for 10-minute blocks
+    #[allow(dead_code)]
     pub fn testnet() -> Self {
         Self {
             iterations: 12_000_000, // ~2 minutes on modern CPU
@@ -29,6 +30,7 @@ impl VDFConfig {
     }
 
     /// Mainnet: 5-minute VDF for 10-minute blocks (future)
+    #[allow(dead_code)]
     pub fn mainnet() -> Self {
         Self {
             iterations: 30_000_000, // ~5 minutes on modern CPU
@@ -39,6 +41,7 @@ impl VDFConfig {
     }
 
     /// Disabled for testing
+    #[allow(dead_code)]
     pub fn disabled() -> Self {
         Self {
             iterations: 0,
@@ -130,11 +133,7 @@ pub fn verify_vdf(input: &[u8], proof: &VDFProof, config: &VDFConfig) -> Result<
     // Verify each checkpoint
     for (idx, checkpoint) in proof.checkpoints.iter().enumerate() {
         // Compute from last position to this checkpoint
-        let iterations_to_do = if idx == 0 {
-            config.checkpoint_interval
-        } else {
-            config.checkpoint_interval
-        };
+        let iterations_to_do = config.checkpoint_interval;
 
         for _ in 0..iterations_to_do {
             current = Sha256::digest(&current).to_vec();

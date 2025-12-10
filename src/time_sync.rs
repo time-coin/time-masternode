@@ -135,6 +135,7 @@ impl TimeSync {
     }
 
     /// Get the current calibrated time (local time + calibration offset)
+    #[allow(dead_code)]
     pub fn get_calibrated_time(&self) -> i64 {
         Utc::now().timestamp() + (self.calibration_delay_ms / 1000)
     }
