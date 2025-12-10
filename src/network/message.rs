@@ -69,6 +69,8 @@ pub enum NetworkMessage {
         nonce: u64,
         timestamp: i64,
     },
+    GetPendingTransactions,
+    PendingTransactionsResponse(Vec<Transaction>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

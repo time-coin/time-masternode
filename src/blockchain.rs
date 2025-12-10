@@ -463,6 +463,20 @@ impl Blockchain {
         *self.current_height.read().await
     }
 
+    /// Get all pending transactions from the mempool
+    pub async fn get_pending_transactions(&self) -> Vec<Transaction> {
+        self.consensus.tx_pool.get_all_pending().await
+    }
+
+    /// Add a transaction to the mempool (called when syncing from peers)
+    pub async fn add_pending_transaction(&self, tx: Transaction) -> Result<(), String> {
+        // Simple validation and add to pool
+        self.consensus.validate_transaction(&tx).await?;
+        let fee = 1000; // Default fee for synced transactions
+        self.consensus.tx_pool.add_pending(tx, fee).await;
+        Ok(())
+    }
+
     pub async fn get_block_by_height(
         &self,
         height: u64,

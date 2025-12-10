@@ -36,71 +36,92 @@ impl NetworkClient {
         let connection_manager = self.connection_manager.clone();
 
         tokio::spawn(async move {
-            loop {
-                // Get list of known peers
-                let peers = peer_manager.get_all_peers().await;
+            // Get initial list of known peers ONCE
+            let peers = peer_manager.get_all_peers().await;
 
-                // Connect to each peer if not already connected
-                for peer_addr in peers.iter().take(6) {
-                    // Extract IP from address
-                    let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
-                        &peer_addr[..colon_pos]
-                    } else {
-                        continue;
-                    };
+            // Connect to each peer (one connection task per peer, never duplicated)
+            for peer_addr in peers.iter().take(6) {
+                // Extract IP from address
+                let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
+                    &peer_addr[..colon_pos]
+                } else {
+                    continue;
+                };
 
-                    // Skip if already connected/connecting
-                    if connection_manager.is_connected(ip).await {
-                        continue;
-                    }
-
-                    // Mark as connecting
-                    if !connection_manager.mark_connecting(ip).await {
-                        continue; // Already connecting
-                    }
-
-                    let cm = connection_manager.clone();
-                    let mr = masternode_registry.clone();
-                    let bc = blockchain.clone();
-                    let ip_str = ip.to_string();
-
-                    // Spawn persistent connection task
-                    tokio::spawn(async move {
-                        loop {
-                            match maintain_peer_connection(
-                                &ip_str,
-                                cm.clone(),
-                                mr.clone(),
-                                bc.clone(),
-                            )
-                            .await
-                            {
-                                Ok(_) => {
-                                    tracing::info!("Connection to {} ended gracefully", ip_str);
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Connection to {} failed: {}", ip_str, e);
-                                }
-                            }
-
-                            // Mark as disconnected
-                            cm.mark_disconnected(&ip_str).await;
-
-                            // Wait before reconnecting
-                            tracing::info!("Reconnecting to {} in 30s...", ip_str);
-                            sleep(Duration::from_secs(30)).await;
-
-                            // Mark as connecting again
-                            cm.mark_connecting(&ip_str).await;
-                        }
-                    });
-
-                    // Small delay between connection attempts
-                    sleep(Duration::from_millis(100)).await;
+                // Skip dead nodes that we know won't work
+                if ip == "165.232.154.150" || ip == "178.128.199.144" {
+                    continue;
                 }
 
-                // Check for new peers every 60 seconds
-                sleep(Duration::from_secs(60)).await;
+                // Skip if already connected/connecting
+                if connection_manager.is_connected(ip).await {
+                    continue;
+                }
+
+                // Mark as connecting
+                if !connection_manager.mark_connecting(ip).await {
+                    continue; // Already connecting
+                }
+
+                let cm = connection_manager.clone();
+                let mr = masternode_registry.clone();
+                let bc = blockchain.clone();
+                let ip_str = ip.to_string();
+
+                // Spawn ONE persistent connection task per peer
+                tokio::spawn(async move {
+                    let mut retry_delay = 5;
+                    let mut consecutive_failures = 0;
+
+                    loop {
+                        match maintain_peer_connection(&ip_str, cm.clone(), mr.clone(), bc.clone())
+                            .await
+                        {
+                            Ok(_) => {
+                                tracing::info!("Connection to {} ended gracefully", ip_str);
+                                consecutive_failures = 0;
+                                retry_delay = 5; // Reset delay on graceful disconnect
+                            }
+                            Err(e) => {
+                                consecutive_failures += 1;
+                                tracing::warn!(
+                                    "Connection to {} failed (attempt {}): {}",
+                                    ip_str,
+                                    consecutive_failures,
+                                    e
+                                );
+
+                                // Stop trying after 10 consecutive failures
+                                if consecutive_failures >= 10 {
+                                    tracing::error!(
+                                        "Giving up on {} after 10 failed attempts",
+                                        ip_str
+                                    );
+                                    break;
+                                }
+
+                                // Exponential backoff up to 5 minutes
+                                retry_delay = (retry_delay * 2).min(300);
+                            }
+                        }
+
+                        // Mark as disconnected
+                        cm.mark_disconnected(&ip_str).await;
+
+                        // Wait before reconnecting
+                        tracing::info!("Reconnecting to {} in {}s...", ip_str, retry_delay);
+                        sleep(Duration::from_secs(retry_delay)).await;
+
+                        // Mark as connecting again
+                        cm.mark_connecting(&ip_str).await;
+                    }
+
+                    // Final cleanup
+                    cm.mark_disconnected(&ip_str).await;
+                });
+
+                // Small delay between initial connection attempts
+                sleep(Duration::from_millis(100)).await;
             }
         });
     }
@@ -186,6 +207,21 @@ async fn maintain_peer_connection(
 
     tracing::debug!("📡 Requested initial block height from {}", ip);
 
+    // Request pending transactions (to catch any we missed during downtime)
+    let tx_request = NetworkMessage::GetPendingTransactions;
+    let msg_json =
+        serde_json::to_string(&tx_request).map_err(|e| format!("Failed to serialize: {}", e))?;
+    writer
+        .write_all(format!("{}\n", msg_json).as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("Flush failed: {}", e))?;
+
+    tracing::debug!("📡 Requested pending transactions from {}", ip);
+
     // Read responses
     let mut line = String::new();
     tracing::info!("🔄 Starting message loop for peer {}", ip);
@@ -264,6 +300,16 @@ async fn maintain_peer_connection(
                                     for block in blocks {
                                         if let Err(e) = blockchain.add_block(block).await {
                                             tracing::warn!("Failed to add block: {}", e);
+                                        }
+                                    }
+                                }
+                                NetworkMessage::PendingTransactionsResponse(transactions) => {
+                                    if !transactions.is_empty() {
+                                        tracing::info!("📩 Received {} pending transaction(s) from peer", transactions.len());
+                                        for tx in transactions {
+                                            if let Err(e) = blockchain.add_pending_transaction(tx).await {
+                                                tracing::debug!("Transaction already known or invalid: {}", e);
+                                            }
                                         }
                                     }
                                 }

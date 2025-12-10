@@ -270,6 +270,16 @@ async fn handle_peer(
                                         let _ = writer.flush().await;
                                     }
                                 }
+                                NetworkMessage::GetPendingTransactions => {
+                                    // Get pending transactions from mempool
+                                    let pending_txs = blockchain.get_pending_transactions().await;
+                                    let reply = NetworkMessage::PendingTransactionsResponse(pending_txs);
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                    }
+                                }
                                 NetworkMessage::GetBlocks(start, end) => {
                                     let mut blocks = Vec::new();
                                     for h in *start..=(*end).min(start + 100) {

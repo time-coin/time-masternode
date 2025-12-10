@@ -79,6 +79,11 @@ impl TransactionPool {
         self.pending.read().await.contains_key(txid)
     }
 
+    /// Get all pending transactions
+    pub async fn get_all_pending(&self) -> Vec<Transaction> {
+        self.pending.read().await.values().cloned().collect()
+    }
+
     /// Check if transaction is finalized
     #[allow(dead_code)]
     pub async fn is_finalized(&self, txid: &Hash256) -> bool {
