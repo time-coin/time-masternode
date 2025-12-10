@@ -40,7 +40,7 @@ impl TimeSync {
         });
     }
 
-    async fn check_time_sync(&mut self) -> Result<(), String> {
+    pub async fn check_time_sync(&mut self) -> Result<i64, String> {
         let mut last_error = None;
 
         // Try each NTP server until one succeeds
@@ -59,6 +59,8 @@ impl TimeSync {
                     );
 
                     // Check deviation
+                    let offset_ms = deviation * 1000; // Convert to milliseconds
+
                     if deviation.abs() >= MAX_DEVIATION_SHUTDOWN {
                         error!(
                             "🛑 CRITICAL: System time deviation is {}s (>{} seconds)",
@@ -75,7 +77,7 @@ impl TimeSync {
                         warn!("⚠️  Please synchronize your system clock!");
                     }
 
-                    return Ok(());
+                    return Ok(offset_ms);
                 }
                 Err(e) => {
                     last_error = Some(format!("{}: {}", server, e));

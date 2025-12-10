@@ -207,10 +207,43 @@ async fn main() {
     utxo_mgr.add_utxo(initial_utxo).await;
     println!("✓ Created initial UTXO (5000 TIME)\n");
 
+    // Perform initial time check BEFORE starting anything else
+    println!("🕐 Checking system time synchronization...");
+    let mut time_sync = TimeSync::new();
+
+    match time_sync.check_time_sync().await {
+        Ok(offset_ms) => {
+            let offset_seconds = offset_ms / 1000;
+            if offset_seconds.abs() > 120 {
+                eprintln!(
+                    "❌ CRITICAL: System time is off by {} seconds",
+                    offset_seconds
+                );
+                eprintln!("   System time must be within 2 minutes of NTP time.");
+                eprintln!("   Please synchronize your system clock and try again.");
+                std::process::exit(1);
+            } else if offset_seconds.abs() > 60 {
+                println!(
+                    "⚠ WARNING: System time is off by {} seconds",
+                    offset_seconds
+                );
+                println!("  Time will be calibrated, but consider syncing system clock.");
+            } else {
+                println!("✓ System time is synchronized (offset: {} ms)", offset_ms);
+            }
+        }
+        Err(e) => {
+            eprintln!("❌ CRITICAL: Failed to contact NTP server: {}", e);
+            eprintln!("   Node requires NTP synchronization to operate correctly.");
+            eprintln!("   Please check your network connection and NTP server availability.");
+            std::process::exit(1);
+        }
+    }
+    println!();
+
     println!("✓ Ready to process transactions\n");
 
-    // Start NTP time synchronization
-    let time_sync = TimeSync::new();
+    // Start background NTP time synchronization
     time_sync.start_sync_task();
 
     let consensus = Arc::new(ConsensusEngine::new(masternodes, utxo_mgr.clone()));
