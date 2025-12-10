@@ -206,11 +206,32 @@ async fn main() {
         }
     };
 
-    // Initialize block storage with increased cache to suppress warnings
+    // Helper function to calculate appropriate cache size based on available memory
+    fn calculate_cache_size() -> u64 {
+        use sysinfo::System;
+        let mut sys = System::new_all();
+        sys.refresh_memory();
+        let available_memory = sys.available_memory();
+
+        // Use 10% of available memory per database, cap at 256MB each
+        let cache_size = std::cmp::min(available_memory / 10, 256 * 1024 * 1024);
+
+        tracing::info!(
+            "📊 Configuring sled cache: {} MB (available memory: {} MB)",
+            cache_size / (1024 * 1024),
+            available_memory / (1024 * 1024)
+        );
+
+        cache_size
+    }
+
+    let cache_size = calculate_cache_size();
+
+    // Initialize block storage
     let block_storage_path = format!("{}/blocks", config.storage.data_dir);
     let block_storage = match sled::Config::new()
         .path(&block_storage_path)
-        .cache_capacity(1024 * 1024 * 1024) // 1GB cache
+        .cache_capacity(cache_size)
         .open()
     {
         Ok(s) => s,
@@ -222,23 +243,23 @@ async fn main() {
 
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
-    // Initialize peer manager (suppress sled output)
+    // Initialize peer manager
     let peer_db = Arc::new(
         sled::Config::new()
             .path(format!("{}/peers", config.storage.data_dir))
-            .cache_capacity(1024 * 1024 * 1024)
+            .cache_capacity(cache_size)
             .open()
             .map_err(|e| format!("Failed to open peer database: {}", e))
             .unwrap(),
     );
     let peer_manager = Arc::new(PeerManager::new(peer_db, config.network.clone()));
 
-    // Initialize masternode registry (suppress sled output)
+    // Initialize masternode registry
     let registry_db_path = format!("{}/registry", config.storage.data_dir);
     let registry_db = Arc::new(
         match sled::Config::new()
             .path(&registry_db_path)
-            .cache_capacity(1024 * 1024 * 1024)
+            .cache_capacity(cache_size)
             .open()
         {
             Ok(db) => db,
