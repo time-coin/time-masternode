@@ -1,9 +1,11 @@
 use crate::consensus::ConsensusEngine;
+use crate::network::blacklist::IPBlacklist;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::OutPoint;
 use crate::utxo_manager::UTXOStateManager;
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
@@ -18,6 +20,7 @@ pub struct NetworkServer {
     pub utxo_manager: Arc<UTXOStateManager>,
     pub consensus: Arc<ConsensusEngine>,
     pub rate_limiter: Arc<RwLock<RateLimiter>>,
+    pub blacklist: Arc<RwLock<IPBlacklist>>,
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     pub blockchain: Arc<crate::blockchain::Blockchain>,
 }
@@ -47,15 +50,39 @@ impl NetworkServer {
             utxo_manager,
             consensus,
             rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
+            blacklist: Arc::new(RwLock::new(IPBlacklist::new())),
             masternode_registry: masternode_registry.clone(),
             blockchain,
         })
     }
 
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
+        // Spawn cleanup task for blacklist
+        let blacklist_cleanup = self.blacklist.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Every 5 minutes
+                blacklist_cleanup.write().await.cleanup();
+            }
+        });
+        
         loop {
             let (stream, addr) = self.listener.accept().await?;
             let addr_str = addr.to_string();
+            
+            // Extract IP address
+            let ip: IpAddr = addr.ip();
+            
+            // Check blacklist BEFORE accepting connection
+            {
+                let mut blacklist = self.blacklist.write().await;
+                if let Some(reason) = blacklist.is_blacklisted(ip) {
+                    tracing::warn!("🚫 Rejected blacklisted IP {}: {}", ip, reason);
+                    drop(stream); // Close immediately
+                    continue;
+                }
+            }
+            
             let peer = PeerConnection {
                 addr: addr_str.clone(),
                 is_masternode: false,
@@ -67,6 +94,7 @@ impl NetworkServer {
             let utxo_mgr = self.utxo_manager.clone();
             let consensus = self.consensus.clone();
             let rate_limiter = self.rate_limiter.clone();
+            let blacklist = self.blacklist.clone();
             let mn_registry = self.masternode_registry.clone();
             let blockchain = self.blockchain.clone();
 
@@ -80,6 +108,7 @@ impl NetworkServer {
                     utxo_mgr,
                     consensus,
                     rate_limiter,
+                    blacklist,
                     mn_registry,
                     blockchain,
                 )
@@ -118,9 +147,15 @@ async fn handle_peer(
     utxo_mgr: Arc<UTXOStateManager>,
     consensus: Arc<ConsensusEngine>,
     rate_limiter: Arc<RwLock<RateLimiter>>,
+    blacklist: Arc<RwLock<IPBlacklist>>,
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
 ) -> Result<(), std::io::Error> {
+    // Extract IP from address
+    let ip: IpAddr = peer.addr.split(':').next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+    
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -146,6 +181,13 @@ async fn handle_peer(
                         // Check if this looks like old protocol (starts with ~W~M)
                         if !handshake_done && line.starts_with("~W~M") {
                             tracing::warn!("🚫 Rejecting {} - old protocol detected (~W~M magic bytes)", peer.addr);
+                            let should_ban = blacklist.write().await.record_violation(
+                                ip,
+                                "Old protocol magic bytes (~W~M)"
+                            );
+                            if should_ban {
+                                tracing::warn!("🔨 IP {} auto-banned for repeated violations", ip);
+                            }
                             break;
                         }
                         
@@ -156,10 +198,18 @@ async fn handle_peer(
                                     NetworkMessage::Handshake { magic, protocol_version, network } => {
                                         if magic != &MAGIC_BYTES {
                                             tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
+                                            blacklist.write().await.record_violation(
+                                                ip,
+                                                &format!("Invalid magic bytes: {:?}", magic)
+                                            );
                                             break;
                                         }
                                         if protocol_version != &1 {
                                             tracing::warn!("🚫 Rejecting {} - unsupported protocol version: {}", peer.addr, protocol_version);
+                                            blacklist.write().await.record_violation(
+                                                ip,
+                                                &format!("Unsupported protocol version: {}", protocol_version)
+                                            );
                                             break;
                                         }
                                         tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
@@ -169,25 +219,32 @@ async fn handle_peer(
                                     }
                                     _ => {
                                         tracing::warn!("🚫 Rejecting {} - first message must be handshake", peer.addr);
+                                        let should_ban = blacklist.write().await.record_violation(
+                                            ip,
+                                            "No handshake sent"
+                                        );
+                                        if should_ban {
+                                            tracing::warn!("🔨 IP {} auto-banned", ip);
+                                        }
                                         break;
                                     }
                                 }
                             }
                             
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
-                            let ip = &peer.addr;
+                            let ip_str = &peer.addr;
                             let mut limiter = rate_limiter.write().await;
 
                             match &msg {
                                 NetworkMessage::TransactionBroadcast(tx) => {
-                                    if limiter.check("tx", ip) {
+                                    if limiter.check("tx", ip_str) {
                                         if let Err(e) = consensus.process_transaction(tx.clone()).await {
                                             eprintln!("Tx rejected: {}", e);
                                         }
                                     }
                                 }
                                 NetworkMessage::UTXOStateQuery(outpoints) => {
-                                    if limiter.check("utxo_query", ip) {
+                                    if limiter.check("utxo_query", ip_str) {
                                         let mut responses = Vec::new();
                                         for op in outpoints {
                                             if let Some(state) = utxo_mgr.get_state(op).await {
@@ -203,7 +260,7 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::Subscribe(sub) => {
-                                    if limiter.check("subscribe", ip) {
+                                    if limiter.check("subscribe", ip_str) {
                                         subs.write().await.insert(sub.id.clone(), sub.clone());
                                     }
                                 }
@@ -257,9 +314,13 @@ async fn handle_peer(
                         } else {
                             failed_parse_count += 1;
                             tracing::warn!("❌ Failed to parse message {} from {}: {}", failed_parse_count, peer.addr, line.trim());
-                            // If we get 3 failed parse attempts, disconnect incompatible client
-                            if failed_parse_count >= 3 {
-                                tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts (incompatible protocol)", peer.addr, failed_parse_count);
+                            // Record violation and check if should ban
+                            let should_ban = blacklist.write().await.record_violation(
+                                ip,
+                                "Failed to parse message"
+                            );
+                            if should_ban || failed_parse_count >= 3 {
+                                tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts", peer.addr, failed_parse_count);
                                 break;
                             }
                         }

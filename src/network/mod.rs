@@ -1,3 +1,4 @@
+pub mod blacklist;
 pub mod client;
 pub mod message;
 pub mod peer_discovery;
