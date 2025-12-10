@@ -1,7 +1,125 @@
 # Peer-to-Peer Network Best Practices
 
+**Last Updated**: 2025-12-10
+
 ## Overview
 This document outlines best practices for maintaining a stable and efficient P2P network for TIME Coin masternodes.
+
+## Table of Contents
+1. [Preventing Duplicate Actions](#preventing-duplicate-actions)
+2. [Connection Management](#connection-management)
+3. [Message Broadcasting](#message-broadcasting)
+4. [Synchronization](#synchronization)
+5. [Security](#security)
+6. [Monitoring](#monitoring)
+7. [Network Configuration](#network-configuration)
+
+---
+
+## 1. Preventing Duplicate Actions
+
+### Problem
+Race conditions can cause duplicate actions when multiple threads or timers fire simultaneously.
+
+### Common Scenarios
+- **Block Production**: Multiple timers firing at same timestamp
+- **Transaction Processing**: Same tx received from multiple peers
+- **Connection Attempts**: Multiple simultaneous connects to same IP
+- **Message Broadcasting**: Same message sent multiple times
+
+### Solution Pattern: Guard Flags
+
+```rust
+use std::sync::atomic::{AtomicBool, Ordering};
+
+struct BlockProducer {
+    is_producing: AtomicBool,
+}
+
+impl BlockProducer {
+    fn produce_block(&self) {
+        // Try to acquire the production lock
+        if self.is_producing.compare_exchange(
+            false, true, 
+            Ordering::SeqCst, Ordering::SeqCst
+        ).is_err() {
+            // Already producing, skip
+            return;
+        }
+        
+        // Ensure we reset the flag even on error
+        let _guard = scopeguard::guard((), |_| {
+            self.is_producing.store(false, Ordering::SeqCst);
+        });
+        
+        // Actual block production logic...
+    }
+}
+```
+
+### Solution Pattern: Deduplication Cache
+
+```rust
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+struct MessageBroadcaster {
+    seen_messages: Mutex<HashSet<String>>,
+}
+
+impl MessageBroadcaster {
+    fn broadcast(&self, msg_id: &str) {
+        let mut seen = self.seen_messages.lock().unwrap();
+        
+        // Check if already seen
+        if !seen.insert(msg_id.to_string()) {
+            // Duplicate, skip
+            return;
+        }
+        
+        // Broadcast logic...
+    }
+}
+```
+
+### Solution Pattern: Connection Manager
+
+```rust
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::Mutex;
+
+struct ConnectionManager {
+    active_connections: Mutex<HashMap<IpAddr, ConnectionState>>,
+}
+
+impl ConnectionManager {
+    fn connect(&self, ip: IpAddr) -> Result<()> {
+        let mut conns = self.active_connections.lock().unwrap();
+        
+        // Check if already connected or connecting
+        match conns.get(&ip) {
+            Some(ConnectionState::Connected) => return Ok(()), // Already connected
+            Some(ConnectionState::Connecting) => return Ok(()), // In progress
+            None => {} // Not connected, proceed
+        }
+        
+        // Mark as connecting
+        conns.insert(ip, ConnectionState::Connecting);
+        drop(conns); // Release lock before slow network operation
+        
+        // Actual connection logic...
+    }
+}
+```
+
+### Key Principles
+
+1. **Check Before Action**: Always verify state before expensive operations
+2. **Atomic Operations**: Use atomic types for flags that multiple threads check
+3. **Guard Pattern**: Ensure cleanup happens even on errors
+4. **Fast Locks**: Hold locks briefly, never during network I/O
+5. **TTL for Caches**: Clean up deduplication caches periodically
 
 ## Connection Management
 
@@ -108,6 +226,60 @@ connecting_to.insert(ip);
 - Track message IDs (transaction hashes, block hashes)
 - Check before processing
 - Clean up old IDs periodically (keep last 1000)
+
+### 8. Action Deduplication (Critical Pattern)
+**Rule**: Prevent duplicate concurrent actions using mutex guards or atomic flags.
+
+**Why**:
+- Race conditions cause duplicate block production
+- Multiple timers can fire simultaneously
+- Async tasks can overlap unexpectedly
+- Critical for blockchain consistency
+
+**Common Race Conditions**:
+1. **Block Production**: Two timers fire at same timestamp
+2. **Connection Attempts**: Multiple tasks try to connect to same peer
+3. **Transaction Processing**: Same TX arrives from multiple peers
+4. **State Updates**: Concurrent writes to shared state
+
+**Implementation Pattern**:
+```rust
+// Use Mutex to ensure only one action at a time
+static PRODUCING_BLOCK: Lazy<Mutex<bool>> = Lazy::new(|| Mutex::new(false));
+
+async fn produce_block() -> Result<()> {
+    let mut guard = PRODUCING_BLOCK.lock().await;
+    if *guard {
+        return Ok(()); // Already producing, skip
+    }
+    *guard = true;
+    
+    // Produce block...
+    
+    *guard = false;
+    Ok(())
+}
+
+// Alternative: Use atomic flag for lightweight checking
+static PRODUCING: AtomicBool = AtomicBool::new(false);
+
+async fn produce_block() -> Result<()> {
+    if PRODUCING.swap(true, Ordering::SeqCst) {
+        return Ok(()); // Already producing
+    }
+    
+    // Produce block...
+    
+    PRODUCING.store(false, Ordering::SeqCst);
+    Ok(())
+}
+```
+
+**Best Practice**:
+- Use Mutex when you need to hold state across await points
+- Use AtomicBool for simple flag checking
+- Always release the lock/flag, even on errors (use Drop guards)
+- Log when skipping duplicate actions for monitoring
 
 ## Network Discovery
 
