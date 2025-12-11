@@ -151,7 +151,7 @@ impl UTXOStateManager {
     ) -> Result<(), UtxoError> {
         let remove_count = to_remove.len();
         let add_count = to_add.len();
-        
+
         for outpoint in to_remove {
             if let Err(e) = self.storage.remove_utxo(&outpoint).await {
                 tracing::warn!("Failed to remove UTXO during reconciliation: {}", e);

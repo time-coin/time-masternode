@@ -4,6 +4,7 @@ pub mod connection_manager;
 pub mod message;
 pub mod peer_discovery;
 pub mod rate_limiter;
+pub mod secure_transport;
 pub mod server;
 pub mod signed_message;
 pub mod tls;

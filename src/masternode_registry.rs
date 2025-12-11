@@ -272,6 +272,7 @@ impl MasternodeRegistry {
         self.masternodes.read().await.len()
     }
 
+    #[allow(dead_code)]
     pub async fn get_all(&self) -> Vec<MasternodeInfo> {
         self.masternodes.read().await.values().cloned().collect()
     }

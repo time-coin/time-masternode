@@ -175,7 +175,7 @@ pub struct LoggingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MasternodeConfig {
     pub enabled: bool,
-    pub wallet_address: String,
+    // wallet_address is auto-generated from the node's wallet - no config needed
     pub collateral_txid: String,
     pub tier: String,
 }
@@ -186,6 +186,20 @@ pub struct SecurityConfig {
     pub max_requests_per_second: u32,
     pub enable_authentication: bool,
     pub api_key: String,
+    #[serde(default = "default_true")]
+    pub enable_tls: bool,
+    #[serde(default = "default_true")]
+    pub enable_message_signing: bool,
+    #[serde(default = "default_message_max_age")]
+    pub message_max_age_seconds: i64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_message_max_age() -> i64 {
+    300 // 5 minutes
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -244,7 +258,6 @@ impl Config {
             },
             masternode: MasternodeConfig {
                 enabled: false,
-                wallet_address: String::new(),
                 collateral_txid: String::new(),
                 tier: "silver".to_string(),
             },
@@ -253,6 +266,9 @@ impl Config {
                 max_requests_per_second: 1000,
                 enable_authentication: false,
                 api_key: String::new(),
+                enable_tls: true,
+                enable_message_signing: true,
+                message_max_age_seconds: 300,
             },
             metrics: MetricsConfig {
                 enabled: false,

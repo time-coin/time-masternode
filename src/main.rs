@@ -138,11 +138,8 @@ async fn main() {
 
     // Initialize masternode info for later registration
     let masternode_info: Option<types::Masternode> = if config.masternode.enabled {
-        let wallet_address = if config.masternode.wallet_address.is_empty() {
-            wallet.address().to_string()
-        } else {
-            config.masternode.wallet_address.clone()
-        };
+        // Always use the wallet's address (auto-generated per node)
+        let wallet_address = wallet.address().to_string();
 
         let tier = match config.masternode.tier.to_lowercase().as_str() {
             "free" => types::MasternodeTier::Free,

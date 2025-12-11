@@ -53,9 +53,9 @@ impl Blockchain {
         self.network_type.genesis_timestamp()
     }
 
-    /// Wait for 3+ masternodes, then create genesis block with initial rewards
+    /// Initialize blockchain - load existing genesis or wait to sync from peers
     pub async fn initialize_genesis(&self) -> Result<(), String> {
-        // Check if genesis already exists (check current height, not just block_0)
+        // Check if genesis already exists locally
         let height = self.load_chain_height()?;
         if height > 0 {
             *self.current_height.write().await = height;
@@ -74,49 +74,14 @@ impl Blockchain {
             return Ok(());
         }
 
-        tracing::info!("⏳ Waiting for 3+ masternodes to register...");
+        // No local genesis - node will sync from peers via catchup_blocks()
+        tracing::info!("⏳ No local genesis block - will sync from network peers");
+        tracing::info!("📡 Waiting for peer connections to download blockchain...");
 
-        // Wait for 3 masternodes (count all registered, not just active with heartbeats)
-        loop {
-            let total_count = self.masternode_registry.total_count().await;
-            let all_mns = self.masternode_registry.get_all().await;
-
-            tracing::info!(
-                "⏳ Waiting for genesis: {} masternode(s) registered (need 3+)",
-                total_count
-            );
-
-            // Debug: show which masternodes are registered
-            if !all_mns.is_empty() {
-                for mn in all_mns.iter().take(5) {
-                    tracing::debug!(
-                        "  Registered: {} ({})",
-                        mn.masternode.address,
-                        mn.masternode.wallet_address
-                    );
-                }
-            }
-
-            if total_count >= 3 {
-                tracing::info!(
-                    "✅ {} masternodes registered, creating genesis block",
-                    total_count
-                );
-                break;
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-
-        // Create genesis block with rewards for initial masternodes
-        let genesis = self.create_genesis_block().await?;
-        self.save_block(&genesis)?;
-        *self.current_height.write().await = 0;
-
-        tracing::info!("✅ Genesis block created: {}", hex::encode(genesis.hash()));
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn create_genesis_block(&self) -> Result<Block, String> {
         let masternodes = self.masternode_registry.list_active().await;
 
@@ -171,7 +136,7 @@ impl Blockchain {
         (elapsed / BLOCK_TIME_SECONDS) as u64
     }
 
-    /// Enter catchup mode to create missing blocks
+    /// Check sync status - blocks are downloaded automatically by P2P client
     pub async fn catchup_blocks(&self) -> Result<(), String> {
         let current = *self.current_height.read().await;
         let expected = self.calculate_expected_height();
@@ -181,23 +146,21 @@ impl Blockchain {
             return Ok(());
         }
 
-        tracing::info!("⚡ Entering catchup mode: {} → {}", current, expected);
+        tracing::info!(
+            "⏳ Syncing blockchain from peers: {} → {} ({} blocks behind)",
+            current,
+            expected,
+            expected - current
+        );
+        tracing::info!("📡 P2P client will automatically download missing blocks");
 
-        for height in (current + 1)..=expected {
-            let block_time = self.genesis_timestamp() + (height as i64 * BLOCK_TIME_SECONDS);
-            let block = self.create_catchup_block(height, block_time).await?;
-            self.save_block(&block)?;
-            *self.current_height.write().await = height;
+        // Blocks are downloaded automatically by the P2P client when it detects
+        // that peers have a higher height. No need to manually generate blocks.
 
-            if height % 100 == 0 {
-                tracing::info!("  ⏩ Catchup progress: {}/{}", height, expected);
-            }
-        }
-
-        tracing::info!("✅ Catchup complete! Height: {}", expected);
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn create_catchup_block(&self, height: u64, timestamp: i64) -> Result<Block, String> {
         let prev_hash = self.get_block_hash(height - 1)?;
         let masternodes = self.masternode_registry.list_active().await;
@@ -665,4 +628,3 @@ impl Clone for Blockchain {
         }
     }
 }
-
