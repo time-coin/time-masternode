@@ -61,27 +61,27 @@ find_repo() {
     # Check if we're already in the timecoin directory
     if [ -f "Cargo.toml" ] && grep -q "name = \"timed\"" Cargo.toml 2>/dev/null; then
         repo_dir="$(pwd)"
-        print_success "Found repository in current directory"
+        print_success "Found repository in current directory" >&2
     # Check default location
     elif [ -d "$DEFAULT_REPO_DIR/.git" ]; then
         repo_dir="$DEFAULT_REPO_DIR"
-        print_success "Found repository at $DEFAULT_REPO_DIR"
+        print_success "Found repository at $DEFAULT_REPO_DIR" >&2
     # Search in common locations
     else
-        print_step "Searching for timecoin repository..."
+        print_step "Searching for timecoin repository..." >&2
         for dir in "$HOME/timecoin" "/root/timecoin" "/opt/timecoin" "$HOME/projects/timecoin"; do
             if [ -d "$dir/.git" ] && [ -f "$dir/Cargo.toml" ]; then
                 repo_dir="$dir"
-                print_success "Found repository at $dir"
+                print_success "Found repository at $dir" >&2
                 break
             fi
         done
     fi
     
     if [ -z "$repo_dir" ]; then
-        print_error "Could not find timecoin repository"
-        echo "Please specify the repository directory:"
-        echo "  sudo $0 /path/to/timecoin"
+        print_error "Could not find timecoin repository" >&2
+        echo "Please specify the repository directory:" >&2
+        echo "  sudo $0 /path/to/timecoin" >&2
         exit 1
     fi
     
