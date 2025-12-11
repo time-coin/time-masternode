@@ -355,6 +355,9 @@ impl Blockchain {
             .insert(b"chain_height", &block.header.height.to_le_bytes())
             .map_err(|e| e.to_string())?;
 
+        // Flush to ensure block is persisted before next validation
+        self.storage.flush().map_err(|e| e.to_string())?;
+
         Ok(())
     }
 
