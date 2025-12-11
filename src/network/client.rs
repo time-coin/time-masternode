@@ -357,6 +357,8 @@ async fn maintain_peer_connection(
 
                                         let mut registered = 0;
                                         for mn_data in masternodes {
+                                            tracing::debug!("Processing masternode: {} (reward: {})", mn_data.address, mn_data.reward_address);
+
                                             // Skip if this is our own masternode
                                             if let Some(ref local_addr) = local_address {
                                                 if mn_data.address == *local_addr {
