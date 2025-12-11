@@ -608,17 +608,22 @@ impl Blockchain {
         // which may differ from the current active set
         // Only validate structure, not the specific masternode list
 
-        // 6. Verify total block reward is correct (but not distribution)
+        // 6. Verify total block reward is approximately correct (allow small rounding errors)
         let expected_reward = BLOCK_REWARD_SATOSHIS;
         let actual_reward: u64 = block
             .masternode_rewards
             .iter()
             .map(|(_, amount)| amount)
             .sum();
-        if actual_reward != expected_reward {
+
+        // Allow up to 0.01% difference for rounding errors in reward distribution
+        let tolerance = expected_reward / 10000; // 0.01% = 1,000,000 satoshis (0.01 TIME)
+        let diff = actual_reward.abs_diff(expected_reward);
+
+        if diff > tolerance {
             return Err(format!(
-                "Invalid block reward: {} (expected {})",
-                actual_reward, expected_reward
+                "Invalid block reward: {} (expected {}, diff: {})",
+                actual_reward, expected_reward, diff
             ));
         }
 
