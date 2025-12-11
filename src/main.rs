@@ -627,6 +627,10 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
     let level = if verbose { "trace" } else { &config.level };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
 
+    // Detect if running under systemd/journald
+    let is_systemd =
+        std::env::var("JOURNAL_STREAM").is_ok() || std::env::var("INVOCATION_ID").is_ok();
+
     // Get hostname - shorten to first part before dot
     let hostname = hostname::get()
         .ok()
@@ -643,18 +647,34 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
                 .init();
         }
         _ => {
-            fmt()
-                .with_env_filter(filter)
-                .with_target(false)
-                .with_thread_ids(false)
-                .with_thread_names(false)
-                .with_file(false)
-                .with_line_number(false)
-                .with_timer(CustomTimer {
-                    hostname: short_hostname,
-                })
-                .compact()
-                .init();
+            if is_systemd {
+                // When running under systemd, don't include timestamp/hostname
+                // (journald already adds them)
+                fmt()
+                    .with_env_filter(filter)
+                    .with_target(false)
+                    .with_thread_ids(false)
+                    .with_thread_names(false)
+                    .with_file(false)
+                    .with_line_number(false)
+                    .without_time()
+                    .compact()
+                    .init();
+            } else {
+                // When running manually, include custom timer with hostname
+                fmt()
+                    .with_env_filter(filter)
+                    .with_target(false)
+                    .with_thread_ids(false)
+                    .with_thread_names(false)
+                    .with_file(false)
+                    .with_line_number(false)
+                    .with_timer(CustomTimer {
+                        hostname: short_hostname,
+                    })
+                    .compact()
+                    .init();
+            }
         }
     }
 }
