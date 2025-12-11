@@ -50,12 +50,6 @@ impl NetworkClient {
                     continue;
                 };
 
-                // Skip dead nodes that we know won't work
-                if ip == "165.232.154.150" || ip == "178.128.199.144" {
-                    tracing::debug!("Skipping self or known-dead peer: {}", ip);
-                    continue;
-                }
-
                 tracing::info!("🔗 Initiating connection to peer: {}", ip);
 
                 // Skip if already connected/connecting
