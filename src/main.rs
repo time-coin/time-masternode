@@ -457,22 +457,18 @@ async fn main() {
             let expected_height =
                 block::generator::DeterministicBlockGenerator::calculate_expected_height();
 
-            tracing::info!(
-                "🧱 Producing block at height {} (expected: {}) at {} ({}:{}0) with {} eligible masternodes",
-                current_height + 1,
-                expected_height,
-                timestamp,
-                now.hour(),
-                (now.minute() / 10),
-                masternodes.len()
-            );
-
-            // Generate catchup blocks if needed
+            // Generate catchup blocks if behind
             if current_height < expected_height {
-                tracing::warn!(
-                    "⏩ Chain is behind! Generating {} catchup blocks...",
-                    expected_height - current_height
+                tracing::info!(
+                    "🧱 Catching up: height {} → {} at {} ({}:{}0) with {} eligible masternodes",
+                    current_height,
+                    expected_height,
+                    timestamp,
+                    now.hour(),
+                    (now.minute() / 10),
+                    masternodes.len()
                 );
+
                 match block_blockchain.catchup_blocks().await {
                     Ok(()) => {
                         tracing::info!("✅ Catchup complete");
@@ -482,8 +478,17 @@ async fn main() {
                         continue;
                     }
                 }
-            } else {
-                // Produce next block (includes finalized transactions and fees)
+            } else if current_height == expected_height {
+                // Already synced - produce next block
+                tracing::info!(
+                    "🧱 Producing block at height {} at {} ({}:{}0) with {} eligible masternodes",
+                    expected_height + 1,
+                    timestamp,
+                    now.hour(),
+                    (now.minute() / 10),
+                    masternodes.len()
+                );
+
                 match block_blockchain.produce_block().await {
                     Ok(block) => {
                         tracing::info!(
@@ -497,6 +502,12 @@ async fn main() {
                         tracing::error!("❌ Failed to produce block: {}", e);
                     }
                 }
+            } else {
+                tracing::warn!(
+                    "⚠️ Height {} ahead of expected {}, skipping block production",
+                    current_height,
+                    expected_height
+                );
             }
         }
     });
