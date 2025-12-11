@@ -455,6 +455,9 @@ impl Blockchain {
             return Ok(());
         }
 
+        // Process block transactions to create UTXOs
+        self.process_block_utxos(&block).await;
+
         // Store the block
         self.save_block(&block)?;
 
@@ -475,6 +478,35 @@ impl Blockchain {
         }
 
         Ok(())
+    }
+
+    /// Process block transactions to create UTXOs
+    async fn process_block_utxos(&self, block: &Block) {
+        use crate::types::{OutPoint, UTXO};
+
+        for tx in &block.transactions {
+            let txid = tx.txid();
+
+            // Create UTXOs for each output
+            for (i, output) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid,
+                    vout: i as u32,
+                };
+
+                // Derive address from script_pubkey
+                let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+
+                let utxo = UTXO {
+                    outpoint,
+                    value: output.value,
+                    script_pubkey: output.script_pubkey.clone(),
+                    address,
+                };
+
+                self.consensus.utxo_manager.add_utxo(utxo).await;
+            }
+        }
     }
 }
 
