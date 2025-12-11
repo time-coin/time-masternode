@@ -39,6 +39,8 @@ impl NetworkClient {
             // Get initial list of known peers ONCE
             let peers = peer_manager.get_all_peers().await;
 
+            tracing::info!("🔌 Starting peer connections to {} peer(s)", peers.len());
+
             // Connect to each peer (one connection task per peer, never duplicated)
             for peer_addr in peers.iter().take(6) {
                 // Extract IP from address
@@ -50,11 +52,15 @@ impl NetworkClient {
 
                 // Skip dead nodes that we know won't work
                 if ip == "165.232.154.150" || ip == "178.128.199.144" {
+                    tracing::debug!("Skipping self or known-dead peer: {}", ip);
                     continue;
                 }
 
+                tracing::info!("🔗 Initiating connection to peer: {}", ip);
+
                 // Skip if already connected/connecting
                 if connection_manager.is_connected(ip).await {
+                    tracing::debug!("Already connected to {}", ip);
                     continue;
                 }
 
