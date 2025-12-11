@@ -43,29 +43,19 @@ impl MasternodeRegistry {
     pub fn new(db: Arc<Db>, network: NetworkType) -> Self {
         let now = Self::now();
 
-        // Clear all existing masternodes from disk on startup for fresh start
+        // Load existing masternodes from disk
         let prefix = b"masternode:";
-        let keys_to_delete: Vec<_> = db
-            .scan_prefix(prefix)
-            .flatten()
-            .map(|(key, _)| key)
-            .collect();
+        let mut nodes: HashMap<String, MasternodeInfo> = HashMap::new();
 
-        let count = keys_to_delete.len();
-        for key in keys_to_delete {
-            let _ = db.remove(key);
+        for item in db.scan_prefix(prefix).flatten() {
+            if let Ok(info) = bincode::deserialize::<MasternodeInfo>(&item.1) {
+                nodes.insert(info.masternode.address.clone(), info);
+            }
         }
 
-        // Ensure changes are written to disk
-        let _ = db.flush();
-
-        tracing::info!(
-            "🧹 Cleared {} masternode(s) from registry for fresh start",
-            count
-        );
-
-        // Start with empty registry
-        let nodes: HashMap<String, MasternodeInfo> = HashMap::new();
+        if !nodes.is_empty() {
+            tracing::info!("📂 Loaded {} masternode(s) from disk", nodes.len());
+        }
 
         let registry = Self {
             masternodes: Arc::new(RwLock::new(nodes)),
