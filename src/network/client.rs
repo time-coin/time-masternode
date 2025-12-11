@@ -294,6 +294,19 @@ async fn maintain_peer_connection(
                         break;
                     }
                 }
+
+                // Request UTXO state hash for verification (every 10 minutes)
+                let utxo_check_msg = NetworkMessage::GetUTXOStateHash;
+                if let Ok(msg_json) = serde_json::to_string(&utxo_check_msg) {
+                    if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+                        tracing::warn!("❌ Failed to write UTXO check to {}: {}", ip, e);
+                        break;
+                    }
+                    if let Err(e) = writer.flush().await {
+                        tracing::warn!("❌ Failed to flush UTXO check to {}: {}", ip, e);
+                        break;
+                    }
+                }
             }
 
             // Read incoming messages
@@ -400,6 +413,36 @@ async fn maintain_peer_connection(
                                             tracing::info!("✅ Registered {} new masternode(s)", registered);
                                         }
                                     }
+                                }
+                                NetworkMessage::UTXOStateHashResponse { hash, height, utxo_count } => {
+                                    let local_height = blockchain.get_height().await;
+                                    let local_hash = blockchain.get_utxo_state_hash().await;
+                                    let local_count = blockchain.get_utxo_count().await;
+
+                                    if height == local_height && hash != local_hash {
+                                        tracing::warn!(
+                                            "⚠️ UTXO state mismatch with peer at height {}! Local: {} UTXOs (hash: {}), Peer: {} UTXOs (hash: {})",
+                                            height,
+                                            local_count,
+                                            hex::encode(&local_hash[..8]),
+                                            utxo_count,
+                                            hex::encode(&hash[..8])
+                                        );
+
+                                        // Request full UTXO set from peer to reconcile
+                                        let request = NetworkMessage::GetUTXOSet;
+                                        if let Ok(json) = serde_json::to_string(&request) {
+                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
+                                            let _ = writer.flush().await;
+                                            tracing::info!("📥 Requesting full UTXO set from peer for reconciliation");
+                                        }
+                                    } else if height == local_height {
+                                        tracing::debug!("✅ UTXO state matches peer at height {}", height);
+                                    }
+                                }
+                                NetworkMessage::UTXOSetResponse(utxos) => {
+                                    tracing::info!("📥 Received {} UTXOs from peer for reconciliation", utxos.len());
+                                    blockchain.reconcile_utxo_state(utxos).await;
                                 }
                                 _ => {}
                             }

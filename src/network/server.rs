@@ -303,6 +303,33 @@ async fn handle_peer(
                                         let _ = writer.flush().await;
                                     }
                                 }
+                                NetworkMessage::GetUTXOStateHash => {
+                                    let height = blockchain.get_height().await;
+                                    let utxo_hash = blockchain.get_utxo_state_hash().await;
+                                    let utxo_count = blockchain.get_utxo_count().await;
+
+                                    let reply = NetworkMessage::UTXOStateHashResponse {
+                                        hash: utxo_hash,
+                                        height,
+                                        utxo_count,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                        tracing::debug!("📤 Sent UTXO state hash to {}", peer.addr);
+                                    }
+                                }
+                                NetworkMessage::GetUTXOSet => {
+                                    let utxos = blockchain.get_all_utxos().await;
+                                    let reply = NetworkMessage::UTXOSetResponse(utxos);
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                        tracing::info!("📤 Sent complete UTXO set to {}", peer.addr);
+                                    }
+                                }
                                 NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
                                     // Extract just the IP (no port) from the peer connection
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();

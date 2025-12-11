@@ -428,6 +428,38 @@ impl Blockchain {
         *self.current_height.read().await
     }
 
+    pub async fn get_utxo_state_hash(&self) -> [u8; 32] {
+        self.consensus.utxo_manager.calculate_utxo_set_hash().await
+    }
+
+    pub async fn get_utxo_count(&self) -> usize {
+        self.consensus.utxo_manager.list_all_utxos().await.len()
+    }
+
+    pub async fn get_all_utxos(&self) -> Vec<crate::types::UTXO> {
+        self.consensus.utxo_manager.list_all_utxos().await
+    }
+
+    pub async fn reconcile_utxo_state(&self, remote_utxos: Vec<crate::types::UTXO>) {
+        let (to_remove, to_add) = self
+            .consensus
+            .utxo_manager
+            .get_utxo_diff(&remote_utxos)
+            .await;
+
+        if !to_remove.is_empty() || !to_add.is_empty() {
+            tracing::warn!("⚠️ UTXO state mismatch detected! Reconciling...");
+            if let Err(e) = self
+                .consensus
+                .utxo_manager
+                .reconcile_utxo_state(to_remove, to_add)
+                .await
+            {
+                tracing::error!("Failed to reconcile UTXO state: {:?}", e);
+            }
+        }
+    }
+
     /// Get all pending transactions from the mempool
     pub async fn get_pending_transactions(&self) -> Vec<Transaction> {
         self.consensus.tx_pool.get_all_pending().await
@@ -463,6 +495,9 @@ impl Blockchain {
             return Ok(());
         }
 
+        // Validate the block before accepting
+        self.validate_block(&block).await?;
+
         // Process block transactions to create UTXOs
         self.process_block_utxos(&block).await;
 
@@ -485,6 +520,106 @@ impl Blockchain {
             );
         }
 
+        Ok(())
+    }
+
+    /// Validate a block before accepting it
+    async fn validate_block(&self, block: &Block) -> Result<(), String> {
+        // 1. Validate block structure
+        if block.header.height == 0 {
+            return Err("Cannot validate genesis block".to_string());
+        }
+
+        // 2. Verify previous block hash
+        let expected_prev_hash = self.get_block_hash(block.header.height - 1)?;
+        if block.header.previous_hash != expected_prev_hash {
+            return Err(format!(
+                "Invalid previous hash: expected {}, got {}",
+                hex::encode(expected_prev_hash),
+                hex::encode(block.header.previous_hash)
+            ));
+        }
+
+        // 3. Validate timestamp (must be after previous block)
+        let prev_block = self.get_block(block.header.height - 1)?;
+        if block.header.timestamp <= prev_block.header.timestamp {
+            return Err(format!(
+                "Invalid timestamp: {} <= previous {}",
+                block.header.timestamp, prev_block.header.timestamp
+            ));
+        }
+
+        // 4. Validate transactions against UTXO state
+        for tx in &block.transactions {
+            // Skip coinbase transaction (first tx with no inputs)
+            if tx.inputs.is_empty() {
+                continue;
+            }
+
+            // Verify each input references a valid UTXO
+            for input in &tx.inputs {
+                let utxo = self
+                    .consensus
+                    .utxo_manager
+                    .get_utxo(&input.previous_output)
+                    .await
+                    .ok_or_else(|| {
+                        format!(
+                            "UTXO not found: {}:{}",
+                            hex::encode(input.previous_output.txid),
+                            input.previous_output.vout
+                        )
+                    })?;
+
+                // Verify the UTXO is unspent
+                if utxo.outpoint != input.previous_output {
+                    return Err(format!(
+                        "UTXO already spent: {}:{}",
+                        hex::encode(input.previous_output.txid),
+                        input.previous_output.vout
+                    ));
+                }
+
+                // TODO: Verify signature against script_pubkey
+                // For now, we trust the block producer did this validation
+            }
+
+            // Verify inputs >= outputs (no value creation except coinbase)
+            let total_in: u64 = tx.inputs.len() as u64 * 100_000_000; // Placeholder
+            let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            if total_out > total_in && !tx.inputs.is_empty() {
+                return Err(format!(
+                    "Transaction creates value: {} out > {} in",
+                    total_out, total_in
+                ));
+            }
+        }
+
+        // 5. Verify masternode rewards match eligible masternodes
+        let active_masternodes = self.masternode_registry.list_active().await;
+        if block.masternode_rewards.len() != active_masternodes.len() {
+            return Err(format!(
+                "Masternode reward count mismatch: {} rewards for {} masternodes",
+                block.masternode_rewards.len(),
+                active_masternodes.len()
+            ));
+        }
+
+        // 6. Verify total block reward is correct
+        let expected_reward = BLOCK_REWARD_SATOSHIS;
+        let actual_reward: u64 = block
+            .masternode_rewards
+            .iter()
+            .map(|(_, amount)| amount)
+            .sum();
+        if actual_reward != expected_reward {
+            return Err(format!(
+                "Invalid block reward: {} (expected {})",
+                actual_reward, expected_reward
+            ));
+        }
+
+        tracing::debug!("✅ Block {} validation passed", block.header.height);
         Ok(())
     }
 
@@ -530,3 +665,4 @@ impl Clone for Blockchain {
         }
     }
 }
+

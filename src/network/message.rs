@@ -43,6 +43,12 @@ pub enum NetworkMessage {
     BlockResponse(Block),
     GetUTXOSet,
     UTXOSetResponse(Vec<UTXO>),
+    GetUTXOStateHash,
+    UTXOStateHashResponse {
+        hash: [u8; 32],
+        height: u64,
+        utxo_count: usize,
+    },
     MasternodeAnnouncement {
         address: String,
         reward_address: String,
