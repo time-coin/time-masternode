@@ -457,8 +457,7 @@ async fn main() {
             }
 
             let current_height = block_blockchain.get_height().await;
-            let expected_height =
-                block::generator::DeterministicBlockGenerator::calculate_expected_height();
+            let expected_height = block_blockchain.calculate_expected_height();
 
             // Generate catchup blocks if behind
             if current_height < expected_height {
