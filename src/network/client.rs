@@ -349,20 +349,25 @@ async fn maintain_peer_connection(
 
                                         // Get local masternode address to skip self-registration
                                         let local_address = masternode_registry.get_local_masternode().await
-                                            .map(|mn| mn.masternode.address.clone());
+                                            .map(|mn| {
+                                                // Strip port if present for comparison
+                                                let addr = mn.masternode.address.clone();
+                                                addr.split(':').next().unwrap_or(&addr).to_string()
+                                            });
 
                                         if let Some(ref addr) = local_address {
-                                            tracing::debug!("Local masternode address: {}", addr);
+                                            tracing::debug!("Local masternode address (for comparison): {}", addr);
                                         }
 
                                         let mut registered = 0;
                                         for mn_data in masternodes {
                                             tracing::debug!("Processing masternode: {} (reward: {})", mn_data.address, mn_data.reward_address);
 
-                                            // Skip if this is our own masternode
+                                            // Skip if this is our own masternode (compare IPs without port)
                                             if let Some(ref local_addr) = local_address {
-                                                if mn_data.address == *local_addr {
-                                                    tracing::info!("⏭️  Skipping self-registration for {}", local_addr);
+                                                let peer_addr = mn_data.address.split(':').next().unwrap_or(&mn_data.address);
+                                                if peer_addr == local_addr {
+                                                    tracing::info!("⏭️  Skipping self-registration for {}", mn_data.address);
                                                     continue;
                                                 }
                                             }
