@@ -295,6 +295,7 @@ async fn main() {
         consensus_engine.clone(),
         registry.clone(),
         vdf_config,
+        network_type,
     ));
 
     println!("✓ Blockchain initialized");

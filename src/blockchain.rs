@@ -3,13 +3,13 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::types::{Transaction, TxOutput};
 use crate::vdf::{compute_vdf, VDFConfig, VDFProof};
+use crate::NetworkType;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
-const GENESIS_TIMESTAMP: i64 = 1764547200; // 2025-12-01 00:00:00 UTC
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
 const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 
@@ -28,6 +28,7 @@ pub struct Blockchain {
     masternode_registry: Arc<MasternodeRegistry>,
     vdf_config: VDFConfig,
     current_height: Arc<RwLock<u64>>,
+    network_type: NetworkType,
 }
 
 impl Blockchain {
@@ -36,6 +37,7 @@ impl Blockchain {
         consensus: Arc<ConsensusEngine>,
         masternode_registry: Arc<MasternodeRegistry>,
         vdf_config: VDFConfig,
+        network_type: NetworkType,
     ) -> Self {
         Self {
             storage,
@@ -43,7 +45,12 @@ impl Blockchain {
             masternode_registry,
             vdf_config,
             current_height: Arc::new(RwLock::new(0)),
+            network_type,
         }
+    }
+
+    fn genesis_timestamp(&self) -> i64 {
+        self.network_type.genesis_timestamp()
     }
 
     /// Wait for 3+ masternodes, then create genesis block with initial rewards
@@ -128,7 +135,7 @@ impl Blockchain {
             inputs: vec![],
             outputs,
             lock_time: 0,
-            timestamp: GENESIS_TIMESTAMP,
+            timestamp: self.genesis_timestamp(),
         };
 
         let block = Block {
@@ -137,7 +144,7 @@ impl Blockchain {
                 height: 0,
                 previous_hash: [0u8; 32],
                 merkle_root: coinbase.txid(),
-                timestamp: GENESIS_TIMESTAMP,
+                timestamp: self.genesis_timestamp(),
                 block_reward: BLOCK_REWARD_SATOSHIS,
             },
             transactions: vec![coinbase],
@@ -155,11 +162,12 @@ impl Blockchain {
     /// Calculate expected height based on time elapsed since genesis
     pub fn calculate_expected_height(&self) -> u64 {
         let now = Utc::now().timestamp();
-        if now < GENESIS_TIMESTAMP {
+        let genesis_timestamp = self.genesis_timestamp();
+        if now < genesis_timestamp {
             return 0;
         }
 
-        let elapsed = now - GENESIS_TIMESTAMP;
+        let elapsed = now - genesis_timestamp;
         (elapsed / BLOCK_TIME_SECONDS) as u64
     }
 
@@ -176,7 +184,7 @@ impl Blockchain {
         tracing::info!("⚡ Entering catchup mode: {} → {}", current, expected);
 
         for height in (current + 1)..=expected {
-            let block_time = GENESIS_TIMESTAMP + (height as i64 * BLOCK_TIME_SECONDS);
+            let block_time = self.genesis_timestamp() + (height as i64 * BLOCK_TIME_SECONDS);
             let block = self.create_catchup_block(height, block_time).await?;
             self.save_block(&block)?;
             *self.current_height.write().await = height;
@@ -246,7 +254,7 @@ impl Blockchain {
             ));
         }
 
-        let timestamp = GENESIS_TIMESTAMP + (height as i64 * BLOCK_TIME_SECONDS);
+        let timestamp = self.genesis_timestamp() + (height as i64 * BLOCK_TIME_SECONDS);
         let now = Utc::now().timestamp();
 
         // Must be within block time window
@@ -518,6 +526,7 @@ impl Clone for Blockchain {
             masternode_registry: self.masternode_registry.clone(),
             vdf_config: self.vdf_config.clone(),
             current_height: self.current_height.clone(),
+            network_type: self.network_type,
         }
     }
 }

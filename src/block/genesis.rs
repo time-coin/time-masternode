@@ -42,9 +42,9 @@ impl GenesisBlock {
         }
     }
 
-    /// Mainnet genesis block - TBD
+    /// Mainnet genesis block - January 1, 2026
     pub fn mainnet() -> Block {
-        let genesis_timestamp = 1764547200; // 2025-12-01T00:00:00Z
+        let genesis_timestamp = 1767225600; // 2026-01-01T00:00:00Z
 
         let coinbase = Transaction {
             version: 1,
