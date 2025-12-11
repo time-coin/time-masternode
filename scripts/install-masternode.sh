@@ -262,6 +262,15 @@ build_binaries() {
     
     cd "$PROJECT_DIR"
     
+    # Verify we're in the right place
+    if [ ! -f "Cargo.toml" ]; then
+        print_error "Cargo.toml not found in $PROJECT_DIR"
+        print_error "Script must be run from the timecoin/scripts/ directory"
+        exit 1
+    fi
+    
+    print_info "Current directory: $(pwd)"
+    
     # Ensure Rust is in PATH
     if [ -f "$HOME/.cargo/env" ]; then
         source "$HOME/.cargo/env"
@@ -276,6 +285,7 @@ build_binaries() {
     fi
     
     print_success "Build completed"
+    print_info "Binaries location: $PROJECT_DIR/target/release/"
 }
 
 install_binaries() {
@@ -284,6 +294,21 @@ install_binaries() {
     # Get the script's directory
     SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
     PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+    
+    print_info "Looking for binaries in: $PROJECT_DIR/target/release/"
+    
+    # Verify binaries exist before copying
+    if [ ! -f "$PROJECT_DIR/target/release/timed" ]; then
+        print_error "Binary not found: $PROJECT_DIR/target/release/timed"
+        print_error "Build may have failed or binaries are in a different location"
+        exit 1
+    fi
+    
+    if [ ! -f "$PROJECT_DIR/target/release/time-cli" ]; then
+        print_error "Binary not found: $PROJECT_DIR/target/release/time-cli"
+        print_error "Build may have failed or binaries are in a different location"
+        exit 1
+    fi
     
     # Copy binaries
     cp "$PROJECT_DIR/target/release/timed" "$BIN_DIR/"
