@@ -232,18 +232,18 @@ create_user() {
 create_directories() {
     print_step "Creating directories..."
     
+    # Create directories
     mkdir -p "$INSTALL_DIR"
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
     
-    # Set ownership
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
-    chown -R "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"
+    # Set ownership to root (service runs as root)
+    chown -R root:root "$BASE_DIR"
+    chown -R root:root "$INSTALL_DIR"
     
     # Set permissions
+    chmod 700 "$BASE_DIR"      # Only root can access
     chmod 750 "$CONFIG_DIR"
     chmod 750 "$DATA_DIR"
     chmod 755 "$LOG_DIR"
@@ -345,7 +345,7 @@ create_config() {
         sed -i "s/rpc_addr = \"127.0.0.1:[0-9]*\"/rpc_addr = \"127.0.0.1:$RPC_PORT\"/g" "$CONFIG_DIR/config.toml"
         sed -i "s|data_dir = \".*\"|data_dir = \"$DATA_DIR\"|g" "$CONFIG_DIR/config.toml"
         
-        chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/config.toml"
+        chown root:root "$CONFIG_DIR/config.toml"
         chmod 640 "$CONFIG_DIR/config.toml"
         print_success "Configuration copied to $CONFIG_DIR/config.toml"
     else
@@ -365,7 +365,7 @@ data_dir = "$DATA_DIR"
 level = "info"
 log_dir = "$LOG_DIR"
 EOF
-        chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/config.toml"
+        chown root:root "$CONFIG_DIR/config.toml"
         chmod 640 "$CONFIG_DIR/config.toml"
         print_success "Minimal configuration created"
     fi
@@ -385,8 +385,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$SERVICE_USER
-Group=$SERVICE_USER
+User=root
+Group=root
 
 # Binary location
 ExecStart=$BIN_DIR/timed --config $CONFIG_DIR/config.toml
@@ -401,13 +401,6 @@ RestartSec=10
 # Resource limits
 LimitNOFILE=65535
 LimitNPROC=4096
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=$DATA_DIR $LOG_DIR
 
 # Logging
 StandardOutput=journal
@@ -534,8 +527,8 @@ main() {
         install_nasm
     fi
     
-    # Create user and directories
-    create_user
+    # Create directories (service runs as root, no separate user needed)
+    # create_user  # Not needed - service runs as root
     create_directories
     
     # Build and install
