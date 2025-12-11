@@ -12,7 +12,7 @@ pub fn get_data_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("timecoin")
     } else {
-        // Linux/Mac: ~/.timecoin
+        // Linux/Mac: ~/.timecoin (or /root/.timecoin for root user)
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".timecoin")
@@ -23,8 +23,8 @@ pub fn get_data_dir() -> PathBuf {
 pub fn get_network_data_dir(network: &NetworkType) -> PathBuf {
     let base = get_data_dir();
     match network {
-        NetworkType::Mainnet => base.join("mainnet"),
-        NetworkType::Testnet => base.join("testnet"),
+        NetworkType::Mainnet => base, // Mainnet uses base directory directly
+        NetworkType::Testnet => base.join("testnet"), // Testnet uses subdirectory
     }
 }
 
@@ -222,8 +222,8 @@ impl Config {
                 allow_origins: vec!["http://localhost:3000".to_string()],
             },
             storage: StorageConfig {
-                backend: "memory".to_string(),
-                data_dir: "./data".to_string(),
+                backend: "sled".to_string(),
+                data_dir: "".to_string(), // Will be auto-configured
                 cache_size_mb: 256,
             },
             consensus: ConsensusConfig {
@@ -273,8 +273,10 @@ impl Config {
             let contents = fs::read_to_string(path)?;
             let mut config: Config = toml::from_str(&contents)?;
 
-            // Update data_dir to use platform-specific path
-            config.storage.data_dir = data_dir.to_string_lossy().to_string();
+            // Update data_dir to use platform-specific path if empty or relative
+            if config.storage.data_dir.is_empty() || config.storage.data_dir.starts_with("./") {
+                config.storage.data_dir = data_dir.to_string_lossy().to_string();
+            }
 
             Ok(config)
         } else {

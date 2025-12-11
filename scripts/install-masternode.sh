@@ -3,7 +3,7 @@
 # TIME Coin Masternode Installation Script
 # For Ubuntu/Debian-based systems
 #
-# Usage: sudo ./install-masternode.sh
+# Usage: sudo ./install-masternode.sh [mainnet|testnet]
 #
 
 set -e  # Exit on error
@@ -15,14 +15,41 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Network selection (default to mainnet if not specified)
+NETWORK="${1:-mainnet}"
+
+# Validate network
+if [[ "$NETWORK" != "mainnet" && "$NETWORK" != "testnet" ]]; then
+    echo -e "${RED}Error: Network must be 'mainnet' or 'testnet'${NC}"
+    echo "Usage: sudo ./install-masternode.sh [mainnet|testnet]"
+    exit 1
+fi
+
+# Port configuration based on network
+if [[ "$NETWORK" == "mainnet" ]]; then
+    P2P_PORT="24000"
+    RPC_PORT="24001"
+else
+    P2P_PORT="24100"
+    RPC_PORT="24101"
+fi
+
 # Configuration
 SERVICE_NAME="timed"
 SERVICE_USER="timecoin"
 INSTALL_DIR="/opt/timecoin"
 BIN_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/timecoin"
-DATA_DIR="/var/lib/timecoin"
-LOG_DIR="/var/log/timecoin"
+
+# Use /root/.timecoin as base directory
+BASE_DIR="/root/.timecoin"
+if [[ "$NETWORK" == "testnet" ]]; then
+    DATA_DIR="$BASE_DIR/testnet"
+else
+    DATA_DIR="$BASE_DIR"
+fi
+
+CONFIG_DIR="$DATA_DIR"  # Config goes in same directory as data
+LOG_DIR="$DATA_DIR/logs"
 
 # Version info
 VERSION="0.1.0"
@@ -34,7 +61,13 @@ VERSION="0.1.0"
 print_header() {
     echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║       TIME Coin Masternode Installation Script v${VERSION}      ║${NC}"
+    echo -e "${BLUE}║                  Network: ${NETWORK^^}                             ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BLUE}Network Configuration:${NC}"
+    echo "  • P2P Port: $P2P_PORT"
+    echo "  • RPC Port: $RPC_PORT"
+    echo "  • Data Directory: $DATA_DIR"
     echo ""
 }
 
@@ -184,6 +217,7 @@ install_nasm() {
     print_success "NASM installed"
 }
 
+
 create_user() {
     print_step "Creating service user..."
     
@@ -280,6 +314,12 @@ create_config() {
     # Copy default config if it exists
     if [ -f "$PROJECT_DIR/config.toml" ]; then
         cp "$PROJECT_DIR/config.toml" "$CONFIG_DIR/config.toml"
+        
+        # Update ports in config file
+        sed -i "s/listen_addr = \"0.0.0.0:[0-9]*\"/listen_addr = \"0.0.0.0:$P2P_PORT\"/g" "$CONFIG_DIR/config.toml"
+        sed -i "s/rpc_addr = \"127.0.0.1:[0-9]*\"/rpc_addr = \"127.0.0.1:$RPC_PORT\"/g" "$CONFIG_DIR/config.toml"
+        sed -i "s|data_dir = \".*\"|data_dir = \"$DATA_DIR\"|g" "$CONFIG_DIR/config.toml"
+        
         chown "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR/config.toml"
         chmod 640 "$CONFIG_DIR/config.toml"
         print_success "Configuration copied to $CONFIG_DIR/config.toml"
@@ -287,10 +327,11 @@ create_config() {
         print_warn "No default config.toml found, creating minimal config"
         
         cat > "$CONFIG_DIR/config.toml" <<EOF
-# TIME Coin Configuration
+# TIME Coin Configuration - $NETWORK
 [network]
-listen_addr = "0.0.0.0:9333"
-rpc_addr = "127.0.0.1:9334"
+listen_addr = "0.0.0.0:$P2P_PORT"
+rpc_addr = "127.0.0.1:$RPC_PORT"
+network = "$NETWORK"
 
 [blockchain]
 data_dir = "$DATA_DIR"
@@ -305,6 +346,7 @@ EOF
     fi
     
     print_info "Edit configuration: $CONFIG_DIR/config.toml"
+    print_info "Network: $NETWORK (P2P: $P2P_PORT, RPC: $RPC_PORT)"
 }
 
 create_systemd_service() {
@@ -392,14 +434,14 @@ create_firewall_rules() {
     if command -v ufw &> /dev/null; then
         print_info "UFW firewall detected"
         
-        # Allow P2P port (9333)
-        ufw allow 9333/tcp comment 'TIME Coin P2P'
+        # Allow P2P port
+        ufw allow $P2P_PORT/tcp comment "TIME Coin P2P ($NETWORK)"
         
         print_success "Firewall rules added"
-        print_info "P2P port 9333 opened"
+        print_info "P2P port $P2P_PORT opened for $NETWORK"
     else
         print_warn "UFW not installed, skipping firewall configuration"
-        print_info "Manually open port 9333/tcp for P2P networking"
+        print_info "Manually open port $P2P_PORT/tcp for P2P networking"
     fi
 }
 
@@ -408,6 +450,10 @@ print_summary() {
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║           Installation Complete! ✅                          ║${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${BLUE}Network: ${NETWORK^^}${NC}"
+    echo "  • P2P Port: $P2P_PORT"
+    echo "  • RPC Port: $RPC_PORT (localhost only)"
     echo ""
     echo -e "${BLUE}Installed Components:${NC}"
     echo "  • Binaries: $BIN_DIR/timed, $BIN_DIR/time-cli"

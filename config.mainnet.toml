@@ -33,7 +33,11 @@ allow_origins = ["http://localhost:3000"]
 [storage]
 # Storage backend configuration
 backend = "sled"  # Options: "memory", "sled"
-data_dir = "./data/mainnet"
+# data_dir is auto-configured based on network type:
+# - Mainnet: ~/.timecoin/ (Linux) or %APPDATA%\timecoin\ (Windows)
+# - Testnet: ~/.timecoin/testnet/ (Linux) or %APPDATA%\timecoin\testnet\ (Windows)
+# Override only if you need a custom location
+data_dir = ""  # Leave empty for automatic platform-specific path
 cache_size_mb = 512
 
 [consensus]

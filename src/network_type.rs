@@ -37,7 +37,7 @@ impl NetworkType {
     pub fn genesis_message(&self) -> &str {
         match self {
             NetworkType::Mainnet => "TIME Coin - Where Every Second Counts",
-            NetworkType::Testnet => "TIME Coin Testnet - 24 Hour Blocks, Instant Finality",
+            NetworkType::Testnet => "TIME Coin Testnet - 10 Minute Blocks, Instant Finality",
         }
     }
 

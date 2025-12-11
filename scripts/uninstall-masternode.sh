@@ -2,7 +2,7 @@
 #
 # TIME Coin Masternode Uninstall Script
 #
-# Usage: sudo ./uninstall-masternode.sh
+# Usage: sudo ./uninstall-masternode.sh [mainnet|testnet]
 #
 
 set -e
@@ -14,17 +14,36 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# Network selection (default to mainnet if not specified)
+NETWORK="${1:-mainnet}"
+
+# Validate network
+if [[ "$NETWORK" != "mainnet" && "$NETWORK" != "testnet" ]]; then
+    echo -e "${RED}Error: Network must be 'mainnet' or 'testnet'${NC}"
+    echo "Usage: sudo ./uninstall-masternode.sh [mainnet|testnet]"
+    exit 1
+fi
+
 # Configuration
 SERVICE_NAME="timed"
 SERVICE_USER="timecoin"
 BIN_DIR="/usr/local/bin"
-CONFIG_DIR="/etc/timecoin"
-DATA_DIR="/var/lib/timecoin"
-LOG_DIR="/var/log/timecoin"
+
+# Use /root/.timecoin as base directory
+BASE_DIR="/root/.timecoin"
+if [[ "$NETWORK" == "testnet" ]]; then
+    DATA_DIR="$BASE_DIR/testnet"
+else
+    DATA_DIR="$BASE_DIR"
+fi
+
+CONFIG_DIR="$DATA_DIR"  # Config goes in same directory as data
+LOG_DIR="$DATA_DIR/logs"
 
 print_header() {
     echo -e "${RED}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${RED}║         TIME Coin Masternode Uninstall Script                ║${NC}"
+    echo -e "${RED}║                  Network: ${NETWORK^^}                             ║${NC}"
     echo -e "${RED}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }

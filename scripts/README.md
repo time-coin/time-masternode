@@ -18,14 +18,18 @@ Automated installation script for fresh Linux machines.
 - ✅ Creates systemd service
 - ✅ Configures firewall (if UFW present)
 - ✅ Security hardening
+- ✅ Supports mainnet and testnet
 
 **Usage**:
 ```bash
 # Make executable
 chmod +x scripts/install-masternode.sh
 
-# Run as root
-sudo ./scripts/install-masternode.sh
+# Install for mainnet (default)
+sudo ./scripts/install-masternode.sh mainnet
+
+# Install for testnet
+sudo ./scripts/install-masternode.sh testnet
 ```
 
 **Requirements**:
@@ -54,7 +58,7 @@ chmod +x scripts/uninstall-masternode.sh
 sudo ./scripts/uninstall-masternode.sh
 ```
 
-**Warning**: This will remove everything except blockchain data in `/var/lib/timecoin`.
+**Warning**: This will remove everything except blockchain data in `/root/.timecoin`.
 
 ---
 
@@ -67,38 +71,53 @@ After running `install-masternode.sh`, files will be organized as:
 ├── timed              # Main daemon
 └── time-cli           # CLI tool
 
-/etc/timecoin/
-└── config.toml        # Configuration file
+/root/.timecoin/       # Mainnet data (when using mainnet)
+├── config.toml        # Configuration file
+├── blockchain/        # Blockchain database
+├── wallets/           # Wallet files
+└── logs/              # Log files
 
-/var/lib/timecoin/     # Blockchain data (preserved on uninstall)
-├── blockchain/
-└── wallets/
-
-/var/log/timecoin/     # Log files
-└── timed.log
+/root/.timecoin/testnet/  # Testnet data (when using testnet)
+├── config.toml        # Testnet configuration file
+├── blockchain/        # Testnet blockchain database
+├── wallets/           # Testnet wallet files
+└── logs/              # Testnet log files
 
 /etc/systemd/system/
 └── timed.service      # Systemd service file
 ```
 
+**Network Configuration**:
+- **Mainnet**: P2P port 24000, RPC port 24001
+- **Testnet**: P2P port 24100, RPC port 24101
+
 ---
 
 ## 🚀 Quick Start
 
-### 1. Install
+### 1. Install (Mainnet)
 ```bash
 # Clone repository
 git clone https://github.com/yourusername/timecoin.git
 cd timecoin
 
-# Run installer
-sudo ./scripts/install-masternode.sh
+# Run installer for mainnet
+sudo ./scripts/install-masternode.sh mainnet
+```
+
+### 1b. Install (Testnet)
+```bash
+# Run installer for testnet
+sudo ./scripts/install-masternode.sh testnet
 ```
 
 ### 2. Configure
 ```bash
-# Edit configuration
-sudo nano /etc/timecoin/config.toml
+# Edit configuration (mainnet)
+sudo nano /root/.timecoin/config.toml
+
+# Edit configuration (testnet)
+sudo nano /root/.timecoin/testnet/config.toml
 
 # Restart service to apply changes
 sudo systemctl restart timed
@@ -259,32 +278,37 @@ sudo swapon /swapfile
 
 ## 📝 Configuration Options
 
-Key configuration options in `/etc/timecoin/config.toml`:
+Key configuration options in `/root/.timecoin/config.toml` (mainnet) or `/root/.timecoin/testnet/config.toml` (testnet):
 
 ```toml
 [network]
 # P2P listening address
-listen_addr = "0.0.0.0:9333"
+# Mainnet: 24000, Testnet: 24100
+listen_addr = "0.0.0.0:24000"
 
 # RPC listening address (local only for security)
-rpc_addr = "127.0.0.1:9334"
+# Mainnet: 24001, Testnet: 24101
+rpc_addr = "127.0.0.1:24001"
+
+# Network type
+network = "mainnet"  # or "testnet"
 
 # Seed nodes to connect to
 seed_nodes = [
-    "seed1.time-coin.io:9333",
-    "seed2.time-coin.io:9333"
+    "seed1.time-coin.io:24000",
+    "seed2.time-coin.io:24000"
 ]
 
 [blockchain]
 # Data directory
-data_dir = "/var/lib/timecoin"
+data_dir = "/root/.timecoin"
 
 [logging]
 # Log level: trace, debug, info, warn, error
 level = "info"
 
 # Log directory
-log_dir = "/var/log/timecoin"
+log_dir = "/root/.timecoin/logs"
 
 [masternode]
 # Your masternode reward address

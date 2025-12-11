@@ -10,7 +10,7 @@ A high-performance implementation of the TIME Coin Protocol with instant finalit
 - **Instant Finality**: <3 second transaction confirmation via BFT consensus
 - **UTXO State Machine**: Advanced state tracking (Unspent → Locked → SpentPending → SpentFinalized → Confirmed)
 - **Masternode Tiers**: Free, Bronze, Silver, Gold tiers with weighted rewards
-- **Deterministic Blocks**: Midnight UTC block generation (365 blocks/year)
+- **Deterministic Blocks**: 10-minute block generation (52,560 blocks/year)
 - **Dual Network Support**: Mainnet and Testnet configurations
 - **Real-time RPC API**: Bitcoin-compatible JSON-RPC interface
 - **P2P Networking**: Peer discovery and gossip protocol

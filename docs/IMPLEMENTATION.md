@@ -17,7 +17,8 @@
    - Sub-second transaction confirmation
 
 3. **Deterministic Block Production** (`src/block/`)
-   - Midnight UTC timestamp normalization
+   - 10-minute block intervals
+   - Clock-aligned block timestamps
    - Alphabetical masternode sorting
    - TXID-based transaction ordering
    - Merkle tree root calculation
@@ -109,7 +110,7 @@ cargo clippy --all-targets
 4. **Vote**: All masternodes validate and vote
 5. **Finalize**: 2/3+ quorum reached → SpentFinalized
 6. **Create**: New UTXOs added to set
-7. **Confirm**: Included in deterministic block at midnight UTC
+7. **Confirm**: Included in next deterministic block (every 10 minutes)
 
 ## 🗂️ Project Structure
 
@@ -165,7 +166,7 @@ chrono = { version = "0.4", features = ["clock"] } # Time handling
 | UTXO State Machine | ✅ Complete | 6 states with transitions |
 | BFT Consensus | ✅ Complete | 2/3 quorum voting |
 | Instant Finality | ✅ Complete | Sub-second confirmation |
-| Deterministic Blocks | ✅ Complete | Midnight UTC, reproducible |
+| Deterministic Blocks | ✅ Complete | 10-minute intervals, reproducible |
 | Masternode Tiers | ✅ Complete | Bronze/Silver/Gold (1:10:100) |
 | Reward Distribution | ✅ Complete | 30/20/10/40 split |
 | Network Protocol | ✅ Complete | All message types |
@@ -305,7 +306,7 @@ match state {
 ```rust
 let block = consensus.generate_deterministic_block(
     height,
-    midnight_utc_timestamp()
+    next_block_timestamp()  // Clock-aligned to 10-minute intervals
 ).await;
 ```
 

@@ -19,8 +19,8 @@ impl BlockValidator {
         if candidate.header.previous_hash != expected_prev_hash {
             return Err("Invalid previous hash".to_string());
         }
-        if !Self::is_midnight_utc(candidate.header.timestamp) {
-            return Err("Timestamp must be midnight UTC".to_string());
+        if !Self::is_valid_block_time(candidate.header.timestamp) {
+            return Err("Timestamp must be aligned to 10-minute intervals".to_string());
         }
 
         let regenerated = crate::block::generator::DeterministicBlockGenerator::generate(
@@ -39,9 +39,8 @@ impl BlockValidator {
     }
 
     #[allow(dead_code)]
-    fn is_midnight_utc(ts: i64) -> bool {
-        use chrono::{TimeZone, Timelike, Utc};
-        let dt = Utc.timestamp_opt(ts, 0).single().unwrap();
-        dt.hour() == 0 && dt.minute() == 0 && dt.second() == 0
+    fn is_valid_block_time(ts: i64) -> bool {
+        // Block times are aligned to 10-minute (600 second) intervals
+        ts % 600 == 0
     }
 }
