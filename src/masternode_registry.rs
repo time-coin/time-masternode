@@ -32,6 +32,7 @@ pub struct MasternodeInfo {
 
 pub struct MasternodeRegistry {
     masternodes: Arc<RwLock<HashMap<String, MasternodeInfo>>>,
+    local_masternode_address: Arc<RwLock<Option<String>>>, // Track which one is ours
     db: Arc<Db>,
     network: NetworkType,
     block_period_start: Arc<RwLock<u64>>,
@@ -68,6 +69,7 @@ impl MasternodeRegistry {
 
         let registry = Self {
             masternodes: Arc::new(RwLock::new(nodes)),
+            local_masternode_address: Arc::new(RwLock::new(None)),
             db,
             network,
             block_period_start: Arc::new(RwLock::new(now)),
@@ -289,8 +291,16 @@ impl MasternodeRegistry {
     }
 
     pub async fn get_local_masternode(&self) -> Option<MasternodeInfo> {
-        // Return the first masternode registered locally (usually only one)
-        self.masternodes.read().await.values().next().cloned()
+        // Return the masternode marked as local
+        if let Some(local_addr) = self.local_masternode_address.read().await.as_ref() {
+            self.masternodes.read().await.get(local_addr).cloned()
+        } else {
+            None
+        }
+    }
+
+    pub async fn set_local_masternode(&self, address: String) {
+        *self.local_masternode_address.write().await = Some(address);
     }
 
     pub async fn register_masternode(
@@ -365,6 +375,7 @@ impl Clone for MasternodeRegistry {
     fn clone(&self) -> Self {
         Self {
             masternodes: self.masternodes.clone(),
+            local_masternode_address: self.local_masternode_address.clone(),
             db: self.db.clone(),
             network: self.network,
             block_period_start: self.block_period_start.clone(),

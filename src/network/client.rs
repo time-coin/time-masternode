@@ -348,15 +348,20 @@ async fn maintain_peer_connection(
                                         tracing::info!("📩 Received {} masternode(s) from peer", masternodes.len());
 
                                         // Get local masternode address to skip self-registration
-                                        let local_address = masternode_registry.get_local_masternode().await
-                                            .map(|mn| {
-                                                // Strip port if present for comparison
-                                                let addr = mn.masternode.address.clone();
-                                                addr.split(':').next().unwrap_or(&addr).to_string()
-                                            });
+                                        let local_mn = masternode_registry.get_local_masternode().await;
+                                        let local_address = local_mn.as_ref().map(|mn| {
+                                            // Strip port if present for comparison
+                                            let addr = mn.masternode.address.clone();
+                                            addr.split(':').next().unwrap_or(&addr).to_string()
+                                        });
 
+                                        if let Some(ref local_mn_info) = local_mn {
+                                            tracing::info!("Local masternode: {} (reward: {})",
+                                                local_mn_info.masternode.address,
+                                                local_mn_info.reward_address);
+                                        }
                                         if let Some(ref addr) = local_address {
-                                            tracing::debug!("Local masternode address (for comparison): {}", addr);
+                                            tracing::debug!("Local masternode IP (for comparison): {}", addr);
                                         }
 
                                         let mut registered = 0;

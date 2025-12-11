@@ -315,6 +315,8 @@ async fn main() {
             .await
         {
             Ok(()) => {
+                // Mark this as our local masternode
+                registry.set_local_masternode(mn.address.clone()).await;
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
             }
             Err(e) => {
