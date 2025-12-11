@@ -448,8 +448,8 @@ impl Blockchain {
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
         let current_height = *self.current_height.read().await;
 
-        // Allow adding next block or filling in gaps
-        if block.header.height <= current_height {
+        // Skip if we already have this block or newer
+        if block.header.height <= current_height && current_height > 0 {
             tracing::debug!(
                 "Skipping block {} (already have height {})",
                 block.header.height,
@@ -458,7 +458,27 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Validate the block before accepting
+        // Special handling for genesis block (height 0)
+        if block.header.height == 0 {
+            // Check if we already have genesis
+            if self
+                .storage
+                .contains_key(b"block_0")
+                .map_err(|e| e.to_string())?
+            {
+                tracing::debug!("Already have genesis block");
+                return Ok(());
+            }
+
+            // Genesis doesn't need validation against previous block
+            tracing::info!("✅ Accepting genesis block from peer");
+            self.process_block_utxos(&block).await;
+            self.save_block(&block)?;
+            *self.current_height.write().await = 0;
+            return Ok(());
+        }
+
+        // Validate non-genesis blocks
         self.validate_block(&block).await?;
 
         // Process block transactions to create UTXOs

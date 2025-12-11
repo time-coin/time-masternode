@@ -331,7 +331,9 @@ async fn maintain_peer_connection(
                                     let local_height = blockchain.get_height().await;
                                     if remote_height > local_height {
                                         tracing::info!("📥 Peer has height {}, we have {}. Requesting blocks...", remote_height, local_height);
-                                        let req = NetworkMessage::GetBlocks(local_height + 1, remote_height);
+                                        // If we have no blocks, start from genesis (block 0)
+                                        let start_height = if local_height == 0 { 0 } else { local_height + 1 };
+                                        let req = NetworkMessage::GetBlocks(start_height, remote_height);
                                         if let Ok(json) = serde_json::to_string(&req) {
                                             let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                             let _ = writer.flush().await;
