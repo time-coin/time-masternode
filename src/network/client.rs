@@ -346,7 +346,20 @@ async fn maintain_peer_connection(
                                 NetworkMessage::MasternodesResponse(masternodes) => {
                                     if !masternodes.is_empty() {
                                         tracing::info!("📩 Received {} masternode(s) from peer", masternodes.len());
+
+                                        // Get local masternode address to skip self-registration
+                                        let local_address = masternode_registry.get_local_masternode().await
+                                            .map(|mn| mn.masternode.address.clone());
+
                                         for mn_data in masternodes {
+                                            // Skip if this is our own masternode
+                                            if let Some(ref local_addr) = local_address {
+                                                if mn_data.address == *local_addr {
+                                                    tracing::debug!("Skipping self-registration for {}", local_addr);
+                                                    continue;
+                                                }
+                                            }
+
                                             let mn = crate::types::Masternode {
                                                 address: mn_data.address.clone(),
                                                 wallet_address: mn_data.reward_address.clone(),
