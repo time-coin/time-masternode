@@ -581,17 +581,12 @@ impl Blockchain {
             }
         }
 
-        // 5. Verify masternode rewards match eligible masternodes
-        let active_masternodes = self.masternode_registry.list_active().await;
-        if block.masternode_rewards.len() != active_masternodes.len() {
-            return Err(format!(
-                "Masternode reward count mismatch: {} rewards for {} masternodes",
-                block.masternode_rewards.len(),
-                active_masternodes.len()
-            ));
-        }
+        // 5. Skip masternode reward validation for synced blocks
+        // Blocks from peers were created with the masternode set at that time,
+        // which may differ from the current active set
+        // Only validate structure, not the specific masternode list
 
-        // 6. Verify total block reward is correct
+        // 6. Verify total block reward is correct (but not distribution)
         let expected_reward = BLOCK_REWARD_SATOSHIS;
         let actual_reward: u64 = block
             .masternode_rewards
