@@ -459,8 +459,9 @@ async fn main() {
             let current_height = block_blockchain.get_height().await;
             let expected_height = block_blockchain.calculate_expected_height();
 
-            // Generate catchup blocks if behind
-            if current_height < expected_height {
+            // Determine what to do based on height comparison
+            if current_height < expected_height - 1 {
+                // More than 1 block behind - need catchup
                 tracing::info!(
                     "🧱 Catching up: height {} → {} at {} ({}:{}0) with {} eligible masternodes",
                     current_height,
@@ -480,11 +481,11 @@ async fn main() {
                         continue;
                     }
                 }
-            } else if current_height == expected_height {
-                // Already synced - produce next block
+            } else if current_height == expected_height - 1 || current_height == expected_height {
+                // At expected height or one behind (normal) - produce next block
                 tracing::info!(
                     "🧱 Producing block at height {} at {} ({}:{}0) with {} eligible masternodes",
-                    expected_height + 1,
+                    current_height + 1,
                     timestamp,
                     now.hour(),
                     (now.minute() / 10),
