@@ -330,23 +330,72 @@ async fn maintain_peer_connection(
                                 NetworkMessage::BlockHeightResponse(remote_height) => {
                                     let local_height = blockchain.get_height().await;
                                     if remote_height > local_height {
-                                        tracing::info!("📥 Peer has height {}, we have {}. Requesting blocks...", remote_height, local_height);
-                                        // If we have no blocks, start from genesis (block 0)
-                                        let start_height = if local_height == 0 { 0 } else { local_height + 1 };
-                                        let req = NetworkMessage::GetBlocks(start_height, remote_height);
-                                        if let Ok(json) = serde_json::to_string(&req) {
-                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                            let _ = writer.flush().await;
+                                        // Check if we're already syncing
+                                        let is_syncing = blockchain.is_syncing().await;
+
+                                        if !is_syncing {
+                                            // Mark as syncing and request blocks from this peer
+                                            blockchain.set_syncing(true).await;
+                                            tracing::info!("📥 Peer {} has height {}, we have {}. Starting sync...", ip, remote_height, local_height);
+
+                                            // If we have no blocks, start from genesis (block 0)
+                                            let start_height = if local_height == 0 { 0 } else { local_height + 1 };
+                                            let req = NetworkMessage::GetBlocks(start_height, remote_height);
+                                            if let Ok(json) = serde_json::to_string(&req) {
+                                                let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
+                                                let _ = writer.flush().await;
+                                            }
+                                        } else {
+                                            tracing::debug!("Already syncing from another peer, skipping");
                                         }
+                                    } else if remote_height == local_height {
+                                        // We're synced, clear syncing flag
+                                        blockchain.set_syncing(false).await;
                                     }
                                 }
                                 NetworkMessage::BlocksResponse(blocks) => {
                                     tracing::info!("📦 Received {} blocks from peer", blocks.len());
+
+                                    let mut blocks_added = 0;
                                     for block in blocks {
+                                        // Validate timestamp - block shouldn't be from the future
+                                        let now = chrono::Utc::now().timestamp();
+                                        let max_future_seconds = 600; // Allow 10 minutes tolerance for clock drift
+
+                                        if block.header.timestamp > now + max_future_seconds {
+                                            tracing::warn!(
+                                                "⚠️ Rejecting block {} from future: timestamp {} is {}s ahead",
+                                                block.header.height,
+                                                block.header.timestamp,
+                                                block.header.timestamp - now
+                                            );
+                                            continue;
+                                        }
+
                                         if let Err(e) = blockchain.add_block(block).await {
                                             tracing::warn!("Failed to add block: {}", e);
+                                        } else {
+                                            blocks_added += 1;
+
+                                            // Every 100 blocks, check network sync and request more if needed
+                                            if blocks_added % 100 == 0 {
+                                                let current_height = blockchain.get_height().await;
+                                                tracing::info!("✅ Synced {} blocks, current height: {}", blocks_added, current_height);
+
+                                                // Request next batch if we're still behind
+                                                let sync_msg = NetworkMessage::GetBlockHeight;
+                                                if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
+                                                    let _ = writer.write_all(format!("{}\n", msg_json).as_bytes()).await;
+                                                    let _ = writer.flush().await;
+                                                }
+                                            }
                                         }
                                     }
+
+                                    tracing::info!("✅ Successfully added {} blocks", blocks_added);
+
+                                    // Clear syncing flag after processing blocks
+                                    blockchain.set_syncing(false).await;
                                 }
                                 NetworkMessage::PendingTransactionsResponse(transactions) => {
                                     if !transactions.is_empty() {

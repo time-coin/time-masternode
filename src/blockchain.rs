@@ -29,6 +29,7 @@ pub struct Blockchain {
     vdf_config: VDFConfig,
     current_height: Arc<RwLock<u64>>,
     network_type: NetworkType,
+    is_syncing: Arc<RwLock<bool>>, // Track if currently syncing from a peer
 }
 
 impl Blockchain {
@@ -46,6 +47,7 @@ impl Blockchain {
             vdf_config,
             current_height: Arc::new(RwLock::new(0)),
             network_type,
+            is_syncing: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -394,6 +396,14 @@ impl Blockchain {
         *self.current_height.read().await
     }
 
+    pub async fn is_syncing(&self) -> bool {
+        *self.is_syncing.read().await
+    }
+
+    pub async fn set_syncing(&self, syncing: bool) {
+        *self.is_syncing.write().await = syncing;
+    }
+
     pub async fn get_utxo_state_hash(&self) -> [u8; 32] {
         self.consensus.utxo_manager.calculate_utxo_set_hash().await
     }
@@ -526,12 +536,24 @@ impl Blockchain {
             ));
         }
 
-        // 3. Validate timestamp (must be after previous block)
+        // 3. Validate timestamp (must be after previous block and not from future)
         let prev_block = self.get_block(block.header.height - 1)?;
         if block.header.timestamp <= prev_block.header.timestamp {
             return Err(format!(
                 "Invalid timestamp: {} <= previous {}",
                 block.header.timestamp, prev_block.header.timestamp
+            ));
+        }
+
+        // Check block is not from the future (allow 10 min tolerance for clock drift)
+        let now = Utc::now().timestamp();
+        let max_future_seconds = 600; // 10 minutes
+        if block.header.timestamp > now + max_future_seconds {
+            return Err(format!(
+                "Block timestamp {} is too far in the future (current time: {}, diff: {}s)",
+                block.header.timestamp,
+                now,
+                block.header.timestamp - now
             ));
         }
 
@@ -643,6 +665,7 @@ impl Clone for Blockchain {
             vdf_config: self.vdf_config.clone(),
             current_height: self.current_height.clone(),
             network_type: self.network_type,
+            is_syncing: self.is_syncing.clone(),
         }
     }
 }
