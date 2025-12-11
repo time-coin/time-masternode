@@ -222,6 +222,21 @@ async fn maintain_peer_connection(
 
     tracing::debug!("📡 Requested pending transactions from {}", ip);
 
+    // Request masternode list
+    let mn_request = NetworkMessage::GetMasternodes;
+    let msg_json =
+        serde_json::to_string(&mn_request).map_err(|e| format!("Failed to serialize: {}", e))?;
+    writer
+        .write_all(format!("{}\n", msg_json).as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("Flush failed: {}", e))?;
+
+    tracing::debug!("📡 Requested masternode list from {}", ip);
+
     // Request peer list for peer discovery
     let peers_request = NetworkMessage::GetPeers;
     let msg_json =
@@ -324,6 +339,28 @@ async fn maintain_peer_connection(
                                         for tx in transactions {
                                             if let Err(e) = blockchain.add_pending_transaction(tx).await {
                                                 tracing::debug!("Transaction already known or invalid: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                NetworkMessage::MasternodesResponse(masternodes) => {
+                                    if !masternodes.is_empty() {
+                                        tracing::info!("📩 Received {} masternode(s) from peer", masternodes.len());
+                                        for mn_data in masternodes {
+                                            let mn = crate::types::Masternode {
+                                                address: mn_data.address.clone(),
+                                                wallet_address: mn_data.reward_address.clone(),
+                                                collateral: mn_data.tier.collateral(),
+                                                tier: mn_data.tier.clone(),
+                                                public_key: mn_data.public_key,
+                                                registered_at: std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap()
+                                                    .as_secs(),
+                                            };
+
+                                            if let Err(e) = masternode_registry.register(mn, mn_data.reward_address.clone()).await {
+                                                tracing::debug!("Masternode already registered or invalid: {}", e);
                                             }
                                         }
                                     }

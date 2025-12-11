@@ -49,6 +49,8 @@ pub enum NetworkMessage {
         tier: MasternodeTier,
         public_key: VerifyingKey,
     },
+    GetMasternodes,
+    MasternodesResponse(Vec<MasternodeAnnouncementData>),
     Version {
         version: String,
         commit_date: String,
@@ -88,4 +90,12 @@ pub struct Subscription {
     pub id: String,
     pub addresses: Vec<String>,
     pub outpoints: Vec<OutPoint>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MasternodeAnnouncementData {
+    pub address: String,
+    pub reward_address: String,
+    pub tier: MasternodeTier,
+    pub public_key: VerifyingKey,
 }

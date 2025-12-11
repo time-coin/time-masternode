@@ -341,6 +341,26 @@ async fn handle_peer(
                                     // TODO: Peer exchange to be implemented in connection_manager
                                     // For now, just acknowledge the request
                                 }
+                                NetworkMessage::GetMasternodes => {
+                                    tracing::debug!("📥 Received GetMasternodes request from {}", peer.addr);
+                                    let all_masternodes = masternode_registry.list_all().await;
+                                    let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = all_masternodes
+                                        .iter()
+                                        .map(|mn_info| crate::network::message::MasternodeAnnouncementData {
+                                            address: mn_info.masternode.address.clone(),
+                                            reward_address: mn_info.reward_address.clone(),
+                                            tier: mn_info.masternode.tier.clone(),
+                                            public_key: mn_info.masternode.public_key,
+                                        })
+                                        .collect();
+
+                                    let response = NetworkMessage::MasternodesResponse(mn_data);
+                                    if let Ok(json) = serde_json::to_string(&response) {
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
+                                        let _ = writer.flush().await;
+                                        tracing::debug!("📤 Sent {} masternode(s) to {}", all_masternodes.len(), peer.addr);
+                                    }
+                                }
                                 NetworkMessage::PeersResponse(_peers) => {
                                     tracing::debug!("📥 Received PeersResponse from {}", peer.addr);
                                     // TODO: Peer exchange to be implemented in connection_manager
