@@ -351,11 +351,16 @@ async fn maintain_peer_connection(
                                         let local_address = masternode_registry.get_local_masternode().await
                                             .map(|mn| mn.masternode.address.clone());
 
+                                        if let Some(ref addr) = local_address {
+                                            tracing::debug!("Local masternode address: {}", addr);
+                                        }
+
+                                        let mut registered = 0;
                                         for mn_data in masternodes {
                                             // Skip if this is our own masternode
                                             if let Some(ref local_addr) = local_address {
                                                 if mn_data.address == *local_addr {
-                                                    tracing::debug!("Skipping self-registration for {}", local_addr);
+                                                    tracing::info!("⏭️  Skipping self-registration for {}", local_addr);
                                                     continue;
                                                 }
                                             }
@@ -374,7 +379,13 @@ async fn maintain_peer_connection(
 
                                             if let Err(e) = masternode_registry.register(mn, mn_data.reward_address.clone()).await {
                                                 tracing::debug!("Masternode already registered or invalid: {}", e);
+                                            } else {
+                                                registered += 1;
                                             }
+                                        }
+
+                                        if registered > 0 {
+                                            tracing::info!("✅ Registered {} new masternode(s)", registered);
                                         }
                                     }
                                 }

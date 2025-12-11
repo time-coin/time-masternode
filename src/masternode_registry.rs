@@ -50,11 +50,18 @@ impl MasternodeRegistry {
             .map(|(key, _)| key)
             .collect();
 
+        let count = keys_to_delete.len();
         for key in keys_to_delete {
             let _ = db.remove(key);
         }
 
-        tracing::info!("🧹 Cleared masternode registry for fresh start");
+        // Ensure changes are written to disk
+        let _ = db.flush();
+
+        tracing::info!(
+            "🧹 Cleared {} masternode(s) from registry for fresh start",
+            count
+        );
 
         // Start with empty registry
         let nodes: HashMap<String, MasternodeInfo> = HashMap::new();
