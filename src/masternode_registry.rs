@@ -359,6 +359,16 @@ impl MasternodeRegistry {
     pub async fn is_registered(&self, address: &str) -> bool {
         self.masternodes.read().await.contains_key(address)
     }
+
+    pub async fn broadcast_block(&self, block: crate::block::types::Block) {
+        use crate::network::message::NetworkMessage;
+
+        if let Some(peer_mgr) = self.peer_manager.read().await.as_ref() {
+            let msg = NetworkMessage::BlockAnnouncement(block);
+            peer_mgr.broadcast(msg).await;
+            tracing::info!("📡 Broadcast block to network");
+        }
+    }
 }
 
 impl Clone for MasternodeRegistry {

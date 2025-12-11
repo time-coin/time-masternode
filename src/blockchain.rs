@@ -405,7 +405,7 @@ impl Blockchain {
         bincode::deserialize(&data).map_err(|e| e.to_string())
     }
 
-    fn get_block_hash(&self, height: u64) -> Result<[u8; 32], String> {
+    pub fn get_block_hash(&self, height: u64) -> Result<[u8; 32], String> {
         let block = self.get_block(height)?;
         Ok(block.hash())
     }

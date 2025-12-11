@@ -218,6 +218,18 @@ impl PeerManager {
             .count()
     }
 
+    /// Broadcast a message to all connected peers
+    pub async fn broadcast(&self, msg: crate::network::message::NetworkMessage) {
+        // This would be implemented by the network layer
+        // For now, we'll just log it
+        tracing::debug!(
+            "Would broadcast message to {} peers",
+            self.peers.read().await.len()
+        );
+        // TODO: Implement actual broadcast through network connections
+        let _ = msg; // Suppress unused warning
+    }
+
     /// Request peer list from a connected peer
     pub async fn request_peers_from_peer(&self, _peer_address: &str) {
         // This would send a GetPeers message to the peer

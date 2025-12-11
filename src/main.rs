@@ -482,28 +482,69 @@ async fn main() {
                     }
                 }
             } else if current_height == expected_height - 1 || current_height == expected_height {
-                // At expected height or one behind (normal) - produce next block
-                tracing::info!(
-                    "🧱 Producing block at height {} at {} ({}:{}0) with {} eligible masternodes",
-                    current_height + 1,
-                    timestamp,
-                    now.hour(),
-                    (now.minute() / 10),
-                    masternodes.len()
-                );
+                // At expected height or one behind (normal) - determine if we should produce
 
-                match block_blockchain.produce_block().await {
-                    Ok(block) => {
-                        tracing::info!(
-                            "✅ Block {} produced: {} transactions, {} masternode rewards",
-                            block.header.height,
-                            block.transactions.len(),
-                            block.masternode_rewards.len()
-                        );
-                    }
+                // Use VDF to select block producer deterministically
+                let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
+                    Ok(hash) => hash,
                     Err(e) => {
-                        tracing::error!("❌ Failed to produce block: {}", e);
+                        tracing::error!("Failed to get previous block hash: {}", e);
+                        continue;
                     }
+                };
+
+                // Compute VDF on previous block hash
+                let vdf_output = {
+                    use sha2::{Digest, Sha256};
+                    Sha256::digest(prev_block_hash).to_vec()
+                };
+
+                // Select producer: hash mod masternode_count
+                let producer_index = {
+                    let mut val = 0u64;
+                    for (i, &byte) in vdf_output.iter().take(8).enumerate() {
+                        val |= (byte as u64) << (i * 8);
+                    }
+                    (val % masternodes.len() as u64) as usize
+                };
+
+                let selected_producer = &masternodes[producer_index];
+                let is_producer = masternode_info
+                    .as_ref()
+                    .map(|mn| mn.address == selected_producer.address)
+                    .unwrap_or(false);
+
+                if is_producer {
+                    tracing::info!(
+                        "🎯 Selected as block producer for height {} at {} ({}:{}0)",
+                        current_height + 1,
+                        timestamp,
+                        now.hour(),
+                        (now.minute() / 10),
+                    );
+
+                    match block_blockchain.produce_block().await {
+                        Ok(block) => {
+                            tracing::info!(
+                                "✅ Block {} produced: {} transactions, {} masternode rewards",
+                                block.header.height,
+                                block.transactions.len(),
+                                block.masternode_rewards.len()
+                            );
+
+                            // Broadcast block to all peers
+                            block_registry.broadcast_block(block).await;
+                        }
+                        Err(e) => {
+                            tracing::error!("❌ Failed to produce block: {}", e);
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "⏸️  Not selected for block {} (producer: {})",
+                        current_height + 1,
+                        selected_producer.address
+                    );
                 }
             } else {
                 tracing::warn!(

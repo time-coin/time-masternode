@@ -366,6 +366,12 @@ async fn handle_peer(
                                     // TODO: Peer exchange to be implemented in connection_manager
                                     // For now, just acknowledge the response
                                 }
+                                NetworkMessage::BlockAnnouncement(block) => {
+                                    tracing::info!("📥 Received block {} announcement from {}", block.header.height, peer.addr);
+                                    if let Err(e) = blockchain.add_block(block.clone()).await {
+                                        tracing::warn!("Failed to add announced block: {}", e);
+                                    }
+                                }
                                 _ => {}
                             }
                         } else {
