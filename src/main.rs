@@ -482,20 +482,20 @@ async fn main() {
                         continue;
                     }
                 }
-            }
-
-            // Produce next block (includes finalized transactions and fees)
-            match block_blockchain.produce_block().await {
-                Ok(block) => {
-                    tracing::info!(
-                        "✅ Block {} produced: {} transactions, {} masternode rewards",
-                        block.header.height,
-                        block.transactions.len(),
-                        block.masternode_rewards.len()
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("❌ Failed to produce block: {}", e);
+            } else {
+                // Produce next block (includes finalized transactions and fees)
+                match block_blockchain.produce_block().await {
+                    Ok(block) => {
+                        tracing::info!(
+                            "✅ Block {} produced: {} transactions, {} masternode rewards",
+                            block.header.height,
+                            block.transactions.len(),
+                            block.masternode_rewards.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to produce block: {}", e);
+                    }
                 }
             }
         }
