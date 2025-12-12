@@ -24,6 +24,7 @@ pub struct NetworkServer {
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     pub blockchain: Arc<crate::blockchain::Blockchain>,
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
+    pub seen_blocks: Arc<RwLock<std::collections::HashSet<u64>>>, // Track seen block heights
 }
 
 pub struct PeerConnection {
@@ -56,6 +57,7 @@ impl NetworkServer {
             masternode_registry: masternode_registry.clone(),
             blockchain,
             peer_manager,
+            seen_blocks: Arc::new(RwLock::new(std::collections::HashSet::new())),
         })
     }
 
@@ -102,6 +104,7 @@ impl NetworkServer {
             let blockchain = self.blockchain.clone();
             let peer_mgr = self.peer_manager.clone();
             let broadcast_tx = self.tx_notifier.clone();
+            let seen_blocks = self.seen_blocks.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -118,6 +121,7 @@ impl NetworkServer {
                     blockchain,
                     peer_mgr,
                     broadcast_tx,
+                    seen_blocks,
                 )
                 .await;
             });
@@ -159,6 +163,7 @@ async fn handle_peer(
     blockchain: Arc<crate::blockchain::Blockchain>,
     peer_manager: Arc<crate::peer_manager::PeerManager>,
     broadcast_tx: broadcast::Sender<NetworkMessage>,
+    seen_blocks: Arc<RwLock<std::collections::HashSet<u64>>>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -408,18 +413,42 @@ async fn handle_peer(
                                     // For now, just acknowledge the response
                                 }
                                 NetworkMessage::BlockAnnouncement(block) => {
-                                    tracing::info!("📥 Received block {} announcement from {}", block.header.height, peer.addr);
+                                    let block_height = block.header.height;
+
+                                    // Check if we've already seen this block
+                                    let already_seen = {
+                                        let mut seen = seen_blocks.write().await;
+                                        if seen.contains(&block_height) {
+                                            true
+                                        } else {
+                                            seen.insert(block_height);
+
+                                            // Keep cache from growing forever - remove old blocks
+                                            if seen.len() > 1000 {
+                                                let min_height = block_height.saturating_sub(1000);
+                                                seen.retain(|&h| h > min_height);
+                                            }
+                                            false
+                                        }
+                                    };
+
+                                    if already_seen {
+                                        tracing::debug!("🔁 Ignoring duplicate block {} from {}", block_height, peer.addr);
+                                        continue;
+                                    }
+
+                                    tracing::info!("📥 Received block {} announcement from {}", block_height, peer.addr);
 
                                     // Add block to our blockchain
                                     match blockchain.add_block(block.clone()).await {
                                         Ok(()) => {
-                                            tracing::info!("✅ Added block {} from {}", block.header.height, peer.addr);
+                                            tracing::info!("✅ Added block {} from {}", block_height, peer.addr);
 
                                             // GOSSIP: Relay to all other connected peers
                                             let msg = NetworkMessage::BlockAnnouncement(block.clone());
                                             match broadcast_tx.send(msg) {
                                                 Ok(receivers) => {
-                                                    tracing::info!("🔄 Gossiped block {} to {} other peer(s)", block.header.height, receivers.saturating_sub(1));
+                                                    tracing::info!("🔄 Gossiped block {} to {} other peer(s)", block_height, receivers.saturating_sub(1));
                                                 }
                                                 Err(e) => {
                                                     tracing::warn!("Failed to gossip block: {}", e);
