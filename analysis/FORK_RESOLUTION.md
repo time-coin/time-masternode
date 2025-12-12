@@ -497,6 +497,31 @@ Action:
 - Node must be reconfigured with correct genesis
 ```
 
+### 5. All Nodes Behind Schedule (BFT Catchup Mode) ⭐
+
+```
+Expected Height: 1000 (based on time since genesis)
+All Masternodes: Currently at height 800
+Status: All nodes in agreement, just behind schedule
+
+Action:
+1. Query all masternodes → 10/10 report height 800
+2. Detect: 2/3+ consensus on being behind ✅
+3. Enter BFT Catchup Mode:
+   - Generate blocks 801-1000 with BFT consensus
+   - Each block requires 2/3+ masternode signatures
+   - All nodes advance together in lock-step
+   - No single node races ahead
+4. Exit catchup mode at height 1000
+5. Resume normal block generation (10 min intervals)
+
+Key Benefits:
+- ✅ No forks created during catchup
+- ✅ All nodes remain synchronized
+- ✅ BFT consensus maintained throughout
+- ✅ Deterministic based on genesis timestamp
+```
+
 ---
 
 ## Configuration
@@ -545,6 +570,16 @@ deep_reorg_threshold = 10
 - Accept blocks with >50% consensus temporarily
 - Wait for 2/3 confirmation
 - Roll back if consensus fails
+
+### 5. BFT Consensus Catchup Mode ⭐
+- Detect when all nodes in agreement but behind schedule
+- Query all masternodes for current height
+- If 2/3+ consensus on being behind: enter coordinated catchup
+- Generate catch-up blocks with BFT voting (2/3+ signatures required)
+- All nodes advance together in lock-step
+- No node races ahead or falls behind
+- Exit when current height >= expected height
+- Prevents fork creation during catchup periods
 
 ---
 

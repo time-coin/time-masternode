@@ -24,6 +24,7 @@
   - No consensus / insufficient peers → Stay on current chain
 - ✅ Integrated with PeerManager for network queries
 - ✅ Uses masternode registry to assess network state
+- ✅ **BFT Consensus Catchup Mode** - When all nodes in agreement but behind, they catch up together
 
 ### 3. Network Messages
 - ✅ `GetBlockHash` - Query block hash at specific height
@@ -94,6 +95,61 @@ This provides protection against:
 - ✅ Stale nodes forcing legitimate nodes onto wrong chain
 - ✅ Deep reorganizations without justification
 
+### BFT Consensus Catchup Mode
+
+**Scenario: All nodes are in agreement but behind schedule**
+
+Example:
+```
+Expected height: 1000 (based on time since genesis)
+All masternodes: Currently at height 800
+Status: All nodes in agreement on chain, just behind schedule
+```
+
+**BFT Catchup Behavior:**
+
+1. **Detect consensus on being behind**
+   - Query all masternodes: "What's your current height?"
+   - If 2/3+ masternodes report same height AND all behind expected
+   - System recognizes: Network is unified but catching up
+
+2. **Coordinated catchup mode**
+   - All nodes sync blocks together from height 800 → 1000
+   - Maintain BFT consensus throughout catchup
+   - Each block validated with 2/3+ masternode agreement
+   - No single node races ahead or falls behind
+
+3. **Block generation during catchup**
+   - **Option A (Conservative):** Pause new block generation until caught up
+   - **Option B (Active):** Generate blocks at accelerated rate with BFT consensus
+   - All nodes participate in consensus for each catch-up block
+   - Ensure 2/3+ masternodes validate each block before proceeding
+
+4. **Exit catchup mode**
+   - When current height >= expected height
+   - All nodes synchronized at target height
+   - Resume normal block generation (one every 10 minutes)
+
+**Key Principles:**
+- ✅ **No node left behind** - All nodes move together
+- ✅ **BFT consensus maintained** - Every catch-up block requires 2/3+ approval
+- ✅ **No fork creation** - Coordinated movement prevents chain divergence
+- ✅ **Deterministic** - All nodes follow same schedule based on genesis timestamp
+
+**Current Implementation:**
+
+The existing `catchup_blocks()` method:
+- Calculates expected height based on time since genesis
+- Waits for peers to sync blocks
+- Monitors progress every 10 seconds
+- Logs sync status and percentage complete
+
+**Enhancement needed for full BFT catchup:**
+- Query all masternodes for their current height
+- Verify 2/3+ consensus on being behind before catchup
+- Coordinate block generation with BFT voting during catchup
+- Ensure all masternodes validate each catch-up block
+
 ---
 
 ## ⚠️ Limitations and Future Enhancements
@@ -138,6 +194,33 @@ This provides protection against:
    - Blocks with 2/3+ signatures considered "finalized"
    - Don't reorg finalized blocks unless supermajority (>90%)
 
+4. **BFT Consensus Catchup Mode** ⭐
+   ```rust
+   // When all nodes behind schedule
+   async fn bft_catchup_mode() {
+       // 1. Query all masternodes for height
+       let heights = query_all_masternode_heights().await;
+       
+       // 2. Check if 2/3+ agree they're behind
+       if consensus_on_being_behind(&heights) {
+           // 3. Enter coordinated catchup
+           while current_height < expected_height {
+               // Generate next block with BFT voting
+               let block = generate_block_with_bft_consensus().await;
+               
+               // All nodes validate and advance together
+               if has_2_3_approval(&block) {
+                   apply_block(block).await;
+               }
+           }
+       }
+   }
+   ```
+   - All nodes move up together in lock-step
+   - Each catch-up block requires 2/3+ masternode approval
+   - No node races ahead or falls behind
+   - Prevents fork creation during catchup
+
 ---
 
 ## 🚨 Production Deployment Checklist
@@ -149,9 +232,11 @@ This provides protection against:
 - [x] Implement consensus verification (Option A - dependency injection)
 - [x] Query masternodes for consensus before reorg
 - [x] Require 2/3+ (BFT quorum) check before reorg  
+- [ ] **Implement BFT consensus catchup mode** (coordinated catch-up when all nodes behind)
 - [ ] Implement real-time peer voting (optional enhancement)
 - [ ] Test with simulated network split (5 vs 5 masternodes)
 - [ ] Test malicious peer sending fake fork
+- [ ] Test all-nodes-behind catchup scenario
 - [ ] Add metrics for fork detection and reorg events
 - [ ] Set up alerts for deep reorgs (>10 blocks)
 - [ ] Document manual intervention procedure for deep forks
@@ -198,6 +283,34 @@ Expected:
 - Neither chain has 2/3 consensus
 - Node STAYS on current chain ✅
 - Wait for network to reunify
+```
+
+### Test 4: BFT Consensus Catchup (All Nodes Behind) ⭐
+```
+Setup:
+- Expected height: 1000 (based on time since genesis)
+- All 10 masternodes currently at height 800
+- All nodes in agreement on chain, just behind schedule
+- Network downtime or slow block generation caused delay
+
+Expected Behavior:
+1. Query all masternodes → 10/10 report height 800
+2. Calculate expected height → 1000 (200 blocks behind)
+3. Detect: 2/3+ consensus on being behind ✅
+4. Enter BFT catchup mode:
+   - Generate blocks 801-1000 with BFT consensus
+   - Each block requires 2/3+ masternode approval
+   - All nodes advance together: 801 → 802 → 803...
+   - No node races ahead independently
+5. Exit catchup at height 1000
+6. Resume normal operation (10 min blocks)
+
+Key Validations:
+- ✅ All nodes move in lock-step
+- ✅ No forks created during catchup
+- ✅ Each catch-up block has 2/3+ signatures
+- ✅ UTXO state consistent across all nodes
+- ✅ Smooth transition back to normal mode
 ```
 
 ---
