@@ -378,15 +378,18 @@ impl MasternodeRegistry {
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
             let msg = NetworkMessage::BlockAnnouncement(block);
             match tx.send(msg) {
+                Ok(0) => {
+                    tracing::debug!("📡 Block produced (no peers connected yet)");
+                }
                 Ok(receivers) => {
                     tracing::info!("📡 Broadcast block to {} connected peer(s)", receivers);
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to broadcast block: {}", e);
+                Err(_) => {
+                    tracing::debug!("Broadcast channel closed (no active connections)");
                 }
             }
         } else {
-            tracing::warn!("⚠️  Cannot broadcast block - no broadcast channel set");
+            tracing::debug!("⚠️  Cannot broadcast block - no broadcast channel set");
         }
     }
 
@@ -399,11 +402,14 @@ impl MasternodeRegistry {
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
             let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
             match tx.send(msg) {
+                Ok(0) => {
+                    tracing::debug!("💓 Heartbeat created (no peers to attest yet)");
+                }
                 Ok(receivers) => {
                     tracing::debug!("📡 Broadcast heartbeat to {} peer(s)", receivers);
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to broadcast heartbeat: {}", e);
+                Err(_) => {
+                    tracing::debug!("Heartbeat broadcast skipped (no active connections)");
                 }
             }
         }
@@ -418,11 +424,14 @@ impl MasternodeRegistry {
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
             let msg = NetworkMessage::HeartbeatAttestation(attestation);
             match tx.send(msg) {
-                Ok(_) => {
-                    tracing::debug!("📡 Broadcast attestation");
+                Ok(0) => {
+                    tracing::debug!("✍️ Attestation created (no peers connected)");
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to broadcast attestation: {}", e);
+                Ok(receivers) => {
+                    tracing::debug!("📡 Broadcast attestation to {} peer(s)", receivers);
+                }
+                Err(_) => {
+                    tracing::debug!("Attestation broadcast skipped (no active connections)");
                 }
             }
         }
