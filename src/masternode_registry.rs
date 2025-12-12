@@ -37,6 +37,9 @@ pub struct MasternodeRegistry {
     network: NetworkType,
     block_period_start: Arc<RwLock<u64>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>,
+    broadcast_tx: Arc<
+        RwLock<Option<tokio::sync::broadcast::Sender<crate::network::message::NetworkMessage>>>,
+    >,
 }
 
 impl MasternodeRegistry {
@@ -64,6 +67,7 @@ impl MasternodeRegistry {
             network,
             block_period_start: Arc::new(RwLock::new(now)),
             peer_manager: Arc::new(RwLock::new(None)),
+            broadcast_tx: Arc::new(RwLock::new(None)),
         };
 
         // Start heartbeat monitor
@@ -281,6 +285,13 @@ impl MasternodeRegistry {
         *self.peer_manager.write().await = Some(peer_manager);
     }
 
+    pub async fn set_broadcast_channel(
+        &self,
+        tx: tokio::sync::broadcast::Sender<crate::network::message::NetworkMessage>,
+    ) {
+        *self.broadcast_tx.write().await = Some(tx);
+    }
+
     pub async fn get_local_masternode(&self) -> Option<MasternodeInfo> {
         // Return the masternode marked as local
         if let Some(local_addr) = self.local_masternode_address.read().await.as_ref() {
@@ -364,10 +375,18 @@ impl MasternodeRegistry {
     pub async fn broadcast_block(&self, block: crate::block::types::Block) {
         use crate::network::message::NetworkMessage;
 
-        if let Some(peer_mgr) = self.peer_manager.read().await.as_ref() {
+        if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
             let msg = NetworkMessage::BlockAnnouncement(block);
-            peer_mgr.broadcast(msg).await;
-            tracing::info!("📡 Broadcast block to network");
+            match tx.send(msg) {
+                Ok(receivers) => {
+                    tracing::info!("📡 Broadcast block to {} connected peer(s)", receivers);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to broadcast block: {}", e);
+                }
+            }
+        } else {
+            tracing::warn!("⚠️  Cannot broadcast block - no broadcast channel set");
         }
     }
 }
@@ -381,6 +400,7 @@ impl Clone for MasternodeRegistry {
             network: self.network,
             block_period_start: self.block_period_start.clone(),
             peer_manager: self.peer_manager.clone(),
+            broadcast_tx: self.broadcast_tx.clone(),
         }
     }
 }

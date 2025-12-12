@@ -637,6 +637,11 @@ async fn main() {
     .await
     {
         Ok(mut server) => {
+            // Give registry access to network broadcast channel
+            registry
+                .set_broadcast_channel(server.tx_notifier.clone())
+                .await;
+
             println!("  ✅ Network server listening on {}", p2p_addr);
             println!("\n╔═══════════════════════════════════════════════════════╗");
             println!("║  🎉 TIME Coin Daemon is Running!                      ║");
