@@ -13,6 +13,7 @@ pub struct RpcHandler {
     consensus: Arc<ConsensusEngine>,
     utxo_manager: Arc<UTXOStateManager>,
     registry: Arc<MasternodeRegistry>,
+    blockchain: Arc<crate::blockchain::Blockchain>,
     start_time: SystemTime,
     network: NetworkType,
     mempool: Arc<tokio::sync::RwLock<HashMap<[u8; 32], Transaction>>>,
@@ -24,11 +25,13 @@ impl RpcHandler {
         utxo_manager: Arc<UTXOStateManager>,
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
+        blockchain: Arc<crate::blockchain::Blockchain>,
     ) -> Self {
         Self {
             consensus,
             utxo_manager,
             registry,
+            blockchain,
             start_time: SystemTime::now(),
             network,
             mempool: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -91,15 +94,18 @@ impl RpcHandler {
             NetworkType::Mainnet => "main",
             NetworkType::Testnet => "test",
         };
+        let height = self.blockchain.get_height().await;
+        let best_hash = self.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
+
         Ok(json!({
             "chain": chain,
-            "blocks": 1,
-            "headers": 1,
-            "bestblockhash": format!("{:064x}", 1),
+            "blocks": height,
+            "headers": height,
+            "bestblockhash": hex::encode(best_hash),
             "difficulty": 1.0,
             "mediantime": chrono::Utc::now().timestamp(),
             "verificationprogress": 1.0,
-            "chainwork": "0000000000000000000000000000000000000000000000000000000000000001",
+            "chainwork": format!("{:064x}", height),
             "pruned": false,
             "consensus": "BFT",
             "instant_finality": true,
@@ -108,7 +114,8 @@ impl RpcHandler {
     }
 
     async fn get_block_count(&self) -> Result<Value, RpcError> {
-        Ok(json!(1))
+        let height = self.blockchain.get_height().await;
+        Ok(json!(height))
     }
 
     async fn get_block(&self, params: &[Value]) -> Result<Value, RpcError> {

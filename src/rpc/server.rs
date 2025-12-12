@@ -45,9 +45,16 @@ impl RpcServer {
         utxo_manager: Arc<UTXOStateManager>,
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
+        blockchain: Arc<crate::blockchain::Blockchain>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
-        let handler = Arc::new(RpcHandler::new(consensus, utxo_manager, network, registry));
+        let handler = Arc::new(RpcHandler::new(
+            consensus,
+            utxo_manager,
+            network,
+            registry,
+            blockchain,
+        ));
 
         Ok(Self { listener, handler })
     }

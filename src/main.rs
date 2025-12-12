@@ -561,6 +561,7 @@ async fn main() {
     let rpc_consensus = consensus_engine.clone();
     let rpc_utxo = utxo_mgr.clone();
     let rpc_registry = registry.clone();
+    let rpc_blockchain = blockchain.clone();
     let rpc_addr_clone = rpc_addr.clone();
     let rpc_network = network_type;
 
@@ -571,6 +572,7 @@ async fn main() {
             rpc_utxo,
             rpc_network,
             rpc_registry,
+            rpc_blockchain,
         )
         .await
         {
