@@ -752,6 +752,28 @@ impl Blockchain {
             current_height
         );
 
+        // CRITICAL: Before reorganizing, we should verify the peer's chain has consensus
+        // TODO: Implement full consensus verification by:
+        // 1. Query all connected masternodes for their block hash at fork_height
+        // 2. Count how many agree with peer_hash vs our_hash
+        // 3. Only reorg if peer's chain has 2/3+ (BFT quorum)
+        // 4. Reject reorg if we have consensus and peer doesn't
+        //
+        // Current limitation: Blockchain doesn't have access to peer_manager/network_client
+        // so we can't query peers. This means we trust any single peer's chain.
+        //
+        // SECURITY RISK: A malicious peer could trigger reorg to fake chain
+        // Mitigation: Reorg depth limits (max 100 blocks) provide some protection
+
+        let peer_hash = peer_block.hash();
+        tracing::warn!("⚠️  SECURITY: Reorg triggered without consensus verification!");
+        tracing::warn!(
+            "⚠️  Peer block hash at height {}: {}",
+            fork_height,
+            hex::encode(peer_hash)
+        );
+        tracing::warn!("⚠️  Production deployment requires consensus checking before reorg");
+
         // Find common ancestor
         let common_ancestor = match self.find_common_ancestor(fork_height).await {
             Ok(height) => height,
