@@ -23,6 +23,7 @@ pub struct NetworkServer {
     pub blacklist: Arc<RwLock<IPBlacklist>>,
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     pub blockchain: Arc<crate::blockchain::Blockchain>,
+    pub peer_manager: Arc<crate::peer_manager::PeerManager>,
 }
 
 pub struct PeerConnection {
@@ -38,6 +39,7 @@ impl NetworkServer {
         consensus: Arc<ConsensusEngine>,
         masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
+        peer_manager: Arc<crate::peer_manager::PeerManager>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -53,6 +55,7 @@ impl NetworkServer {
             blacklist: Arc::new(RwLock::new(IPBlacklist::new())),
             masternode_registry: masternode_registry.clone(),
             blockchain,
+            peer_manager,
         })
     }
 
@@ -97,6 +100,7 @@ impl NetworkServer {
             let blacklist = self.blacklist.clone();
             let mn_registry = self.masternode_registry.clone();
             let blockchain = self.blockchain.clone();
+            let peer_mgr = self.peer_manager.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -111,6 +115,7 @@ impl NetworkServer {
                     blacklist,
                     mn_registry,
                     blockchain,
+                    peer_mgr,
                 )
                 .await;
             });
@@ -150,6 +155,7 @@ async fn handle_peer(
     blacklist: Arc<RwLock<IPBlacklist>>,
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
+    peer_manager: Arc<crate::peer_manager::PeerManager>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -357,6 +363,10 @@ async fn handle_peer(
                                         Ok(()) => {
                                             let count = masternode_registry.total_count().await;
                                             tracing::info!("✅ Registered masternode {} (total: {})", peer_ip, count);
+
+                                            // Add masternode to peer_manager for P2P connections
+                                            let peer_addr_with_port = format!("{}:24100", peer_ip);
+                                            peer_manager.add_peer(peer_addr_with_port).await;
                                         },
                                         Err(e) => {
                                             tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);

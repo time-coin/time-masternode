@@ -630,6 +630,7 @@ async fn main() {
         consensus_engine.clone(),
         registry.clone(),
         blockchain_server.clone(),
+        peer_manager.clone(),
     )
     .await
     {
