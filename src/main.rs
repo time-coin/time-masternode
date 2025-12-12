@@ -3,6 +3,7 @@ mod block;
 mod blockchain;
 mod config;
 mod consensus;
+mod heartbeat_attestation;
 mod masternode_registry;
 mod network;
 mod network_type;
@@ -21,6 +22,7 @@ use chrono::Timelike;
 use clap::Parser;
 use config::Config;
 use consensus::ConsensusEngine;
+use heartbeat_attestation::HeartbeatAttestationSystem;
 use masternode_registry::MasternodeRegistry;
 use network::server::NetworkServer;
 use network_type::NetworkType;
@@ -276,6 +278,11 @@ async fn main() {
     println!("  ✅ Peer manager initialized");
     println!();
 
+    // Initialize heartbeat attestation system
+    let attestation_system = Arc::new(HeartbeatAttestationSystem::new());
+    println!("  ✅ Heartbeat attestation system initialized");
+    println!();
+
     println!("✓ Ready to process transactions\n");
 
     // Initialize consensus engine
@@ -316,7 +323,19 @@ async fn main() {
             Ok(()) => {
                 // Mark this as our local masternode
                 registry.set_local_masternode(mn.address.clone()).await;
+
+                // Set up attestation system identity
+                // Generate or load signing key (for now, generate fresh)
+                use ed25519_dalek::SigningKey;
+                use rand::rngs::OsRng;
+                let mut csprng = OsRng;
+                let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
+                attestation_system
+                    .set_local_identity(mn.address.clone(), signing_key.clone())
+                    .await;
+
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
+                tracing::info!("✓ Heartbeat attestation identity configured");
             }
             Err(e) => {
                 tracing::error!("❌ Failed to register masternode: {}", e);
@@ -324,15 +343,33 @@ async fn main() {
             }
         }
 
-        // Start heartbeat task for this masternode
+        // Start heartbeat task with attestation
         let registry_clone = registry.clone();
+        let attestation_clone = attestation_system.clone();
         let mn_address = mn.address.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
+
+                // Update old-style heartbeat
                 if let Err(e) = registry_clone.heartbeat(&mn_address).await {
                     tracing::warn!("❌ Failed to send heartbeat: {}", e);
+                }
+
+                // Create and broadcast attestable heartbeat
+                match attestation_clone.create_heartbeat().await {
+                    Ok(heartbeat) => {
+                        tracing::debug!(
+                            "💓 Created signed heartbeat seq {}",
+                            heartbeat.sequence_number
+                        );
+                        // TODO: Broadcast via network
+                        // network_client.broadcast(NetworkMessage::HeartbeatBroadcast(heartbeat)).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!("❌ Failed to create attestable heartbeat: {}", e);
+                    }
                 }
             }
         });

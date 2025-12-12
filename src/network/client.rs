@@ -574,6 +574,21 @@ async fn maintain_peer_connection(
                                     tracing::info!("📥 Received {} UTXOs from peer for reconciliation", utxos.len());
                                     blockchain.reconcile_utxo_state(utxos).await;
                                 }
+                                NetworkMessage::PeersResponse(_peers) => {
+                                    tracing::debug!("📩 Received peer list from {}", ip);
+                                    // TODO: Process peer discovery
+                                }
+                                NetworkMessage::HeartbeatBroadcast(heartbeat) => {
+                                    tracing::debug!("💓 Received heartbeat from {} seq {}",
+                                        heartbeat.masternode_address, heartbeat.sequence_number);
+                                    // TODO: Pass to attestation system
+                                    // attestation_system.receive_heartbeat(heartbeat).await;
+                                }
+                                NetworkMessage::HeartbeatAttestation(attestation) => {
+                                    tracing::debug!("✍️ Received attestation from {}", attestation.witness_address);
+                                    // TODO: Pass to attestation system
+                                    // attestation_system.add_attestation(attestation).await;
+                                }
                                 _ => {}
                             }
                         }

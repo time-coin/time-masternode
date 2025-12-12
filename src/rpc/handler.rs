@@ -139,10 +139,10 @@ impl RpcHandler {
                 // Calculate block hash
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
-                hasher.update(&block.header.height.to_le_bytes());
-                hasher.update(&block.header.previous_hash);
-                hasher.update(&block.header.merkle_root);
-                hasher.update(&block.header.timestamp.to_le_bytes());
+                hasher.update(block.header.height.to_le_bytes());
+                hasher.update(block.header.previous_hash);
+                hasher.update(block.header.merkle_root);
+                hasher.update(block.header.timestamp.to_le_bytes());
                 let block_hash: [u8; 32] = hasher.finalize().into();
 
                 Ok(json!({

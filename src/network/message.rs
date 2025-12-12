@@ -82,6 +82,9 @@ pub enum NetworkMessage {
     // Peer exchange
     GetPeers,
     PeersResponse(Vec<String>), // List of peer addresses (IP:port)
+    // Heartbeat attestation
+    HeartbeatBroadcast(crate::heartbeat_attestation::SignedHeartbeat),
+    HeartbeatAttestation(crate::heartbeat_attestation::WitnessAttestation),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
