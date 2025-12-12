@@ -51,7 +51,7 @@ impl Blockchain {
         self.network_type.genesis_timestamp()
     }
 
-    /// Initialize blockchain - load existing genesis or wait to sync from peers
+    /// Initialize blockchain - load existing genesis or create it
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
@@ -67,14 +67,23 @@ impl Blockchain {
             .contains_key("block_0".as_bytes())
             .map_err(|e| e.to_string())?
         {
-            *self.current_height.write().await = height;
-            tracing::info!("✓ Genesis block already exists (height: {})", height);
+            *self.current_height.write().await = 0;
+            tracing::info!("✓ Genesis block already exists");
             return Ok(());
         }
 
-        // No local genesis - node will sync from peers via catchup_blocks()
-        tracing::info!("⏳ No local genesis block - will sync from network peers");
-        tracing::info!("📡 Waiting for peer connections to download blockchain...");
+        // No local genesis - create it immediately
+        // (Don't wait for peers - there may not be any peers with the genesis yet)
+        tracing::info!("📦 Creating genesis block...");
+
+        let genesis = crate::block::genesis::GenesisBlock::for_network(self.network_type);
+
+        // Save genesis block
+        self.process_block_utxos(&genesis).await;
+        self.save_block(&genesis)?;
+        *self.current_height.write().await = 0;
+
+        tracing::info!("✅ Genesis block created (height: 0)");
 
         Ok(())
     }
@@ -146,27 +155,47 @@ impl Blockchain {
             expected - current
         );
 
-        // Wait a moment to see if P2P will sync from peers
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Wait longer for P2P peers to connect and sync
+        // Initial wait: 30 seconds for peer discovery and connections
+        tracing::info!("📡 Waiting for peer connections to sync blockchain...");
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
-        // Check again if peers synced us
-        let current_after_wait = *self.current_height.read().await;
+        // Check if peers synced us
+        let mut current_after_wait = *self.current_height.read().await;
         if current_after_wait >= expected {
             tracing::info!("✓ Synced from peers to height {}", current_after_wait);
             return Ok(());
         }
 
-        // Peers don't have the blocks either - generate them locally
-        let blocks_to_create = expected - current_after_wait;
-        if blocks_to_create > 100 {
-            tracing::warn!(
-                "⚠️  Need to catch up {} blocks - this may take a while",
-                blocks_to_create
+        // Still behind - check if we made any progress
+        if current_after_wait > current {
+            let progress = current_after_wait - current;
+            tracing::info!(
+                "📥 Synced {} blocks from peers, {} more to go. Waiting...",
+                progress,
+                expected - current_after_wait
             );
+
+            // Continue waiting for sync to complete
+            for _ in 0..6 {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                let height = *self.current_height.read().await;
+                if height >= expected {
+                    tracing::info!("✓ Sync complete at height {}", height);
+                    return Ok(());
+                }
+                if height > current_after_wait {
+                    tracing::info!("📥 Syncing... ({}/{})", height, expected);
+                    current_after_wait = height;
+                }
+            }
         }
 
-        tracing::info!(
-            "🏗️  Generating {} missing blocks locally (peers don't have them)",
+        // No peer sync progress - generate blocks locally as fallback
+        let blocks_to_create = expected - current_after_wait;
+
+        tracing::warn!(
+            "⚠️  Peers don't have blocks or aren't responding. Generating {} blocks locally.",
             blocks_to_create
         );
 

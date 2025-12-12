@@ -72,18 +72,16 @@ impl RpcHandler {
             "getrawmempool" => self.get_raw_mempool().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
             "getattestationstats" => self.get_attestation_stats().await,
-            "getheartbeathistory" => {
-                match params_array.first().and_then(|v| v.as_str()) {
-                    Some(address) => {
-                        let limit = params_array.get(1).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-                        self.get_heartbeat_history(address, limit).await
-                    }
-                    None => Err(RpcError {
-                        code: -32602,
-                        message: "address parameter required".to_string(),
-                    })
+            "getheartbeathistory" => match params_array.first().and_then(|v| v.as_str()) {
+                Some(address) => {
+                    let limit = params_array.get(1).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                    self.get_heartbeat_history(address, limit).await
                 }
-            }
+                None => Err(RpcError {
+                    code: -32602,
+                    message: "address parameter required".to_string(),
+                }),
+            },
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
