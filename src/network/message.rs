@@ -85,6 +85,26 @@ pub enum NetworkMessage {
     // Heartbeat attestation
     HeartbeatBroadcast(crate::heartbeat_attestation::SignedHeartbeat),
     HeartbeatAttestation(crate::heartbeat_attestation::WitnessAttestation),
+    // Fork resolution
+    GetBlockHash(u64),
+    BlockHashResponse {
+        height: u64,
+        hash: Option<[u8; 32]>,
+    },
+    ConsensusQuery {
+        height: u64,
+        block_hash: [u8; 32],
+    },
+    ConsensusQueryResponse {
+        agrees: bool,
+        height: u64,
+        their_hash: [u8; 32],
+    },
+    GetBlockRange {
+        start_height: u64,
+        end_height: u64,
+    },
+    BlockRangeResponse(Vec<Block>),
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

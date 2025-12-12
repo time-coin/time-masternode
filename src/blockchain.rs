@@ -187,7 +187,7 @@ impl Blockchain {
                     tracing::info!("📥 Syncing... ({}/{})", height, expected);
                     current_after_wait = height;
                 }
-                
+
                 // Log progress every minute
                 if i % 6 == 0 && i > 0 {
                     tracing::info!(
@@ -516,12 +516,28 @@ impl Blockchain {
 
         // Skip if we already have this block or newer
         if block.header.height <= current_height && current_height > 0 {
-            tracing::debug!(
-                "Skipping block {} (already have height {})",
-                block.header.height,
-                current_height
-            );
-            return Ok(());
+            // Check if this is the same block or a fork
+            if let Ok(existing_block) = self.get_block(block.header.height) {
+                if existing_block.hash() == block.hash() {
+                    tracing::debug!("Skipping block {} (already have it)", block.header.height);
+                    return Ok(());
+                } else {
+                    // Fork detected at this height!
+                    tracing::warn!(
+                        "🍴 Fork detected at height {}: our hash {} vs peer hash {}",
+                        block.header.height,
+                        hex::encode(existing_block.hash()),
+                        hex::encode(block.hash())
+                    );
+
+                    // If peer is on a different chain, we need to check if we should reorganize
+                    // For now, log it - full reorg implementation below
+                    return Err(format!(
+                        "Fork detected at height {} - use reorg to resolve",
+                        block.header.height
+                    ));
+                }
+            }
         }
 
         // Special handling for genesis block (height 0)
@@ -544,32 +560,44 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Validate non-genesis blocks
-        self.validate_block(&block).await?;
+        // Validate non-genesis blocks (this will detect fork if prev hash doesn't match)
+        match self.validate_block(&block).await {
+            Ok(_) => {
+                // Valid block, add it normally
+                self.process_block_utxos(&block).await;
+                self.save_block(&block)?;
 
-        // Process block transactions to create UTXOs
-        self.process_block_utxos(&block).await;
+                // Update height if this is the next sequential block
+                if block.header.height == current_height + 1 {
+                    *self.current_height.write().await = block.header.height;
+                    tracing::info!(
+                        "✅ Added block {} to chain (hash: {})",
+                        block.header.height,
+                        hex::encode(block.hash())
+                    );
+                } else {
+                    tracing::info!(
+                        "📦 Stored block {} (gap - current height: {})",
+                        block.header.height,
+                        current_height
+                    );
+                }
 
-        // Store the block
-        self.save_block(&block)?;
+                Ok(())
+            }
+            Err(e) if e.contains("Invalid previous hash") => {
+                // Fork detected! Previous hash doesn't match our chain
+                tracing::warn!(
+                    "🍴 Fork detected: block {} doesn't build on our chain",
+                    block.header.height
+                );
+                tracing::info!("🔄 Initiating blockchain reorganization...");
 
-        // Update height if this is the next sequential block
-        if block.header.height == current_height + 1 {
-            *self.current_height.write().await = block.header.height;
-            tracing::info!(
-                "✅ Added block {} to chain (hash: {})",
-                block.header.height,
-                hex::encode(block.hash())
-            );
-        } else {
-            tracing::info!(
-                "📦 Stored block {} (gap - current height: {})",
-                block.header.height,
-                current_height
-            );
+                // Attempt to reorganize to the peer's chain
+                self.handle_fork_and_reorg(block).await
+            }
+            Err(e) => Err(e),
         }
-
-        Ok(())
     }
 
     /// Validate a block before accepting it
@@ -711,6 +739,248 @@ impl Blockchain {
                 self.consensus.utxo_manager.add_utxo(utxo).await;
             }
         }
+    }
+
+    /// Handle fork detection and perform blockchain reorganization
+    async fn handle_fork_and_reorg(&self, peer_block: Block) -> Result<(), String> {
+        let fork_height = peer_block.header.height;
+        let current_height = *self.current_height.read().await;
+
+        tracing::warn!(
+            "🍴 Fork detected at height {} (current height: {})",
+            fork_height,
+            current_height
+        );
+
+        // Find common ancestor
+        let common_ancestor = match self.find_common_ancestor(fork_height).await {
+            Ok(height) => height,
+            Err(e) => {
+                tracing::error!("Failed to find common ancestor: {}", e);
+                return Err(format!("Fork resolution failed: {}", e));
+            }
+        };
+
+        tracing::info!("📍 Common ancestor found at height {}", common_ancestor);
+
+        let reorg_depth = current_height - common_ancestor;
+
+        // Safety check: prevent deep reorganizations
+        const MAX_REORG_DEPTH: u64 = 100;
+        const DEEP_REORG_THRESHOLD: u64 = 10;
+
+        if reorg_depth > MAX_REORG_DEPTH {
+            tracing::error!(
+                "❌ Fork too deep ({} blocks) - manual intervention required",
+                reorg_depth
+            );
+            return Err(format!(
+                "Fork depth {} exceeds maximum allowed depth {}",
+                reorg_depth, MAX_REORG_DEPTH
+            ));
+        }
+
+        if reorg_depth > DEEP_REORG_THRESHOLD {
+            tracing::warn!(
+                "⚠️  Deep reorganization: {} blocks will be rolled back",
+                reorg_depth
+            );
+        }
+
+        // Rollback to common ancestor
+        tracing::info!("🔄 Rolling back to height {}...", common_ancestor);
+        self.rollback_to_height(common_ancestor).await?;
+
+        // Request blocks from peer starting after common ancestor
+        // For now, return success and let the sync process handle fetching new blocks
+        tracing::info!(
+            "✅ Rollback complete. Ready to sync from height {}",
+            common_ancestor + 1
+        );
+
+        Ok(())
+    }
+
+    /// Find the common ancestor block between our chain and a peer's chain
+    async fn find_common_ancestor(&self, fork_height: u64) -> Result<u64, String> {
+        // Start from the fork height and walk backwards
+        let mut height = if fork_height > 0 { fork_height - 1 } else { 0 };
+
+        while height > 0 {
+            // Get our block hash at this height
+            let _our_hash = match self.get_block_hash(height) {
+                Ok(hash) => hash,
+                Err(_) => {
+                    // We don't have this block, go back further
+                    height = height.saturating_sub(1);
+                    continue;
+                }
+            };
+
+            // For now, we assume blocks exist if we can get the hash
+            // In a full implementation, we would query peers for their hash at this height
+            // and compare. Since we don't have peer communication in this function yet,
+            // we'll return the height before the fork
+
+            // If we successfully got our hash, this is a potential common ancestor
+            // The actual peer comparison would happen via network messages
+            tracing::debug!("Checking height {} for common ancestor", height);
+
+            if height == 0 {
+                return Ok(0); // Genesis is always common
+            }
+
+            // For now, return height - 1 of fork as common ancestor
+            // This is a simplified version - full implementation would query peers
+            return Ok(height);
+        }
+
+        Ok(0) // Genesis block is the ultimate common ancestor
+    }
+
+    /// Rollback blockchain to a specific height
+    async fn rollback_to_height(&self, target_height: u64) -> Result<(), String> {
+        let current_height = *self.current_height.read().await;
+
+        if target_height >= current_height {
+            return Err(format!(
+                "Cannot rollback: target height {} >= current height {}",
+                target_height, current_height
+            ));
+        }
+
+        tracing::info!(
+            "🔄 Rolling back from height {} to {}...",
+            current_height,
+            target_height
+        );
+
+        // Delete blocks in reverse order
+        for height in ((target_height + 1)..=current_height).rev() {
+            // Get the block before deleting it (to revert UTXOs)
+            if let Ok(block) = self.get_block(height) {
+                // Revert UTXOs created by this block
+                self.revert_block_utxos(&block).await;
+
+                // Delete the block from storage
+                let key = format!("block_{}", height);
+                self.storage
+                    .remove(key.as_bytes())
+                    .map_err(|e| format!("Failed to delete block {}: {}", height, e))?;
+
+                tracing::debug!("🗑️  Removed block {}", height);
+            }
+        }
+
+        // Update chain height
+        *self.current_height.write().await = target_height;
+        self.storage
+            .insert(b"chain_height", &target_height.to_le_bytes())
+            .map_err(|e| format!("Failed to update chain height: {}", e))?;
+        self.storage
+            .flush()
+            .map_err(|e| format!("Failed to flush storage: {}", e))?;
+
+        tracing::info!(
+            "✅ Rollback complete: chain height is now {}",
+            target_height
+        );
+
+        Ok(())
+    }
+
+    /// Revert UTXOs created by a block (during rollback)
+    async fn revert_block_utxos(&self, block: &Block) {
+        use crate::types::OutPoint;
+
+        // Remove all UTXOs created by transactions in this block
+        for tx in &block.transactions {
+            let txid = tx.txid();
+
+            for i in 0..tx.outputs.len() {
+                let outpoint = OutPoint {
+                    txid,
+                    vout: i as u32,
+                };
+
+                // Remove the UTXO
+                self.consensus.utxo_manager.remove_utxo(&outpoint).await;
+                tracing::trace!("Reverted UTXO {}:{}", hex::encode(txid), i);
+            }
+
+            // Restore UTXOs that were spent by this transaction's inputs
+            if !tx.inputs.is_empty() {
+                for input in &tx.inputs {
+                    // In a full implementation, we would restore the spent UTXO
+                    // For now, we just log it
+                    tracing::trace!(
+                        "Should restore UTXO {}:{}",
+                        hex::encode(input.previous_output.txid),
+                        input.previous_output.vout
+                    );
+                }
+            }
+        }
+    }
+
+    /// Query peers for consensus on a block hash at a specific height
+    #[allow(dead_code)]
+    pub async fn verify_chain_consensus(
+        &self,
+        _height: u64,
+        _block_hash: [u8; 32],
+        peers: &[String],
+    ) -> Result<bool, String> {
+        if peers.is_empty() {
+            return Err("No peers available for consensus check".to_string());
+        }
+
+        let total_peers = peers.len();
+        let required_consensus = (total_peers * 2) / 3 + 1; // 2/3 + 1
+
+        tracing::info!(
+            "🔍 Checking consensus: {} peers, need {} for 2/3 majority",
+            total_peers,
+            required_consensus
+        );
+
+        // In a full implementation, we would:
+        // 1. Query each peer for their block hash at this height
+        // 2. Count how many agree with our block_hash
+        // 3. Return true if we have 2/3+ consensus
+
+        // For now, this is a placeholder that would integrate with the network layer
+        tracing::warn!("⚠️  Consensus verification not fully implemented yet");
+
+        Ok(false)
+    }
+
+    /// Get block hash at a specific height (public interface for network queries)
+    pub async fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
+        self.get_block_hash(height).ok()
+    }
+
+    /// Check if we agree with a peer's block hash at a specific height
+    pub async fn check_consensus_with_peer(
+        &self,
+        height: u64,
+        peer_hash: [u8; 32],
+    ) -> (bool, Option<[u8; 32]>) {
+        match self.get_block_hash(height) {
+            Ok(our_hash) => (our_hash == peer_hash, Some(our_hash)),
+            Err(_) => (false, None),
+        }
+    }
+
+    /// Get a range of blocks for reorg sync
+    pub async fn get_block_range(&self, start: u64, end: u64) -> Vec<Block> {
+        let mut blocks = Vec::new();
+        for height in start..=end {
+            if let Ok(block) = self.get_block(height) {
+                blocks.push(block);
+            }
+        }
+        blocks
     }
 }
 

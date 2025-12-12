@@ -43,6 +43,11 @@ impl UTXOStateManager {
             .insert(outpoint, UTXOState::Unspent);
     }
 
+    pub async fn remove_utxo(&self, outpoint: &OutPoint) {
+        let _ = self.storage.remove_utxo(outpoint).await;
+        self.utxo_states.write().await.remove(outpoint);
+    }
+
     #[allow(dead_code)]
     pub async fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
         let mut states = self.utxo_states.write().await;

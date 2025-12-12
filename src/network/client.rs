@@ -617,6 +617,34 @@ async fn maintain_peer_connection(
                                         tracing::warn!("Failed to add attestation: {}", e);
                                     }
                                 }
+                                NetworkMessage::BlockHashResponse { height, hash } => {
+                                    tracing::debug!("📥 Received BlockHashResponse for height {}", height);
+                                    // Fork resolution logic would use this
+                                    if let Some(our_hash) = blockchain.get_block_hash_at_height(height).await {
+                                        if let Some(peer_hash) = hash {
+                                            if our_hash != peer_hash {
+                                                tracing::warn!("🍴 Fork detected at height {}: our hash {} vs peer hash {}",
+                                                    height, hex::encode(our_hash), hex::encode(peer_hash));
+                                            }
+                                        }
+                                    }
+                                }
+                                NetworkMessage::ConsensusQueryResponse { agrees, height, their_hash } => {
+                                    tracing::debug!("📥 Received ConsensusQueryResponse for height {}: agrees={}", height, agrees);
+                                    if !agrees {
+                                        tracing::warn!("⚠️ Peer disagrees on block hash at height {}", height);
+                                        tracing::debug!("Peer's hash: {}", hex::encode(their_hash));
+                                    }
+                                }
+                                NetworkMessage::BlockRangeResponse(blocks) => {
+                                    tracing::info!("📦 Received block range: {} blocks from peer", blocks.len());
+                                    // Process blocks for reorg
+                                    for block in blocks {
+                                        if let Err(e) = blockchain.add_block(block).await {
+                                            tracing::warn!("Failed to add block from range: {}", e);
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }

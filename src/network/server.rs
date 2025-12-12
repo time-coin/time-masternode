@@ -459,6 +459,44 @@ async fn handle_peer(
                                         }
                                     }
                                 }
+                                NetworkMessage::GetBlockHash(height) => {
+                                    tracing::debug!("📥 Received GetBlockHash({}) from {}", height, peer.addr);
+                                    let hash = blockchain.get_block_hash_at_height(*height).await;
+                                    let reply = NetworkMessage::BlockHashResponse {
+                                        height: *height,
+                                        hash,
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                    }
+                                }
+                                NetworkMessage::ConsensusQuery { height, block_hash } => {
+                                    tracing::debug!("📥 Received ConsensusQuery for height {} from {}", height, peer.addr);
+                                    let (agrees, our_hash) = blockchain.check_consensus_with_peer(*height, *block_hash).await;
+                                    let reply = NetworkMessage::ConsensusQueryResponse {
+                                        agrees,
+                                        height: *height,
+                                        their_hash: our_hash.unwrap_or([0u8; 32]),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                    }
+                                }
+                                NetworkMessage::GetBlockRange { start_height, end_height } => {
+                                    tracing::debug!("📥 Received GetBlockRange({}-{}) from {}", start_height, end_height, peer.addr);
+                                    let blocks = blockchain.get_block_range(*start_height, *end_height).await;
+                                    let reply = NetworkMessage::BlockRangeResponse(blocks);
+                                    if let Ok(json) = serde_json::to_string(&reply) {
+                                        let _ = writer.write_all(json.as_bytes()).await;
+                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.flush().await;
+                                        tracing::debug!("📤 Sent block range to {}", peer.addr);
+                                    }
+                                }
                                 _ => {}
                             }
                         } else {
