@@ -303,6 +303,7 @@ async fn main() {
         peer_manager.clone(),
         registry.clone(),
         blockchain.clone(),
+        network_type,
     );
     network_client.start().await;
 

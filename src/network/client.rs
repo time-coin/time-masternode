@@ -3,6 +3,7 @@ use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
 use crate::peer_manager::PeerManager;
+use crate::NetworkType;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::time::{sleep, Duration};
@@ -12,6 +13,7 @@ pub struct NetworkClient {
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
     connection_manager: Arc<ConnectionManager>,
+    p2p_port: u16,
 }
 
 impl NetworkClient {
@@ -19,12 +21,14 @@ impl NetworkClient {
         peer_manager: Arc<PeerManager>,
         masternode_registry: Arc<MasternodeRegistry>,
         blockchain: Arc<Blockchain>,
+        network_type: NetworkType,
     ) -> Self {
         Self {
             peer_manager,
             masternode_registry,
             blockchain,
             connection_manager: Arc::new(ConnectionManager::new()),
+            p2p_port: network_type.default_p2p_port(),
         }
     }
 
@@ -34,16 +38,16 @@ impl NetworkClient {
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
         let connection_manager = self.connection_manager.clone();
+        let p2p_port = self.p2p_port;
 
         tokio::spawn(async move {
-            // Get initial list of known peers ONCE
+            // Initial peer connection
             let peers = peer_manager.get_all_peers().await;
-
             tracing::info!("🔌 Starting peer connections to {} peer(s)", peers.len());
 
-            // Connect to each peer (one connection task per peer, never duplicated)
-            for peer_addr in peers.iter().take(6) {
-                // Extract IP from address
+            // Connect to initial peers
+            for peer_addr in peers.iter().take(10) {
+                // Increased from 6 to 10
                 let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
                     &peer_addr[..colon_pos]
                 } else {
@@ -52,35 +56,39 @@ impl NetworkClient {
 
                 tracing::info!("🔗 Initiating connection to peer: {}", ip);
 
-                // Skip if already connected/connecting
                 if connection_manager.is_connected(ip).await {
                     tracing::debug!("Already connected to {}", ip);
                     continue;
                 }
 
-                // Mark as connecting
                 if !connection_manager.mark_connecting(ip).await {
-                    continue; // Already connecting
+                    continue;
                 }
 
                 let cm = connection_manager.clone();
                 let mr = masternode_registry.clone();
                 let bc = blockchain.clone();
                 let ip_str = ip.to_string();
+                let port = p2p_port;
 
-                // Spawn ONE persistent connection task per peer
                 tokio::spawn(async move {
                     let mut retry_delay = 5;
                     let mut consecutive_failures = 0;
 
                     loop {
-                        match maintain_peer_connection(&ip_str, cm.clone(), mr.clone(), bc.clone())
-                            .await
+                        match maintain_peer_connection(
+                            &ip_str,
+                            port,
+                            cm.clone(),
+                            mr.clone(),
+                            bc.clone(),
+                        )
+                        .await
                         {
                             Ok(_) => {
                                 tracing::info!("Connection to {} ended gracefully", ip_str);
                                 consecutive_failures = 0;
-                                retry_delay = 5; // Reset delay on graceful disconnect
+                                retry_delay = 5;
                             }
                             Err(e) => {
                                 consecutive_failures += 1;
@@ -91,7 +99,6 @@ impl NetworkClient {
                                     e
                                 );
 
-                                // Stop trying after 10 consecutive failures
                                 if consecutive_failures >= 10 {
                                     tracing::error!(
                                         "Giving up on {} after 10 failed attempts",
@@ -100,28 +107,94 @@ impl NetworkClient {
                                     break;
                                 }
 
-                                // Exponential backoff up to 5 minutes
                                 retry_delay = (retry_delay * 2).min(300);
                             }
                         }
 
-                        // Mark as disconnected
                         cm.mark_disconnected(&ip_str).await;
-
-                        // Wait before reconnecting
                         tracing::info!("Reconnecting to {} in {}s...", ip_str, retry_delay);
                         sleep(Duration::from_secs(retry_delay)).await;
-
-                        // Mark as connecting again
                         cm.mark_connecting(&ip_str).await;
                     }
 
-                    // Final cleanup
                     cm.mark_disconnected(&ip_str).await;
                 });
 
-                // Small delay between initial connection attempts
                 sleep(Duration::from_millis(100)).await;
+            }
+
+            // Periodic peer discovery - check for new peers every 2 minutes
+            let peer_discovery_interval = Duration::from_secs(120);
+            loop {
+                sleep(peer_discovery_interval).await;
+
+                let current_peers = peer_manager.get_all_peers().await;
+                tracing::debug!(
+                    "🔍 Checking for new peers... ({} known)",
+                    current_peers.len()
+                );
+
+                for peer_addr in current_peers.iter().take(10) {
+                    let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
+                        &peer_addr[..colon_pos]
+                    } else {
+                        continue;
+                    };
+
+                    // Skip if already connected or connecting
+                    if connection_manager.is_connected(ip).await {
+                        continue;
+                    }
+
+                    if !connection_manager.mark_connecting(ip).await {
+                        continue;
+                    }
+
+                    tracing::info!("🔗 Discovered new peer, connecting to: {}", ip);
+
+                    let cm = connection_manager.clone();
+                    let mr = masternode_registry.clone();
+                    let bc = blockchain.clone();
+                    let ip_str = ip.to_string();
+                    let port = p2p_port;
+
+                    tokio::spawn(async move {
+                        let mut retry_delay = 5;
+                        let mut consecutive_failures = 0;
+
+                        loop {
+                            match maintain_peer_connection(
+                                &ip_str,
+                                port,
+                                cm.clone(),
+                                mr.clone(),
+                                bc.clone(),
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    consecutive_failures = 0;
+                                    retry_delay = 5;
+                                }
+                                Err(e) => {
+                                    consecutive_failures += 1;
+                                    if consecutive_failures >= 10 {
+                                        break;
+                                    }
+                                    retry_delay = (retry_delay * 2).min(300);
+                                }
+                            }
+
+                            cm.mark_disconnected(&ip_str).await;
+                            sleep(Duration::from_secs(retry_delay)).await;
+                            cm.mark_connecting(&ip_str).await;
+                        }
+
+                        cm.mark_disconnected(&ip_str).await;
+                    });
+
+                    sleep(Duration::from_millis(100)).await;
+                }
             }
         });
     }
@@ -130,12 +203,13 @@ impl NetworkClient {
 /// Maintain a persistent connection to a peer
 async fn maintain_peer_connection(
     ip: &str,
+    port: u16,
     connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
-    let addr = format!("{}:24100", ip);
+    let addr = format!("{}:{}", ip, port);
     let stream = tokio::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
