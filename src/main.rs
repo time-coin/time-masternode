@@ -294,6 +294,9 @@ async fn main() {
         network_type,
     ));
 
+    // Set peer manager for fork consensus verification
+    blockchain.set_peer_manager(peer_manager.clone()).await;
+
     println!("✓ Blockchain initialized");
     println!();
 
