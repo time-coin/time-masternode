@@ -1129,14 +1129,27 @@ impl Blockchain {
 
         // Only rollback if we're ahead of the common ancestor
         if current_height > common_ancestor {
-            tracing::info!("🔄 Rolling back from {} to {}...", current_height, common_ancestor);
+            tracing::info!(
+                "🔄 Rolling back from {} to {}...",
+                current_height,
+                common_ancestor
+            );
             self.rollback_to_height(common_ancestor).await?;
-            tracing::info!("✅ Rollback complete. Ready to sync from height {}", common_ancestor + 1);
+            tracing::info!(
+                "✅ Rollback complete. Ready to sync from height {}",
+                common_ancestor + 1
+            );
         } else if current_height == common_ancestor {
-            tracing::info!("✅ Already at common ancestor (height {}). No rollback needed.", common_ancestor);
+            tracing::info!(
+                "✅ Already at common ancestor (height {}). No rollback needed.",
+                common_ancestor
+            );
         } else {
-            tracing::warn!("⚠️  Current height {} is below common ancestor {}. This shouldn't happen.", 
-                current_height, common_ancestor);
+            tracing::warn!(
+                "⚠️  Current height {} is below common ancestor {}. This shouldn't happen.",
+                current_height,
+                common_ancestor
+            );
         }
 
         // Request blocks from peer starting after common ancestor
