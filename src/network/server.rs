@@ -437,6 +437,16 @@ async fn handle_peer(
             result = notifier.recv() => {
                 match result {
                     Ok(msg) => {
+                        // Log what we're broadcasting
+                        match &msg {
+                            NetworkMessage::BlockAnnouncement(block) => {
+                                tracing::info!("📤 Sending block {} to peer {}", block.header.height, peer.addr);
+                            }
+                            _ => {
+                                tracing::debug!("📤 Sending message to peer {}", peer.addr);
+                            }
+                        }
+
                         if let Ok(json) = serde_json::to_string(&msg) {
                             let _ = writer.write_all(json.as_bytes()).await;
                             let _ = writer.write_all(b"\n").await;
