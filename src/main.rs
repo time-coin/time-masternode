@@ -302,6 +302,7 @@ async fn main() {
         peer_manager.clone(),
         registry.clone(),
         blockchain.clone(),
+        attestation_system.clone(),
         network_type,
     );
     network_client.start().await;
@@ -356,8 +357,8 @@ async fn main() {
                             "💓 Created signed heartbeat seq {}",
                             heartbeat.sequence_number
                         );
-                        // TODO: Broadcast via network
-                        // network_client.broadcast(NetworkMessage::HeartbeatBroadcast(heartbeat)).await;
+                        // Broadcast to network
+                        registry_clone.broadcast_heartbeat(heartbeat).await;
                     }
                     Err(e) => {
                         tracing::warn!("❌ Failed to create attestable heartbeat: {}", e);

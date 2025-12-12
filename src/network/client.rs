@@ -1,4 +1,5 @@
 use crate::blockchain::Blockchain;
+use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
@@ -12,6 +13,7 @@ pub struct NetworkClient {
     peer_manager: Arc<PeerManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
+    attestation_system: Arc<HeartbeatAttestationSystem>,
     connection_manager: Arc<ConnectionManager>,
     p2p_port: u16,
 }
@@ -21,12 +23,14 @@ impl NetworkClient {
         peer_manager: Arc<PeerManager>,
         masternode_registry: Arc<MasternodeRegistry>,
         blockchain: Arc<Blockchain>,
+        attestation_system: Arc<HeartbeatAttestationSystem>,
         network_type: NetworkType,
     ) -> Self {
         Self {
             peer_manager,
             masternode_registry,
             blockchain,
+            attestation_system,
             connection_manager: Arc::new(ConnectionManager::new()),
             p2p_port: network_type.default_p2p_port(),
         }
@@ -37,6 +41,7 @@ impl NetworkClient {
         let peer_manager = self.peer_manager.clone();
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
+        let attestation_system = self.attestation_system.clone();
         let connection_manager = self.connection_manager.clone();
         let p2p_port = self.p2p_port;
 
@@ -68,6 +73,7 @@ impl NetworkClient {
                 let cm = connection_manager.clone();
                 let mr = masternode_registry.clone();
                 let bc = blockchain.clone();
+                let attestation = attestation_system.clone();
                 let ip_str = ip.to_string();
                 let port = p2p_port;
 
@@ -82,6 +88,7 @@ impl NetworkClient {
                             cm.clone(),
                             mr.clone(),
                             bc.clone(),
+                            attestation.clone(),
                         )
                         .await
                         {
@@ -155,6 +162,7 @@ impl NetworkClient {
                     let cm = connection_manager.clone();
                     let mr = masternode_registry.clone();
                     let bc = blockchain.clone();
+                    let attestation_system = attestation_system.clone();
                     let ip_str = ip.to_string();
                     let port = p2p_port;
 
@@ -169,6 +177,7 @@ impl NetworkClient {
                                 cm.clone(),
                                 mr.clone(),
                                 bc.clone(),
+                                attestation_system.clone(),
                             )
                             .await
                             {
@@ -207,6 +216,7 @@ async fn maintain_peer_connection(
     connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
+    attestation_system: Arc<HeartbeatAttestationSystem>,
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
@@ -581,13 +591,31 @@ async fn maintain_peer_connection(
                                 NetworkMessage::HeartbeatBroadcast(heartbeat) => {
                                     tracing::debug!("💓 Received heartbeat from {} seq {}",
                                         heartbeat.masternode_address, heartbeat.sequence_number);
-                                    // TODO: Pass to attestation system
-                                    // attestation_system.receive_heartbeat(heartbeat).await;
+
+                                    // Process heartbeat and create attestation if we're a masternode
+                                    match attestation_system.receive_heartbeat(heartbeat.clone()).await {
+                                        Ok(Some(attestation)) => {
+                                            // We created an attestation, broadcast it back
+                                            tracing::debug!("✍️ Broadcasting our attestation");
+                                            // Forward to masternode registry for broadcast
+                                            masternode_registry.broadcast_attestation(attestation).await;
+                                        }
+                                        Ok(None) => {
+                                            tracing::debug!("✓ Processed heartbeat (no attestation needed)");
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to process heartbeat: {}", e);
+                                        }
+                                    }
                                 }
                                 NetworkMessage::HeartbeatAttestation(attestation) => {
-                                    tracing::debug!("✍️ Received attestation from {}", attestation.witness_address);
-                                    // TODO: Pass to attestation system
-                                    // attestation_system.add_attestation(attestation).await;
+                                    tracing::debug!("✍️ Received attestation from {} for heartbeat {}",
+                                        attestation.witness_address,
+                                        hex::encode(&attestation.heartbeat_hash[..8]));
+
+                                    if let Err(e) = attestation_system.add_attestation(attestation).await {
+                                        tracing::warn!("Failed to add attestation: {}", e);
+                                    }
                                 }
                                 _ => {}
                             }

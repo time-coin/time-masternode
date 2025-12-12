@@ -246,7 +246,11 @@ impl HeartbeatAttestationSystem {
     }
 
     /// Receive and validate a heartbeat from another masternode
-    pub async fn receive_heartbeat(&self, heartbeat: SignedHeartbeat) -> Result<(), String> {
+    /// Returns an attestation if we're a masternode and successfully validated
+    pub async fn receive_heartbeat(
+        &self,
+        heartbeat: SignedHeartbeat,
+    ) -> Result<Option<WitnessAttestation>, String> {
         // Basic validation
         if !heartbeat.verify() {
             return Err("Invalid heartbeat signature".to_string());
@@ -272,11 +276,11 @@ impl HeartbeatAttestationSystem {
         drop(sequences);
 
         // Create attestation if we're a masternode
-        if let Some(signing_key) = self.local_signing_key.read().await.as_ref() {
+        let attestation = if let Some(signing_key) = self.local_signing_key.read().await.as_ref() {
             if let Some(local_addr) = self.local_address.read().await.as_ref() {
                 // Don't attest our own heartbeats
                 if local_addr != &heartbeat.masternode_address {
-                    let _attestation =
+                    let attestation =
                         WitnessAttestation::new(&heartbeat, local_addr.clone(), signing_key);
 
                     debug!(
@@ -284,11 +288,16 @@ impl HeartbeatAttestationSystem {
                         heartbeat.masternode_address, heartbeat.sequence_number
                     );
 
-                    // Store and return attestation to be broadcast
-                    // (In full implementation, this would return the attestation to send back)
+                    Some(attestation)
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         // Store heartbeat (initially with no attestations)
         let mut history = self.heartbeat_history.write().await;
@@ -296,7 +305,7 @@ impl HeartbeatAttestationSystem {
         // Check if we already have this heartbeat
         let hb_hash = heartbeat.hash();
         if history.iter().any(|h| h.heartbeat.hash() == hb_hash) {
-            return Ok(()); // Already have it
+            return Ok(attestation); // Already have it, but return attestation
         }
 
         history.push_back(AttestedHeartbeat {
@@ -310,7 +319,7 @@ impl HeartbeatAttestationSystem {
             history.pop_front();
         }
 
-        Ok(())
+        Ok(attestation)
     }
 
     /// Add a witness attestation to an existing heartbeat

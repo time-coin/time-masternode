@@ -389,6 +389,44 @@ impl MasternodeRegistry {
             tracing::warn!("⚠️  Cannot broadcast block - no broadcast channel set");
         }
     }
+
+    pub async fn broadcast_heartbeat(
+        &self,
+        heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
+    ) {
+        use crate::network::message::NetworkMessage;
+
+        if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
+            let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
+            match tx.send(msg) {
+                Ok(receivers) => {
+                    tracing::debug!("📡 Broadcast heartbeat to {} peer(s)", receivers);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to broadcast heartbeat: {}", e);
+                }
+            }
+        }
+    }
+
+    pub async fn broadcast_attestation(
+        &self,
+        attestation: crate::heartbeat_attestation::WitnessAttestation,
+    ) {
+        use crate::network::message::NetworkMessage;
+
+        if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
+            let msg = NetworkMessage::HeartbeatAttestation(attestation);
+            match tx.send(msg) {
+                Ok(_) => {
+                    tracing::debug!("📡 Broadcast attestation");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to broadcast attestation: {}", e);
+                }
+            }
+        }
+    }
 }
 
 impl Clone for MasternodeRegistry {
