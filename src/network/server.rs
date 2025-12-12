@@ -101,6 +101,7 @@ impl NetworkServer {
             let mn_registry = self.masternode_registry.clone();
             let blockchain = self.blockchain.clone();
             let peer_mgr = self.peer_manager.clone();
+            let broadcast_tx = self.tx_notifier.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -116,6 +117,7 @@ impl NetworkServer {
                     mn_registry,
                     blockchain,
                     peer_mgr,
+                    broadcast_tx,
                 )
                 .await;
             });
@@ -156,6 +158,7 @@ async fn handle_peer(
     masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
     peer_manager: Arc<crate::peer_manager::PeerManager>,
+    broadcast_tx: broadcast::Sender<NetworkMessage>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -406,8 +409,26 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::BlockAnnouncement(block) => {
                                     tracing::info!("📥 Received block {} announcement from {}", block.header.height, peer.addr);
-                                    if let Err(e) = blockchain.add_block(block.clone()).await {
-                                        tracing::warn!("Failed to add announced block: {}", e);
+
+                                    // Add block to our blockchain
+                                    match blockchain.add_block(block.clone()).await {
+                                        Ok(()) => {
+                                            tracing::info!("✅ Added block {} from {}", block.header.height, peer.addr);
+
+                                            // GOSSIP: Relay to all other connected peers
+                                            let msg = NetworkMessage::BlockAnnouncement(block.clone());
+                                            match broadcast_tx.send(msg) {
+                                                Ok(receivers) => {
+                                                    tracing::info!("🔄 Gossiped block {} to {} other peer(s)", block.header.height, receivers.saturating_sub(1));
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to gossip block: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to add announced block: {}", e);
+                                        }
                                     }
                                 }
                                 _ => {}
