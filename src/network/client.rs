@@ -176,7 +176,7 @@ impl NetworkClient {
                                     consecutive_failures = 0;
                                     retry_delay = 5;
                                 }
-                                Err(e) => {
+                                Err(_e) => {
                                     consecutive_failures += 1;
                                     if consecutive_failures >= 10 {
                                         break;
