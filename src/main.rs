@@ -606,6 +606,7 @@ async fn main() {
             rpc_network,
             rpc_registry,
             rpc_blockchain,
+            attestation_system.clone(),
         )
         .await
         {

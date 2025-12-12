@@ -1,5 +1,6 @@
 use super::handler::RpcHandler;
 use crate::consensus::ConsensusEngine;
+use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
@@ -46,6 +47,7 @@ impl RpcServer {
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
+        attestation_system: Arc<HeartbeatAttestationSystem>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
         let handler = Arc::new(RpcHandler::new(
@@ -54,6 +56,7 @@ impl RpcServer {
             network,
             registry,
             blockchain,
+            attestation_system,
         ));
 
         Ok(Self { listener, handler })

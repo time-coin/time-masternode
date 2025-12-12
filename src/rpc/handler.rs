@@ -1,5 +1,6 @@
 use super::server::{RpcError, RpcRequest, RpcResponse};
 use crate::consensus::ConsensusEngine;
+use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::types::Transaction;
 use crate::utxo_manager::UTXOStateManager;
@@ -14,6 +15,7 @@ pub struct RpcHandler {
     utxo_manager: Arc<UTXOStateManager>,
     registry: Arc<MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
+    attestation_system: Arc<HeartbeatAttestationSystem>,
     start_time: SystemTime,
     network: NetworkType,
     mempool: Arc<tokio::sync::RwLock<HashMap<[u8; 32], Transaction>>>,
@@ -26,12 +28,14 @@ impl RpcHandler {
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
+        attestation_system: Arc<HeartbeatAttestationSystem>,
     ) -> Self {
         Self {
             consensus,
             utxo_manager,
             registry,
             blockchain,
+            attestation_system,
             start_time: SystemTime::now(),
             network,
             mempool: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -67,6 +71,19 @@ impl RpcHandler {
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
+            "getattestationstats" => self.get_attestation_stats().await,
+            "getheartbeathistory" => {
+                match params_array.first().and_then(|v| v.as_str()) {
+                    Some(address) => {
+                        let limit = params_array.get(1).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                        self.get_heartbeat_history(address, limit).await
+                    }
+                    None => Err(RpcError {
+                        code: -32602,
+                        message: "address parameter required".to_string(),
+                    })
+                }
+            }
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -591,5 +608,52 @@ impl RpcHandler {
                 message: format!("Transaction rejected: {}", e),
             }),
         }
+    }
+
+    async fn get_attestation_stats(&self) -> Result<Value, RpcError> {
+        let stats = self.attestation_system.get_stats().await;
+
+        Ok(json!({
+            "total_heartbeats": stats.total_heartbeats,
+            "verified_heartbeats": stats.verified_heartbeats,
+            "pending_heartbeats": stats.pending_heartbeats,
+            "unique_masternodes": stats.unique_masternodes,
+            "total_verified_count": stats.total_verified_count,
+            "verification_rate": if stats.total_heartbeats > 0 {
+                (stats.verified_heartbeats as f64 / stats.total_heartbeats as f64) * 100.0
+            } else {
+                0.0
+            }
+        }))
+    }
+
+    async fn get_heartbeat_history(&self, address: &str, limit: usize) -> Result<Value, RpcError> {
+        let history = self
+            .attestation_system
+            .get_heartbeat_history(address, limit)
+            .await;
+        let verified_count = self
+            .attestation_system
+            .get_verified_heartbeats(address)
+            .await;
+        let latest_seq = self.attestation_system.get_latest_sequence(address).await;
+
+        let heartbeats: Vec<Value> = history.iter().map(|h| {
+            json!({
+                "sequence": h.heartbeat.sequence_number,
+                "timestamp": h.heartbeat.timestamp,
+                "verified": h.is_verified(),
+                "witness_count": h.attestations.len(),
+                "unique_witnesses": h.unique_witnesses(),
+                "witnesses": h.attestations.iter().map(|a| &a.witness_address).collect::<Vec<_>>()
+            })
+        }).collect();
+
+        Ok(json!({
+            "address": address,
+            "total_verified_heartbeats": verified_count,
+            "latest_sequence": latest_seq,
+            "recent_heartbeats": heartbeats
+        }))
     }
 }
