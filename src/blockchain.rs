@@ -1,6 +1,7 @@
 use crate::block::types::{Block, BlockHeader};
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
+use crate::network::message::NetworkMessage;
 use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
@@ -1164,39 +1165,161 @@ impl Blockchain {
 
     /// Find the common ancestor block between our chain and a peer's chain
     async fn find_common_ancestor(&self, fork_height: u64) -> Result<u64, String> {
+        // Get peer manager for querying peers
+        let peer_manager = self.peer_manager.read().await;
+        let peer_manager = match peer_manager.as_ref() {
+            Some(pm) => pm.clone(),
+            None => {
+                tracing::warn!("No peer manager - cannot query peers for common ancestor");
+                // Fallback: return fork_height - 1
+                return Ok(if fork_height > 0 { fork_height - 1 } else { 0 });
+            }
+        };
+        drop(peer_manager); // Release lock
+
         // Start from the fork height and walk backwards
         let mut height = if fork_height > 0 { fork_height - 1 } else { 0 };
 
         while height > 0 {
             // Get our block hash at this height
-            let _our_hash = match self.get_block_hash(height) {
+            let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,
                 Err(_) => {
                     // We don't have this block, go back further
+                    tracing::debug!("We don't have block at height {} - going back", height);
                     height = height.saturating_sub(1);
                     continue;
                 }
             };
 
-            // For now, we assume blocks exist if we can get the hash
-            // In a full implementation, we would query peers for their hash at this height
-            // and compare. Since we don't have peer communication in this function yet,
-            // we'll return the height before the fork
-
-            // If we successfully got our hash, this is a potential common ancestor
-            // The actual peer comparison would happen via network messages
-            tracing::debug!("Checking height {} for common ancestor", height);
-
             if height == 0 {
                 return Ok(0); // Genesis is always common
             }
 
-            // For now, return height - 1 of fork as common ancestor
-            // This is a simplified version - full implementation would query peers
-            return Ok(height);
+            // Query peers to see if they have the same hash at this height
+            tracing::debug!(
+                "Checking height {} for common ancestor (our hash: {:x?})",
+                height,
+                &our_hash[..8]
+            );
+
+            // Get peers to query
+            let pm_lock = self.peer_manager.read().await;
+            let peers = if let Some(pm) = pm_lock.as_ref() {
+                pm.get_all_peers().await
+            } else {
+                Vec::new()
+            };
+            drop(pm_lock);
+
+            if peers.is_empty() {
+                tracing::warn!("No peers available to verify common ancestor");
+                // Fallback: assume this is common ancestor
+                return Ok(height);
+            }
+
+            // Query up to 3 peers for their block hash at this height
+            let mut peers_agree = 0;
+            let peers_to_query = peers.iter().take(3);
+
+            for peer_addr in peers_to_query {
+                // Query peer for block hash at this height
+                match self.query_peer_block_hash(peer_addr, height).await {
+                    Ok(Some(peer_hash)) => {
+                        if peer_hash == our_hash {
+                            peers_agree += 1;
+                            tracing::debug!("Peer {} agrees on block {} hash", peer_addr, height);
+                        } else {
+                            tracing::debug!(
+                                "Peer {} has different hash at height {} (peer: {:x?})",
+                                peer_addr,
+                                height,
+                                &peer_hash[..8]
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            "Peer {} doesn't have block at height {}",
+                            peer_addr,
+                            height
+                        );
+                    }
+                    Err(e) => {
+                        tracing::debug!("Failed to query peer {}: {}", peer_addr, e);
+                    }
+                }
+            }
+
+            // If at least one peer agrees, this is likely the common ancestor
+            if peers_agree > 0 {
+                tracing::info!(
+                    "✅ Found common ancestor at height {} ({} peer(s) agree)",
+                    height,
+                    peers_agree
+                );
+                return Ok(height);
+            }
+
+            // No agreement at this height, go back further
+            tracing::debug!("No peers agree at height {} - going back", height);
+            height = height.saturating_sub(1);
         }
 
         Ok(0) // Genesis block is the ultimate common ancestor
+    }
+
+    /// Query a peer for their block hash at a specific height
+    async fn query_peer_block_hash(
+        &self,
+        peer_addr: &str,
+        height: u64,
+    ) -> Result<Option<[u8; 32]>, String> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpStream;
+        use tokio::time::{timeout, Duration};
+
+        let connect_future = TcpStream::connect(peer_addr);
+        let mut stream = match timeout(Duration::from_secs(5), connect_future).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(format!("Failed to connect to peer: {}", e)),
+            Err(_) => return Err("Connection timeout".to_string()),
+        };
+
+        // Send GetBlockHash message
+        let message = NetworkMessage::GetBlockHash(height);
+        let json = serde_json::to_string(&message).map_err(|e| format!("JSON error: {}", e))?;
+
+        stream
+            .write_all(json.as_bytes())
+            .await
+            .map_err(|e| format!("Write error: {}", e))?;
+        stream
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("Write error: {}", e))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("Flush error: {}", e))?;
+
+        // Read response with timeout
+        let mut reader = BufReader::new(stream);
+        let mut response_line = String::new();
+
+        match timeout(Duration::from_secs(5), reader.read_line(&mut response_line)).await {
+            Ok(Ok(_)) => {
+                let response: NetworkMessage = serde_json::from_str(&response_line)
+                    .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+                match response {
+                    NetworkMessage::BlockHashResponse { height: _, hash } => Ok(hash),
+                    _ => Err("Unexpected response type".to_string()),
+                }
+            }
+            Ok(Err(e)) => Err(format!("Read error: {}", e)),
+            Err(_) => Err("Response timeout".to_string()),
+        }
     }
 
     /// Rollback blockchain to a specific height
