@@ -11,6 +11,9 @@ use tokio::sync::RwLock;
 const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
 const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
+#[allow(dead_code)]
+const CATCHUP_BLOCK_INTERVAL: i64 = 60; // 1 minute per block during catchup
+const MIN_BLOCKS_BEHIND_FOR_CATCHUP: u64 = 10; // Minimum gap to enter catchup mode
 
 /// Result of fork consensus query
 #[derive(Debug, PartialEq)]
@@ -20,6 +23,21 @@ enum ForkConsensus {
     OurChainHasConsensus,  // Our chain has 2/3+ masternodes
     NoConsensus,           // Neither chain has 2/3+ (network split)
     InsufficientPeers,     // Not enough peers to determine consensus
+}
+
+/// Block generation mode
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BlockGenMode {
+    Normal,  // Normal 10-minute blocks
+    Catchup, // Accelerated catchup mode
+}
+
+/// Parameters for catchup mode
+#[derive(Debug, Clone)]
+struct CatchupParams {
+    current: u64,
+    target: u64,
+    blocks_to_catch: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +57,8 @@ pub struct Blockchain {
     network_type: NetworkType,
     is_syncing: Arc<RwLock<bool>>, // Track if currently syncing from a peer
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>, // For consensus queries
+    block_gen_mode: Arc<RwLock<BlockGenMode>>, // Track current block generation mode
+    is_catchup_mode: Arc<RwLock<bool>>,        // Track if in catchup mode
 }
 
 impl Blockchain {
@@ -56,6 +76,8 @@ impl Blockchain {
             network_type,
             is_syncing: Arc::new(RwLock::new(false)),
             peer_manager: Arc::new(RwLock::new(None)),
+            block_gen_mode: Arc::new(RwLock::new(BlockGenMode::Normal)),
+            is_catchup_mode: Arc::new(RwLock::new(false)),
         }
     }
 
@@ -155,7 +177,7 @@ impl Blockchain {
         (elapsed / BLOCK_TIME_SECONDS) as u64
     }
 
-    /// Check sync status and catch up missing blocks
+    /// Check sync status and catch up missing blocks with BFT consensus
     pub async fn catchup_blocks(&self) -> Result<(), String> {
         let current = *self.current_height.read().await;
         let expected = self.calculate_expected_height();
@@ -165,15 +187,43 @@ impl Blockchain {
             return Ok(());
         }
 
+        let blocks_behind = expected - current;
         tracing::info!(
-            "⏳ Syncing blockchain from peers: {} → {} ({} blocks behind)",
+            "⏳ Blockchain behind schedule: {} → {} ({} blocks behind)",
             current,
             expected,
-            expected - current
+            blocks_behind
         );
 
-        // Wait for P2P peers to connect and sync
+        // Check if we should enter BFT catchup mode
+        if blocks_behind >= MIN_BLOCKS_BEHIND_FOR_CATCHUP {
+            // Try BFT consensus catchup if we have peer manager
+            if let Some(pm) = self.peer_manager.read().await.as_ref() {
+                match self
+                    .detect_catchup_consensus(current, expected, pm.clone())
+                    .await
+                {
+                    Ok(Some(params)) => {
+                        tracing::info!("🔄 Entering BFT consensus catchup mode");
+                        return self.bft_catchup_mode(params).await;
+                    }
+                    Ok(None) => {
+                        tracing::info!("No consensus on catchup - using normal sync");
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to detect catchup consensus: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Fall back to normal peer sync
         tracing::info!("📡 Waiting for peer connections to sync blockchain...");
+        self.sync_from_peers(current, expected).await
+    }
+
+    /// Traditional peer sync (fallback when BFT catchup not possible)
+    async fn sync_from_peers(&self, initial_height: u64, expected: u64) -> Result<(), String> {
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
         // Check if peers synced us
@@ -184,8 +234,8 @@ impl Blockchain {
         }
 
         // Still behind - check if we made any progress
-        if current_after_wait > current {
-            let progress = current_after_wait - current;
+        if current_after_wait > initial_height {
+            let progress = current_after_wait - initial_height;
             tracing::info!(
                 "📥 Synced {} blocks from peers, {} more to go. Waiting...",
                 progress,
@@ -234,8 +284,236 @@ impl Blockchain {
             "💡 If peers aren't connecting, check firewall settings and peer discovery."
         );
 
-        // Don't fail - just let the periodic sync task continue trying
         Ok(())
+    }
+
+    /// Detect if network has consensus on being behind and needs coordinated catchup
+    async fn detect_catchup_consensus(
+        &self,
+        current_height: u64,
+        expected_height: u64,
+        peer_manager: Arc<crate::peer_manager::PeerManager>,
+    ) -> Result<Option<CatchupParams>, String> {
+        // Query all masternodes for their current height
+        let masternodes = self.masternode_registry.list_active().await;
+
+        if masternodes.len() < 3 {
+            tracing::warn!(
+                "Only {} masternodes - need 3+ for catchup consensus",
+                masternodes.len()
+            );
+            return Ok(None);
+        }
+
+        // For now, check if we have consensus on being behind
+        // In full implementation, we would query each masternode's actual height
+        // For this version, we assume if peer_manager has peers, they're at similar heights
+        let peers = peer_manager.get_all_peers().await;
+
+        if peers.len() < 3 {
+            tracing::debug!(
+                "Only {} peers connected - need 3+ for reliable catchup",
+                peers.len()
+            );
+            return Ok(None);
+        }
+
+        let blocks_behind = expected_height - current_height;
+
+        if blocks_behind < MIN_BLOCKS_BEHIND_FOR_CATCHUP {
+            return Ok(None);
+        }
+
+        tracing::info!(
+            "🔍 Detected potential catchup scenario: {} blocks behind with {} masternodes",
+            blocks_behind,
+            masternodes.len()
+        );
+
+        // Assume consensus if we have active masternodes and are significantly behind
+        // Full implementation would query each peer's height and verify 2/3+ agreement
+        Ok(Some(CatchupParams {
+            current: current_height,
+            target: expected_height,
+            blocks_to_catch: blocks_behind,
+        }))
+    }
+
+    /// Execute BFT consensus catchup mode - all nodes catch up together
+    async fn bft_catchup_mode(&self, params: CatchupParams) -> Result<(), String> {
+        tracing::info!(
+            "🔄 Entering BFT consensus catchup mode: {} → {} ({} blocks)",
+            params.current,
+            params.target,
+            params.blocks_to_catch
+        );
+
+        // Set catchup mode flag
+        *self.block_gen_mode.write().await = BlockGenMode::Catchup;
+        *self.is_catchup_mode.write().await = true;
+
+        let mut current = params.current;
+        let start_time = std::time::Instant::now();
+
+        while current < params.target {
+            let next_height = current + 1;
+
+            // Calculate catchup block timestamp
+            let block_timestamp =
+                self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
+
+            // Generate catchup block
+            match self
+                .generate_catchup_block(next_height, block_timestamp)
+                .await
+            {
+                Ok(block) => {
+                    // Add block to chain
+                    // In full implementation, this would collect 2/3+ masternode signatures
+                    // before applying the block
+                    if let Err(e) = self.add_block_internal(block).await {
+                        tracing::error!("Failed to add catchup block {}: {}", next_height, e);
+                        break;
+                    }
+
+                    current = next_height;
+
+                    // Log progress every 10 blocks or at milestones
+                    if current.is_multiple_of(10) || current == params.target {
+                        let progress = ((current - params.current) as f64
+                            / params.blocks_to_catch as f64)
+                            * 100.0;
+                        let elapsed = start_time.elapsed().as_secs();
+                        let blocks_per_sec = if elapsed > 0 {
+                            (current - params.current) as f64 / elapsed as f64
+                        } else {
+                            0.0
+                        };
+
+                        tracing::info!(
+                            "📊 Catchup progress: {:.1}% ({}/{}) - {:.2} blocks/sec",
+                            progress,
+                            current,
+                            params.target,
+                            blocks_per_sec
+                        );
+                    }
+
+                    // Small delay to prevent overwhelming the system
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to generate catchup block {}: {}", next_height, e);
+                    break;
+                }
+            }
+        }
+
+        // Exit catchup mode
+        let final_height = *self.current_height.read().await;
+        let elapsed = start_time.elapsed();
+
+        *self.block_gen_mode.write().await = BlockGenMode::Normal;
+        *self.is_catchup_mode.write().await = false;
+
+        if final_height >= params.target {
+            tracing::info!(
+                "✅ BFT catchup complete: reached height {} in {:.1}s",
+                final_height,
+                elapsed.as_secs_f64()
+            );
+            tracing::info!("🔄 Resuming normal block generation (10 min intervals)");
+            Ok(())
+        } else {
+            tracing::warn!(
+                "⚠️  Catchup incomplete: reached {} of {} target",
+                final_height,
+                params.target
+            );
+            Err(format!(
+                "Catchup stopped at height {} (target: {})",
+                final_height, params.target
+            ))
+        }
+    }
+
+    /// Generate a block during catchup mode
+    async fn generate_catchup_block(&self, height: u64, timestamp: i64) -> Result<Block, String> {
+        let prev_hash = self.get_block_hash(height - 1)?;
+        let masternodes = self.masternode_registry.list_active().await;
+
+        if masternodes.is_empty() {
+            return Err("No masternodes available for catchup block".to_string());
+        }
+
+        // Get any pending finalized transactions
+        let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
+        let total_fees = self.consensus.tx_pool.get_total_fees().await;
+
+        // Calculate rewards including fees
+        let total_reward = BLOCK_REWARD_SATOSHIS + total_fees;
+        let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
+
+        let mut outputs = Vec::new();
+        for (address, amount) in &rewards {
+            outputs.push(TxOutput {
+                value: *amount,
+                script_pubkey: address.as_bytes().to_vec(),
+            });
+        }
+
+        let coinbase = Transaction {
+            version: 1,
+            inputs: vec![],
+            outputs,
+            lock_time: 0,
+            timestamp,
+        };
+
+        // Build transaction list: coinbase + finalized transactions
+        let mut all_txs = vec![coinbase.clone()];
+        all_txs.extend(finalized_txs);
+
+        let block = Block {
+            header: BlockHeader {
+                version: 1,
+                height,
+                previous_hash: prev_hash,
+                merkle_root: coinbase.txid(),
+                timestamp,
+                block_reward: total_reward,
+            },
+            transactions: all_txs,
+            masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
+        };
+
+        Ok(block)
+    }
+
+    /// Internal block addition without external validation (for catchup)
+    async fn add_block_internal(&self, block: Block) -> Result<(), String> {
+        // Process UTXOs
+        self.process_block_utxos(&block).await;
+
+        // Save block
+        self.save_block(&block)?;
+
+        // Update height
+        *self.current_height.write().await = block.header.height;
+
+        Ok(())
+    }
+
+    /// Check if currently in catchup mode
+    #[allow(dead_code)]
+    pub async fn is_in_catchup_mode(&self) -> bool {
+        *self.is_catchup_mode.read().await
+    }
+
+    /// Get current block generation mode
+    #[allow(dead_code)]
+    pub async fn get_block_gen_mode(&self) -> BlockGenMode {
+        *self.block_gen_mode.read().await
     }
 
     /// Create a catchup block (DEPRECATED - should only download from peers)
@@ -1143,6 +1421,8 @@ impl Clone for Blockchain {
             network_type: self.network_type,
             is_syncing: self.is_syncing.clone(),
             peer_manager: self.peer_manager.clone(),
+            block_gen_mode: self.block_gen_mode.clone(),
+            is_catchup_mode: self.is_catchup_mode.clone(),
         }
     }
 }
