@@ -205,7 +205,7 @@ async fn maintain_peer_connection(
         .await
         .map_err(|e| format!("Flush failed: {}", e))?;
 
-    tracing::debug!("📡 Requested initial block height from {}", ip);
+    tracing::info!("📡 Requested initial block height from {}", ip);
 
     // Request pending transactions (to catch any we missed during downtime)
     let tx_request = NetworkMessage::GetPendingTransactions;
@@ -329,6 +329,8 @@ async fn maintain_peer_connection(
                                 }
                                 NetworkMessage::BlockHeightResponse(remote_height) => {
                                     let local_height = blockchain.get_height().await;
+                                    tracing::info!("📊 Peer {} has height {}, we have {}", ip, remote_height, local_height);
+
                                     if remote_height > local_height {
                                         // Check if we're already syncing
                                         let is_syncing = blockchain.is_syncing().await;
@@ -351,6 +353,9 @@ async fn maintain_peer_connection(
                                     } else if remote_height == local_height {
                                         // We're synced, clear syncing flag
                                         blockchain.set_syncing(false).await;
+                                        tracing::debug!("✅ Synced with peer {} at height {}", ip, local_height);
+                                    } else {
+                                        tracing::info!("📈 We have height {} which is ahead of peer {} at {}", local_height, ip, remote_height);
                                     }
                                 }
                                 NetworkMessage::BlocksResponse(blocks) => {

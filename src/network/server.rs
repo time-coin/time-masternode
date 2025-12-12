@@ -278,6 +278,7 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::GetBlockHeight => {
                                     let height = blockchain.get_height().await;
+                                    tracing::debug!("📥 Received GetBlockHeight from {}, responding with height {}", peer.addr, height);
                                     let reply = NetworkMessage::BlockHeightResponse(height);
                                     if let Ok(json) = serde_json::to_string(&reply) {
                                         let _ = writer.write_all(json.as_bytes()).await;
