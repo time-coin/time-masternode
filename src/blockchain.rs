@@ -155,8 +155,7 @@ impl Blockchain {
             expected - current
         );
 
-        // Wait longer for P2P peers to connect and sync
-        // Initial wait: 30 seconds for peer discovery and connections
+        // Wait for P2P peers to connect and sync
         tracing::info!("📡 Waiting for peer connections to sync blockchain...");
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
@@ -176,8 +175,8 @@ impl Blockchain {
                 expected - current_after_wait
             );
 
-            // Continue waiting for sync to complete
-            for _ in 0..6 {
+            // Continue waiting for sync to complete (up to 5 minutes total)
+            for i in 0..30 {
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
                 let height = *self.current_height.read().await;
                 if height >= expected {
@@ -188,45 +187,43 @@ impl Blockchain {
                     tracing::info!("📥 Syncing... ({}/{})", height, expected);
                     current_after_wait = height;
                 }
+                
+                // Log progress every minute
+                if i % 6 == 0 && i > 0 {
+                    tracing::info!(
+                        "📊 Still syncing from peers... ({}/{}, {:.1}% complete)",
+                        height,
+                        expected,
+                        (height as f64 / expected as f64) * 100.0
+                    );
+                }
             }
         }
 
-        // No peer sync progress - generate blocks locally as fallback
-        let blocks_to_create = expected - current_after_wait;
+        // After waiting up to 5.5 minutes, check final status
+        let final_height = *self.current_height.read().await;
+        if final_height >= expected {
+            tracing::info!("✓ Sync complete at height {}", final_height);
+            return Ok(());
+        }
 
+        // Still behind - don't generate blocks, just wait for peers
+        let blocks_behind = expected - final_height;
         tracing::warn!(
-            "⚠️  Peers don't have blocks or aren't responding. Generating {} blocks locally.",
-            blocks_to_create
+            "⚠️  Still {} blocks behind. Waiting for peers to sync blockchain...",
+            blocks_behind
+        );
+        tracing::info!(
+            "💡 If peers aren't connecting, check firewall settings and peer discovery."
         );
 
-        for height in (current_after_wait + 1)..=expected {
-            let timestamp = self.genesis_timestamp() + (height as i64 * BLOCK_TIME_SECONDS);
-
-            match self.create_catchup_block(height, timestamp).await {
-                Ok(block) => {
-                    if let Err(e) = self.add_block(block.clone()).await {
-                        tracing::error!("Failed to add catchup block {}: {}", height, e);
-                        return Err(format!("Catchup failed at block {}: {}", height, e));
-                    }
-
-                    // Broadcast catchup block to network so all nodes have the same blocks
-                    self.masternode_registry.broadcast_block(block).await;
-
-                    if height % 10 == 0 {
-                        tracing::info!("📦 Generated catchup blocks up to {}/{}", height, expected);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create catchup block {}: {}", height, e);
-                    return Err(format!("Failed to create catchup block {}: {}", height, e));
-                }
-            }
-        }
-
-        tracing::info!("✅ Catchup complete - now at height {}", expected);
+        // Don't fail - just let the periodic sync task continue trying
         Ok(())
     }
 
+    /// Create a catchup block (DEPRECATED - should only download from peers)
+    /// This is only used for generating the very first blocks after genesis
+    /// when no peers exist yet (bootstrap scenario)
     #[allow(dead_code)]
     async fn create_catchup_block(&self, height: u64, timestamp: i64) -> Result<Block, String> {
         let prev_hash = self.get_block_hash(height - 1)?;
