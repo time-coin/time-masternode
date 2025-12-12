@@ -1,5 +1,4 @@
 use crate::types::{Hash256, Transaction};
-use crate::vdf::VDFProof;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -7,7 +6,6 @@ pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
-    pub vdf_proof: VDFProof,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

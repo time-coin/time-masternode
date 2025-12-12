@@ -1,6 +1,5 @@
 use crate::block::types::{Block, BlockHeader};
 use crate::types::{Transaction, TxOutput};
-use crate::vdf::VDFProof;
 use crate::NetworkType;
 use serde_json::json;
 
@@ -34,11 +33,6 @@ impl GenesisBlock {
             },
             transactions: vec![coinbase],
             masternode_rewards: vec![],
-            vdf_proof: VDFProof {
-                output: vec![0u8; 32],
-                iterations: 100_000,
-                checkpoints: vec![],
-            },
         }
     }
 
@@ -68,11 +62,6 @@ impl GenesisBlock {
             },
             transactions: vec![coinbase],
             masternode_rewards: vec![],
-            vdf_proof: VDFProof {
-                output: vec![0u8; 32],
-                iterations: 100_000,
-                checkpoints: vec![],
-            },
         }
     }
 
@@ -98,7 +87,7 @@ impl GenesisBlock {
             "network": network_str,
             "version": 2,
             "message": format!(
-                "TIME Coin {} Genesis Block - Proof of Time Enabled",
+                "TIME Coin {} Genesis Block - Instant BFT Consensus",
                 if matches!(network, NetworkType::Mainnet) { "Mainnet" } else { "Testnet" }
             ),
             "block": {
@@ -111,11 +100,6 @@ impl GenesisBlock {
                     "previous_hash": hex::encode(block.header.previous_hash),
                     "merkle_root": hex::encode(block.header.merkle_root),
                     "block_reward": block.header.block_reward,
-                    "proof_of_time": {
-                        "output": hex::encode(&block.vdf_proof.output),
-                        "iterations": block.vdf_proof.iterations,
-                        "checkpoints": &block.vdf_proof.checkpoints,
-                    }
                 },
                 "transactions": block.transactions.iter().map(|tx| {
                     json!({

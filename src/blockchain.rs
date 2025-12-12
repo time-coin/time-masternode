@@ -2,7 +2,6 @@ use crate::block::types::{Block, BlockHeader};
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::types::{Transaction, TxOutput};
-use crate::vdf::{compute_vdf, VDFConfig, VDFProof};
 use crate::NetworkType;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -26,7 +25,6 @@ pub struct Blockchain {
     storage: sled::Db,
     consensus: Arc<ConsensusEngine>,
     masternode_registry: Arc<MasternodeRegistry>,
-    vdf_config: VDFConfig,
     current_height: Arc<RwLock<u64>>,
     network_type: NetworkType,
     is_syncing: Arc<RwLock<bool>>, // Track if currently syncing from a peer
@@ -37,14 +35,12 @@ impl Blockchain {
         storage: sled::Db,
         consensus: Arc<ConsensusEngine>,
         masternode_registry: Arc<MasternodeRegistry>,
-        vdf_config: VDFConfig,
         network_type: NetworkType,
     ) -> Self {
         Self {
             storage,
             consensus,
             masternode_registry,
-            vdf_config,
             current_height: Arc::new(RwLock::new(0)),
             network_type,
             is_syncing: Arc::new(RwLock::new(false)),
@@ -116,11 +112,6 @@ impl Blockchain {
             },
             transactions: vec![coinbase],
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
-            vdf_proof: VDFProof {
-                output: vec![0u8; 32],
-                iterations: 0,
-                checkpoints: vec![],
-            },
         };
 
         Ok(block)
@@ -241,17 +232,12 @@ impl Blockchain {
             },
             transactions: vec![coinbase],
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
-            vdf_proof: VDFProof {
-                output: vec![0u8; 32],
-                iterations: 0,
-                checkpoints: vec![],
-            },
         };
 
         Ok(block)
     }
 
-    /// Produce a block at the scheduled time with VDF proof
+    /// Produce a block at the scheduled time
     pub async fn produce_block(&self) -> Result<Block, String> {
         let height = *self.current_height.read().await + 1;
         let expected = self.calculate_expected_height();
@@ -291,11 +277,6 @@ impl Blockchain {
             ));
         }
 
-        // Generate VDF proof
-        let prev_hash = self.get_block_hash(height - 1)?;
-        let vdf_input = prev_hash;
-        let vdf_proof = compute_vdf(&vdf_input, &self.vdf_config)?;
-
         // Get finalized transactions and calculate total fees
         let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
         let total_fees = self.consensus.tx_pool.get_total_fees().await;
@@ -326,6 +307,8 @@ impl Blockchain {
         let mut all_txs = vec![coinbase.clone()];
         all_txs.extend(finalized_txs);
 
+        let prev_hash = self.get_block_hash(height - 1)?;
+
         let block = Block {
             header: BlockHeader {
                 version: 1,
@@ -337,7 +320,6 @@ impl Blockchain {
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
-            vdf_proof,
         };
 
         Ok(block)
@@ -712,7 +694,6 @@ impl Clone for Blockchain {
             storage: self.storage.clone(),
             consensus: self.consensus.clone(),
             masternode_registry: self.masternode_registry.clone(),
-            vdf_config: self.vdf_config.clone(),
             current_height: self.current_height.clone(),
             network_type: self.network_type,
             is_syncing: self.is_syncing.clone(),

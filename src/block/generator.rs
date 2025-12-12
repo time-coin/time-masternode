@@ -122,11 +122,6 @@ impl DeterministicBlockGenerator {
             header,
             transactions: all_txs,
             masternode_rewards,
-            vdf_proof: crate::vdf::VDFProof {
-                output: vec![0u8; 32], // Will be computed by VDF prover
-                iterations: 0,
-                checkpoints: vec![],
-            },
         }
     }
 

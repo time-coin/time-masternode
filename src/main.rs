@@ -14,7 +14,6 @@ mod time_sync;
 mod transaction_pool;
 mod types;
 mod utxo_manager;
-mod vdf;
 mod wallet;
 
 use blockchain::Blockchain;
@@ -33,7 +32,6 @@ use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
 use types::*;
 use utxo_manager::UTXOStateManager;
-use vdf::VDFConfig;
 use wallet::WalletManager;
 
 #[derive(Parser, Debug)]
@@ -289,16 +287,10 @@ async fn main() {
     let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
 
     // Initialize blockchain
-    let vdf_config = match network_type {
-        NetworkType::Mainnet => VDFConfig::mainnet(),
-        NetworkType::Testnet => VDFConfig::testnet(),
-    };
-
     let blockchain = Arc::new(Blockchain::new(
         block_storage,
         consensus_engine.clone(),
         registry.clone(),
-        vdf_config,
         network_type,
     ));
 
@@ -528,29 +520,18 @@ async fn main() {
                     }
                 };
 
-                // Use VDF for fair producer selection
-                // Note: This is a lightweight selection VDF (fewer iterations than block VDF)
-                // to determine producer quickly, then full VDF is computed during block production
-                let selection_vdf_config = crate::vdf::VDFConfig {
-                    iterations: 100_000, // Quick selection: ~0.5 seconds
-                    checkpoint_interval: 10_000,
-                    min_block_time: 0,
-                    expected_compute_time: 1,
-                };
-
-                let vdf_output =
-                    match crate::vdf::compute_vdf(&prev_block_hash, &selection_vdf_config) {
-                        Ok(proof) => proof.output,
-                        Err(e) => {
-                            tracing::error!("Failed to compute selection VDF: {}", e);
-                            continue;
-                        }
-                    };
+                // Use deterministic leader selection based on previous block hash
+                // This provides fair rotation without expensive VDF computation
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(prev_block_hash);
+                hasher.update(current_height.to_le_bytes());
+                let selection_hash: [u8; 32] = hasher.finalize().into();
 
                 // Select producer: hash mod masternode_count
                 let producer_index = {
                     let mut val = 0u64;
-                    for (i, &byte) in vdf_output.iter().take(8).enumerate() {
+                    for (i, &byte) in selection_hash.iter().take(8).enumerate() {
                         val |= (byte as u64) << (i * 8);
                     }
                     (val % masternodes.len() as u64) as usize
