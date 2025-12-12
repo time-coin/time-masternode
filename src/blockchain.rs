@@ -189,6 +189,9 @@ impl Blockchain {
                         return Err(format!("Catchup failed at block {}: {}", height, e));
                     }
 
+                    // Broadcast catchup block to network so all nodes have the same blocks
+                    self.masternode_registry.broadcast_block(block).await;
+
                     if height % 10 == 0 {
                         tracing::info!("📦 Generated catchup blocks up to {}/{}", height, expected);
                     }
