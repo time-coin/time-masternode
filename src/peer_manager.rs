@@ -104,7 +104,22 @@ impl PeerManager {
     /// Add a peer to the manager (only adds to candidate list, not saved until connection succeeds)
     pub async fn add_peer_candidate(&self, address: String) -> bool {
         let mut peers = self.peers.write().await;
-        peers.insert(address)
+        let is_new = peers.insert(address.clone());
+
+        if is_new {
+            // Also add to peer_info so get_all_peers() can find it
+            let mut peer_info = self.peer_info.write().await;
+            peer_info.push(PeerInfo {
+                address,
+                last_seen: 0, // Never connected yet
+                version: "unknown".to_string(),
+                is_masternode: false,
+                connection_attempts: 0,
+                last_attempt: 0,
+            });
+        }
+
+        is_new
     }
 
     /// Add a verified peer (after successful connection)
