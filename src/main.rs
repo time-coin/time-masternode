@@ -490,11 +490,24 @@ async fn main() {
                     }
                 };
 
-                // Compute VDF on previous block hash
-                let vdf_output = {
-                    use sha2::{Digest, Sha256};
-                    Sha256::digest(prev_block_hash).to_vec()
+                // Use VDF for fair producer selection
+                // Note: This is a lightweight selection VDF (fewer iterations than block VDF)
+                // to determine producer quickly, then full VDF is computed during block production
+                let selection_vdf_config = crate::vdf::VDFConfig {
+                    iterations: 100_000, // Quick selection: ~0.5 seconds
+                    checkpoint_interval: 10_000,
+                    min_block_time: 0,
+                    expected_compute_time: 1,
                 };
+
+                let vdf_output =
+                    match crate::vdf::compute_vdf(&prev_block_hash, &selection_vdf_config) {
+                        Ok(proof) => proof.output,
+                        Err(e) => {
+                            tracing::error!("Failed to compute selection VDF: {}", e);
+                            continue;
+                        }
+                    };
 
                 // Select producer: hash mod masternode_count
                 let producer_index = {

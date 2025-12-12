@@ -22,8 +22,8 @@ impl VDFConfig {
     #[allow(dead_code)]
     pub fn testnet() -> Self {
         Self {
-            iterations: 12_000_000, // ~2 minutes on modern CPU
-            checkpoint_interval: 1_000_000,
+            iterations: 120_000_000, // ~2 minutes on modern CPU (10x more)
+            checkpoint_interval: 10_000_000,
             min_block_time: 600,        // 10 minutes
             expected_compute_time: 120, // 2 minutes
         }
