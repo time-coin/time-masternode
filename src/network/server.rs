@@ -241,11 +241,9 @@ async fn handle_peer(
                                         continue;
                                     }
                                     _ => {
-                                        tracing::warn!("🚫 Rejecting {} - first message must be handshake", peer.addr);
-                                        blacklist.write().await.record_violation(
-                                            ip,
-                                            "No handshake sent"
-                                        );
+                                        tracing::warn!("⚠️  {} sent message before handshake - closing connection (not blacklisting)", peer.addr);
+                                        // Don't blacklist - could be network timing issue or legitimate peer
+                                        // Just close the connection and let them reconnect
                                         break;
                                     }
                                 }
