@@ -218,7 +218,8 @@ impl PeerManager {
             .count()
     }
 
-    /// Broadcast a message to all connected peers
+    /// Broadcast a message to all connected peers (deprecated - use NetworkServer broadcast instead)
+    #[allow(dead_code)]
     pub async fn broadcast(&self, msg: crate::network::message::NetworkMessage) {
         // This would be implemented by the network layer
         // For now, we'll just log it
