@@ -127,16 +127,43 @@ impl RpcHandler {
                 message: "Invalid params: expected block height".to_string(),
             })?;
 
-        // For now, return a stub block
-        // TODO: Implement actual block storage and retrieval
-        Ok(json!({
-            "height": height,
-            "hash": format!("{:064x}", height),
-            "previousblockhash": format!("{:064x}", height.saturating_sub(1)),
-            "time": chrono::Utc::now().timestamp(),
-            "tx": [],
-            "confirmations": 1
-        }))
+        // Get block from blockchain
+        match self.blockchain.get_block_by_height(height).await {
+            Ok(block) => {
+                let txids: Vec<String> = block
+                    .transactions
+                    .iter()
+                    .map(|tx| hex::encode(tx.txid()))
+                    .collect();
+
+                // Calculate block hash
+                use sha2::{Digest, Sha256};
+                let mut hasher = Sha256::new();
+                hasher.update(&block.header.height.to_le_bytes());
+                hasher.update(&block.header.previous_hash);
+                hasher.update(&block.header.merkle_root);
+                hasher.update(&block.header.timestamp.to_le_bytes());
+                let block_hash: [u8; 32] = hasher.finalize().into();
+
+                Ok(json!({
+                    "height": block.header.height,
+                    "hash": hex::encode(block_hash),
+                    "previousblockhash": hex::encode(block.header.previous_hash),
+                    "time": block.header.timestamp,
+                    "version": block.header.version,
+                    "merkleroot": hex::encode(block.header.merkle_root),
+                    "tx": txids,
+                    "nTx": block.transactions.len(),
+                    "confirmations": (self.blockchain.get_height().await as i64 - height as i64 + 1).max(0),
+                    "block_reward": block.header.block_reward,
+                    "masternode_rewards": block.masternode_rewards.len(),
+                }))
+            }
+            Err(e) => Err(RpcError {
+                code: -5,
+                message: format!("Block not found: {}", e),
+            }),
+        }
     }
 
     async fn get_network_info(&self) -> Result<Value, RpcError> {
@@ -144,6 +171,10 @@ impl RpcHandler {
             NetworkType::Mainnet => "mainnet",
             NetworkType::Testnet => "testnet",
         };
+
+        // Get active peer count from registry (masternodes)
+        let active_masternodes = self.registry.count_active().await;
+
         Ok(json!({
             "version": 10000,
             "subversion": "/timed:0.1.0/",
@@ -152,7 +183,7 @@ impl RpcHandler {
             "localrelay": true,
             "timeoffset": 0,
             "networkactive": true,
-            "connections": 0,
+            "connections": active_masternodes,
             "networks": [{
                 "name": network,
                 "limited": false,
@@ -168,17 +199,36 @@ impl RpcHandler {
     }
 
     async fn get_peer_info(&self) -> Result<Value, RpcError> {
-        // TODO: Implement actual peer tracking
-        Ok(json!([]))
+        let masternodes = self.registry.list_all().await;
+        let peers: Vec<Value> = masternodes
+            .iter()
+            .map(|mn| {
+                json!({
+                    "addr": mn.masternode.address.clone(),
+                    "services": "0000000000000409",
+                    "lastseen": mn.last_heartbeat,
+                    "subver": "/timed:0.1.0/",
+                    "inbound": false,
+                    "conntime": mn.masternode.registered_at,
+                    "timeoffset": 0,
+                    "version": 10000,
+                    "is_masternode": true,
+                    "tier": format!("{:?}", mn.masternode.tier),
+                    "active": mn.is_active,
+                })
+            })
+            .collect();
+        Ok(json!(peers))
     }
 
     async fn get_txout_set_info(&self) -> Result<Value, RpcError> {
         let utxos = self.utxo_manager.list_all_utxos().await;
         let total_amount: u64 = utxos.iter().map(|u| u.value).sum();
+        let height = self.blockchain.get_height().await;
 
         Ok(json!({
-            "height": 1,
-            "bestblock": format!("{:064x}", 1),
+            "height": height,
+            "bestblock": hex::encode(self.blockchain.get_block_hash(height).unwrap_or([0u8; 32])),
             "transactions": utxos.len(),
             "txouts": utxos.len(),
             "total_amount": total_amount as f64 / 100_000_000.0,
