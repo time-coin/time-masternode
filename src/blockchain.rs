@@ -138,7 +138,7 @@ impl Blockchain {
         (elapsed / BLOCK_TIME_SECONDS) as u64
     }
 
-    /// Check sync status - blocks are downloaded automatically by P2P client
+    /// Check sync status and catch up missing blocks
     pub async fn catchup_blocks(&self) -> Result<(), String> {
         let current = *self.current_height.read().await;
         let expected = self.calculate_expected_height();
@@ -154,11 +154,53 @@ impl Blockchain {
             expected,
             expected - current
         );
-        tracing::info!("📡 P2P client will automatically download missing blocks");
 
-        // Blocks are downloaded automatically by the P2P client when it detects
-        // that peers have a higher height. No need to manually generate blocks.
+        // Wait a moment to see if P2P will sync from peers
+        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+        // Check again if peers synced us
+        let current_after_wait = *self.current_height.read().await;
+        if current_after_wait >= expected {
+            tracing::info!("✓ Synced from peers to height {}", current_after_wait);
+            return Ok(());
+        }
+
+        // Peers don't have the blocks either - generate them locally
+        let blocks_to_create = expected - current_after_wait;
+        if blocks_to_create > 100 {
+            tracing::warn!(
+                "⚠️  Need to catch up {} blocks - this may take a while",
+                blocks_to_create
+            );
+        }
+
+        tracing::info!(
+            "🏗️  Generating {} missing blocks locally (peers don't have them)",
+            blocks_to_create
+        );
+
+        for height in (current_after_wait + 1)..=expected {
+            let timestamp = self.genesis_timestamp() + (height as i64 * BLOCK_TIME_SECONDS);
+
+            match self.create_catchup_block(height, timestamp).await {
+                Ok(block) => {
+                    if let Err(e) = self.add_block(block.clone()).await {
+                        tracing::error!("Failed to add catchup block {}: {}", height, e);
+                        return Err(format!("Catchup failed at block {}: {}", height, e));
+                    }
+
+                    if height % 10 == 0 {
+                        tracing::info!("📦 Generated catchup blocks up to {}/{}", height, expected);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create catchup block {}: {}", height, e);
+                    return Err(format!("Failed to create catchup block {}: {}", height, e));
+                }
+            }
+        }
+
+        tracing::info!("✅ Catchup complete - now at height {}", expected);
         Ok(())
     }
 
