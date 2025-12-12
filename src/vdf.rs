@@ -18,14 +18,14 @@ pub struct VDFConfig {
 }
 
 impl VDFConfig {
-    /// Testnet: 2-minute VDF for 10-minute blocks
+    /// Testnet: Fast VDF for low-power servers (5 seconds instead of 2 minutes)
     #[allow(dead_code)]
     pub fn testnet() -> Self {
         Self {
-            iterations: 1_800_000_000, // ~2 minutes on modern CPU (15x more than 120M)
-            checkpoint_interval: 150_000_000,
-            min_block_time: 600,        // 10 minutes
-            expected_compute_time: 120, // 2 minutes
+            iterations: 60_000_000, // ~5 seconds on modern CPU
+            checkpoint_interval: 6_000_000,
+            min_block_time: 600,      // 10 minutes
+            expected_compute_time: 5, // 5 seconds
         }
     }
 
