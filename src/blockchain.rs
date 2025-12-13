@@ -1,3 +1,4 @@
+use crate::bft_consensus::BFTConsensus;
 use crate::block::types::{Block, BlockHeader};
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
@@ -60,6 +61,7 @@ pub struct Blockchain {
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>, // For consensus queries
     block_gen_mode: Arc<RwLock<BlockGenMode>>, // Track current block generation mode
     is_catchup_mode: Arc<RwLock<bool>>,        // Track if in catchup mode
+    bft_consensus: Arc<RwLock<Option<Arc<BFTConsensus>>>>, // BFT consensus for block generation
 }
 
 impl Blockchain {
@@ -79,7 +81,13 @@ impl Blockchain {
             peer_manager: Arc::new(RwLock::new(None)),
             block_gen_mode: Arc::new(RwLock::new(BlockGenMode::Normal)),
             is_catchup_mode: Arc::new(RwLock::new(false)),
+            bft_consensus: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set BFT consensus module (called after initialization)
+    pub async fn set_bft_consensus(&self, bft: Arc<BFTConsensus>) {
+        *self.bft_consensus.write().await = Some(bft);
     }
 
     /// Set peer manager for consensus verification (called after initialization)
@@ -795,7 +803,122 @@ impl Blockchain {
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
         };
 
+        // If BFT consensus is enabled, propose block through BFT
+        if let Some(bft) = self.bft_consensus.read().await.as_ref() {
+            // Sign the block
+            let signature = bft.sign_block(&block).await;
+
+            // Start BFT round if not already started
+            bft.start_round(height, &masternodes).await;
+
+            // Check if we're the leader
+            if bft.are_we_leader(height, &masternodes) {
+                tracing::info!(
+                    "🏆 We are BFT leader for height {}, proposing block",
+                    height
+                );
+                bft.propose_block(block.clone(), signature).await;
+            } else {
+                tracing::debug!(
+                    "⏸️  Not BFT leader for height {}, waiting for proposal",
+                    height
+                );
+            }
+
+            // Note: Block will be committed through BFT consensus
+            // The actual block addition happens when consensus is reached
+        }
+
         Ok(block)
+    }
+
+    /// Process BFT-committed blocks
+    pub async fn process_bft_committed_blocks(&self) -> Result<usize, String> {
+        if let Some(bft) = self.bft_consensus.read().await.as_ref() {
+            let committed_blocks = bft.get_committed_blocks().await;
+            let count = committed_blocks.len();
+
+            for block in committed_blocks {
+                tracing::info!(
+                    "✅ Adding BFT-committed block {} with {} transactions",
+                    block.header.height,
+                    block.transactions.len()
+                );
+
+                // Add block to chain
+                if let Err(e) = self.add_block(block.clone()).await {
+                    tracing::error!("Failed to add BFT-committed block: {}", e);
+                    return Err(e);
+                }
+
+                // Broadcast block to peers
+                self.masternode_registry.broadcast_block(block).await;
+            }
+
+            Ok(count)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// Handle incoming BFT messages
+    pub async fn handle_bft_message(&self, message: NetworkMessage) -> Result<(), String> {
+        if let Some(bft) = self.bft_consensus.read().await.as_ref() {
+            match message {
+                NetworkMessage::BlockProposal {
+                    block,
+                    proposer,
+                    signature,
+                    round,
+                } => {
+                    tracing::debug!(
+                        "Received BFT block proposal for height {} from {}",
+                        block.header.height,
+                        proposer
+                    );
+                    bft.handle_proposal(block, proposer, signature, round).await
+                }
+                NetworkMessage::BlockVote {
+                    block_hash,
+                    height,
+                    voter,
+                    signature,
+                    approve,
+                } => {
+                    tracing::debug!(
+                        "Received BFT vote for height {} from {}: {}",
+                        height,
+                        voter,
+                        if approve { "APPROVE" } else { "REJECT" }
+                    );
+                    let vote = crate::bft_consensus::BlockVote {
+                        block_hash,
+                        voter,
+                        approve,
+                        signature,
+                    };
+                    bft.handle_vote(vote).await
+                }
+                NetworkMessage::BlockCommit {
+                    block_hash: _,
+                    height,
+                    signatures,
+                } => {
+                    tracing::info!(
+                        "Received BFT commit for height {} with {} signatures",
+                        height,
+                        signatures.len()
+                    );
+                    // The commit message indicates consensus was reached
+                    // Process any committed blocks
+                    self.process_bft_committed_blocks().await?;
+                    Ok(())
+                }
+                _ => Err("Not a BFT message".to_string()),
+            }
+        } else {
+            Err("BFT consensus not initialized".to_string())
+        }
     }
 
     fn calculate_rewards_with_amount(
@@ -1790,6 +1913,7 @@ impl Clone for Blockchain {
             peer_manager: self.peer_manager.clone(),
             block_gen_mode: self.block_gen_mode.clone(),
             is_catchup_mode: self.is_catchup_mode.clone(),
+            bft_consensus: self.bft_consensus.clone(),
         }
     }
 }

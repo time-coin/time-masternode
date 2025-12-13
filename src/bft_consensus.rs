@@ -35,15 +35,18 @@
 ///    └─> Any masternode can propose (first valid proposal wins)
 /// ```
 use crate::block::types::Block;
+use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeInfo;
 use crate::network::message::NetworkMessage;
 use crate::types::Hash256;
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// BFT consensus state for a specific height
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ConsensusRound {
     pub height: u64,
     pub round: u64,
@@ -61,15 +64,21 @@ pub struct BlockVote {
     pub signature: Vec<u8>,
 }
 
+type BroadcastCallback = Arc<RwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>>>;
+
 pub struct BFTConsensus {
     /// Current consensus rounds by height
     rounds: Arc<RwLock<HashMap<u64, ConsensusRound>>>,
     /// Committed blocks waiting to be added to chain
     committed_blocks: Arc<RwLock<Vec<Block>>>,
     /// Callback to broadcast messages
-    broadcast_callback: Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>,
+    broadcast_callback: BroadcastCallback,
     /// Our masternode address
     our_address: String,
+    /// Our signing key for BFT messages
+    signing_key: Arc<RwLock<Option<SigningKey>>>,
+    /// Blockchain reference for validation
+    blockchain: Arc<RwLock<Option<Arc<Blockchain>>>>,
 }
 
 impl BFTConsensus {
@@ -77,23 +86,38 @@ impl BFTConsensus {
         Self {
             rounds: Arc::new(RwLock::new(HashMap::new())),
             committed_blocks: Arc::new(RwLock::new(Vec::new())),
-            broadcast_callback: None,
+            broadcast_callback: Arc::new(RwLock::new(None)),
             our_address,
+            signing_key: Arc::new(RwLock::new(None)),
+            blockchain: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the signing key for this node
+    pub async fn set_signing_key(&self, key: SigningKey) {
+        *self.signing_key.write().await = Some(key);
+    }
+
+    /// Set blockchain reference for validation
+    pub async fn set_blockchain(&self, blockchain: Arc<Blockchain>) {
+        *self.blockchain.write().await = Some(blockchain);
     }
 
     /// Set broadcast callback
-    pub fn set_broadcast_callback<F>(&mut self, callback: F)
+    pub async fn set_broadcast_callback<F>(&self, callback: F)
     where
         F: Fn(NetworkMessage) + Send + Sync + 'static,
     {
-        self.broadcast_callback = Some(Arc::new(callback));
+        *self.broadcast_callback.write().await = Some(Arc::new(callback));
     }
 
     fn broadcast(&self, msg: NetworkMessage) {
-        if let Some(callback) = &self.broadcast_callback {
-            callback(msg);
-        }
+        let callback = self.broadcast_callback.clone();
+        tokio::spawn(async move {
+            if let Some(cb) = callback.read().await.as_ref() {
+                cb(msg);
+            }
+        });
     }
 
     /// Select deterministic leader for a given height
@@ -326,7 +350,7 @@ impl BFTConsensus {
                 let total_votes = round.votes.len();
 
                 // Need 2/3+ approval
-                let quorum = (total_votes * 2 + 2) / 3;
+                let quorum = (total_votes * 2).div_ceil(3);
 
                 if approve_count >= quorum {
                     tracing::info!(
@@ -360,22 +384,112 @@ impl BFTConsensus {
     }
 
     /// Validate a proposed block
-    async fn validate_block(&self, _block: &Block) -> bool {
-        // TODO: Implement full block validation
-        // - Check previous hash
-        // - Validate all transactions
-        // - Verify merkle root
-        // - Check masternode signatures
-        // - Verify timestamp
+    async fn validate_block(&self, block: &Block) -> bool {
+        // Basic validation
+        if block.transactions.is_empty() {
+            tracing::warn!("Block has no transactions");
+            return false;
+        }
 
-        // For now, approve all blocks
+        // Validate timestamp is not in future
+        let now = chrono::Utc::now().timestamp();
+        if block.header.timestamp > now + 30 {
+            tracing::warn!("Block timestamp is too far in future");
+            return false;
+        }
+
+        // Check if we have blockchain reference for deeper validation
+        if let Some(blockchain) = self.blockchain.read().await.as_ref() {
+            // Verify previous hash matches
+            if block.header.height > 0 {
+                match blockchain.get_block_hash(block.header.height - 1) {
+                    Ok(prev_hash) => {
+                        if prev_hash != block.header.previous_hash {
+                            tracing::warn!("Previous hash mismatch");
+                            return false;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to get previous hash: {}", e);
+                        return false;
+                    }
+                }
+            }
+
+            // Verify block is for expected height
+            let current_height = blockchain.get_height().await;
+            if block.header.height != current_height + 1 {
+                tracing::warn!(
+                    "Block height {} doesn't match expected {}",
+                    block.header.height,
+                    current_height + 1
+                );
+                return false;
+            }
+        }
+
+        // TODO: More validation
+        // - Verify merkle root
+        // - Validate all transactions
+        // - Check masternode signatures
+        // - Verify reward amounts
+
         true
     }
 
-    /// Sign a vote
-    async fn sign_vote(&self, _block_hash: &Hash256, _approve: bool) -> Vec<u8> {
-        // TODO: Implement proper signing with masternode private key
-        vec![0u8; 64] // Placeholder signature
+    /// Sign a vote with our masternode key
+    async fn sign_vote(&self, block_hash: &Hash256, approve: bool) -> Vec<u8> {
+        if let Some(signing_key) = self.signing_key.read().await.as_ref() {
+            // Create message to sign: block_hash + approve flag
+            let mut message = block_hash.to_vec();
+            message.push(if approve { 1 } else { 0 });
+
+            // Sign the message
+            let signature = signing_key.sign(&message);
+            signature.to_bytes().to_vec()
+        } else {
+            tracing::warn!("No signing key available for vote");
+            vec![0u8; 64] // Placeholder
+        }
+    }
+
+    /// Verify a vote signature
+    #[allow(dead_code)]
+    pub fn verify_vote_signature(
+        block_hash: &Hash256,
+        approve: bool,
+        signature: &[u8],
+        public_key: &VerifyingKey,
+    ) -> bool {
+        if signature.len() != 64 {
+            return false;
+        }
+
+        // Reconstruct the signed message
+        let mut message = block_hash.to_vec();
+        message.push(if approve { 1 } else { 0 });
+
+        // Parse signature
+        let sig_array: &[u8; 64] = match signature.try_into() {
+            Ok(arr) => arr,
+            Err(_) => return false,
+        };
+        let sig = Signature::from_bytes(sig_array);
+
+        // Verify
+        public_key.verify(&message, &sig).is_ok()
+    }
+
+    /// Sign a block proposal
+    pub async fn sign_block(&self, block: &Block) -> Vec<u8> {
+        if let Some(signing_key) = self.signing_key.read().await.as_ref() {
+            let block_hash = block.hash();
+            let signature = signing_key.sign(&block_hash);
+            signature.to_bytes().to_vec()
+        } else {
+            tracing::warn!("No signing key available for block proposal");
+            vec![0u8; 64] // Placeholder
+        }
     }
 
     /// Get committed blocks ready to be added to chain
@@ -386,6 +500,7 @@ impl BFTConsensus {
     }
 
     /// Check if consensus round has timed out (30 seconds)
+    #[allow(dead_code)]
     pub async fn check_timeout(&self, height: u64) -> bool {
         if let Some(round) = self.rounds.read().await.get(&height) {
             round.start_time.elapsed().as_secs() > 30
@@ -395,6 +510,7 @@ impl BFTConsensus {
     }
 
     /// Clean up old rounds
+    #[allow(dead_code)]
     pub async fn cleanup_old_rounds(&self, current_height: u64) {
         self.rounds
             .write()

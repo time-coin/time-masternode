@@ -440,6 +440,23 @@ impl MasternodeRegistry {
             }
         }
     }
+
+    /// Broadcast any network message (used by BFT consensus)
+    pub async fn broadcast_message(&self, msg: crate::network::message::NetworkMessage) {
+        if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
+            match tx.send(msg) {
+                Ok(0) => {
+                    tracing::debug!("📡 Message created (no peers connected)");
+                }
+                Ok(receivers) => {
+                    tracing::debug!("📡 Broadcast message to {} peer(s)", receivers);
+                }
+                Err(_) => {
+                    tracing::debug!("Message broadcast skipped (no active connections)");
+                }
+            }
+        }
+    }
 }
 
 impl Clone for MasternodeRegistry {

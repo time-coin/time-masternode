@@ -509,6 +509,27 @@ async fn handle_peer(
                                         tracing::debug!("📤 Sent block range to {}", peer.addr);
                                     }
                                 }
+                                // BFT Consensus Messages
+                                NetworkMessage::BlockProposal { .. } |
+                                NetworkMessage::BlockVote { .. } |
+                                NetworkMessage::BlockCommit { .. } => {
+                                    tracing::debug!("📥 Received BFT message from {}", peer.addr);
+
+                                    // Handle BFT message through blockchain
+                                    if let Err(e) = blockchain.handle_bft_message(msg.clone()).await {
+                                        tracing::warn!("Failed to handle BFT message: {}", e);
+                                    }
+
+                                    // Gossip BFT messages to other peers
+                                    match broadcast_tx.send(msg.clone()) {
+                                        Ok(receivers) => {
+                                            tracing::debug!("🔄 Gossiped BFT message to {} peer(s)", receivers.saturating_sub(1));
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Failed to gossip BFT message: {}", e);
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         } else {

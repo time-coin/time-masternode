@@ -17,6 +17,7 @@ mod types;
 mod utxo_manager;
 mod wallet;
 
+use bft_consensus::BFTConsensus;
 use blockchain::Blockchain;
 use chrono::Timelike;
 use clap::Parser;
@@ -298,6 +299,33 @@ async fn main() {
     // Set peer manager for fork consensus verification
     blockchain.set_peer_manager(peer_manager.clone()).await;
 
+    // Initialize BFT consensus if running as masternode
+    let bft_consensus = if let Some(ref mn) = masternode_info {
+        let bft = Arc::new(BFTConsensus::new(mn.address.clone()));
+
+        // Set up BFT to broadcast messages through registry
+        let bft_registry = registry.clone();
+        bft.set_broadcast_callback(move |msg| {
+            let registry = bft_registry.clone();
+            tokio::spawn(async move {
+                // Broadcast through peer manager
+                registry.broadcast_message(msg).await;
+            });
+        })
+        .await;
+
+        // Link BFT to blockchain for validation
+        bft.set_blockchain(blockchain.clone()).await;
+
+        // Link blockchain to BFT
+        blockchain.set_bft_consensus(bft.clone()).await;
+
+        tracing::info!("✓ BFT consensus initialized for masternode");
+        Some(bft)
+    } else {
+        None
+    };
+
     println!("✓ Blockchain initialized");
     println!();
 
@@ -330,6 +358,12 @@ async fn main() {
                 attestation_system
                     .set_local_identity(mn.address.clone(), signing_key.clone())
                     .await;
+
+                // Set signing key for BFT consensus
+                if let Some(ref bft) = bft_consensus {
+                    bft.set_signing_key(signing_key.clone()).await;
+                    tracing::info!("✓ BFT consensus signing key configured");
+                }
 
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Heartbeat attestation identity configured");
@@ -589,6 +623,28 @@ async fn main() {
             }
         }
     });
+
+    // Start BFT committed block processor (every 5 seconds)
+    if bft_consensus.is_some() {
+        let bft_blockchain = blockchain.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+
+                // Process any BFT-committed blocks
+                match bft_blockchain.process_bft_committed_blocks().await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("✅ Processed {} BFT-committed block(s)", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("❌ Failed to process BFT-committed blocks: {}", e);
+                    }
+                }
+            }
+        });
+    }
 
     // Start network server
 
