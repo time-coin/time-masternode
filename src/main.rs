@@ -1,4 +1,5 @@
 mod address;
+mod bft_consensus;
 mod block;
 mod blockchain;
 mod config;

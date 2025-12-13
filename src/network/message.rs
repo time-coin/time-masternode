@@ -109,6 +109,25 @@ pub enum NetworkMessage {
         end_height: u64,
     },
     BlockRangeResponse(Vec<Block>),
+    // BFT Consensus for Block Generation
+    BlockProposal {
+        block: Block,
+        proposer: String,   // Masternode address
+        signature: Vec<u8>, // Proposer's signature
+        round: u64,         // Consensus round number
+    },
+    BlockVote {
+        block_hash: [u8; 32],
+        height: u64,
+        voter: String,      // Masternode address
+        signature: Vec<u8>, // Voter's signature
+        approve: bool,      // true = approve, false = reject
+    },
+    BlockCommit {
+        block_hash: [u8; 32],
+        height: u64,
+        signatures: Vec<(String, Vec<u8>)>, // (masternode_address, signature)
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
