@@ -229,6 +229,16 @@ async fn handle_peer(
                                         tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
                                         handshake_done = true;
 
+                                        // Send ACK to confirm handshake was processed
+                                        let ack_msg = NetworkMessage::Ack {
+                                            message_type: "Handshake".to_string(),
+                                        };
+                                        if let Ok(json) = serde_json::to_string(&ack_msg) {
+                                            let _ = writer.write_all(json.as_bytes()).await;
+                                            let _ = writer.write_all(b"\n").await;
+                                            let _ = writer.flush().await;
+                                        }
+
                                         // Request peer list for peer discovery
                                         let get_peers_msg = NetworkMessage::GetPeers;
                                         if let Ok(json) = serde_json::to_string(&get_peers_msg) {
@@ -254,6 +264,10 @@ async fn handle_peer(
                             let mut limiter = rate_limiter.write().await;
 
                             match &msg {
+                                NetworkMessage::Ack { message_type } => {
+                                    tracing::debug!("✅ Received ACK for {} from {}", message_type, peer.addr);
+                                    // ACKs are informational, no action needed
+                                }
                                 NetworkMessage::TransactionBroadcast(tx) => {
                                     if limiter.check("tx", ip_str) {
                                         if let Err(e) = consensus.process_transaction(tx.clone()).await {

@@ -249,6 +249,55 @@ async fn maintain_peer_connection(
 
     tracing::debug!("📡 Sent handshake to {}", ip);
 
+    // Wait for handshake ACK before sending other messages
+    let mut line = String::new();
+
+    // Read until we get the handshake ACK or timeout after 10 seconds
+    let ack_timeout = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) => {
+                    return Err("Connection closed before handshake ACK".to_string());
+                }
+                Ok(_) => {
+                    if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
+                        if let NetworkMessage::Ack { message_type } = msg {
+                            if message_type == "Handshake" {
+                                tracing::debug!("✅ Received handshake ACK from {}", ip);
+                                return Ok(());
+                            }
+                        } else {
+                            // Got another message - store it for later processing if needed
+                            tracing::debug!(
+                                "📨 Received message before ACK from {}: {:?}",
+                                ip,
+                                std::mem::discriminant(&msg)
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Error reading handshake ACK: {}", e));
+                }
+            }
+        }
+    })
+    .await;
+
+    match ack_timeout {
+        Ok(Ok(())) => {
+            tracing::info!("🤝 Handshake completed with {}", ip);
+        }
+        Ok(Err(e)) => {
+            return Err(format!("Handshake ACK failed: {}", e));
+        }
+        Err(_) => {
+            tracing::warn!("⏱️  Handshake ACK timeout from {} - proceeding anyway", ip);
+            // Continue anyway for backward compatibility with older nodes
+        }
+    }
+
     // Announce our masternode if we are one
     if let Some(local_mn) = masternode_registry.get_local_masternode().await {
         let announce_msg = NetworkMessage::MasternodeAnnouncement {
@@ -336,8 +385,8 @@ async fn maintain_peer_connection(
 
     tracing::debug!("📡 Requested peer list from {}", ip);
 
-    // Read responses
-    let mut line = String::new();
+    // Read responses (reuse the line buffer from handshake)
+    line.clear();
     tracing::info!("🔄 Starting message loop for peer {}", ip);
 
     loop {
@@ -410,6 +459,10 @@ async fn maintain_peer_connection(
                                     if let Err(e) = masternode_registry.register_masternode(ip.clone(), reward_address, tier, public_key).await {
                                         tracing::warn!("Failed to register masternode {}: {}", ip, e);
                                     }
+                                }
+                                NetworkMessage::Ack { message_type } => {
+                                    tracing::debug!("✅ Received ACK for {} from {}", message_type, ip);
+                                    // ACKs are informational, no action needed
                                 }
                                 NetworkMessage::BlockHeightResponse(remote_height) => {
                                     let local_height = blockchain.get_height().await;

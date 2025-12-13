@@ -18,6 +18,10 @@ pub enum NetworkMessage {
         protocol_version: u32,
         network: String,
     },
+    // Acknowledgment for handshake and critical messages
+    Ack {
+        message_type: String,
+    },
     TransactionBroadcast(Transaction),
     TransactionVoteRequest([u8; 32]),
     TransactionVote(Vote),
