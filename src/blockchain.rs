@@ -1422,6 +1422,27 @@ impl Blockchain {
             Err(_) => return Err("Connection timeout".to_string()),
         };
 
+        // Send handshake FIRST
+        let handshake = NetworkMessage::Handshake {
+            magic: *b"TIME",
+            protocol_version: 1,
+            network: "Testnet".to_string(),
+        };
+        let handshake_json = serde_json::to_string(&handshake)
+            .map_err(|e| format!("Handshake JSON error: {}", e))?;
+        stream
+            .write_all(handshake_json.as_bytes())
+            .await
+            .map_err(|e| format!("Handshake write error: {}", e))?;
+        stream
+            .write_all(b"\n")
+            .await
+            .map_err(|e| format!("Handshake write error: {}", e))?;
+        stream
+            .flush()
+            .await
+            .map_err(|e| format!("Handshake flush error: {}", e))?;
+
         // Send GetBlockHash message
         let message = NetworkMessage::GetBlockHash(height);
         let json = serde_json::to_string(&message).map_err(|e| format!("JSON error: {}", e))?;
