@@ -362,6 +362,7 @@ async fn handle_peer(
                                         let connection_age = connection_start.elapsed().as_secs();
                                         if connection_age < 5 {
                                             tracing::debug!("⏭️  Ignoring masternode announcement from short-lived connection {} (age: {}s)", peer.addr, connection_age);
+                                            line.clear();
                                             continue;
                                         }
                                         is_stable_connection = true;
@@ -373,6 +374,7 @@ async fn handle_peer(
 
                                     if peer_ip.is_empty() {
                                         tracing::warn!("❌ Invalid peer IP from {}", peer.addr);
+                                        line.clear();
                                         continue;
                                     }
 
@@ -455,6 +457,7 @@ async fn handle_peer(
 
                                     if already_seen {
                                         tracing::debug!("🔁 Ignoring duplicate block {} from {}", block_height, peer.addr);
+                                        line.clear();
                                         continue;
                                     }
 
