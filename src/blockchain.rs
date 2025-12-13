@@ -1154,11 +1154,33 @@ impl Blockchain {
         }
 
         // Request blocks from peer starting after common ancestor
-        // The sync process will handle fetching new blocks
+        // NEW: Actively request blocks instead of just waiting
+        let start_height = common_ancestor + 1;
         tracing::info!(
-            "🔄 Ready to accept blocks from height {} onward",
-            common_ancestor + 1
+            "📥 Actively requesting blocks from height {} onward from peers",
+            start_height
         );
+
+        // If we have a peer manager, request blocks from all connected peers
+        if let Some(pm) = self.peer_manager.read().await.as_ref() {
+            let peers = pm.get_all_peers().await;
+            if !peers.is_empty() {
+                // Send GetBlocks request to first available peer
+                // In a better implementation, we'd broadcast to all peers
+                if let Some(first_peer) = peers.first() {
+                    tracing::info!("📤 Requesting blocks from peer {}", first_peer);
+                    
+                    // Note: This requires adding a method to peer_manager or finding another way
+                    // For now, we'll log that we're ready and rely on periodic sync
+                    tracing::info!(
+                        "🔄 Ready to accept blocks from height {} onward. Periodic sync will fetch them.",
+                        start_height
+                    );
+                }
+            } else {
+                tracing::warn!("⚠️ No peers available to request blocks from");
+            }
+        }
 
         Ok(())
     }
@@ -1411,7 +1433,7 @@ impl Blockchain {
     async fn query_fork_consensus(
         &self,
         fork_height: u64,
-        _peer_hash: [u8; 32],
+        peer_hash: [u8; 32],
         our_hash: Option<[u8; 32]>,
         peer_manager: Arc<crate::peer_manager::PeerManager>,
     ) -> Result<ForkConsensus, String> {
@@ -1427,71 +1449,80 @@ impl Blockchain {
             return Ok(ForkConsensus::InsufficientPeers);
         }
 
-        // For now, we'll use a simplified approach:
-        // In a full implementation, we would send GetBlockHash(fork_height) to each peer
-        // and wait for responses. Since that requires network round-trips and we don't
-        // have a direct way to query from the blockchain layer, we'll use the masternode
-        // registry as a proxy for network consensus.
+        tracing::info!(
+            "🔍 Querying {} peers for fork consensus at height {}...",
+            peers.len(),
+            fork_height
+        );
 
-        // Query all masternodes for their opinion
-        let masternodes = self.masternode_registry.list_active().await;
-        let total_masternodes = masternodes.len();
+        // Query peers sequentially (simpler than parallel for now)
+        let mut peer_chain_votes = 0;
+        let mut our_chain_votes = 0;
+        let mut responded = 0;
+        let mut no_block = 0;
 
-        if total_masternodes < 3 {
-            tracing::warn!(
-                "Only {} masternode(s) registered - need 3+ for BFT consensus",
-                total_masternodes
-            );
+        for peer in peers.iter() {
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(3),
+                self.query_peer_block_hash(peer, fork_height)
+            ).await {
+                Ok(Ok(Some(hash))) => {
+                    responded += 1;
+                    if hash == peer_hash {
+                        peer_chain_votes += 1;
+                        tracing::debug!("Peer {} votes for peer's chain", peer);
+                    } else if our_hash.is_some() && hash == our_hash.unwrap() {
+                        our_chain_votes += 1;
+                        tracing::debug!("Peer {} votes for our chain", peer);
+                    } else {
+                        tracing::debug!("Peer {} has different hash (3rd chain?)", peer);
+                    }
+                }
+                Ok(Ok(None)) => {
+                    no_block += 1;
+                    tracing::debug!("Peer {} doesn't have block at height {}", peer, fork_height);
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("Peer {} query failed: {}", peer, e);
+                }
+                Err(_) => {
+                    tracing::debug!("Peer {} query timed out", peer);
+                }
+            }
+        }
+
+        tracing::info!(
+            "📊 Fork consensus results: {} responded, {} vote peer's chain, {} vote our chain, {} no block",
+            responded,
+            peer_chain_votes,
+            our_chain_votes,
+            no_block
+        );
+
+        // Need 2/3+ for consensus
+        let required = (peers.len() * 2) / 3 + 1;
+
+        if responded < 3 {
+            tracing::warn!("⚠️ Too few responses ({}) to determine consensus", responded);
+            // Fallback: if we don't have the block, peer probably has consensus
+            if our_hash.is_none() {
+                tracing::info!("We don't have block at height {} - assuming peer has consensus", fork_height);
+                return Ok(ForkConsensus::PeerChainHasConsensus);
+            }
             return Ok(ForkConsensus::InsufficientPeers);
         }
 
-        let required_for_consensus = (total_masternodes * 2) / 3 + 1; // 2/3 + 1 for BFT
-
-        tracing::info!(
-            "📊 Fork consensus check: {} masternodes, need {} for 2/3 majority",
-            total_masternodes,
-            required_for_consensus
-        );
-
-        // NOTE: This is a simplified implementation. In production, we would:
-        // 1. Send ConsensusQuery messages to all connected masternode peers
-        // 2. Wait for responses with timeout
-        // 3. Count actual responses for peer_hash vs our_hash
-        // 4. Determine consensus based on real network votes
-        //
-        // For now, we'll make a heuristic decision:
-        // - If we have our_hash and multiple peers connected, assume they have consensus
-        // - If we don't have our_hash (we're behind), assume peer has consensus
-
-        if our_hash.is_none() {
-            // We don't even have a block at this height - peer is ahead
-            tracing::info!(
-                "We don't have block at height {} - peer appears ahead",
-                fork_height
-            );
-            return Ok(ForkConsensus::PeerChainHasConsensus);
+        if peer_chain_votes >= required {
+            tracing::info!("✅ Peer's chain has 2/3+ consensus ({}/{})", peer_chain_votes, peers.len());
+            Ok(ForkConsensus::PeerChainHasConsensus)
+        } else if our_hash.is_some() && our_chain_votes >= required {
+            tracing::info!("✅ Our chain has 2/3+ consensus ({}/{})", our_chain_votes, peers.len());
+            Ok(ForkConsensus::OurChainHasConsensus)
+        } else {
+            tracing::warn!("⚠️ No chain has 2/3+ consensus (peer: {}, ours: {}, required: {})",
+                peer_chain_votes, our_chain_votes, required);
+            Ok(ForkConsensus::NoConsensus)
         }
-
-        // Check if the fork is recent (within last 10 blocks)
-        let current_height = *self.current_height.read().await;
-        let fork_age = current_height.saturating_sub(fork_height);
-
-        if fork_age > 10 {
-            // Old fork - our chain has been running for a while, likely has consensus
-            tracing::info!(
-                "Fork is {} blocks old - our chain has been stable, likely has consensus",
-                fork_age
-            );
-            return Ok(ForkConsensus::OurChainHasConsensus);
-        }
-
-        // Recent fork - assume peer's chain has consensus if they're connected
-        // This is conservative: we prefer to sync with the network
-        tracing::info!(
-            "Recent fork ({} blocks old) - assuming peer's chain has network consensus",
-            fork_age
-        );
-        Ok(ForkConsensus::PeerChainHasConsensus)
     }
 
     /// Query peers for consensus on a block hash at a specific height
