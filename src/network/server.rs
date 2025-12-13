@@ -75,6 +75,11 @@ impl NetworkServer {
             let (stream, addr) = self.listener.accept().await?;
             let addr_str = addr.to_string();
 
+            // Disable Nagle's algorithm to prevent batching
+            if let Err(e) = stream.set_nodelay(true) {
+                tracing::warn!("Failed to set TCP_NODELAY for {}: {}", addr, e);
+            }
+
             // Extract IP address
             let ip: IpAddr = addr.ip();
 

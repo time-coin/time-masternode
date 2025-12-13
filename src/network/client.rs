@@ -224,6 +224,11 @@ async fn maintain_peer_connection(
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
+    // Disable Nagle's algorithm to prevent batching of small messages
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::warn!("Failed to set TCP_NODELAY: {}", e);
+    }
+
     tracing::info!("✓ Connected to peer: {}", ip);
 
     let (reader, writer) = stream.into_split();
@@ -364,9 +369,6 @@ async fn maintain_peer_connection(
         .map_err(|e| format!("Flush failed: {}", e))?;
 
     tracing::debug!("📡 Requested pending transactions from {}", ip);
-
-    // Small delay to ensure message is sent separately
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Request masternode list
     let mn_request = NetworkMessage::GetMasternodes;
