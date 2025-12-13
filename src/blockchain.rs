@@ -352,6 +352,7 @@ impl Blockchain {
         let local_address = self.masternode_registry.get_local_address().await;
 
         // Calculate score for each masternode: tier_weight * uptime_seconds
+        // Free tier uses uptime only when no paid tiers available
         let mut scored_nodes: Vec<(String, u64, String)> = Vec::new(); // (address, score, wallet)
 
         for mn_info in &masternodes {
@@ -362,13 +363,8 @@ impl Blockchain {
                 crate::types::MasternodeTier::Gold => 100,
                 crate::types::MasternodeTier::Silver => 10,
                 crate::types::MasternodeTier::Bronze => 1,
-                crate::types::MasternodeTier::Free => 0, // Free tier cannot be leader
+                crate::types::MasternodeTier::Free => 1, // Free tier can be leader, weighted by uptime only
             };
-
-            // Skip Free tier nodes
-            if tier_weight == 0 {
-                continue;
-            }
 
             // Calculate uptime score
             let uptime_seconds = mn_info.total_uptime;
@@ -381,7 +377,7 @@ impl Blockchain {
         }
 
         if scored_nodes.is_empty() {
-            tracing::warn!("⚠️  No eligible masternodes for leader selection (all Free tier)");
+            tracing::warn!("⚠️  No masternodes available for leader selection");
             return (false, None);
         }
 
