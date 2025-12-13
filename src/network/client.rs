@@ -324,6 +324,9 @@ async fn maintain_peer_connection(
             .map_err(|e| format!("Flush failed: {}", e))?;
 
         tracing::info!("📡 Announced masternode to {}", ip);
+
+        // Small delay to ensure message is sent separately
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
     // Send heartbeat and sync check every 2 minutes (blocks are every 10 minutes)
@@ -344,6 +347,9 @@ async fn maintain_peer_connection(
 
     tracing::info!("📡 Requested initial block height from {}", ip);
 
+    // Small delay to ensure message is sent separately
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     // Request pending transactions (to catch any we missed during downtime)
     let tx_request = NetworkMessage::GetPendingTransactions;
     let msg_json =
@@ -358,6 +364,9 @@ async fn maintain_peer_connection(
         .map_err(|e| format!("Flush failed: {}", e))?;
 
     tracing::debug!("📡 Requested pending transactions from {}", ip);
+
+    // Small delay to ensure message is sent separately
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Request masternode list
     let mn_request = NetworkMessage::GetMasternodes;
