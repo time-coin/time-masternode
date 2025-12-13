@@ -499,13 +499,20 @@ async fn handle_peer(
                             }
                         } else {
                             failed_parse_count += 1;
-                            tracing::warn!("❌ Failed to parse message {} from {}: {}", failed_parse_count, peer.addr, line.trim());
+                            // Try to parse to see what the error is
+                            if let Err(parse_err) = serde_json::from_str::<NetworkMessage>(&line) {
+                                tracing::warn!("❌ Failed to parse message {} from {}: {} | Raw: {} | Error: {}",
+                                    failed_parse_count, peer.addr, line.trim(),
+                                    line.chars().take(100).collect::<String>(), parse_err);
+                            }
                             // Record violation and check if should ban
                             let should_ban = blacklist.write().await.record_violation(
                                 ip,
                                 "Failed to parse message"
                             );
-                            if should_ban || failed_parse_count >= 3 {
+                            // Be more lenient - allow up to 10 parse failures before disconnecting
+                            // This handles cases where peers send extra newlines or have temporary issues
+                            if should_ban || failed_parse_count >= 10 {
                                 tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts", peer.addr, failed_parse_count);
                                 break;
                             }

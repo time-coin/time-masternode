@@ -484,7 +484,9 @@ async fn maintain_peer_connection(
                                                 if e.to_string().contains("Fork detected") {
                                                     tracing::warn!("🍴 Fork detected while syncing: {}", e);
                                                     had_fork_error = true;
-                                                    // Don't continue adding blocks after fork - need to resolve first
+                                                    // Fork resolution is triggered automatically when blocks arrive
+                                                    // Just stop processing this batch and re-check height
+                                                    tracing::info!("🔄 Will re-check height after fork detection");
                                                     break;
                                                 } else {
                                                     tracing::warn!("Failed to add block: {}", e);
