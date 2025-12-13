@@ -241,16 +241,14 @@ async fn handle_peer(
                                             message_type: "Handshake".to_string(),
                                         };
                                         if let Ok(json) = serde_json::to_string(&ack_msg) {
-                                            let _ = writer.write_all(json.as_bytes()).await;
-                                            let _ = writer.write_all(b"\n").await;
+                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                             let _ = writer.flush().await;
                                         }
 
                                         // Request peer list for peer discovery
                                         let get_peers_msg = NetworkMessage::GetPeers;
                                         if let Ok(json) = serde_json::to_string(&get_peers_msg) {
-                                            let _ = writer.write_all(json.as_bytes()).await;
-                                            let _ = writer.write_all(b"\n").await;
+                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                             let _ = writer.flush().await;
                                         }
 
@@ -292,8 +290,7 @@ async fn handle_peer(
                                         }
                                         let reply = NetworkMessage::UTXOStateResponse(responses);
                                         if let Ok(json) = serde_json::to_string(&reply) {
-                                            let _ = writer.write_all(json.as_bytes()).await;
-                                            let _ = writer.write_all(b"\n").await;
+                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                             let _ = writer.flush().await;
                                         }
                                     }
@@ -308,8 +305,7 @@ async fn handle_peer(
                                     tracing::debug!("📥 Received GetBlockHeight from {}, responding with height {}", peer.addr, height);
                                     let reply = NetworkMessage::BlockHeightResponse(height);
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                     }
                                 }
@@ -318,8 +314,7 @@ async fn handle_peer(
                                     let pending_txs = blockchain.get_pending_transactions().await;
                                     let reply = NetworkMessage::PendingTransactionsResponse(pending_txs);
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                     }
                                 }
@@ -332,8 +327,7 @@ async fn handle_peer(
                                     }
                                     let reply = NetworkMessage::BlocksResponse(blocks);
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                     }
                                 }
@@ -348,8 +342,7 @@ async fn handle_peer(
                                         utxo_count,
                                     };
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                         tracing::debug!("📤 Sent UTXO state hash to {}", peer.addr);
                                     }
@@ -358,8 +351,7 @@ async fn handle_peer(
                                     let utxos = blockchain.get_all_utxos().await;
                                     let reply = NetworkMessage::UTXOSetResponse(utxos);
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                         tracing::info!("📤 Sent complete UTXO set to {}", peer.addr);
                                     }
@@ -497,8 +489,7 @@ async fn handle_peer(
                                         hash,
                                     };
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                     }
                                 }
@@ -511,8 +502,7 @@ async fn handle_peer(
                                         their_hash: our_hash.unwrap_or([0u8; 32]),
                                     };
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                     }
                                 }
@@ -521,8 +511,7 @@ async fn handle_peer(
                                     let blocks = blockchain.get_block_range(*start_height, *end_height).await;
                                     let reply = NetworkMessage::BlockRangeResponse(blocks);
                                     if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(json.as_bytes()).await;
-                                        let _ = writer.write_all(b"\n").await;
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                                         let _ = writer.flush().await;
                                         tracing::debug!("📤 Sent block range to {}", peer.addr);
                                     }
@@ -612,8 +601,7 @@ async fn handle_peer(
                         }
 
                         if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = writer.write_all(json.as_bytes()).await;
-                            let _ = writer.write_all(b"\n").await;
+                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
                             let _ = writer.flush().await;
                         }
                     }
