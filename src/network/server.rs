@@ -509,6 +509,25 @@ async fn handle_peer(
                                         tracing::debug!("📤 Sent block range to {}", peer.addr);
                                     }
                                 }
+                                // Heartbeat Messages
+                                NetworkMessage::HeartbeatBroadcast(heartbeat) => {
+                                    tracing::debug!("💓 Received heartbeat from {} seq {}",
+                                        heartbeat.masternode_address, heartbeat.sequence_number);
+
+                                    // Process heartbeat through masternode registry
+                                    if let Err(e) = masternode_registry.receive_heartbeat_broadcast(heartbeat.clone()).await {
+                                        tracing::warn!("Failed to process heartbeat: {}", e);
+                                    }
+                                }
+                                NetworkMessage::HeartbeatAttestation(attestation) => {
+                                    tracing::debug!("✍️ Received heartbeat attestation from {}",
+                                        attestation.witness_address);
+
+                                    // Process attestation through masternode registry
+                                    if let Err(e) = masternode_registry.receive_attestation_broadcast(attestation.clone()).await {
+                                        tracing::warn!("Failed to process attestation: {}", e);
+                                    }
+                                }
                                 // BFT Consensus Messages
                                 NetworkMessage::BlockProposal { .. } |
                                 NetworkMessage::BlockVote { .. } |

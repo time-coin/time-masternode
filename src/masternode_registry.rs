@@ -457,6 +457,53 @@ impl MasternodeRegistry {
             }
         }
     }
+
+    /// Receive and process a heartbeat broadcast from another masternode
+    pub async fn receive_heartbeat_broadcast(
+        &self,
+        heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Update the masternode's last_heartbeat timestamp
+        let mn_address = &heartbeat.masternode_address;
+
+        let mut masternodes = self.masternodes.write().await;
+        if let Some(info) = masternodes.get_mut(mn_address) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            info.last_heartbeat = now;
+            info.is_active = true;
+            tracing::debug!("💓 Updated last_heartbeat for masternode {}", mn_address);
+        }
+
+        Ok(())
+    }
+
+    /// Receive and process an attestation broadcast
+    pub async fn receive_attestation_broadcast(
+        &self,
+        attestation: crate::heartbeat_attestation::WitnessAttestation,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Update the witness masternode's last_heartbeat
+        let attester = &attestation.witness_address;
+
+        let mut masternodes = self.masternodes.write().await;
+        if let Some(info) = masternodes.get_mut(attester) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            info.last_heartbeat = now;
+            info.is_active = true;
+            tracing::debug!(
+                "✍️ Updated last_heartbeat for attesting masternode {}",
+                attester
+            );
+        }
+
+        Ok(())
+    }
 }
 
 impl Clone for MasternodeRegistry {
