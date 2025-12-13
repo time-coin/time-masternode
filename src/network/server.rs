@@ -174,12 +174,14 @@ async fn handle_peer(
         .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
 
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
+    let connection_start = std::time::Instant::now();
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
     let mut line = String::new();
     let mut failed_parse_count = 0;
     let mut handshake_done = false;
+    let mut is_stable_connection = false;
 
     // Define expected magic bytes for our protocol
     const MAGIC_BYTES: [u8; 4] = *b"TIME";
@@ -358,6 +360,17 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
+                                    // Check if this is a stable connection (>5 seconds)
+                                    if !is_stable_connection {
+                                        let connection_age = connection_start.elapsed().as_secs();
+                                        if connection_age < 5 {
+                                            tracing::debug!("⏭️  Ignoring masternode announcement from short-lived connection {} (age: {}s)", peer.addr, connection_age);
+                                            continue;
+                                        }
+                                        is_stable_connection = true;
+                                        tracing::debug!("✅ Connection {} marked as stable", peer.addr);
+                                    }
+
                                     // Extract just the IP (no port) from the peer connection
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
 
