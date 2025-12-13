@@ -301,6 +301,10 @@ impl MasternodeRegistry {
         }
     }
 
+    pub async fn get_local_address(&self) -> Option<String> {
+        self.local_masternode_address.read().await.clone()
+    }
+
     pub async fn set_local_masternode(&self, address: String) {
         *self.local_masternode_address.write().await = Some(address);
     }

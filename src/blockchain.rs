@@ -340,6 +340,73 @@ impl Blockchain {
         }))
     }
 
+    /// Select catchup leader using BFT criteria (tier, uptime, address)
+    /// Returns: (is_leader, leader_address)
+    async fn select_catchup_leader(&self) -> (bool, Option<String>) {
+        let masternodes = self.masternode_registry.list_active().await;
+
+        if masternodes.is_empty() {
+            return (false, None);
+        }
+
+        let local_address = self.masternode_registry.get_local_address().await;
+
+        // Calculate score for each masternode: tier_weight * uptime_seconds
+        let mut scored_nodes: Vec<(String, u64, String)> = Vec::new(); // (address, score, wallet)
+
+        for mn_info in &masternodes {
+            let mn = &mn_info.masternode;
+
+            // Tier weights (as per BFT rules)
+            let tier_weight = match mn.tier {
+                crate::types::MasternodeTier::Gold => 100,
+                crate::types::MasternodeTier::Silver => 10,
+                crate::types::MasternodeTier::Bronze => 1,
+                crate::types::MasternodeTier::Free => 0, // Free tier cannot be leader
+            };
+
+            // Skip Free tier nodes
+            if tier_weight == 0 {
+                continue;
+            }
+
+            // Calculate uptime score
+            let uptime_seconds = mn_info.total_uptime;
+
+            // Combined score: tier_weight * uptime_seconds
+            // This ensures higher tier nodes with good uptime are preferred
+            let score = tier_weight * uptime_seconds;
+
+            scored_nodes.push((mn.address.clone(), score, mn.wallet_address.clone()));
+        }
+
+        if scored_nodes.is_empty() {
+            tracing::warn!("⚠️  No eligible masternodes for leader selection (all Free tier)");
+            return (false, None);
+        }
+
+        // Sort by: score DESC, then address ASC (deterministic tiebreaker)
+        scored_nodes.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+        let leader_address = &scored_nodes[0].0;
+        let leader_score = scored_nodes[0].1;
+
+        let is_leader = local_address.as_ref() == Some(leader_address);
+
+        tracing::info!(
+            "🏆 Catchup leader selected: {} (score: {}) - {}",
+            leader_address,
+            leader_score,
+            if is_leader {
+                "I AM LEADER"
+            } else {
+                "waiting for leader"
+            }
+        );
+
+        (is_leader, Some(leader_address.clone()))
+    }
+
     /// Execute BFT consensus catchup mode - all nodes catch up together
     async fn bft_catchup_mode(&self, params: CatchupParams) -> Result<(), String> {
         tracing::info!(
@@ -349,15 +416,66 @@ impl Blockchain {
             params.blocks_to_catch
         );
 
+        // Select leader for this catchup period
+        let (is_leader, leader_address) = self.select_catchup_leader().await;
+
         // Set catchup mode flag
         *self.block_gen_mode.write().await = BlockGenMode::Catchup;
         *self.is_catchup_mode.write().await = true;
 
         let mut current = params.current;
         let start_time = std::time::Instant::now();
+        let leader_timeout = std::time::Duration::from_secs(30); // Wait 30s for leader's blocks
+        let mut last_leader_activity = std::time::Instant::now();
 
         while current < params.target {
             let next_height = current + 1;
+
+            // NON-LEADER NODES: Wait for leader to broadcast blocks
+            if !is_leader {
+                // Check if we've received the block from leader
+                let our_height = *self.current_height.read().await;
+
+                if our_height >= next_height {
+                    // Leader's block arrived!
+                    current = our_height;
+                    last_leader_activity = std::time::Instant::now();
+
+                    // Log progress
+                    if current.is_multiple_of(10) || current == params.target {
+                        let progress = ((current - params.current) as f64
+                            / params.blocks_to_catch as f64)
+                            * 100.0;
+                        tracing::info!(
+                            "📊 Catchup progress (following leader): {:.1}% ({}/{})",
+                            progress,
+                            current,
+                            params.target
+                        );
+                    }
+
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
+                }
+
+                // Check if leader has timed out
+                if last_leader_activity.elapsed() > leader_timeout {
+                    tracing::warn!(
+                        "⚠️  Leader {:?} timeout after 30s - switching to self-generation at height {}",
+                        leader_address,
+                        next_height
+                    );
+                    // Become emergency leader and continue generating
+                    break;
+                }
+
+                // Still waiting for leader
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                continue;
+            }
+
+            // LEADER NODE: Generate and broadcast blocks
+            tracing::debug!("👑 Leader generating block {}", next_height);
 
             // Calculate catchup block timestamp
             let block_timestamp =
@@ -1169,7 +1287,7 @@ impl Blockchain {
                 // In a better implementation, we'd broadcast to all peers
                 if let Some(first_peer) = peers.first() {
                     tracing::info!("📤 Requesting blocks from peer {}", first_peer);
-                    
+
                     // Note: This requires adding a method to peer_manager or finding another way
                     // For now, we'll log that we're ready and rely on periodic sync
                     tracing::info!(
@@ -1464,8 +1582,10 @@ impl Blockchain {
         for peer in peers.iter() {
             match tokio::time::timeout(
                 tokio::time::Duration::from_secs(3),
-                self.query_peer_block_hash(peer, fork_height)
-            ).await {
+                self.query_peer_block_hash(peer, fork_height),
+            )
+            .await
+            {
                 Ok(Ok(Some(hash))) => {
                     responded += 1;
                     if hash == peer_hash {
@@ -1503,24 +1623,42 @@ impl Blockchain {
         let required = (peers.len() * 2) / 3 + 1;
 
         if responded < 3 {
-            tracing::warn!("⚠️ Too few responses ({}) to determine consensus", responded);
+            tracing::warn!(
+                "⚠️ Too few responses ({}) to determine consensus",
+                responded
+            );
             // Fallback: if we don't have the block, peer probably has consensus
             if our_hash.is_none() {
-                tracing::info!("We don't have block at height {} - assuming peer has consensus", fork_height);
+                tracing::info!(
+                    "We don't have block at height {} - assuming peer has consensus",
+                    fork_height
+                );
                 return Ok(ForkConsensus::PeerChainHasConsensus);
             }
             return Ok(ForkConsensus::InsufficientPeers);
         }
 
         if peer_chain_votes >= required {
-            tracing::info!("✅ Peer's chain has 2/3+ consensus ({}/{})", peer_chain_votes, peers.len());
+            tracing::info!(
+                "✅ Peer's chain has 2/3+ consensus ({}/{})",
+                peer_chain_votes,
+                peers.len()
+            );
             Ok(ForkConsensus::PeerChainHasConsensus)
         } else if our_hash.is_some() && our_chain_votes >= required {
-            tracing::info!("✅ Our chain has 2/3+ consensus ({}/{})", our_chain_votes, peers.len());
+            tracing::info!(
+                "✅ Our chain has 2/3+ consensus ({}/{})",
+                our_chain_votes,
+                peers.len()
+            );
             Ok(ForkConsensus::OurChainHasConsensus)
         } else {
-            tracing::warn!("⚠️ No chain has 2/3+ consensus (peer: {}, ours: {}, required: {})",
-                peer_chain_votes, our_chain_votes, required);
+            tracing::warn!(
+                "⚠️ No chain has 2/3+ consensus (peer: {}, ours: {}, required: {})",
+                peer_chain_votes,
+                our_chain_votes,
+                required
+            );
             Ok(ForkConsensus::NoConsensus)
         }
     }
