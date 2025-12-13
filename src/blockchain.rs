@@ -14,7 +14,7 @@ const SATOSHIS_PER_TIME: u64 = 100_000_000;
 const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 #[allow(dead_code)]
 const CATCHUP_BLOCK_INTERVAL: i64 = 60; // 1 minute per block during catchup
-const MIN_BLOCKS_BEHIND_FOR_CATCHUP: u64 = 10; // Minimum gap to enter catchup mode
+const MIN_BLOCKS_BEHIND_FOR_CATCHUP: u64 = 3; // Minimum gap to enter catchup mode (lowered for current issue)
 
 /// Result of fork consensus query
 #[derive(Debug, PartialEq)]
