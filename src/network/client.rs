@@ -243,14 +243,11 @@ async fn maintain_peer_connection(
     };
     let handshake_json = serde_json::to_string(&handshake)
         .map_err(|e| format!("Failed to serialize handshake: {}", e))?;
+    let msg_with_newline = format!("{}\n", handshake_json);
     writer
-        .write_all(handshake_json.as_bytes())
+        .write_all(msg_with_newline.as_bytes())
         .await
         .map_err(|e| format!("Failed to send handshake: {}", e))?;
-    writer
-        .write_all(b"\n")
-        .await
-        .map_err(|e| format!("Failed to send handshake newline: {}", e))?;
     writer
         .flush()
         .await
@@ -323,12 +320,9 @@ async fn maintain_peer_connection(
         let msg_json = serde_json::to_string(&announce_msg)
             .map_err(|e| format!("Failed to serialize: {}", e))?;
 
+        let msg_with_newline = format!("{}\n", msg_json);
         writer
-            .write_all(msg_json.as_bytes())
-            .await
-            .map_err(|e| format!("Write failed: {}", e))?;
-        writer
-            .write_all(b"\n")
+            .write_all(msg_with_newline.as_bytes())
             .await
             .map_err(|e| format!("Write failed: {}", e))?;
         writer
@@ -349,12 +343,9 @@ async fn maintain_peer_connection(
     let sync_msg = NetworkMessage::GetBlockHeight;
     let msg_json =
         serde_json::to_string(&sync_msg).map_err(|e| format!("Failed to serialize: {}", e))?;
+    let msg_with_newline = format!("{}\n", msg_json);
     writer
-        .write_all(msg_json.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .write_all(b"\n")
+        .write_all(msg_with_newline.as_bytes())
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
     writer
@@ -371,12 +362,9 @@ async fn maintain_peer_connection(
     let tx_request = NetworkMessage::GetPendingTransactions;
     let msg_json =
         serde_json::to_string(&tx_request).map_err(|e| format!("Failed to serialize: {}", e))?;
+    let msg_with_newline = format!("{}\n", msg_json);
     writer
-        .write_all(msg_json.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .write_all(b"\n")
+        .write_all(msg_with_newline.as_bytes())
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
     writer
@@ -390,12 +378,9 @@ async fn maintain_peer_connection(
     let mn_request = NetworkMessage::GetMasternodes;
     let msg_json =
         serde_json::to_string(&mn_request).map_err(|e| format!("Failed to serialize: {}", e))?;
+    let msg_with_newline = format!("{}\n", msg_json);
     writer
-        .write_all(msg_json.as_bytes())
-        .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .write_all(b"\n")
+        .write_all(msg_with_newline.as_bytes())
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
     writer
