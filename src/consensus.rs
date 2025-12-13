@@ -202,11 +202,12 @@ impl ConsensusEngine {
                     txid,
                     vout: i as u32,
                 };
+                let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
                 let utxo = UTXO {
                     outpoint: new_outpoint.clone(),
                     value: output.value,
                     script_pubkey: output.script_pubkey.clone(),
-                    address: "recipient".to_string(), // TODO: derive from script_pubkey
+                    address,
                 };
 
                 self.utxo_manager.add_utxo(utxo.clone()).await;

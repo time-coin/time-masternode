@@ -74,6 +74,7 @@ impl NetworkClient {
                 let mr = masternode_registry.clone();
                 let bc = blockchain.clone();
                 let attestation = attestation_system.clone();
+                let pm = peer_manager.clone();
                 let ip_str = ip.to_string();
                 let port = p2p_port;
 
@@ -89,6 +90,7 @@ impl NetworkClient {
                             mr.clone(),
                             bc.clone(),
                             attestation.clone(),
+                            pm.clone(),
                         )
                         .await
                         {
@@ -163,6 +165,7 @@ impl NetworkClient {
                     let mr = masternode_registry.clone();
                     let bc = blockchain.clone();
                     let attestation_system = attestation_system.clone();
+                    let pm = peer_manager.clone();
                     let ip_str = ip.to_string();
                     let port = p2p_port;
 
@@ -178,6 +181,7 @@ impl NetworkClient {
                                 mr.clone(),
                                 bc.clone(),
                                 attestation_system.clone(),
+                                pm.clone(),
                             )
                             .await
                             {
@@ -217,6 +221,7 @@ async fn maintain_peer_connection(
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
+    peer_manager: Arc<PeerManager>,
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
@@ -683,9 +688,17 @@ async fn maintain_peer_connection(
                                     tracing::info!("📥 Received {} UTXOs from peer for reconciliation", utxos.len());
                                     blockchain.reconcile_utxo_state(utxos).await;
                                 }
-                                NetworkMessage::PeersResponse(_peers) => {
-                                    tracing::debug!("📩 Received peer list from {}", ip);
-                                    // TODO: Process peer discovery
+                                NetworkMessage::PeersResponse(peers) => {
+                                    tracing::debug!("📩 Received peer list from {} with {} peer(s)", ip, peers.len());
+                                    let mut added = 0;
+                                    for peer_addr in peers {
+                                        if peer_manager.add_peer_candidate(peer_addr.clone()).await {
+                                            added += 1;
+                                        }
+                                    }
+                                    if added > 0 {
+                                        tracing::info!("✓ Added {} new peer candidate(s) from {}", added, ip);
+                                    }
                                 }
                                 NetworkMessage::HeartbeatBroadcast(heartbeat) => {
                                     tracing::debug!("💓 Received heartbeat from {} seq {}",

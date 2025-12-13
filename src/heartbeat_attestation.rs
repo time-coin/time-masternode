@@ -8,8 +8,6 @@
 // 4. Prevents Sybil attacks: new nodes can't fake historical uptime
 // 5. Prevents collusion: witnesses are pseudo-randomly selected
 
-#![allow(dead_code)] // TODO: Remove when fully integrated
-
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -154,6 +152,7 @@ impl WitnessAttestation {
 pub struct AttestedHeartbeat {
     pub heartbeat: SignedHeartbeat,
     pub attestations: Vec<WitnessAttestation>,
+    #[allow(dead_code)]
     pub received_at: i64,
 }
 
@@ -415,6 +414,7 @@ impl HeartbeatAttestationSystem {
     }
 
     /// Cleanup old heartbeats
+    #[allow(dead_code)]
     pub async fn cleanup_old_heartbeats(&self, max_age_seconds: i64) {
         let now = chrono::Utc::now().timestamp();
         let mut history = self.heartbeat_history.write().await;

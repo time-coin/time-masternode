@@ -413,11 +413,22 @@ impl RpcHandler {
     }
 
     async fn masternode_status(&self) -> Result<Value, RpcError> {
-        // TODO: Return actual masternode status if running as masternode
-        Ok(json!({
-            "status": "Not a masternode",
-            "message": "This node is not configured as a masternode"
-        }))
+        if let Some(local_mn) = self.registry.get_local_masternode().await {
+            Ok(json!({
+                "status": "active",
+                "address": local_mn.masternode.address,
+                "reward_address": local_mn.reward_address,
+                "tier": format!("{:?}", local_mn.masternode.tier),
+                "total_uptime": local_mn.total_uptime,
+                "is_active": local_mn.is_active,
+                "public_key": hex::encode(local_mn.masternode.public_key.to_bytes())
+            }))
+        } else {
+            Ok(json!({
+                "status": "Not a masternode",
+                "message": "This node is not configured as a masternode"
+            }))
+        }
     }
 
     async fn validate_address(&self, params: &[Value]) -> Result<Value, RpcError> {

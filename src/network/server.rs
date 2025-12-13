@@ -407,8 +407,13 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::GetPeers => {
                                     tracing::debug!("📥 Received GetPeers request from {}", peer.addr);
-                                    // TODO: Peer exchange to be implemented in connection_manager
-                                    // For now, just acknowledge the request
+                                    let peers = peer_manager.get_all_peers().await;
+                                    let response = NetworkMessage::PeersResponse(peers.clone());
+                                    if let Ok(json) = serde_json::to_string(&response) {
+                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
+                                        let _ = writer.flush().await;
+                                        tracing::debug!("📤 Sent {} peer(s) to {}", peers.len(), peer.addr);
+                                    }
                                 }
                                 NetworkMessage::GetMasternodes => {
                                     tracing::debug!("📥 Received GetMasternodes request from {}", peer.addr);
@@ -430,10 +435,17 @@ async fn handle_peer(
                                         tracing::debug!("📤 Sent {} masternode(s) to {}", all_masternodes.len(), peer.addr);
                                     }
                                 }
-                                NetworkMessage::PeersResponse(_peers) => {
-                                    tracing::debug!("📥 Received PeersResponse from {}", peer.addr);
-                                    // TODO: Peer exchange to be implemented in connection_manager
-                                    // For now, just acknowledge the response
+                                NetworkMessage::PeersResponse(peers) => {
+                                    tracing::debug!("📥 Received PeersResponse from {} with {} peer(s)", peer.addr, peers.len());
+                                    let mut added = 0;
+                                    for peer_addr in peers {
+                                        if peer_manager.add_peer_candidate(peer_addr.clone()).await {
+                                            added += 1;
+                                        }
+                                    }
+                                    if added > 0 {
+                                        tracing::info!("✓ Added {} new peer candidate(s) from {}", added, peer.addr);
+                                    }
                                 }
                                 NetworkMessage::BlockAnnouncement(block) => {
                                     let block_height = block.header.height;

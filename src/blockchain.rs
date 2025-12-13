@@ -7,6 +7,7 @@ use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -789,13 +790,14 @@ impl Blockchain {
         all_txs.extend(finalized_txs);
 
         let prev_hash = self.get_block_hash(height - 1)?;
+        let merkle_root = Self::calculate_merkle_root(&all_txs);
 
         let block = Block {
             header: BlockHeader {
                 version: 1,
                 height,
                 previous_hash: prev_hash,
-                merkle_root: coinbase.txid(), // TODO: Calculate proper merkle root
+                merkle_root,
                 timestamp,
                 block_reward: total_reward,
             },
@@ -1898,6 +1900,29 @@ impl Blockchain {
             }
         }
         blocks
+    }
+
+    /// Calculate merkle root of transactions
+    fn calculate_merkle_root(txs: &[Transaction]) -> [u8; 32] {
+        if txs.is_empty() {
+            return [0u8; 32];
+        }
+        let mut hashes: Vec<[u8; 32]> = txs.iter().map(|tx| tx.txid()).collect();
+        while hashes.len() > 1 {
+            if hashes.len() % 2 == 1 {
+                hashes.push(*hashes.last().unwrap());
+            }
+            hashes = hashes
+                .chunks(2)
+                .map(|pair| {
+                    let mut hasher = Sha256::new();
+                    hasher.update(pair[0]);
+                    hasher.update(pair[1]);
+                    hasher.finalize().into()
+                })
+                .collect();
+        }
+        hashes[0]
     }
 }
 
