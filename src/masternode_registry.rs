@@ -403,17 +403,17 @@ impl MasternodeRegistry {
     ) {
         use crate::network::message::NetworkMessage;
 
+        // Use broadcast channel to send to all connected peers
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-            let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
+            let msg = NetworkMessage::HeartbeatBroadcast(heartbeat.clone());
             match tx.send(msg) {
-                Ok(0) => {
-                    tracing::debug!("💓 Heartbeat created (no peers to attest yet)");
-                }
-                Ok(receivers) => {
-                    tracing::debug!("📡 Broadcast heartbeat to {} peer(s)", receivers);
+                Ok(receiver_count) => {
+                    if receiver_count > 0 {
+                        tracing::debug!("📡 Broadcast heartbeat to {} peer(s)", receiver_count);
+                    }
                 }
                 Err(_) => {
-                    tracing::debug!("Heartbeat broadcast skipped (no active connections)");
+                    tracing::trace!("No peers connected to receive heartbeat");
                 }
             }
         }
