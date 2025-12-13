@@ -315,7 +315,7 @@ impl Blockchain {
             }
 
             // Log progress every 10 seconds
-            if start_time.elapsed().as_secs() % 10 == 0 {
+            if start_time.elapsed().as_secs().is_multiple_of(10) {
                 let progress = ((current - start_height) as f64
                     / (target_height - start_height) as f64)
                     * 100.0;
@@ -374,7 +374,6 @@ impl Blockchain {
     }
 
     /// Traditional peer sync (fallback when BFT catchup not possible)
-
     /// Select catchup leader using BFT criteria (tier, uptime, address)
     /// Returns: (is_leader, leader_address)
     async fn select_catchup_leader(&self) -> (bool, Option<String>) {

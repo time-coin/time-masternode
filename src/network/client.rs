@@ -327,7 +327,7 @@ async fn maintain_peer_connection(
     }
 
     // Send heartbeat and sync check every 2 minutes (blocks are every 10 minutes)
-    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(120));
+    let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(60));
 
     // Initial height request
     let sync_msg = NetworkMessage::GetBlockHeight;
