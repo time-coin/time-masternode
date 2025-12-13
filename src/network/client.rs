@@ -258,6 +258,10 @@ async fn maintain_peer_connection(
             line.clear();
             match reader.read_line(&mut line).await {
                 Ok(0) => {
+                    tracing::warn!(
+                        "🔌 {} closed connection immediately after handshake (before ACK)",
+                        ip
+                    );
                     return Err("Connection closed before handshake ACK".to_string());
                 }
                 Ok(_) => {
