@@ -244,9 +244,13 @@ async fn maintain_peer_connection(
     let handshake_json = serde_json::to_string(&handshake)
         .map_err(|e| format!("Failed to serialize handshake: {}", e))?;
     writer
-        .write_all(format!("{}\n", handshake_json).as_bytes())
+        .write_all(handshake_json.as_bytes())
         .await
         .map_err(|e| format!("Failed to send handshake: {}", e))?;
+    writer
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("Failed to send handshake newline: {}", e))?;
     writer
         .flush()
         .await
@@ -320,7 +324,11 @@ async fn maintain_peer_connection(
             .map_err(|e| format!("Failed to serialize: {}", e))?;
 
         writer
-            .write_all(format!("{}\n", msg_json).as_bytes())
+            .write_all(msg_json.as_bytes())
+            .await
+            .map_err(|e| format!("Write failed: {}", e))?;
+        writer
+            .write_all(b"\n")
             .await
             .map_err(|e| format!("Write failed: {}", e))?;
         writer
@@ -342,7 +350,11 @@ async fn maintain_peer_connection(
     let msg_json =
         serde_json::to_string(&sync_msg).map_err(|e| format!("Failed to serialize: {}", e))?;
     writer
-        .write_all(format!("{}\n", msg_json).as_bytes())
+        .write_all(msg_json.as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    writer
+        .write_all(b"\n")
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
     writer
@@ -360,7 +372,11 @@ async fn maintain_peer_connection(
     let msg_json =
         serde_json::to_string(&tx_request).map_err(|e| format!("Failed to serialize: {}", e))?;
     writer
-        .write_all(format!("{}\n", msg_json).as_bytes())
+        .write_all(msg_json.as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    writer
+        .write_all(b"\n")
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
     writer
@@ -375,7 +391,11 @@ async fn maintain_peer_connection(
     let msg_json =
         serde_json::to_string(&mn_request).map_err(|e| format!("Failed to serialize: {}", e))?;
     writer
-        .write_all(format!("{}\n", msg_json).as_bytes())
+        .write_all(msg_json.as_bytes())
+        .await
+        .map_err(|e| format!("Write failed: {}", e))?;
+    writer
+        .write_all(b"\n")
         .await
         .map_err(|e| format!("Write failed: {}", e))?;
     writer
