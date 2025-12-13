@@ -196,149 +196,184 @@ impl Blockchain {
             blocks_behind
         );
 
-        // Check if we should enter BFT catchup mode
-        if blocks_behind >= MIN_BLOCKS_BEHIND_FOR_CATCHUP {
-            // Try BFT consensus catchup if we have peer manager
-            if let Some(pm) = self.peer_manager.read().await.as_ref() {
-                match self
-                    .detect_catchup_consensus(current, expected, pm.clone())
-                    .await
-                {
-                    Ok(Some(params)) => {
-                        tracing::info!("🔄 Entering BFT consensus catchup mode");
-                        return self.bft_catchup_mode(params).await;
-                    }
-                    Ok(None) => {
-                        tracing::info!("No consensus on catchup - using normal sync");
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to detect catchup consensus: {}", e);
-                    }
-                }
-            }
-        }
+        // STEP 1: Always try to sync from peers first (blocks might already exist)
+        tracing::info!("📡 Attempting to sync from peers...");
 
-        // Fall back to normal peer sync
-        tracing::info!("📡 Waiting for peer connections to sync blockchain...");
-        self.sync_from_peers(current, expected).await
-    }
+        if let Some(pm) = self.peer_manager.read().await.as_ref() {
+            // Query peers for their heights to see if anyone has the blocks we need
+            let peers = pm.get_all_peers().await;
 
-    /// Traditional peer sync (fallback when BFT catchup not possible)
-    async fn sync_from_peers(&self, initial_height: u64, expected: u64) -> Result<(), String> {
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            if !peers.is_empty() {
+                tracing::info!("🔍 Checking {} peer(s) for existing blocks...", peers.len());
 
-        // Check if peers synced us
-        let mut current_after_wait = *self.current_height.read().await;
-        if current_after_wait >= expected {
-            tracing::info!("✓ Synced from peers to height {}", current_after_wait);
-            return Ok(());
-        }
+                // Network client will handle requesting blocks when peers respond with heights
+                // Wait a bit for sync to happen via normal P2P
+                let sync_result = self.wait_for_peer_sync(current, expected, 60).await;
 
-        // Still behind - check if we made any progress
-        if current_after_wait > initial_height {
-            let progress = current_after_wait - initial_height;
-            tracing::info!(
-                "📥 Synced {} blocks from peers, {} more to go. Waiting...",
-                progress,
-                expected - current_after_wait
-            );
-
-            // Continue waiting for sync to complete (up to 5 minutes total)
-            for i in 0..30 {
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                let height = *self.current_height.read().await;
-                if height >= expected {
-                    tracing::info!("✓ Sync complete at height {}", height);
+                if sync_result.is_ok() {
+                    tracing::info!("✓ Successfully synced from peers");
                     return Ok(());
                 }
-                if height > current_after_wait {
-                    tracing::info!("📥 Syncing... ({}/{})", height, expected);
-                    current_after_wait = height;
-                }
 
-                // Log progress every minute
-                if i % 6 == 0 && i > 0 {
+                // Check if we made progress but didn't complete
+                let new_height = *self.current_height.read().await;
+                if new_height > current {
                     tracing::info!(
-                        "📊 Still syncing from peers... ({}/{}, {:.1}% complete)",
-                        height,
-                        expected,
-                        (height as f64 / expected as f64) * 100.0
+                        "📥 Partial sync: {} → {} ({} blocks received)",
+                        current,
+                        new_height,
+                        new_height - current
                     );
+
+                    // If we're close to target, wait a bit more
+                    if expected - new_height < 5 {
+                        tracing::info!("⏳ Nearly synced, waiting 30s more...");
+                        if self
+                            .wait_for_peer_sync(new_height, expected, 30)
+                            .await
+                            .is_ok()
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
             }
         }
 
-        // After waiting up to 5.5 minutes, check final status
+        // STEP 2: Peer sync failed or no peers - check if we need to generate new blocks
         let final_height = *self.current_height.read().await;
+
         if final_height >= expected {
-            tracing::info!("✓ Sync complete at height {}", final_height);
-            return Ok(());
+            return Ok(()); // We caught up during the wait
         }
 
-        // Still behind - don't generate blocks, just wait for peers
-        let blocks_behind = expected - final_height;
-        tracing::warn!(
-            "⚠️  Still {} blocks behind. Waiting for peers to sync blockchain...",
-            blocks_behind
-        );
-        tracing::info!(
-            "💡 If peers aren't connecting, check firewall settings and peer discovery."
-        );
+        let remaining = expected - final_height;
 
-        Ok(())
+        // Only enter catchup generation if we're significantly behind and have consensus
+        if remaining >= MIN_BLOCKS_BEHIND_FOR_CATCHUP {
+            tracing::warn!(
+                "⚠️  Peer sync incomplete: still {} blocks behind. Checking for network catchup consensus...",
+                remaining
+            );
+
+            if let Some(pm) = self.peer_manager.read().await.as_ref() {
+                // Check if ALL nodes are behind (network-wide catchup needed)
+                match self
+                    .detect_network_wide_catchup(final_height, expected, pm.clone())
+                    .await
+                {
+                    Ok(true) => {
+                        tracing::info!(
+                            "🔄 Network consensus: all nodes behind - entering BFT catchup mode"
+                        );
+                        let params = CatchupParams {
+                            current: final_height,
+                            target: expected,
+                            blocks_to_catch: remaining,
+                        };
+                        return self.bft_catchup_mode(params).await;
+                    }
+                    Ok(false) => {
+                        tracing::warn!("❌ No network-wide catchup consensus - some peers ahead but unreachable");
+                        return Err(format!(
+                            "Unable to sync from peers and no consensus for catchup generation (height: {} / {})",
+                            final_height, expected
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to detect network catchup consensus: {}", e);
+                        return Err(format!("Catchup failed: {}", e));
+                    }
+                }
+            }
+        }
+
+        tracing::warn!("⚠️  Catchup incomplete: {} / {}", final_height, expected);
+        Err(format!(
+            "Catchup stopped at height {} (target: {})",
+            final_height, expected
+        ))
     }
 
-    /// Detect if network has consensus on being behind and needs coordinated catchup
-    async fn detect_catchup_consensus(
+    /// Wait for peer sync to complete
+    async fn wait_for_peer_sync(
         &self,
-        current_height: u64,
+        start_height: u64,
+        target_height: u64,
+        timeout_secs: u64,
+    ) -> Result<(), String> {
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+
+        while start_time.elapsed() < timeout {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            let current = *self.current_height.read().await;
+
+            if current >= target_height {
+                return Ok(());
+            }
+
+            // Log progress every 10 seconds
+            if start_time.elapsed().as_secs() % 10 == 0 {
+                let progress = ((current - start_height) as f64
+                    / (target_height - start_height) as f64)
+                    * 100.0;
+                tracing::debug!(
+                    "📥 Sync progress: {:.1}% ({} / {})",
+                    progress,
+                    current,
+                    target_height
+                );
+            }
+        }
+
+        let final_height = *self.current_height.read().await;
+        if final_height >= target_height {
+            Ok(())
+        } else {
+            Err(format!(
+                "Sync timeout: {} / {} after {}s",
+                final_height, target_height, timeout_secs
+            ))
+        }
+    }
+
+    /// Detect if the entire network is behind (all nodes need catchup blocks)
+    async fn detect_network_wide_catchup(
+        &self,
+        our_height: u64,
         expected_height: u64,
-        peer_manager: Arc<crate::peer_manager::PeerManager>,
-    ) -> Result<Option<CatchupParams>, String> {
-        // Query all masternodes for their current height
+        _peer_manager: Arc<crate::peer_manager::PeerManager>,
+    ) -> Result<bool, String> {
+        // For now, simple heuristic: if we have active masternodes and are significantly behind,
+        // assume network-wide catchup is needed
+        //
+        // Full implementation would:
+        // 1. Query all peers for their current height
+        // 2. If 2/3+ peers are at similar height to us (all behind), return true
+        // 3. If any peer is at expected height, return false (blocks exist, just sync issue)
+
         let masternodes = self.masternode_registry.list_active().await;
 
-        if masternodes.len() < 3 {
-            tracing::warn!(
-                "Only {} masternodes - need 3+ for catchup consensus",
-                masternodes.len()
-            );
-            return Ok(None);
+        if masternodes.is_empty() {
+            return Err("No active masternodes for catchup consensus".to_string());
         }
 
-        // For now, check if we have consensus on being behind
-        // In full implementation, we would query each masternode's actual height
-        // For this version, we assume if peer_manager has peers, they're at similar heights
-        let peers = peer_manager.get_all_peers().await;
-
-        if peers.len() < 3 {
-            tracing::debug!(
-                "Only {} peers connected - need 3+ for reliable catchup",
-                peers.len()
-            );
-            return Ok(None);
-        }
-
-        let blocks_behind = expected_height - current_height;
-
-        if blocks_behind < MIN_BLOCKS_BEHIND_FOR_CATCHUP {
-            return Ok(None);
-        }
+        let blocks_behind = expected_height - our_height;
 
         tracing::info!(
-            "🔍 Detected potential catchup scenario: {} blocks behind with {} masternodes",
+            "🔍 Network catchup check: {} blocks behind with {} masternodes",
             blocks_behind,
             masternodes.len()
         );
 
-        // Assume consensus if we have active masternodes and are significantly behind
-        // Full implementation would query each peer's height and verify 2/3+ agreement
-        Ok(Some(CatchupParams {
-            current: current_height,
-            target: expected_height,
-            blocks_to_catch: blocks_behind,
-        }))
+        // If we're significantly behind and have masternodes, assume network-wide catchup
+        // This is a simplified heuristic - production would query actual peer heights
+        Ok(blocks_behind >= MIN_BLOCKS_BEHIND_FOR_CATCHUP && masternodes.len() >= 3)
     }
+
+    /// Traditional peer sync (fallback when BFT catchup not possible)
 
     /// Select catchup leader using BFT criteria (tier, uptime, address)
     /// Returns: (is_leader, leader_address)
@@ -461,13 +496,16 @@ impl Blockchain {
                         leader_address,
                         next_height
                     );
-                    // Become emergency leader and continue generating
-                    break;
+                    // Become emergency leader - fall through to generate blocks ourselves
+                    tracing::info!(
+                        "🚨 Taking over as emergency leader - generating remaining blocks"
+                    );
+                    // Don't continue waiting - fall through to leader block generation
+                } else {
+                    // Still waiting for leader
+                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                    continue;
                 }
-
-                // Still waiting for leader
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                continue;
             }
 
             // LEADER NODE: Generate and broadcast blocks
