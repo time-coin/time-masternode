@@ -87,7 +87,7 @@ impl NetworkServer {
             {
                 let mut blacklist = self.blacklist.write().await;
                 if let Some(reason) = blacklist.is_blacklisted(ip) {
-                    tracing::warn!("🚫 Rejected blacklisted IP {}: {}", ip, reason);
+                    tracing::debug!("🚫 Rejected blacklisted IP {}: {}", ip, reason);
                     drop(stream); // Close immediately
                     continue;
                 }
