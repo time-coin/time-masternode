@@ -107,16 +107,37 @@ timecoin/
 │   ├── main.rs              # Entry point
 │   ├── config.rs            # Configuration management
 │   ├── types.rs             # Core types
-│   ├── consensus_engine.rs  # BFT consensus
+│   ├── consensus.rs         # BFT consensus
 │   ├── utxo_manager.rs      # UTXO state machine
-│   ├── storage.rs           # Persistence layer
+│   ├── blockchain.rs        # Blockchain storage
+│   ├── masternode_registry.rs # Masternode tracking
+│   ├── heartbeat_attestation.rs # Uptime verification
 │   ├── block/               # Block generation & validation
 │   ├── network/             # P2P networking
 │   └── rpc/                 # RPC server
+├── docs/                    # 📚 Complete documentation
+│   └── TIMECOIN_PROTOCOL.md # Full protocol specification
+├── analysis/                # Implementation notes
 ├── config.toml              # Default config
 ├── config.mainnet.toml      # Mainnet config
 └── Cargo.toml               # Dependencies
 ```
+
+## 📚 Documentation
+
+For complete protocol documentation, see **[docs/TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md)**
+
+Key topics covered:
+- **[Core Architecture](docs/TIMECOIN_PROTOCOL.md#core-architecture)** - System components and data structures
+- **[UTXO State Machine](docs/TIMECOIN_PROTOCOL.md#utxo-state-machine)** - 6-state transaction lifecycle
+- **[Instant Finality](docs/TIMECOIN_PROTOCOL.md#instant-finality)** - Sub-3-second settlement
+- **[BFT Consensus](docs/TIMECOIN_PROTOCOL.md#bft-consensus)** - Byzantine fault tolerance
+- **[Masternode System](docs/TIMECOIN_PROTOCOL.md#masternode-system)** - Tier structure and requirements
+- **[Heartbeat Attestation](docs/TIMECOIN_PROTOCOL.md#heartbeat-attestation)** - Peer-verified uptime
+- **[Block Production](docs/TIMECOIN_PROTOCOL.md#block-production)** - Deterministic generation
+- **[Reward Distribution](docs/TIMECOIN_PROTOCOL.md#reward-distribution)** - Economic model
+- **[Network Protocol](docs/TIMECOIN_PROTOCOL.md#network-protocol)** - P2P messaging
+- **[Security Model](docs/TIMECOIN_PROTOCOL.md#security-model)** - Threat analysis
 
 ## 🏗️ Architecture
 
@@ -134,19 +155,27 @@ Unspent → Locked → SpentPending → SpentFinalized → Confirmed
 
 ### Masternode Tiers
 
-| Tier   | Collateral | Voting Weight | Block Rewards | Governance |
+| Tier   | Collateral | Reward Weight | Block Rewards | Governance |
 |--------|-----------|---------------|---------------|------------|
-| Free   | 0 TIME    | 0.1           | ✅            | ❌         |
-| Bronze | 1,000     | 1             | ✅            | ✅         |
-| Silver | 10,000    | 10            | ✅            | ✅         |
-| Gold   | 100,000   | 100           | ✅            | ✅         |
+| Free   | 0 TIME    | 100           | ✅            | ❌         |
+| Bronze | 1,000     | 1,000         | ✅            | ✅         |
+| Silver | 10,000    | 10,000        | ✅            | ✅         |
+| Gold   | 100,000   | 100,000       | ✅            | ✅         |
 
-### Block Rewards (Per 24h Block)
+*Free tier enables zero-barrier participation. Governance voting requires collateral to prevent Sybil attacks.*
 
-- Finalizers: 40%
-- Masternodes: 30% (distributed by weight)
-- Treasury: 20%
-- Governance: 10%
+*Free tier enables zero-barrier participation. Governance voting requires collateral to prevent Sybil attacks.*
+
+### Block Rewards
+
+- **Base Reward**: 100 × (1 + ln(n)) TIME per block
+  - Scales logarithmically with masternode count
+  - Example: 10 nodes = ~330 TIME, 100 nodes = ~560 TIME
+- **Distribution**: Proportional to masternode weight
+- **Transaction Fees**: Added to block reward
+- **All rewards** distributed to masternodes (no treasury/governance allocations)
+
+See [docs/TIMECOIN_PROTOCOL.md#reward-distribution](docs/TIMECOIN_PROTOCOL.md#reward-distribution) for detailed examples.
 
 ## 🧪 Testing
 
