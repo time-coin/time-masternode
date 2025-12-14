@@ -16,6 +16,7 @@ pub struct NetworkClient {
     attestation_system: Arc<HeartbeatAttestationSystem>,
     connection_manager: Arc<ConnectionManager>,
     p2p_port: u16,
+    max_peers: usize,
 }
 
 impl NetworkClient {
@@ -25,6 +26,7 @@ impl NetworkClient {
         blockchain: Arc<Blockchain>,
         attestation_system: Arc<HeartbeatAttestationSystem>,
         network_type: NetworkType,
+        max_peers: usize,
     ) -> Self {
         Self {
             peer_manager,
@@ -33,6 +35,7 @@ impl NetworkClient {
             attestation_system,
             connection_manager: Arc::new(ConnectionManager::new()),
             p2p_port: network_type.default_p2p_port(),
+            max_peers,
         }
     }
 
@@ -44,15 +47,19 @@ impl NetworkClient {
         let attestation_system = self.attestation_system.clone();
         let connection_manager = self.connection_manager.clone();
         let p2p_port = self.p2p_port;
+        let max_peers = self.max_peers;
 
         tokio::spawn(async move {
             // Initial peer connection
             let peers = peer_manager.get_all_peers().await;
-            tracing::info!("🔌 Starting peer connections to {} peer(s)", peers.len());
+            tracing::info!(
+                "🔌 Starting peer connections to {} peer(s) (max: {})",
+                peers.len(),
+                max_peers
+            );
 
-            // Connect to initial peers
-            for peer_addr in peers.iter().take(10) {
-                // Increased from 6 to 10
+            // Connect to initial peers (up to max_peers)
+            for peer_addr in peers.iter().take(max_peers) {
                 let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
                     &peer_addr[..colon_pos]
                 } else {
@@ -138,12 +145,30 @@ impl NetworkClient {
                 sleep(peer_discovery_interval).await;
 
                 let current_peers = peer_manager.get_all_peers().await;
-                tracing::debug!(
-                    "🔍 Checking for new peers... ({} known)",
+                let connected_count = connection_manager.connected_count().await;
+                tracing::info!(
+                    "🔍 Peer check: {} connected, {} known peers",
+                    connected_count,
                     current_peers.len()
                 );
 
-                for peer_addr in current_peers.iter().take(10) {
+                // Try to connect to unconnected peers up to max_peers limit
+                let available_slots = max_peers.saturating_sub(connected_count);
+
+                if available_slots == 0 {
+                    tracing::debug!(
+                        "Already at max_peers ({}), skipping new connections",
+                        max_peers
+                    );
+                    continue;
+                }
+
+                tracing::info!(
+                    "🔗 {} connection slots available, attempting to fill",
+                    available_slots
+                );
+
+                for peer_addr in current_peers.iter().take(available_slots) {
                     let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
                         &peer_addr[..colon_pos]
                     } else {

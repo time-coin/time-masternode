@@ -31,4 +31,10 @@ impl ConnectionManager {
         let mut ips = self.connected_ips.write().await;
         ips.remove(ip);
     }
+
+    /// Get count of connected peers
+    pub async fn connected_count(&self) -> usize {
+        let ips = self.connected_ips.read().await;
+        ips.len()
+    }
 }

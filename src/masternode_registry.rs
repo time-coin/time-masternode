@@ -95,6 +95,7 @@ impl MasternodeRegistry {
 
             let now = Self::now();
             let mut masternodes = self.masternodes.write().await;
+            let mut to_remove = Vec::new();
 
             for (address, info) in masternodes.iter_mut() {
                 if info.is_active {
@@ -118,7 +119,21 @@ impl MasternodeRegistry {
                             let _ = self.db.insert(key.as_bytes(), value);
                         }
                     }
+                } else {
+                    // If offline for more than 1 hour, remove completely
+                    let time_since_heartbeat = now - info.last_heartbeat;
+                    if time_since_heartbeat > 3600 {
+                        to_remove.push(address.clone());
+                    }
                 }
+            }
+
+            // Remove stale masternodes
+            for address in to_remove {
+                masternodes.remove(&address);
+                let key = format!("masternode:{}", address);
+                let _ = self.db.remove(key.as_bytes());
+                info!("🗑️  Removed stale masternode {} (offline >1hr)", address);
             }
         }
     }

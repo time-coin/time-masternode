@@ -157,8 +157,16 @@ async fn main() {
             }
         };
 
+        // Get external address and extract IP only (no port) for consistent masternode identification
+        let full_address = config.network.full_external_address(&network_type);
+        let ip_only = full_address
+            .split(':')
+            .next()
+            .unwrap_or(&full_address)
+            .to_string();
+
         let masternode = types::Masternode {
-            address: config.network.full_external_address(&network_type),
+            address: ip_only,
             wallet_address: wallet_address.clone(),
             collateral: tier.collateral(),
             tier: tier.clone(),
@@ -336,6 +344,7 @@ async fn main() {
         blockchain.clone(),
         attestation_system.clone(),
         network_type,
+        config.network.max_peers as usize,
     );
     network_client.start().await;
 
