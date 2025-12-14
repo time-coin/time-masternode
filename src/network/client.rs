@@ -74,7 +74,7 @@ impl NetworkClient {
             for mn in masternodes.iter().take(reserved_masternode_slots) {
                 let ip = mn.masternode.address.clone();
 
-                tracing::info!("🔗 [MASTERNODE] Initiating priority connection to: {}", ip);
+                tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
 
                 if connection_manager.is_connected(&ip).await {
                     tracing::debug!("Already connected to masternode {}", ip);
@@ -83,6 +83,7 @@ impl NetworkClient {
                 }
 
                 if !connection_manager.mark_connecting(&ip).await {
+                    tracing::debug!("[PHASE1-MN] Already connecting to {}, skipping", ip);
                     continue;
                 }
 
@@ -140,10 +141,7 @@ impl NetworkClient {
 
                 for ip in unique_peers.iter().take(available_slots) {
                     // Skip if this is a masternode (already connected in Phase 1)
-                    if masternodes
-                        .iter()
-                        .any(|mn| mn.masternode.address == *ip)
-                    {
+                    if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                         continue;
                     }
 
@@ -153,8 +151,11 @@ impl NetworkClient {
                     }
 
                     if !connection_manager.mark_connecting(ip).await {
+                        tracing::debug!("[PHASE2-PEER] Already connecting to {}, skipping", ip);
                         continue;
                     }
+
+                    tracing::info!("🔗 [PHASE2-PEER] Connecting to: {}", ip);
 
                     spawn_connection_task(
                         ip.clone(),
@@ -194,7 +195,10 @@ impl NetworkClient {
                     if !connection_manager.is_connected(ip).await
                         && connection_manager.mark_connecting(ip).await
                     {
-                        tracing::info!("🎯 [PRIORITY] Reconnecting to masternode: {}", ip);
+                        tracing::info!(
+                            "🎯 [PHASE3-MN-PRIORITY] Reconnecting to masternode: {}",
+                            ip
+                        );
 
                         spawn_connection_task(
                             ip.clone(),
@@ -242,10 +246,7 @@ impl NetworkClient {
 
                     for ip in unique_peers.iter().take(available_slots) {
                         // Skip masternodes (they're handled above with priority)
-                        if masternodes
-                            .iter()
-                            .any(|mn| mn.masternode.address == *ip)
-                        {
+                        if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                             continue;
                         }
 
@@ -254,7 +255,10 @@ impl NetworkClient {
                         }
 
                         if connection_manager.mark_connecting(ip).await {
-                            tracing::info!("🔗 Discovered new peer, connecting to: {}", ip);
+                            tracing::info!(
+                                "🔗 [PHASE3-PEER] Discovered new peer, connecting to: {}",
+                                ip
+                            );
 
                             spawn_connection_task(
                                 ip.clone(),
@@ -288,6 +292,9 @@ fn spawn_connection_task(
     peer_manager: Arc<PeerManager>,
     is_masternode: bool,
 ) {
+    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+    tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
+
     tokio::spawn(async move {
         let mut retry_delay = 5;
         let mut consecutive_failures = 0;
@@ -342,7 +349,25 @@ fn spawn_connection_task(
             tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
 
             sleep(Duration::from_secs(retry_delay)).await;
-            connection_manager.mark_connecting(&ip).await;
+
+            // Check if already connected/connecting before reconnecting
+            if connection_manager.is_connected(&ip).await {
+                tracing::debug!(
+                    "{} Already connected to {} during reconnect, task exiting",
+                    tag,
+                    ip
+                );
+                break;
+            }
+
+            if !connection_manager.mark_connecting(&ip).await {
+                tracing::debug!(
+                    "{} Already connecting to {} during reconnect, task exiting",
+                    tag,
+                    ip
+                );
+                break;
+            }
         }
 
         connection_manager.mark_disconnected(&ip).await;
