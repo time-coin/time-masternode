@@ -17,6 +17,7 @@ pub struct NetworkClient {
     connection_manager: Arc<ConnectionManager>,
     p2p_port: u16,
     max_peers: usize,
+    reserved_masternode_slots: usize, // Reserved slots for masternodes
 }
 
 impl NetworkClient {
@@ -29,6 +30,9 @@ impl NetworkClient {
         max_peers: usize,
         connection_manager: Arc<ConnectionManager>,
     ) -> Self {
+        // Reserve 40% of slots for masternodes, minimum 20 slots, max 30 slots
+        let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
+
         Self {
             peer_manager,
             masternode_registry,
@@ -37,6 +41,7 @@ impl NetworkClient {
             connection_manager,
             p2p_port: network_type.default_p2p_port(),
             max_peers,
+            reserved_masternode_slots,
         }
     }
 
@@ -49,135 +54,83 @@ impl NetworkClient {
         let connection_manager = self.connection_manager.clone();
         let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
+        let reserved_masternode_slots = self.reserved_masternode_slots;
 
         tokio::spawn(async move {
-            // Initial peer connection
-            let peers = peer_manager.get_all_peers().await;
             tracing::info!(
-                "🔌 Starting peer connections to {} peer(s) (max: {})",
-                peers.len(),
-                max_peers
+                "🔌 Starting network client (max peers: {}, reserved for masternodes: {})",
+                max_peers,
+                reserved_masternode_slots
             );
 
-            // Connect to initial peers (up to max_peers)
-            for peer_addr in peers.iter().take(max_peers) {
-                let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
-                    &peer_addr[..colon_pos]
-                } else {
-                    continue;
-                };
+            // PHASE 1: Connect to all active masternodes FIRST (priority)
+            let masternodes = masternode_registry.list_active().await;
+            tracing::info!(
+                "🎯 Connecting to {} active masternode(s) with priority...",
+                masternodes.len()
+            );
 
-                tracing::info!("🔗 Initiating connection to peer: {}", ip);
+            let mut masternode_connections = 0;
+            for mn in masternodes.iter().take(reserved_masternode_slots) {
+                let ip = mn.masternode.address.clone();
 
-                if connection_manager.is_connected(ip).await {
-                    tracing::debug!("Already connected to {}", ip);
+                tracing::info!("🔗 [MASTERNODE] Initiating priority connection to: {}", ip);
+
+                if connection_manager.is_connected(&ip).await {
+                    tracing::debug!("Already connected to masternode {}", ip);
+                    masternode_connections += 1;
                     continue;
                 }
 
-                if !connection_manager.mark_connecting(ip).await {
+                if !connection_manager.mark_connecting(&ip).await {
                     continue;
                 }
 
-                let cm = connection_manager.clone();
-                let mr = masternode_registry.clone();
-                let bc = blockchain.clone();
-                let attestation = attestation_system.clone();
-                let pm = peer_manager.clone();
-                let ip_str = ip.to_string();
-                let port = p2p_port;
-
-                tokio::spawn(async move {
-                    let mut retry_delay = 5;
-                    let mut consecutive_failures = 0;
-
-                    loop {
-                        match maintain_peer_connection(
-                            &ip_str,
-                            port,
-                            cm.clone(),
-                            mr.clone(),
-                            bc.clone(),
-                            attestation.clone(),
-                            pm.clone(),
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                tracing::info!("Connection to {} ended gracefully", ip_str);
-                                consecutive_failures = 0;
-                                retry_delay = 5;
-                            }
-                            Err(e) => {
-                                consecutive_failures += 1;
-                                tracing::warn!(
-                                    "Connection to {} failed (attempt {}): {}",
-                                    ip_str,
-                                    consecutive_failures,
-                                    e
-                                );
-
-                                if consecutive_failures >= 10 {
-                                    tracing::error!(
-                                        "Giving up on {} after 10 failed attempts",
-                                        ip_str
-                                    );
-                                    break;
-                                }
-
-                                retry_delay = (retry_delay * 2).min(300);
-                            }
-                        }
-
-                        cm.mark_disconnected(&ip_str).await;
-                        tracing::info!("Reconnecting to {} in {}s...", ip_str, retry_delay);
-                        sleep(Duration::from_secs(retry_delay)).await;
-                        cm.mark_connecting(&ip_str).await;
-                    }
-
-                    cm.mark_disconnected(&ip_str).await;
-                });
+                masternode_connections += 1;
+                spawn_connection_task(
+                    ip,
+                    p2p_port,
+                    connection_manager.clone(),
+                    masternode_registry.clone(),
+                    blockchain.clone(),
+                    attestation_system.clone(),
+                    peer_manager.clone(),
+                    true, // is_masternode flag
+                );
 
                 sleep(Duration::from_millis(100)).await;
             }
 
-            // Periodic peer discovery - check for new peers every 2 minutes
-            let peer_discovery_interval = Duration::from_secs(120);
-            loop {
-                sleep(peer_discovery_interval).await;
+            tracing::info!(
+                "✅ Connected to {} masternode(s), {} slots available for regular peers",
+                masternode_connections,
+                max_peers.saturating_sub(masternode_connections)
+            );
 
-                let current_peers = peer_manager.get_all_peers().await;
-                let connected_count = connection_manager.connected_count().await;
+            // PHASE 2: Fill remaining slots with regular peers
+            let available_slots = max_peers.saturating_sub(masternode_connections);
+            if available_slots > 0 {
+                let peers = peer_manager.get_all_peers().await;
                 tracing::info!(
-                    "🔍 Peer check: {} connected, {} known peers",
-                    connected_count,
-                    current_peers.len()
+                    "🔌 Filling {} remaining slot(s) with regular peers from {} candidates",
+                    available_slots,
+                    peers.len()
                 );
 
-                // Try to connect to unconnected peers up to max_peers limit
-                let available_slots = max_peers.saturating_sub(connected_count);
-
-                if available_slots == 0 {
-                    tracing::debug!(
-                        "Already at max_peers ({}), skipping new connections",
-                        max_peers
-                    );
-                    continue;
-                }
-
-                tracing::info!(
-                    "🔗 {} connection slots available, attempting to fill",
-                    available_slots
-                );
-
-                for peer_addr in current_peers.iter().take(available_slots) {
+                for peer_addr in peers.iter().take(available_slots) {
                     let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
                         &peer_addr[..colon_pos]
                     } else {
                         continue;
                     };
 
-                    // Skip if already connected or connecting
+                    // Skip if this is a masternode (already connected in Phase 1)
+                    if masternodes.iter().any(|mn| mn.masternode.address == ip) {
+                        continue;
+                    }
+
                     if connection_manager.is_connected(ip).await {
+                        tracing::debug!("Already connected to {}", ip);
                         continue;
                     }
 
@@ -185,58 +138,180 @@ impl NetworkClient {
                         continue;
                     }
 
-                    tracing::info!("🔗 Discovered new peer, connecting to: {}", ip);
-
-                    let cm = connection_manager.clone();
-                    let mr = masternode_registry.clone();
-                    let bc = blockchain.clone();
-                    let attestation_system = attestation_system.clone();
-                    let pm = peer_manager.clone();
-                    let ip_str = ip.to_string();
-                    let port = p2p_port;
-
-                    tokio::spawn(async move {
-                        let mut retry_delay = 5;
-                        let mut consecutive_failures = 0;
-
-                        loop {
-                            match maintain_peer_connection(
-                                &ip_str,
-                                port,
-                                cm.clone(),
-                                mr.clone(),
-                                bc.clone(),
-                                attestation_system.clone(),
-                                pm.clone(),
-                            )
-                            .await
-                            {
-                                Ok(_) => {
-                                    consecutive_failures = 0;
-                                    retry_delay = 5;
-                                }
-                                Err(_e) => {
-                                    consecutive_failures += 1;
-                                    if consecutive_failures >= 10 {
-                                        break;
-                                    }
-                                    retry_delay = (retry_delay * 2).min(300);
-                                }
-                            }
-
-                            cm.mark_disconnected(&ip_str).await;
-                            sleep(Duration::from_secs(retry_delay)).await;
-                            cm.mark_connecting(&ip_str).await;
-                        }
-
-                        cm.mark_disconnected(&ip_str).await;
-                    });
+                    spawn_connection_task(
+                        ip.to_string(),
+                        p2p_port,
+                        connection_manager.clone(),
+                        masternode_registry.clone(),
+                        blockchain.clone(),
+                        attestation_system.clone(),
+                        peer_manager.clone(),
+                        false, // regular peer
+                    );
 
                     sleep(Duration::from_millis(100)).await;
                 }
             }
+
+            // PHASE 3: Periodic peer discovery with masternode priority
+            let peer_discovery_interval = Duration::from_secs(120);
+            loop {
+                sleep(peer_discovery_interval).await;
+
+                // Always check masternodes first
+                let masternodes = masternode_registry.list_active().await;
+                let connected_count = connection_manager.connected_count().await;
+
+                tracing::info!(
+                    "🔍 Peer check: {} connected, {} active masternodes, {} total slots",
+                    connected_count,
+                    masternodes.len(),
+                    max_peers
+                );
+
+                // Reconnect to any disconnected masternodes (HIGH PRIORITY)
+                for mn in masternodes.iter().take(reserved_masternode_slots) {
+                    let ip = &mn.masternode.address;
+
+                    if !connection_manager.is_connected(ip).await
+                        && connection_manager.mark_connecting(ip).await
+                    {
+                        tracing::info!("🎯 [PRIORITY] Reconnecting to masternode: {}", ip);
+
+                        spawn_connection_task(
+                            ip.clone(),
+                            p2p_port,
+                            connection_manager.clone(),
+                            masternode_registry.clone(),
+                            blockchain.clone(),
+                            attestation_system.clone(),
+                            peer_manager.clone(),
+                            true,
+                        );
+                    }
+                }
+
+                // Fill any remaining slots with regular peers
+                let available_slots = max_peers.saturating_sub(connected_count);
+                if available_slots > 0 {
+                    let current_peers = peer_manager.get_all_peers().await;
+
+                    tracing::info!(
+                        "🔗 {} connection slot(s) available, checking {} peer candidates",
+                        available_slots,
+                        current_peers.len()
+                    );
+
+                    for peer_addr in current_peers.iter().take(available_slots) {
+                        let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
+                            &peer_addr[..colon_pos]
+                        } else {
+                            continue;
+                        };
+
+                        // Skip masternodes (they're handled above with priority)
+                        if masternodes.iter().any(|mn| mn.masternode.address == ip) {
+                            continue;
+                        }
+
+                        if connection_manager.is_connected(ip).await {
+                            continue;
+                        }
+
+                        if connection_manager.mark_connecting(ip).await {
+                            tracing::info!("🔗 Discovered new peer, connecting to: {}", ip);
+
+                            spawn_connection_task(
+                                ip.to_string(),
+                                p2p_port,
+                                connection_manager.clone(),
+                                masternode_registry.clone(),
+                                blockchain.clone(),
+                                attestation_system.clone(),
+                                peer_manager.clone(),
+                                false,
+                            );
+
+                            sleep(Duration::from_millis(100)).await;
+                        }
+                    }
+                }
+            }
         });
     }
+}
+
+/// Helper function to spawn a persistent connection task
+#[allow(clippy::too_many_arguments)]
+fn spawn_connection_task(
+    ip: String,
+    port: u16,
+    connection_manager: Arc<ConnectionManager>,
+    masternode_registry: Arc<MasternodeRegistry>,
+    blockchain: Arc<Blockchain>,
+    attestation_system: Arc<HeartbeatAttestationSystem>,
+    peer_manager: Arc<PeerManager>,
+    is_masternode: bool,
+) {
+    tokio::spawn(async move {
+        let mut retry_delay = 5;
+        let mut consecutive_failures = 0;
+        let max_failures = if is_masternode { 20 } else { 10 }; // Masternodes get more retries
+
+        loop {
+            match maintain_peer_connection(
+                &ip,
+                port,
+                connection_manager.clone(),
+                masternode_registry.clone(),
+                blockchain.clone(),
+                attestation_system.clone(),
+                peer_manager.clone(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+                    tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                    consecutive_failures = 0;
+                    retry_delay = 5;
+                }
+                Err(e) => {
+                    consecutive_failures += 1;
+                    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+                    tracing::warn!(
+                        "{} Connection to {} failed (attempt {}): {}",
+                        tag,
+                        ip,
+                        consecutive_failures,
+                        e
+                    );
+
+                    if consecutive_failures >= max_failures {
+                        tracing::error!(
+                            "{} Giving up on {} after {} failed attempts",
+                            tag,
+                            ip,
+                            consecutive_failures
+                        );
+                        break;
+                    }
+
+                    retry_delay = (retry_delay * 2).min(300);
+                }
+            }
+
+            connection_manager.mark_disconnected(&ip).await;
+
+            let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+            tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
+
+            sleep(Duration::from_secs(retry_delay)).await;
+            connection_manager.mark_connecting(&ip).await;
+        }
+
+        connection_manager.mark_disconnected(&ip).await;
+    });
 }
 
 /// Maintain a persistent connection to a peer
