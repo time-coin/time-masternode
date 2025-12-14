@@ -4,7 +4,7 @@ use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::OutPoint;
 use crate::utxo_manager::UTXOStateManager;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -24,7 +24,8 @@ pub struct NetworkServer {
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     pub blockchain: Arc<crate::blockchain::Blockchain>,
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
-    pub seen_blocks: Arc<RwLock<std::collections::HashSet<u64>>>, // Track seen block heights
+    pub seen_blocks: Arc<RwLock<HashSet<u64>>>, // Track seen block heights
+    pub seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>, // Track seen transaction hashes
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
 }
 
@@ -59,7 +60,8 @@ impl NetworkServer {
             masternode_registry: masternode_registry.clone(),
             blockchain,
             peer_manager,
-            seen_blocks: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            seen_blocks: Arc::new(RwLock::new(HashSet::new())),
+            seen_transactions: Arc::new(RwLock::new(HashSet::new())),
             connection_manager,
         })
     }
@@ -71,6 +73,22 @@ impl NetworkServer {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Every 5 minutes
                 blacklist_cleanup.write().await.cleanup();
+            }
+        });
+
+        // Spawn cleanup task for seen transactions cache
+        let seen_txs_cleanup = self.seen_transactions.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(600)).await; // Every 10 minutes
+                let mut seen = seen_txs_cleanup.write().await;
+                let old_size = seen.len();
+
+                // Keep only recent 10,000 transactions to prevent unbounded memory growth
+                if old_size > 10000 {
+                    seen.clear();
+                    tracing::debug!("🧹 Cleared seen_transactions cache ({} entries)", old_size);
+                }
             }
         });
 
@@ -113,6 +131,7 @@ impl NetworkServer {
             let peer_mgr = self.peer_manager.clone();
             let broadcast_tx = self.tx_notifier.clone();
             let seen_blocks = self.seen_blocks.clone();
+            let seen_txs = self.seen_transactions.clone();
             let conn_mgr = self.connection_manager.clone();
 
             tokio::spawn(async move {
@@ -131,6 +150,7 @@ impl NetworkServer {
                     peer_mgr,
                     broadcast_tx,
                     seen_blocks,
+                    seen_txs,
                     conn_mgr,
                 )
                 .await;
@@ -173,7 +193,8 @@ async fn handle_peer(
     blockchain: Arc<crate::blockchain::Blockchain>,
     peer_manager: Arc<crate::peer_manager::PeerManager>,
     broadcast_tx: broadcast::Sender<NetworkMessage>,
-    seen_blocks: Arc<RwLock<std::collections::HashSet<u64>>>,
+    seen_blocks: Arc<RwLock<HashSet<u64>>>,
+    seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
@@ -295,8 +316,22 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::TransactionBroadcast(tx) => {
                                     if limiter.check("tx", ip_str) {
+                                        // Check if we've already seen this transaction
+                                        let txid = tx.txid();
+                                        let already_seen = {
+                                            let mut seen = seen_transactions.write().await;
+                                            !seen.insert(txid)
+                                        };
+
+                                        if already_seen {
+                                            tracing::debug!("🔁 Ignoring duplicate transaction {} from {}", hex::encode(txid), peer.addr);
+                                            line.clear();
+                                            continue;
+                                        }
+
+                                        tracing::debug!("📥 Processing new transaction {} from {}", hex::encode(txid), peer.addr);
                                         if let Err(e) = consensus.process_transaction(tx.clone()).await {
-                                            eprintln!("Tx rejected: {}", e);
+                                            tracing::debug!("Tx rejected: {}", e);
                                         }
                                     }
                                 }

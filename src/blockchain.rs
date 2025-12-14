@@ -6,9 +6,11 @@ use crate::network::message::NetworkMessage;
 use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::RwLock;
 
 const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
@@ -17,6 +19,10 @@ const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 #[allow(dead_code)]
 const CATCHUP_BLOCK_INTERVAL: i64 = 60; // 1 minute per block during catchup
 const MIN_BLOCKS_BEHIND_FOR_CATCHUP: u64 = 3; // Minimum gap to enter catchup mode (lowered for current issue)
+
+/// Global lock to prevent duplicate concurrent block production
+/// This prevents race conditions when multiple timers or tasks try to produce the same block
+static BLOCK_PRODUCTION_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(()));
 
 /// Result of fork consensus query
 #[derive(Debug, PartialEq)]
@@ -721,6 +727,17 @@ impl Blockchain {
 
     /// Produce a block at the scheduled time
     pub async fn produce_block(&self) -> Result<Block, String> {
+        // Try to acquire the production lock - prevents duplicate concurrent block production
+        let _guard = match BLOCK_PRODUCTION_LOCK.try_lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                tracing::debug!(
+                    "⏭️  Block production already in progress, skipping duplicate attempt"
+                );
+                return Err("Block production already in progress".to_string());
+            }
+        };
+
         let height = *self.current_height.read().await + 1;
         let expected = self.calculate_expected_height();
 
