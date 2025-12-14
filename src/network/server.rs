@@ -96,9 +96,22 @@ impl NetworkServer {
             let (stream, addr) = self.listener.accept().await?;
             let addr_str = addr.to_string();
 
+            // Configure TCP socket options for persistent connections
             // Disable Nagle's algorithm to prevent batching
             if let Err(e) = stream.set_nodelay(true) {
                 tracing::warn!("Failed to set TCP_NODELAY for {}: {}", addr, e);
+            }
+
+            // Enable TCP keepalive to detect dead connections
+            let socket = socket2::SockRef::from(&stream);
+            let keepalive = socket2::TcpKeepalive::new()
+                .with_time(std::time::Duration::from_secs(30)) // Send first probe after 30s idle
+                .with_interval(std::time::Duration::from_secs(10)); // Send probes every 10s
+
+            if let Err(e) = socket.set_tcp_keepalive(&keepalive) {
+                tracing::warn!("Failed to set TCP_KEEPALIVE for {}: {}", addr, e);
+            } else {
+                tracing::debug!("✓ TCP keepalive enabled for inbound {}", addr);
             }
 
             // Extract IP address

@@ -256,9 +256,23 @@ async fn maintain_peer_connection(
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 
+    // Configure TCP socket options for persistent connections
     // Disable Nagle's algorithm to prevent batching of small messages
     if let Err(e) = stream.set_nodelay(true) {
         tracing::warn!("Failed to set TCP_NODELAY: {}", e);
+    }
+
+    // Enable TCP keepalive to detect dead connections
+    // This prevents wasted connection slots from silently dead peers
+    let socket = socket2::SockRef::from(&stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(30)) // Send first probe after 30s idle
+        .with_interval(std::time::Duration::from_secs(10)); // Send probes every 10s
+
+    if let Err(e) = socket.set_tcp_keepalive(&keepalive) {
+        tracing::warn!("Failed to set TCP_KEEPALIVE: {}", e);
+    } else {
+        tracing::debug!("✓ TCP keepalive enabled for {}", ip);
     }
 
     tracing::info!("✓ Connected to peer: {}", ip);
