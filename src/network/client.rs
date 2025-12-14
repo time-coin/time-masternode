@@ -111,21 +111,39 @@ impl NetworkClient {
             let available_slots = max_peers.saturating_sub(masternode_connections);
             if available_slots > 0 {
                 let peers = peer_manager.get_all_peers().await;
+
+                // Deduplicate peers by IP (remove port) to prevent duplicate connections
+                let mut seen_ips = std::collections::HashSet::new();
+                let unique_peers: Vec<String> = peers
+                    .into_iter()
+                    .filter_map(|peer_addr| {
+                        let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
+                            &peer_addr[..colon_pos]
+                        } else {
+                            &peer_addr
+                        };
+
+                        // Only keep first occurrence of each IP
+                        if seen_ips.insert(ip.to_string()) {
+                            Some(ip.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
                 tracing::info!(
-                    "🔌 Filling {} remaining slot(s) with regular peers from {} candidates",
+                    "🔌 Filling {} remaining slot(s) with {} unique regular peers",
                     available_slots,
-                    peers.len()
+                    unique_peers.len()
                 );
 
-                for peer_addr in peers.iter().take(available_slots) {
-                    let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
-                        &peer_addr[..colon_pos]
-                    } else {
-                        continue;
-                    };
-
+                for ip in unique_peers.iter().take(available_slots) {
                     // Skip if this is a masternode (already connected in Phase 1)
-                    if masternodes.iter().any(|mn| mn.masternode.address == ip) {
+                    if masternodes
+                        .iter()
+                        .any(|mn| mn.masternode.address == *ip)
+                    {
                         continue;
                     }
 
@@ -139,7 +157,7 @@ impl NetworkClient {
                     }
 
                     spawn_connection_task(
-                        ip.to_string(),
+                        ip.clone(),
                         p2p_port,
                         connection_manager.clone(),
                         masternode_registry.clone(),
@@ -196,21 +214,38 @@ impl NetworkClient {
                 if available_slots > 0 {
                     let current_peers = peer_manager.get_all_peers().await;
 
+                    // Deduplicate peers by IP (remove port) to prevent duplicate connections
+                    let mut seen_ips = std::collections::HashSet::new();
+                    let unique_peers: Vec<String> = current_peers
+                        .into_iter()
+                        .filter_map(|peer_addr| {
+                            let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
+                                &peer_addr[..colon_pos]
+                            } else {
+                                &peer_addr
+                            };
+
+                            // Only keep first occurrence of each IP
+                            if seen_ips.insert(ip.to_string()) {
+                                Some(ip.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
                     tracing::info!(
-                        "🔗 {} connection slot(s) available, checking {} peer candidates",
+                        "🔗 {} connection slot(s) available, checking {} unique peer candidates",
                         available_slots,
-                        current_peers.len()
+                        unique_peers.len()
                     );
 
-                    for peer_addr in current_peers.iter().take(available_slots) {
-                        let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
-                            &peer_addr[..colon_pos]
-                        } else {
-                            continue;
-                        };
-
+                    for ip in unique_peers.iter().take(available_slots) {
                         // Skip masternodes (they're handled above with priority)
-                        if masternodes.iter().any(|mn| mn.masternode.address == ip) {
+                        if masternodes
+                            .iter()
+                            .any(|mn| mn.masternode.address == *ip)
+                        {
                             continue;
                         }
 
@@ -222,7 +257,7 @@ impl NetworkClient {
                             tracing::info!("🔗 Discovered new peer, connecting to: {}", ip);
 
                             spawn_connection_task(
-                                ip.to_string(),
+                                ip.clone(),
                                 p2p_port,
                                 connection_manager.clone(),
                                 masternode_registry.clone(),
