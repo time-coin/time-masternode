@@ -250,6 +250,7 @@ async fn maintain_peer_connection(
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
+    let connection_start = std::time::Instant::now();
     let stream = tokio::net::TcpStream::connect(&addr)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
@@ -437,13 +438,16 @@ async fn maintain_peer_connection(
 
     // Read responses (reuse the line buffer from handshake)
     line.clear();
-    tracing::info!("🔄 Starting message loop for peer {}", ip);
+    tracing::info!(
+        "🔄 Starting message loop for peer {} (connection established)",
+        ip
+    );
 
     loop {
         tokio::select! {
             // Send periodic heartbeat and sync check
             _ = heartbeat_interval.tick() => {
-                tracing::debug!("💓 Sending heartbeat to {}", ip);
+                tracing::debug!("💓 Sending heartbeat/sync to {}", ip);
 
                 // Send masternode announcement
                 if let Some(local_mn) = masternode_registry.get_local_masternode().await {
@@ -788,7 +792,7 @@ async fn maintain_peer_connection(
                         line.clear();
                     }
                     Err(e) => {
-                        tracing::info!("🔌 Connection to {} ended: {}", ip, e);
+                        tracing::info!("🔌 Connection to {} ended: {} (after {} seconds)", ip, e, connection_start.elapsed().as_secs());
                         break;
                     }
                 }
