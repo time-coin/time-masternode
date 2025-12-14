@@ -27,13 +27,14 @@ impl NetworkClient {
         attestation_system: Arc<HeartbeatAttestationSystem>,
         network_type: NetworkType,
         max_peers: usize,
+        connection_manager: Arc<ConnectionManager>,
     ) -> Self {
         Self {
             peer_manager,
             masternode_registry,
             blockchain,
             attestation_system,
-            connection_manager: Arc::new(ConnectionManager::new()),
+            connection_manager,
             p2p_port: network_type.default_p2p_port(),
             max_peers,
         }

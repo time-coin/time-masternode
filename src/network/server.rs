@@ -25,6 +25,7 @@ pub struct NetworkServer {
     pub blockchain: Arc<crate::blockchain::Blockchain>,
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
     pub seen_blocks: Arc<RwLock<std::collections::HashSet<u64>>>, // Track seen block heights
+    pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
 }
 
 pub struct PeerConnection {
@@ -41,6 +42,7 @@ impl NetworkServer {
         masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
         peer_manager: Arc<crate::peer_manager::PeerManager>,
+        connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -58,6 +60,7 @@ impl NetworkServer {
             blockchain,
             peer_manager,
             seen_blocks: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            connection_manager,
         })
     }
 
@@ -110,6 +113,7 @@ impl NetworkServer {
             let peer_mgr = self.peer_manager.clone();
             let broadcast_tx = self.tx_notifier.clone();
             let seen_blocks = self.seen_blocks.clone();
+            let conn_mgr = self.connection_manager.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -127,6 +131,7 @@ impl NetworkServer {
                     peer_mgr,
                     broadcast_tx,
                     seen_blocks,
+                    conn_mgr,
                 )
                 .await;
             });
@@ -169,6 +174,7 @@ async fn handle_peer(
     peer_manager: Arc<crate::peer_manager::PeerManager>,
     broadcast_tx: broadcast::Sender<NetworkMessage>,
     seen_blocks: Arc<RwLock<std::collections::HashSet<u64>>>,
+    connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -177,6 +183,20 @@ async fn handle_peer(
         .next()
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+
+    let ip_str = ip.to_string();
+
+    // Check if we already have an outbound connection to this IP
+    if connection_manager.is_connected(&ip_str).await {
+        tracing::info!(
+            "🔄 Rejecting duplicate inbound connection from {} (already have outbound)",
+            peer.addr
+        );
+        return Ok(());
+    }
+
+    // Mark this inbound connection
+    connection_manager.mark_inbound(&ip_str).await;
 
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let connection_start = std::time::Instant::now();
@@ -630,6 +650,10 @@ async fn handle_peer(
             }
         }
     }
+
+    // Cleanup: mark inbound connection as disconnected
+    connection_manager.mark_inbound_disconnected(&ip_str).await;
+    tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
 
     Ok(())
 }

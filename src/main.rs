@@ -337,6 +337,9 @@ async fn main() {
     println!("✓ Blockchain initialized");
     println!();
 
+    // Create shared connection manager for both client and server
+    let connection_manager = Arc::new(network::connection_manager::ConnectionManager::new());
+
     // Start network client for outbound connections and masternode announcements
     let network_client = network::client::NetworkClient::new(
         peer_manager.clone(),
@@ -345,6 +348,7 @@ async fn main() {
         attestation_system.clone(),
         network_type,
         config.network.max_peers as usize,
+        connection_manager.clone(),
     );
     network_client.start().await;
 
@@ -736,6 +740,7 @@ async fn main() {
         registry.clone(),
         blockchain_server.clone(),
         peer_manager.clone(),
+        connection_manager.clone(),
     )
     .await
     {
