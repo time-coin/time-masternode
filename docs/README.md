@@ -1,35 +1,67 @@
 # TimeCoin Documentation
 
-User-facing documentation and technical specifications for the TimeCoin protocol.
+Comprehensive documentation for the TIME Coin Protocol.
 
 ## Core Documentation
 
-### Getting Started
-- **INTEGRATION_QUICKSTART.md** - Quick start guide for integration
-- **LINUX_INSTALLATION.md** - Linux installation instructions
-- **NETWORK_CONFIG.md** - Network configuration guide
+### 📘 Protocol Specification
+- **[TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)** - Complete protocol specification
+  - Core architecture and components
+  - UTXO state machine (6-state lifecycle)
+  - Instant finality and BFT consensus
+  - Masternode system and tiers
+  - Heartbeat attestation
+  - Block production and rewards
+  - Network protocol and security
 
-### Protocol Specifications
-- **HEARTBEAT_ATTESTATION.md** - Peer-verified heartbeat attestation system
-- **INSTANT_FINALITY.md** - Instant transaction finality via BFT consensus
-- **MASTERNODE_TIERS.md** - Masternode tier system (Free/Bronze/Silver/Gold)
-- **REWARD_DISTRIBUTION.md** - Block reward distribution algorithm
-- **FEES.md** - Transaction fee structure
+### 🚀 Getting Started
+- **[INTEGRATION_QUICKSTART.md](INTEGRATION_QUICKSTART.md)** - Quick start guide for integration
+- **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** - Linux installation instructions
+- **[NETWORK_CONFIG.md](NETWORK_CONFIG.md)** - Network configuration guide
 
-### Implementation Guides
-- **IMPLEMENTATION.md** - Implementation overview
-- **P2P_NETWORK_BEST_PRACTICES.md** - P2P network best practices
-- **RUST_P2P_GUIDELINES.md** - Rust P2P implementation guidelines
+### 📚 Implementation Guides
+- **[P2P_NETWORK_BEST_PRACTICES.md](P2P_NETWORK_BEST_PRACTICES.md)** - P2P network best practices
+- **[RUST_P2P_GUIDELINES.md](RUST_P2P_GUIDELINES.md)** - Rust P2P implementation guidelines
+
+## Key Features
+
+### Instant Finality
+- **Transaction finalization in <3 seconds**
+- Byzantine Fault Tolerant (BFT) consensus
+- 2/3 masternode quorum required
+- No need for multiple confirmations
+
+### UTXO State Machine
+Advanced 6-state lifecycle:
+```
+Unspent → Locked → SpentPending → SpentFinalized → Confirmed
+```
+
+### Peer-Attested Uptime
+Cryptographically verified masternode reputation:
+- Ed25519 signed heartbeats every 60 seconds
+- Minimum 3 independent witness attestations required
+- Prevents Sybil attacks and uptime fraud
+
+### Tiered Masternodes
+Four tiers with different requirements and rewards:
+
+| Tier | Collateral | Governance Voting | Reward Weight |
+|------|-----------|-------------------|---------------|
+| **Free** | 0 TIME | ❌ No | 100 |
+| **Bronze** | 1,000 TIME | ✅ Yes | 1,000 |
+| **Silver** | 10,000 TIME | ✅ Yes | 10,000 |
+| **Gold** | 100,000 TIME | ✅ Yes | 100,000 |
 
 ## Document Organization
 
 ### User Documentation (`/docs`)
 This folder contains:
+- ✅ Complete protocol specification
 - ✅ User-facing feature documentation
-- ✅ Protocol specifications
 - ✅ Installation and configuration guides
-- ✅ API and RPC documentation
 - ✅ Best practices and guidelines
+- ✅ API and RPC documentation
 
 ### Implementation Analysis (`/analysis`)
 For implementation details, architectural decisions, and status reports, see `/analysis/`:
@@ -37,28 +69,19 @@ For implementation details, architectural decisions, and status reports, see `/a
 - Architectural decision records (ADRs)
 - Build and deployment notes
 - Gap analysis and issue tracking
+- Session summaries and bug fixes
 
-## Key Features
+## Quick Links
 
-### Instant Finality
-TimeCoin uses Byzantine Fault Tolerant (BFT) consensus for instant transaction finality:
-- Transaction finalization in <3 seconds
-- 2/3 masternode quorum required
-- No need for multiple confirmations
-
-### Peer-Attested Uptime
-Masternode uptime is cryptographically verified:
-- Ed25519 signed heartbeats every 60 seconds
-- Minimum 3 independent witness attestations required
-- Prevents Sybil attacks and uptime fraud
-- See `HEARTBEAT_ATTESTATION.md` for full details
-
-### Tiered Masternodes
-Four tiers with different requirements and rewards:
-- **Free**: No collateral, limited voting
-- **Bronze**: 1,000 TIME collateral, full voting
-- **Silver**: 10,000 TIME, 10x rewards
-- **Gold**: 100,000 TIME, 100x rewards
+- [Protocol Overview](TIMECOIN_PROTOCOL.md#overview)
+- [UTXO State Machine](TIMECOIN_PROTOCOL.md#utxo-state-machine)
+- [Instant Finality](TIMECOIN_PROTOCOL.md#instant-finality)
+- [BFT Consensus](TIMECOIN_PROTOCOL.md#bft-consensus)
+- [Masternode System](TIMECOIN_PROTOCOL.md#masternode-system)
+- [Heartbeat Attestation](TIMECOIN_PROTOCOL.md#heartbeat-attestation)
+- [Reward Distribution](TIMECOIN_PROTOCOL.md#reward-distribution)
+- [Network Protocol](TIMECOIN_PROTOCOL.md#network-protocol)
+- [Security Model](TIMECOIN_PROTOCOL.md#security-model)
 
 ## Contributing
 
@@ -67,3 +90,4 @@ For development documentation and implementation status, see `/analysis/README.m
 ## License
 
 MIT License - See LICENSE file for details.
+
