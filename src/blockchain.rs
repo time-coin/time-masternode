@@ -505,16 +505,25 @@ impl Blockchain {
 
                 // Check if leader has timed out
                 if last_leader_activity.elapsed() > leader_timeout {
-                    tracing::warn!(
-                        "⚠️  Leader {:?} timeout after 30s - switching to self-generation at height {}",
+                    tracing::error!(
+                        "❌ Leader {:?} timeout after 30s at height {}",
                         leader_address,
                         next_height
                     );
-                    // Become emergency leader - fall through to generate blocks ourselves
-                    tracing::info!(
-                        "🚨 Taking over as emergency leader - generating remaining blocks"
+
+                    // CRITICAL FIX: Don't self-generate when catching up!
+                    // When we're behind, we need legitimate blocks from the network,
+                    // not self-generated blocks that would create a fork.
+                    tracing::error!(
+                        "❌ Cannot become emergency leader during catchup - would create fork"
                     );
-                    // Don't continue waiting - fall through to leader block generation
+                    tracing::info!("🔄 Exiting catchup mode. Node should sync from peers instead.");
+
+                    // Exit catchup mode and let normal sync handle this
+                    return Err(format!(
+                        "Leader timeout during catchup at height {} - manual sync required",
+                        next_height
+                    ));
                 } else {
                     // Still waiting for leader
                     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -1058,24 +1067,49 @@ impl Blockchain {
         self.consensus.utxo_manager.list_all_utxos().await
     }
 
+    /// Reconcile UTXO state with remote peer (REQUIRES VERIFICATION)
     pub async fn reconcile_utxo_state(&self, remote_utxos: Vec<crate::types::UTXO>) {
-        let (to_remove, to_add) = self
-            .consensus
-            .utxo_manager
-            .get_utxo_diff(&remote_utxos)
-            .await;
+        // CRITICAL FIX: Don't blindly accept peer UTXO sets
+        // This is a security vulnerability - a malicious peer could delete our UTXOs
 
-        if !to_remove.is_empty() || !to_add.is_empty() {
-            tracing::warn!("⚠️ UTXO state mismatch detected! Reconciling...");
-            if let Err(e) = self
-                .consensus
-                .utxo_manager
-                .reconcile_utxo_state(to_remove, to_add)
-                .await
-            {
-                tracing::error!("Failed to reconcile UTXO state: {:?}", e);
-            }
-        }
+        tracing::warn!(
+            "⚠️ UTXO reconciliation requested with {} remote UTXOs",
+            remote_utxos.len()
+        );
+
+        let local_utxos = self.consensus.utxo_manager.list_all_utxos().await;
+        let local_count = local_utxos.len();
+        let remote_count = remote_utxos.len();
+
+        tracing::warn!(
+            "⚠️ Local: {} UTXOs, Remote: {} UTXOs (diff: {})",
+            local_count,
+            remote_count,
+            (local_count as i64 - remote_count as i64).abs()
+        );
+
+        // CRITICAL: Don't reconcile automatically - this requires manual investigation
+        // A UTXO mismatch at the same height indicates:
+        // 1. Non-deterministic block processing (BUG)
+        // 2. Different transaction ordering (BUG)
+        // 3. Malicious peer (ATTACK)
+        // 4. Corrupted local state (DATA CORRUPTION)
+
+        tracing::error!(
+            "❌ UTXO reconciliation DISABLED - requires multi-peer consensus verification"
+        );
+        tracing::error!(
+            "❌ Manual intervention required: investigate why UTXO sets differ at same height"
+        );
+        tracing::info!(
+            "💡 Recommended action: 1) Query multiple peers for UTXO consensus, 2) Rollback and resync if needed"
+        );
+
+        // TODO: Implement proper UTXO reconciliation:
+        // 1. Query multiple peers (5+) for their UTXO sets at this height
+        // 2. Only accept UTXO changes if 2/3+ peers agree
+        // 3. Verify each UTXO has supporting transaction proof
+        // 4. Log all changes for audit
     }
 
     /// Get all pending transactions from the mempool
@@ -1377,13 +1411,20 @@ impl Blockchain {
                     ));
                 }
                 ForkConsensus::InsufficientPeers => {
-                    tracing::warn!("⚠️  Not enough peers to verify consensus (need 3+)");
-                    tracing::warn!("⚠️  Proceeding with reorg based on depth limits only");
+                    tracing::error!(
+                        "❌ Insufficient peers to verify fork consensus (need 5+ responses)"
+                    );
+                    tracing::error!("❌ REJECTING fork - cannot verify without peer consensus");
+                    return Err(format!(
+                        "Cannot verify fork at height {} - insufficient peer responses",
+                        fork_height
+                    ));
                 }
             }
         } else {
-            tracing::warn!("⚠️  No peer manager available - cannot verify consensus");
-            tracing::warn!("⚠️  Proceeding with reorg based on depth limits only");
+            tracing::error!("❌ No peer manager available - cannot verify consensus");
+            tracing::error!("❌ REJECTING fork - peer verification required for safety");
+            return Err("Cannot verify fork without peer manager".to_string());
         }
 
         // Find common ancestor
@@ -1815,24 +1856,20 @@ impl Blockchain {
             no_block
         );
 
-        // Need 2/3+ for consensus
-        let required = (peers.len() * 2) / 3 + 1;
+        // CRITICAL FIX: Require minimum quorum of responses before making any decision
+        const MIN_RESPONSES: usize = 5;
 
-        if responded < 3 {
-            tracing::warn!(
-                "⚠️ Too few responses ({}) to determine consensus",
-                responded
+        if responded < MIN_RESPONSES {
+            tracing::error!(
+                "❌ Insufficient peer responses: {} < {} required for consensus decision",
+                responded,
+                MIN_RESPONSES
             );
-            // Fallback: if we don't have the block, peer probably has consensus
-            if our_hash.is_none() {
-                tracing::info!(
-                    "We don't have block at height {} - assuming peer has consensus",
-                    fork_height
-                );
-                return Ok(ForkConsensus::PeerChainHasConsensus);
-            }
             return Ok(ForkConsensus::InsufficientPeers);
         }
+
+        // Need 2/3+ of responding peers (not total peers) for consensus
+        let required = (responded * 2) / 3 + 1;
 
         if peer_chain_votes >= required {
             tracing::info!(

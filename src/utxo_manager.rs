@@ -119,6 +119,8 @@ impl UTXOStateManager {
     }
 
     /// Get UTXO differences between local and remote state
+    /// TODO: This will be used in future proper UTXO reconciliation with multi-peer consensus
+    #[allow(dead_code)]
     pub async fn get_utxo_diff(&self, remote_utxos: &[UTXO]) -> (Vec<OutPoint>, Vec<UTXO>) {
         let local_utxos = self.list_all_utxos().await;
 
@@ -149,6 +151,8 @@ impl UTXOStateManager {
     }
 
     /// Reconcile UTXO state with remote node
+    /// TODO: This will be used in future proper UTXO reconciliation with multi-peer consensus
+    #[allow(dead_code)]
     pub async fn reconcile_utxo_state(
         &self,
         to_remove: Vec<OutPoint>,
