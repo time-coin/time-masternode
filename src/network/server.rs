@@ -644,6 +644,30 @@ async fn handle_peer(
                                         }
                                     }
                                 }
+                                // Health Check Messages
+                                NetworkMessage::Ping { nonce, timestamp: _ } => {
+                                    // Respond to ping with pong
+                                    let pong_msg = NetworkMessage::Pong {
+                                        nonce: *nonce,
+                                        timestamp: chrono::Utc::now().timestamp(),
+                                    };
+
+                                    if let Ok(msg_json) = serde_json::to_string(&pong_msg) {
+                                        if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+                                            tracing::warn!("❌ Failed to write pong to {}: {}", peer.addr, e);
+                                            break;
+                                        }
+                                        if let Err(e) = writer.flush().await {
+                                            tracing::warn!("❌ Failed to flush pong to {}: {}", peer.addr, e);
+                                            break;
+                                        }
+                                        tracing::debug!("📤 Sent pong to {} (nonce: {})", peer.addr, nonce);
+                                    }
+                                }
+                                NetworkMessage::Pong { nonce, timestamp: _ } => {
+                                    // Inbound connections don't send pings, just log if we receive a pong
+                                    tracing::debug!("📥 Received unexpected pong from {} (nonce: {})", peer.addr, nonce);
+                                }
                                 _ => {}
                             }
                         } else {

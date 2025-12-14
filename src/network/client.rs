@@ -382,8 +382,13 @@ async fn maintain_peer_connection(
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    // Send heartbeat and sync check every 2 minutes (blocks are every 10 minutes)
+    // Send heartbeat and sync check every 60 seconds (blocks are every 10 minutes)
     let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(60));
+
+    // Send ping for health check every 30 seconds
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    let mut pending_ping: Option<(u64, std::time::Instant)> = None; // (nonce, sent_time)
+    let mut consecutive_missed_pongs = 0u32;
 
     // Initial height request
     let sync_msg = NetworkMessage::GetBlockHeight;
@@ -460,6 +465,47 @@ async fn maintain_peer_connection(
 
     loop {
         tokio::select! {
+            // Send periodic ping for health check
+            _ = ping_interval.tick() => {
+                // Check if there's a pending ping that timed out (5 second timeout)
+                if let Some((nonce, sent_time)) = pending_ping {
+                    if sent_time.elapsed() > std::time::Duration::from_secs(5) {
+                        consecutive_missed_pongs += 1;
+                        tracing::warn!(
+                            "⚠️ Ping timeout from {} (nonce: {}, missed: {}/3)",
+                            ip, nonce, consecutive_missed_pongs
+                        );
+
+                        if consecutive_missed_pongs >= 3 {
+                            tracing::error!(
+                                "❌ Peer {} unresponsive after 3 missed pongs, disconnecting",
+                                ip
+                            );
+                            break;
+                        }
+                    }
+                }
+
+                // Send new ping
+                let nonce = rand::random::<u64>();
+                let timestamp = chrono::Utc::now().timestamp();
+                let ping_msg = NetworkMessage::Ping { nonce, timestamp };
+
+                if let Ok(msg_json) = serde_json::to_string(&ping_msg) {
+                    if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+                        tracing::warn!("❌ Failed to write ping to {}: {}", ip, e);
+                        break;
+                    }
+                    if let Err(e) = writer.flush().await {
+                        tracing::warn!("❌ Failed to flush ping to {}: {}", ip, e);
+                        break;
+                    }
+
+                    pending_ping = Some((nonce, std::time::Instant::now()));
+                    tracing::debug!("📤 Sent ping to {} (nonce: {})", ip, nonce);
+                }
+            }
+
             // Send periodic heartbeat and sync check
             _ = heartbeat_interval.tick() => {
                 tracing::debug!("💓 Sending heartbeat/sync to {}", ip);
@@ -803,6 +849,46 @@ async fn maintain_peer_connection(
                                         if let Err(e) = blockchain.add_block(block).await {
                                             tracing::warn!("Failed to add block from range: {}", e);
                                         }
+                                    }
+                                }
+                                NetworkMessage::Ping { nonce, timestamp: _ } => {
+                                    // Respond to ping with pong
+                                    let pong_msg = NetworkMessage::Pong {
+                                        nonce,
+                                        timestamp: chrono::Utc::now().timestamp(),
+                                    };
+
+                                    if let Ok(msg_json) = serde_json::to_string(&pong_msg) {
+                                        if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+                                            tracing::warn!("❌ Failed to write pong to {}: {}", ip, e);
+                                            break;
+                                        }
+                                        if let Err(e) = writer.flush().await {
+                                            tracing::warn!("❌ Failed to flush pong to {}: {}", ip, e);
+                                            break;
+                                        }
+                                        tracing::debug!("📤 Sent pong to {} (nonce: {})", ip, nonce);
+                                    }
+                                }
+                                NetworkMessage::Pong { nonce, timestamp: _ } => {
+                                    // Check if this pong matches our pending ping
+                                    if let Some((pending_nonce, sent_time)) = pending_ping {
+                                        if nonce == pending_nonce {
+                                            let rtt = sent_time.elapsed();
+                                            tracing::debug!(
+                                                "✅ Received pong from {} (nonce: {}, RTT: {}ms)",
+                                                ip, nonce, rtt.as_millis()
+                                            );
+                                            pending_ping = None;
+                                            consecutive_missed_pongs = 0; // Reset counter on successful pong
+                                        } else {
+                                            tracing::warn!(
+                                                "⚠️ Received pong with wrong nonce from {} (expected: {}, got: {})",
+                                                ip, pending_nonce, nonce
+                                            );
+                                        }
+                                    } else {
+                                        tracing::debug!("📥 Received unexpected pong from {} (no pending ping)", ip);
                                     }
                                 }
                                 _ => {}
