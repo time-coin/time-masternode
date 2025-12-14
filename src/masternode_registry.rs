@@ -52,8 +52,53 @@ impl MasternodeRegistry {
 
         for item in db.scan_prefix(prefix).flatten() {
             if let Ok(info) = bincode::deserialize::<MasternodeInfo>(&item.1) {
-                nodes.insert(info.masternode.address.clone(), info);
+                // Strip port from address to normalize (handles old entries with ports)
+                let ip_only = info
+                    .masternode
+                    .address
+                    .split(':')
+                    .next()
+                    .unwrap_or(&info.masternode.address)
+                    .to_string();
+
+                // If we already have this IP, keep the more recent one
+                if let Some(existing) = nodes.get(&ip_only) {
+                    if info.last_heartbeat > existing.last_heartbeat {
+                        // This one is newer, replace it
+                        let mut updated_info = info;
+                        updated_info.masternode.address = ip_only.clone();
+                        nodes.insert(ip_only, updated_info);
+                    }
+                    // Otherwise keep the existing one
+                } else {
+                    // New entry
+                    let mut updated_info = info;
+                    updated_info.masternode.address = ip_only.clone();
+                    nodes.insert(ip_only, updated_info);
+                }
             }
+        }
+
+        // Clean up old duplicate entries from disk
+        let mut cleaned = 0;
+        for item in db.scan_prefix(prefix).flatten() {
+            if let Ok(key_str) = String::from_utf8(item.0.to_vec()) {
+                // Extract address from key "masternode:ADDRESS"
+                if let Some(addr) = key_str.strip_prefix("masternode:") {
+                    if addr.contains(':') {
+                        // This is an old entry with port, remove it
+                        let _ = db.remove(item.0);
+                        cleaned += 1;
+                    }
+                }
+            }
+        }
+
+        if cleaned > 0 {
+            tracing::info!(
+                "🧹 Cleaned up {} duplicate masternode entries with ports",
+                cleaned
+            );
         }
 
         if !nodes.is_empty() {

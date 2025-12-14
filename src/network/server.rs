@@ -420,11 +420,16 @@ async fn handle_peer(
                                     let all_masternodes = masternode_registry.list_all().await;
                                     let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = all_masternodes
                                         .iter()
-                                        .map(|mn_info| crate::network::message::MasternodeAnnouncementData {
-                                            address: mn_info.masternode.address.clone(),
-                                            reward_address: mn_info.reward_address.clone(),
-                                            tier: mn_info.masternode.tier.clone(),
-                                            public_key: mn_info.masternode.public_key,
+                                        .map(|mn_info| {
+                                            // Strip port from address to ensure consistency
+                                            let ip_only = mn_info.masternode.address.split(':').next()
+                                                .unwrap_or(&mn_info.masternode.address).to_string();
+                                            crate::network::message::MasternodeAnnouncementData {
+                                                address: ip_only,
+                                                reward_address: mn_info.reward_address.clone(),
+                                                tier: mn_info.masternode.tier.clone(),
+                                                public_key: mn_info.masternode.public_key,
+                                            }
                                         })
                                         .collect();
 

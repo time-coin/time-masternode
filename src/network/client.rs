@@ -663,8 +663,12 @@ async fn maintain_peer_connection(
                                                 }
                                             }
 
+                                            // Strip port from address to ensure consistency
+                                            let ip_only = mn_data.address.split(':').next()
+                                                .unwrap_or(&mn_data.address).to_string();
+
                                             let mn = crate::types::Masternode {
-                                                address: mn_data.address.clone(),
+                                                address: ip_only,
                                                 wallet_address: mn_data.reward_address.clone(),
                                                 collateral: mn_data.tier.collateral(),
                                                 tier: mn_data.tier.clone(),
