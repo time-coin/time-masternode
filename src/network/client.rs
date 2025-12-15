@@ -3,6 +3,7 @@ use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
+use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::peer_manager::PeerManager;
 use crate::NetworkType;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub struct NetworkClient {
     blockchain: Arc<Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
     connection_manager: Arc<ConnectionManager>,
+    peer_registry: Arc<PeerConnectionRegistry>,
     p2p_port: u16,
     max_peers: usize,
     reserved_masternode_slots: usize, // Reserved slots for masternodes
@@ -31,6 +33,7 @@ impl NetworkClient {
         network_type: NetworkType,
         max_peers: usize,
         connection_manager: Arc<ConnectionManager>,
+        peer_registry: Arc<PeerConnectionRegistry>,
         local_ip: Option<String>, // Our own public IP to avoid self-connection
     ) -> Self {
         // Reserve 40% of slots for masternodes, minimum 20 slots, max 30 slots
@@ -42,6 +45,7 @@ impl NetworkClient {
             blockchain,
             attestation_system,
             connection_manager,
+            peer_registry,
             p2p_port: network_type.default_p2p_port(),
             max_peers,
             reserved_masternode_slots,
@@ -56,6 +60,7 @@ impl NetworkClient {
         let blockchain = self.blockchain.clone();
         let attestation_system = self.attestation_system.clone();
         let connection_manager = self.connection_manager.clone();
+        let peer_registry = self.peer_registry.clone();
         let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;
@@ -113,6 +118,7 @@ impl NetworkClient {
                     blockchain.clone(),
                     attestation_system.clone(),
                     peer_manager.clone(),
+                    peer_registry.clone(),
                     true, // is_masternode flag
                 );
 
@@ -190,6 +196,7 @@ impl NetworkClient {
                         blockchain.clone(),
                         attestation_system.clone(),
                         peer_manager.clone(),
+                        peer_registry.clone(),
                         false, // regular peer
                     );
 
@@ -240,6 +247,7 @@ impl NetworkClient {
                             blockchain.clone(),
                             attestation_system.clone(),
                             peer_manager.clone(),
+                            peer_registry.clone(),
                             true,
                         );
                     }
@@ -307,6 +315,7 @@ impl NetworkClient {
                                 blockchain.clone(),
                                 attestation_system.clone(),
                                 peer_manager.clone(),
+                                peer_registry.clone(),
                                 false,
                             );
 
@@ -329,6 +338,7 @@ fn spawn_connection_task(
     blockchain: Arc<Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_manager: Arc<PeerManager>,
+    peer_registry: Arc<PeerConnectionRegistry>,
     is_masternode: bool,
 ) {
     let tag = if is_masternode { "[MASTERNODE]" } else { "" };
@@ -348,6 +358,7 @@ fn spawn_connection_task(
                 blockchain.clone(),
                 attestation_system.clone(),
                 peer_manager.clone(),
+                peer_registry.clone(),
             )
             .await
             {
@@ -414,6 +425,7 @@ fn spawn_connection_task(
 }
 
 /// Maintain a persistent connection to a peer
+#[allow(clippy::too_many_arguments)]
 async fn maintain_peer_connection(
     ip: &str,
     port: u16,
@@ -422,6 +434,7 @@ async fn maintain_peer_connection(
     blockchain: Arc<Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_manager: Arc<PeerManager>,
+    _peer_registry: Arc<PeerConnectionRegistry>,
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
@@ -527,6 +540,12 @@ async fn maintain_peer_connection(
             // Continue anyway for backward compatibility with older nodes
         }
     }
+
+    // TODO: Register writer with PeerConnectionRegistry
+    // This requires refactoring all direct writer usage to go through the registry
+    // See analysis/TODO_PeerConnectionRegistry_Integration.md Phase 2
+    // _peer_registry.register_peer(ip.to_string(), writer).await;
+    // tracing::debug!("📝 Registered {} in PeerConnectionRegistry", ip);
 
     // Announce our masternode if we are one
     if let Some(local_mn) = masternode_registry.get_local_masternode().await {

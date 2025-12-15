@@ -25,6 +25,7 @@ use config::Config;
 use consensus::ConsensusEngine;
 use heartbeat_attestation::HeartbeatAttestationSystem;
 use masternode_registry::MasternodeRegistry;
+use network::peer_connection_registry::PeerConnectionRegistry;
 use network::server::NetworkServer;
 use network_type::NetworkType;
 use peer_manager::PeerManager;
@@ -340,6 +341,9 @@ async fn main() {
     // Create shared connection manager for both client and server
     let connection_manager = Arc::new(network::connection_manager::ConnectionManager::new());
 
+    // Create shared peer connection registry for managing active connections
+    let peer_registry = Arc::new(PeerConnectionRegistry::new());
+
     // Extract local IP from external address to prevent self-connections
     let local_ip = if let Some(ref mn) = masternode_info {
         Some(mn.address.clone()) // Already IP-only format
@@ -368,6 +372,7 @@ async fn main() {
         network_type,
         config.network.max_peers as usize,
         connection_manager.clone(),
+        peer_registry.clone(),
         local_ip,
     );
     network_client.start().await;

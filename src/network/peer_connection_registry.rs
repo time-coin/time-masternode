@@ -10,6 +10,9 @@ type PeerWriter = BufWriter<OwnedWriteHalf>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
 
 /// Registry of active peer connections with ability to send targeted messages
+/// Note: Infrastructure for Phase 2 of PeerConnectionRegistry integration
+/// See analysis/TODO_PeerConnectionRegistry_Integration.md
+#[allow(dead_code)]
 pub struct PeerConnectionRegistry {
     /// Map of peer IP to their TCP writer
     connections: Arc<RwLock<HashMap<String, PeerWriter>>>,
@@ -17,6 +20,7 @@ pub struct PeerConnectionRegistry {
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
 }
 
+#[allow(dead_code)]
 impl PeerConnectionRegistry {
     pub fn new() -> Self {
         Self {
@@ -46,21 +50,21 @@ impl PeerConnectionRegistry {
     /// Send a message to a specific peer
     pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
         let mut connections = self.connections.write().await;
-        
+
         if let Some(writer) = connections.get_mut(peer_ip) {
             let msg_json = serde_json::to_string(&message)
                 .map_err(|e| format!("Failed to serialize message: {}", e))?;
-            
+
             writer
                 .write_all(format!("{}\n", msg_json).as_bytes())
                 .await
                 .map_err(|e| format!("Failed to write to peer {}: {}", peer_ip, e))?;
-            
+
             writer
                 .flush()
                 .await
                 .map_err(|e| format!("Failed to flush to peer {}: {}", peer_ip, e))?;
-            
+
             debug!("📤 Sent message to {}", peer_ip);
             Ok(())
         } else {
@@ -107,11 +111,14 @@ impl PeerConnectionRegistry {
     /// Handle an incoming response message (called from message loop)
     pub async fn handle_response(&self, peer_ip: &str, message: NetworkMessage) {
         let mut pending = self.pending_responses.write().await;
-        
+
         if let Some(senders) = pending.get_mut(peer_ip) {
             if let Some(sender) = senders.pop() {
                 if sender.send(message).is_err() {
-                    warn!("Failed to send response to awaiting task for peer {}", peer_ip);
+                    warn!(
+                        "Failed to send response to awaiting task for peer {}",
+                        peer_ip
+                    );
                 }
             }
         }
@@ -136,7 +143,7 @@ impl PeerConnectionRegistry {
                 disconnected_peers.push(peer_ip.clone());
                 continue;
             }
-            
+
             if let Err(e) = writer.flush().await {
                 warn!("Failed to flush broadcast to {}: {}", peer_ip, e);
                 disconnected_peers.push(peer_ip.clone());
