@@ -1628,14 +1628,21 @@ impl Blockchain {
     /// Query a peer for their block hash at a specific height
     async fn query_peer_block_hash(
         &self,
-        peer_addr: &str,
+        peer_ip: &str,
         height: u64,
     ) -> Result<Option<[u8; 32]>, String> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
 
-        let connect_future = TcpStream::connect(peer_addr);
+        // Add port if not present (peers are stored without ports)
+        let peer_addr = if peer_ip.contains(':') {
+            peer_ip.to_string()
+        } else {
+            format!("{}:{}", peer_ip, self.network_type.default_p2p_port())
+        };
+
+        let connect_future = TcpStream::connect(&peer_addr);
         let mut stream = match timeout(Duration::from_secs(5), connect_future).await {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => return Err(format!("Failed to connect to peer: {}", e)),
