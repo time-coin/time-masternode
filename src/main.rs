@@ -340,6 +340,25 @@ async fn main() {
     // Create shared connection manager for both client and server
     let connection_manager = Arc::new(network::connection_manager::ConnectionManager::new());
 
+    // Extract local IP from external address to prevent self-connections
+    let local_ip = if let Some(ref mn) = masternode_info {
+        Some(mn.address.clone()) // Already IP-only format
+    } else {
+        // Even non-masternodes should know their public IP to avoid self-connection
+        let full_address = config.network.full_external_address(&network_type);
+        Some(
+            full_address
+                .split(':')
+                .next()
+                .unwrap_or(&full_address)
+                .to_string(),
+        )
+    };
+
+    if let Some(ref ip) = local_ip {
+        tracing::info!("🏠 Local public IP detected: {}", ip);
+    }
+
     // Start network client for outbound connections and masternode announcements
     let network_client = network::client::NetworkClient::new(
         peer_manager.clone(),
@@ -349,6 +368,7 @@ async fn main() {
         network_type,
         config.network.max_peers as usize,
         connection_manager.clone(),
+        local_ip,
     );
     network_client.start().await;
 

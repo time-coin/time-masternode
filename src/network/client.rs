@@ -18,9 +18,11 @@ pub struct NetworkClient {
     p2p_port: u16,
     max_peers: usize,
     reserved_masternode_slots: usize, // Reserved slots for masternodes
+    local_ip: Option<String>,         // Our own public IP (without port) to avoid self-connection
 }
 
 impl NetworkClient {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer_manager: Arc<PeerManager>,
         masternode_registry: Arc<MasternodeRegistry>,
@@ -29,6 +31,7 @@ impl NetworkClient {
         network_type: NetworkType,
         max_peers: usize,
         connection_manager: Arc<ConnectionManager>,
+        local_ip: Option<String>, // Our own public IP to avoid self-connection
     ) -> Self {
         // Reserve 40% of slots for masternodes, minimum 20 slots, max 30 slots
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
@@ -42,6 +45,7 @@ impl NetworkClient {
             p2p_port: network_type.default_p2p_port(),
             max_peers,
             reserved_masternode_slots,
+            local_ip,
         }
     }
 
@@ -55,6 +59,7 @@ impl NetworkClient {
         let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;
+        let local_ip = self.local_ip.clone();
 
         tokio::spawn(async move {
             tracing::info!(
@@ -62,6 +67,10 @@ impl NetworkClient {
                 max_peers,
                 reserved_masternode_slots
             );
+
+            if let Some(ref ip) = local_ip {
+                tracing::info!("🏠 Local IP: {} (will skip self-connections)", ip);
+            }
 
             // PHASE 1: Connect to all active masternodes FIRST (priority)
             let masternodes = masternode_registry.list_active().await;
@@ -73,6 +82,14 @@ impl NetworkClient {
             let mut masternode_connections = 0;
             for mn in masternodes.iter().take(reserved_masternode_slots) {
                 let ip = mn.masternode.address.clone();
+
+                // CRITICAL FIX: Skip if this is our own IP
+                if let Some(ref local) = local_ip {
+                    if ip == *local {
+                        tracing::info!("⏭️  [PHASE1-MN] Skipping self-connection to {}", ip);
+                        continue;
+                    }
+                }
 
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
 
@@ -140,6 +157,14 @@ impl NetworkClient {
                 );
 
                 for ip in unique_peers.iter().take(available_slots) {
+                    // CRITICAL FIX: Skip if this is our own IP
+                    if let Some(ref local) = local_ip {
+                        if ip == local {
+                            tracing::info!("⏭️  [PHASE2-PEER] Skipping self-connection to {}", ip);
+                            continue;
+                        }
+                    }
+
                     // Skip if this is a masternode (already connected in Phase 1)
                     if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                         continue;
@@ -191,6 +216,13 @@ impl NetworkClient {
                 // Reconnect to any disconnected masternodes (HIGH PRIORITY)
                 for mn in masternodes.iter().take(reserved_masternode_slots) {
                     let ip = &mn.masternode.address;
+
+                    // CRITICAL FIX: Skip if this is our own IP
+                    if let Some(ref local) = local_ip {
+                        if ip == local {
+                            continue;
+                        }
+                    }
 
                     if !connection_manager.is_connected(ip).await
                         && connection_manager.mark_connecting(ip).await
@@ -245,6 +277,13 @@ impl NetworkClient {
                     );
 
                     for ip in unique_peers.iter().take(available_slots) {
+                        // CRITICAL FIX: Skip if this is our own IP
+                        if let Some(ref local) = local_ip {
+                            if ip == local {
+                                continue;
+                            }
+                        }
+
                         // Skip masternodes (they're handled above with priority)
                         if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                             continue;
