@@ -71,6 +71,7 @@ impl RpcHandler {
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
+            "mergeutxos" => self.merge_utxos(&params_array).await,
             "getattestationstats" => self.get_attestation_stats().await,
             "getheartbeathistory" => match params_array.first().and_then(|v| v.as_str()) {
                 Some(address) => {
@@ -612,6 +613,107 @@ impl RpcHandler {
         // Broadcast transaction to consensus engine
         match self.consensus.process_transaction(tx).await {
             Ok(_) => Ok(json!(hex::encode(txid))),
+            Err(e) => Err(RpcError {
+                code: -26,
+                message: format!("Transaction rejected: {}", e),
+            }),
+        }
+    }
+
+    async fn merge_utxos(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // Parse parameters: mergeutxos min_count max_count [address]
+        let min_count = params.first().and_then(|v| v.as_u64()).unwrap_or(2) as usize;
+
+        let max_count = params.get(1).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+
+        let filter_address = params.get(2).and_then(|v| v.as_str());
+
+        // Get all UTXOs
+        let mut utxos = self.utxo_manager.list_all_utxos().await;
+
+        // Filter by address if specified
+        if let Some(addr) = filter_address {
+            utxos.retain(|utxo| utxo.address == addr);
+        }
+
+        // Check if we have enough UTXOs to merge
+        if utxos.len() < min_count {
+            return Err(RpcError {
+                code: -8,
+                message: format!(
+                    "Not enough UTXOs to merge. Found {}, need at least {}",
+                    utxos.len(),
+                    min_count
+                ),
+            });
+        }
+
+        // Limit to max_count UTXOs
+        utxos.truncate(max_count);
+
+        tracing::info!("Merging {} UTXOs", utxos.len());
+
+        // Calculate total value
+        let total_value: u64 = utxos.iter().map(|u| u.value).sum();
+        let fee = 1_000 + (utxos.len() as u64 * 100); // Base fee + per-input fee
+
+        if total_value <= fee {
+            return Err(RpcError {
+                code: -8,
+                message: format!(
+                    "Total UTXO value ({}) is less than or equal to fee ({})",
+                    total_value, fee
+                ),
+            });
+        }
+
+        // Create merge transaction
+        use crate::types::{Transaction, TxInput, TxOutput};
+
+        let inputs: Vec<TxInput> = utxos
+            .iter()
+            .map(|utxo| TxInput {
+                previous_output: utxo.outpoint.clone(),
+                script_sig: vec![], // TODO: Sign with wallet key
+                sequence: 0xFFFFFFFF,
+            })
+            .collect();
+
+        // Get the address from the first UTXO (all should be same if filtered)
+        let output_address = if utxos.is_empty() {
+            return Err(RpcError {
+                code: -8,
+                message: "No UTXOs selected".to_string(),
+            });
+        } else {
+            &utxos[0].address
+        };
+
+        let outputs = vec![TxOutput {
+            value: total_value - fee,
+            script_pubkey: output_address.as_bytes().to_vec(),
+        }];
+
+        let tx = Transaction {
+            version: 1,
+            inputs,
+            outputs,
+            lock_time: 0,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        let txid = tx.txid();
+
+        // Broadcast transaction to consensus engine
+        match self.consensus.process_transaction(tx).await {
+            Ok(_) => Ok(json!({
+                "txid": hex::encode(txid),
+                "merged_count": utxos.len(),
+                "total_value": total_value,
+                "fee": fee,
+                "final_value": total_value - fee,
+                "message": format!("Successfully merged {} UTXOs", utxos.len())
+            })),
             Err(e) => Err(RpcError {
                 code: -26,
                 message: format!("Transaction rejected: {}", e),

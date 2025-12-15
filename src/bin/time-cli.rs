@@ -118,6 +118,19 @@ enum Commands {
         /// Amount to send (in TIME)
         amount: f64,
     },
+
+    /// Merge UTXOs to reduce UTXO set size
+    MergeUtxos {
+        /// Minimum number of UTXOs required to merge (default: 2)
+        #[arg(short, long, default_value = "2")]
+        min_count: usize,
+        /// Maximum number of UTXOs to merge in one transaction (default: 100)
+        #[arg(short = 'x', long, default_value = "100")]
+        max_count: usize,
+        /// Address to merge UTXOs for (optional, uses default wallet if not specified)
+        #[arg(short, long)]
+        address: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -185,6 +198,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
+        Commands::MergeUtxos {
+            min_count,
+            max_count,
+            address,
+        } => ("mergeutxos", json!([min_count, max_count, address])),
     };
 
     let request = RpcRequest {
