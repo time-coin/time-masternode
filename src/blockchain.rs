@@ -1411,20 +1411,45 @@ impl Blockchain {
                     ));
                 }
                 ForkConsensus::InsufficientPeers => {
-                    tracing::error!(
-                        "❌ Insufficient peers to verify fork consensus (need 5+ responses)"
-                    );
-                    tracing::error!("❌ REJECTING fork - cannot verify without peer consensus");
-                    return Err(format!(
-                        "Cannot verify fork at height {} - insufficient peer responses",
-                        fork_height
-                    ));
+                    // If we don't have the block, we're clearly behind
+                    if our_hash.is_none() {
+                        tracing::warn!(
+                            "⚠️ Cannot verify fork consensus (peer query system needs refactor)"
+                        );
+                        tracing::warn!(
+                            "⚠️ We don't have block at height {}, assuming we're behind and accepting",
+                            fork_height
+                        );
+                        tracing::info!(
+                            "💡 Proceeding with sync - if this is wrong, manual intervention needed"
+                        );
+                        // Fall through to accept the fork
+                    } else {
+                        // We have a competing block - this is dangerous, reject
+                        tracing::error!(
+                            "❌ Insufficient peers to verify COMPETING fork (need 5+ responses)"
+                        );
+                        tracing::error!("❌ REJECTING fork - cannot verify without peer consensus");
+                        return Err(format!(
+                            "Cannot verify competing fork at height {} - insufficient peer responses",
+                            fork_height
+                        ));
+                    }
                 }
             }
         } else {
-            tracing::error!("❌ No peer manager available - cannot verify consensus");
-            tracing::error!("❌ REJECTING fork - peer verification required for safety");
-            return Err("Cannot verify fork without peer manager".to_string());
+            tracing::warn!("⚠️ No peer manager available - cannot verify consensus");
+            // If we don't have the block, we're behind - accept it
+            if our_hash.is_none() {
+                tracing::warn!(
+                    "⚠️ We don't have block at height {}, assuming we're behind and accepting",
+                    fork_height
+                );
+                // Fall through to accept
+            } else {
+                tracing::error!("❌ REJECTING competing fork - peer verification required");
+                return Err("Cannot verify competing fork without peer manager".to_string());
+            }
         }
 
         // Find common ancestor
