@@ -1840,10 +1840,10 @@ impl Blockchain {
                     tracing::debug!("Peer {} doesn't have block at height {}", peer, fork_height);
                 }
                 Ok(Err(e)) => {
-                    tracing::debug!("Peer {} query failed: {}", peer, e);
+                    tracing::warn!("⚠️ Peer {} query failed: {}", peer, e);
                 }
                 Err(_) => {
-                    tracing::debug!("Peer {} query timed out", peer);
+                    tracing::warn!("⚠️ Peer {} query timed out (3s)", peer);
                 }
             }
         }
@@ -1857,15 +1857,35 @@ impl Blockchain {
         );
 
         // CRITICAL FIX: Require minimum quorum of responses before making any decision
+        // However, if we don't have the block ourselves, we're clearly behind
         const MIN_RESPONSES: usize = 5;
+        const MIN_RESPONSES_IF_BEHIND: usize = 2; // Lower threshold if we're behind
 
-        if responded < MIN_RESPONSES {
-            tracing::error!(
-                "❌ Insufficient peer responses: {} < {} required for consensus decision",
-                responded,
-                MIN_RESPONSES
-            );
-            return Ok(ForkConsensus::InsufficientPeers);
+        let we_are_behind = our_hash.is_none();
+        let min_required = if we_are_behind {
+            MIN_RESPONSES_IF_BEHIND
+        } else {
+            MIN_RESPONSES
+        };
+
+        if responded < min_required {
+            if we_are_behind && responded > 0 {
+                tracing::warn!(
+                    "⚠️ Only {} peer responses (need {}), but we don't have block at height {}",
+                    responded,
+                    min_required,
+                    fork_height
+                );
+                tracing::warn!("⚠️ We appear to be behind. Accepting fork if any peers agree.");
+                // Fall through to check if peers agree on the new chain
+            } else {
+                tracing::error!(
+                    "❌ Insufficient peer responses: {} < {} required for consensus decision",
+                    responded,
+                    min_required
+                );
+                return Ok(ForkConsensus::InsufficientPeers);
+            }
         }
 
         // Need 2/3+ of responding peers (not total peers) for consensus
