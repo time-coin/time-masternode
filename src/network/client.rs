@@ -713,6 +713,9 @@ async fn maintain_peer_connection(
                                     // ACKs are informational, no action needed
                                 }
                                 NetworkMessage::BlockHeightResponse(remote_height) => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::BlockHeightResponse(remote_height)).await;
+
                                     let local_height = blockchain.get_height().await;
                                     tracing::info!("📊 Peer {} has height {}, we have {}", ip, remote_height, local_height);
 
@@ -741,6 +744,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::BlocksResponse(blocks) => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::BlocksResponse(blocks.clone())).await;
+
                                     tracing::info!("📦 Received {} blocks from peer", blocks.len());
 
                                     let mut blocks_added = 0;
@@ -805,6 +811,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::PendingTransactionsResponse(transactions) => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::PendingTransactionsResponse(transactions.clone())).await;
+
                                     if !transactions.is_empty() {
                                         tracing::info!("📩 Received {} pending transaction(s) from peer", transactions.len());
                                         for tx in transactions {
@@ -815,6 +824,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::MasternodesResponse(masternodes) => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::MasternodesResponse(masternodes.clone())).await;
+
                                     if !masternodes.is_empty() {
                                         tracing::info!("📩 Received {} masternode(s) from peer", masternodes.len());
 
@@ -877,6 +889,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::UTXOStateHashResponse { hash, height, utxo_count } => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::UTXOStateHashResponse { hash, height, utxo_count }).await;
+
                                     let local_height = blockchain.get_height().await;
                                     let local_hash = blockchain.get_utxo_state_hash().await;
                                     let local_count = blockchain.get_utxo_count().await;
@@ -900,6 +915,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::UTXOSetResponse(utxos) => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::UTXOSetResponse(utxos.clone())).await;
+
                                     tracing::info!("📥 Received {} UTXOs from peer for reconciliation", utxos.len());
                                     blockchain.reconcile_utxo_state(utxos).await;
                                 }
@@ -945,6 +963,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::BlockHashResponse { height, hash } => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::BlockHashResponse { height, hash }).await;
+
                                     tracing::debug!("📥 Received BlockHashResponse for height {}", height);
                                     // Fork resolution logic would use this
                                     if let Some(our_hash) = blockchain.get_block_hash_at_height(height).await {
@@ -957,6 +978,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::ConsensusQueryResponse { agrees, height, their_hash } => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::ConsensusQueryResponse { agrees, height, their_hash }).await;
+
                                     tracing::debug!("📥 Received ConsensusQueryResponse for height {}: agrees={}", height, agrees);
                                     if !agrees {
                                         tracing::warn!("⚠️ Peer disagrees on block hash at height {}", height);
@@ -964,6 +988,9 @@ async fn maintain_peer_connection(
                                     }
                                 }
                                 NetworkMessage::BlockRangeResponse(blocks) => {
+                                    // Route response to any waiting query
+                                    peer_registry.handle_response(ip, NetworkMessage::BlockRangeResponse(blocks.clone())).await;
+
                                     tracing::info!("📦 Received block range: {} blocks from peer", blocks.len());
                                     // Process blocks for reorg
                                     for block in blocks {
