@@ -344,6 +344,9 @@ async fn main() {
     // Create shared peer connection registry for managing active connections
     let peer_registry = Arc::new(PeerConnectionRegistry::new());
 
+    // Set peer registry on blockchain for request/response queries
+    blockchain.set_peer_registry(peer_registry.clone()).await;
+
     // Extract local IP from external address to prevent self-connections
     let local_ip = if let Some(ref mn) = masternode_info {
         Some(mn.address.clone()) // Already IP-only format

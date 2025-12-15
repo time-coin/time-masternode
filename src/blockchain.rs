@@ -3,6 +3,7 @@ use crate::block::types::{Block, BlockHeader};
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::network::message::NetworkMessage;
+use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
@@ -66,6 +67,7 @@ pub struct Blockchain {
     network_type: NetworkType,
     is_syncing: Arc<RwLock<bool>>, // Track if currently syncing from a peer
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>, // For consensus queries
+    peer_registry: Arc<RwLock<Option<Arc<PeerConnectionRegistry>>>>, // For request/response queries
     block_gen_mode: Arc<RwLock<BlockGenMode>>, // Track current block generation mode
     is_catchup_mode: Arc<RwLock<bool>>,        // Track if in catchup mode
     bft_consensus: Arc<RwLock<Option<Arc<BFTConsensus>>>>, // BFT consensus for block generation
@@ -86,6 +88,7 @@ impl Blockchain {
             network_type,
             is_syncing: Arc::new(RwLock::new(false)),
             peer_manager: Arc::new(RwLock::new(None)),
+            peer_registry: Arc::new(RwLock::new(None)),
             block_gen_mode: Arc::new(RwLock::new(BlockGenMode::Normal)),
             is_catchup_mode: Arc::new(RwLock::new(false)),
             bft_consensus: Arc::new(RwLock::new(None)),
@@ -100,6 +103,11 @@ impl Blockchain {
     /// Set peer manager for consensus verification (called after initialization)
     pub async fn set_peer_manager(&self, peer_manager: Arc<crate::peer_manager::PeerManager>) {
         *self.peer_manager.write().await = Some(peer_manager);
+    }
+
+    /// Set peer registry for request/response queries (called after initialization)
+    pub async fn set_peer_registry(&self, peer_registry: Arc<PeerConnectionRegistry>) {
+        *self.peer_registry.write().await = Some(peer_registry);
     }
 
     fn genesis_timestamp(&self) -> i64 {
@@ -1656,6 +1664,28 @@ impl Blockchain {
         peer_ip: &str,
         height: u64,
     ) -> Result<Option<[u8; 32]>, String> {
+        // Try using peer registry first (preferred method)
+        if let Some(peer_reg) = self.peer_registry.read().await.as_ref() {
+            let message = NetworkMessage::GetBlockHash(height);
+            match peer_reg.send_and_await_response(peer_ip, message, 5).await {
+                Ok(NetworkMessage::BlockHashResponse { height: _, hash }) => {
+                    return Ok(hash);
+                }
+                Ok(_) => return Err("Unexpected response type".to_string()),
+                Err(e) => {
+                    tracing::warn!(
+                        "Registry query failed for {}: {}, falling back to direct connection",
+                        peer_ip,
+                        e
+                    );
+                    // Fall through to fallback method
+                }
+            }
+        }
+
+        // Fallback: create new connection (for peers not in registry or during startup)
+        tracing::debug!("Using fallback direct connection to query {}", peer_ip);
+
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
@@ -2042,6 +2072,7 @@ impl Clone for Blockchain {
             network_type: self.network_type,
             is_syncing: self.is_syncing.clone(),
             peer_manager: self.peer_manager.clone(),
+            peer_registry: self.peer_registry.clone(),
             block_gen_mode: self.block_gen_mode.clone(),
             is_catchup_mode: self.is_catchup_mode.clone(),
             bft_consensus: self.bft_consensus.clone(),
