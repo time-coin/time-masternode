@@ -434,7 +434,7 @@ async fn maintain_peer_connection(
     blockchain: Arc<Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_manager: Arc<PeerManager>,
-    _peer_registry: Arc<PeerConnectionRegistry>,
+    peer_registry: Arc<PeerConnectionRegistry>,
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
@@ -541,11 +541,10 @@ async fn maintain_peer_connection(
         }
     }
 
-    // TODO: Register writer with PeerConnectionRegistry
-    // This requires refactoring all direct writer usage to go through the registry
-    // See analysis/TODO_PeerConnectionRegistry_Integration.md Phase 2
-    // _peer_registry.register_peer(ip.to_string(), writer).await;
-    // tracing::debug!("📝 Registered {} in PeerConnectionRegistry", ip);
+    // Register writer with PeerConnectionRegistry
+    // After this, all messages must be sent through the registry
+    peer_registry.register_peer(ip.to_string(), writer).await;
+    tracing::debug!("📝 Registered {} in PeerConnectionRegistry", ip);
 
     // Announce our masternode if we are one
     if let Some(local_mn) = masternode_registry.get_local_masternode().await {
@@ -556,18 +555,10 @@ async fn maintain_peer_connection(
             public_key: local_mn.masternode.public_key,
         };
 
-        let msg_json = serde_json::to_string(&announce_msg)
-            .map_err(|e| format!("Failed to serialize: {}", e))?;
-
-        let msg_with_newline = format!("{}\n", msg_json);
-        writer
-            .write_all(msg_with_newline.as_bytes())
+        peer_registry
+            .send_to_peer(ip, announce_msg)
             .await
-            .map_err(|e| format!("Write failed: {}", e))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| format!("Flush failed: {}", e))?;
+            .map_err(|e| format!("Failed to send masternode announcement: {}", e))?;
 
         tracing::info!("📡 Announced masternode to {}", ip);
 
@@ -585,17 +576,10 @@ async fn maintain_peer_connection(
 
     // Initial height request
     let sync_msg = NetworkMessage::GetBlockHeight;
-    let msg_json =
-        serde_json::to_string(&sync_msg).map_err(|e| format!("Failed to serialize: {}", e))?;
-    let msg_with_newline = format!("{}\n", msg_json);
-    writer
-        .write_all(msg_with_newline.as_bytes())
+    peer_registry
+        .send_to_peer(ip, sync_msg)
         .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| format!("Flush failed: {}", e))?;
+        .map_err(|e| format!("Failed to send initial height request: {}", e))?;
 
     tracing::info!("📡 Requested initial block height from {}", ip);
 
@@ -604,48 +588,28 @@ async fn maintain_peer_connection(
 
     // Request pending transactions (to catch any we missed during downtime)
     let tx_request = NetworkMessage::GetPendingTransactions;
-    let msg_json =
-        serde_json::to_string(&tx_request).map_err(|e| format!("Failed to serialize: {}", e))?;
-    let msg_with_newline = format!("{}\n", msg_json);
-    writer
-        .write_all(msg_with_newline.as_bytes())
+    peer_registry
+        .send_to_peer(ip, tx_request)
         .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| format!("Flush failed: {}", e))?;
+        .map_err(|e| format!("Failed to send pending transactions request: {}", e))?;
 
     tracing::debug!("📡 Requested pending transactions from {}", ip);
 
     // Request masternode list
     let mn_request = NetworkMessage::GetMasternodes;
-    let msg_json =
-        serde_json::to_string(&mn_request).map_err(|e| format!("Failed to serialize: {}", e))?;
-    let msg_with_newline = format!("{}\n", msg_json);
-    writer
-        .write_all(msg_with_newline.as_bytes())
+    peer_registry
+        .send_to_peer(ip, mn_request)
         .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| format!("Flush failed: {}", e))?;
+        .map_err(|e| format!("Failed to send masternode request: {}", e))?;
 
     tracing::debug!("📡 Requested masternode list from {}", ip);
 
     // Request peer list for peer discovery
     let peers_request = NetworkMessage::GetPeers;
-    let msg_json =
-        serde_json::to_string(&peers_request).map_err(|e| format!("Failed to serialize: {}", e))?;
-    writer
-        .write_all(format!("{}\n", msg_json).as_bytes())
+    peer_registry
+        .send_to_peer(ip, peers_request)
         .await
-        .map_err(|e| format!("Write failed: {}", e))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| format!("Flush failed: {}", e))?;
+        .map_err(|e| format!("Failed to send peers request: {}", e))?;
 
     tracing::debug!("📡 Requested peer list from {}", ip);
 
@@ -684,19 +648,13 @@ async fn maintain_peer_connection(
                 let timestamp = chrono::Utc::now().timestamp();
                 let ping_msg = NetworkMessage::Ping { nonce, timestamp };
 
-                if let Ok(msg_json) = serde_json::to_string(&ping_msg) {
-                    if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                        tracing::warn!("❌ Failed to write ping to {}: {}", ip, e);
-                        break;
-                    }
-                    if let Err(e) = writer.flush().await {
-                        tracing::warn!("❌ Failed to flush ping to {}: {}", ip, e);
-                        break;
-                    }
-
-                    pending_ping = Some((nonce, std::time::Instant::now()));
-                    tracing::debug!("📤 Sent ping to {} (nonce: {})", ip, nonce);
+                if let Err(e) = peer_registry.send_to_peer(ip, ping_msg).await {
+                    tracing::warn!("❌ Failed to send ping to {}: {}", ip, e);
+                    break;
                 }
+
+                pending_ping = Some((nonce, std::time::Instant::now()));
+                tracing::debug!("📤 Sent ping to {} (nonce: {})", ip, nonce);
             }
 
             // Send periodic heartbeat and sync check
@@ -711,42 +669,24 @@ async fn maintain_peer_connection(
                         tier: local_mn.masternode.tier,
                         public_key: local_mn.masternode.public_key,
                     };
-                    if let Ok(msg_json) = serde_json::to_string(&heartbeat_msg) {
-                        if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                            tracing::warn!("❌ Failed to write heartbeat to {}: {}", ip, e);
-                            break;
-                        }
-                        if let Err(e) = writer.flush().await {
-                            tracing::warn!("❌ Failed to flush heartbeat to {}: {}", ip, e);
-                            break;
-                        }
+                    if let Err(e) = peer_registry.send_to_peer(ip, heartbeat_msg).await {
+                        tracing::warn!("❌ Failed to send heartbeat to {}: {}", ip, e);
+                        break;
                     }
                 }
 
                 // Request peer height for sync check
                 let sync_msg = NetworkMessage::GetBlockHeight;
-                if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
-                    if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                        tracing::warn!("❌ Failed to write sync request to {}: {}", ip, e);
-                        break;
-                    }
-                    if let Err(e) = writer.flush().await {
-                        tracing::warn!("❌ Failed to flush sync request to {}: {}", ip, e);
-                        break;
-                    }
+                if let Err(e) = peer_registry.send_to_peer(ip, sync_msg).await {
+                    tracing::warn!("❌ Failed to send sync request to {}: {}", ip, e);
+                    break;
                 }
 
                 // Request UTXO state hash for verification (every 10 minutes)
                 let utxo_check_msg = NetworkMessage::GetUTXOStateHash;
-                if let Ok(msg_json) = serde_json::to_string(&utxo_check_msg) {
-                    if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                        tracing::warn!("❌ Failed to write UTXO check to {}: {}", ip, e);
-                        break;
-                    }
-                    if let Err(e) = writer.flush().await {
-                        tracing::warn!("❌ Failed to flush UTXO check to {}: {}", ip, e);
-                        break;
-                    }
+                if let Err(e) = peer_registry.send_to_peer(ip, utxo_check_msg).await {
+                    tracing::warn!("❌ Failed to send UTXO check to {}: {}", ip, e);
+                    break;
                 }
             }
 
@@ -788,10 +728,7 @@ async fn maintain_peer_connection(
                                             // If we have no blocks, start from genesis (block 0)
                                             let start_height = if local_height == 0 { 0 } else { local_height + 1 };
                                             let req = NetworkMessage::GetBlocks(start_height, remote_height);
-                                            if let Ok(json) = serde_json::to_string(&req) {
-                                                let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                                let _ = writer.flush().await;
-                                            }
+                                            let _ = peer_registry.send_to_peer(ip, req).await;
                                         } else {
                                             tracing::debug!("Already syncing from another peer, skipping");
                                         }
@@ -835,10 +772,7 @@ async fn maintain_peer_connection(
 
                                                     // Request next batch if we're still behind
                                                     let sync_msg = NetworkMessage::GetBlockHeight;
-                                                    if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
-                                                        let _ = writer.write_all(format!("{}\n", msg_json).as_bytes()).await;
-                                                        let _ = writer.flush().await;
-                                                    }
+                                                    let _ = peer_registry.send_to_peer(ip, sync_msg).await;
                                                 }
                                             }
                                             Err(e) => {
@@ -867,10 +801,7 @@ async fn maintain_peer_connection(
                                     if had_fork_error {
                                         tracing::info!("🔄 Fork detected during sync - requesting updated height to reassess");
                                         let sync_msg = NetworkMessage::GetBlockHeight;
-                                        if let Ok(msg_json) = serde_json::to_string(&sync_msg) {
-                                            let _ = writer.write_all(format!("{}\n", msg_json).as_bytes()).await;
-                                            let _ = writer.flush().await;
-                                        }
+                                        let _ = peer_registry.send_to_peer(ip, sync_msg).await;
                                     }
                                 }
                                 NetworkMessage::PendingTransactionsResponse(transactions) => {
@@ -962,11 +893,8 @@ async fn maintain_peer_connection(
 
                                         // Request full UTXO set from peer to reconcile
                                         let request = NetworkMessage::GetUTXOSet;
-                                        if let Ok(json) = serde_json::to_string(&request) {
-                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                            let _ = writer.flush().await;
-                                            tracing::info!("📥 Requesting full UTXO set from peer for reconciliation");
-                                        }
+                                        let _ = peer_registry.send_to_peer(ip, request).await;
+                                        tracing::info!("📥 Requesting full UTXO set from peer for reconciliation");
                                     } else if height == local_height {
                                         tracing::debug!("✅ UTXO state matches peer at height {}", height);
                                     }
@@ -1051,17 +979,11 @@ async fn maintain_peer_connection(
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
 
-                                    if let Ok(msg_json) = serde_json::to_string(&pong_msg) {
-                                        if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                                            tracing::warn!("❌ Failed to write pong to {}: {}", ip, e);
-                                            break;
-                                        }
-                                        if let Err(e) = writer.flush().await {
-                                            tracing::warn!("❌ Failed to flush pong to {}: {}", ip, e);
-                                            break;
-                                        }
-                                        tracing::debug!("📤 Sent pong to {} (nonce: {})", ip, nonce);
+                                    if let Err(e) = peer_registry.send_to_peer(ip, pong_msg).await {
+                                        tracing::warn!("❌ Failed to send pong to {}: {}", ip, e);
+                                        break;
                                     }
+                                    tracing::debug!("📤 Sent pong to {} (nonce: {})", ip, nonce);
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
                                     // Check if this pong matches our pending ping
