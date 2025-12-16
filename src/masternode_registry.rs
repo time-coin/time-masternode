@@ -203,13 +203,33 @@ impl MasternodeRegistry {
         let mut nodes = self.masternodes.write().await;
         let now = Self::now();
 
+        // Get the count before we do any mutable operations
+        let total_masternodes = nodes.len();
+
         // If already registered, update heartbeat (treat as heartbeat)
         if let Some(existing) = nodes.get_mut(&masternode.address) {
+            let time_since_last = now - existing.last_heartbeat;
             existing.last_heartbeat = now;
             if !existing.is_active {
                 existing.is_active = true;
                 existing.uptime_start = now;
-                info!("✓ Masternode {} reactivated", masternode.address);
+                info!(
+                    "✅ Registered masternode {} (total: {}) - Tier: {:?}, Was offline for {}s, now ACTIVE at timestamp {}",
+                    masternode.address,
+                    total_masternodes,
+                    masternode.tier,
+                    time_since_last,
+                    now
+                );
+            } else {
+                tracing::debug!(
+                    "♻️  Heartbeat from {} - Tier: {:?}, Last seen: {}s ago, Active at: {}, Now: {}",
+                    masternode.address,
+                    masternode.tier,
+                    time_since_last,
+                    existing.uptime_start,
+                    now
+                );
             }
 
             // Update on disk
@@ -225,7 +245,7 @@ impl MasternodeRegistry {
 
         let info = MasternodeInfo {
             masternode: masternode.clone(),
-            reward_address,
+            reward_address: reward_address.clone(),
             last_heartbeat: now,
             uptime_start: now,
             total_uptime: 0,
@@ -241,7 +261,16 @@ impl MasternodeRegistry {
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
         nodes.insert(masternode.address.clone(), info);
-        info!("✓ Registered masternode: {}", masternode.address);
+        let total_masternodes = nodes.len();
+
+        info!(
+            "✅ Registered masternode {} (total: {}) - NEW - Tier: {:?}, Reward address: {}, Active at timestamp: {}",
+            masternode.address,
+            total_masternodes,
+            masternode.tier,
+            reward_address,
+            now
+        );
         Ok(())
     }
 
