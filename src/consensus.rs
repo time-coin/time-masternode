@@ -7,6 +7,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// Resource limits to prevent DOS attacks
+const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
+#[allow(dead_code)] // TODO: Implement byte-size tracking in TransactionPool
+const MAX_MEMPOOL_SIZE_BYTES: usize = 300_000_000; // 300MB
+const MAX_TX_SIZE: usize = 1_000_000; // 1MB
+const MIN_TX_FEE: u64 = 1_000; // 0.00001 TIME minimum fee
+const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
+
 type BroadcastCallback = Arc<RwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>>>;
 
 #[allow(dead_code)]
@@ -57,7 +65,19 @@ impl ConsensusEngine {
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
-        // Check inputs exist and are unspent
+        // 1. Check transaction size limit
+        let tx_size = bincode::serialize(tx)
+            .map_err(|e| format!("Failed to serialize transaction: {}", e))?
+            .len();
+
+        if tx_size > MAX_TX_SIZE {
+            return Err(format!(
+                "Transaction too large: {} bytes (max {} bytes)",
+                tx_size, MAX_TX_SIZE
+            ));
+        }
+
+        // 2. Check inputs exist and are unspent
         for input in &tx.inputs {
             match self.utxo_manager.get_state(&input.previous_output).await {
                 Some(UTXOState::Unspent) => {}
@@ -70,7 +90,7 @@ impl ConsensusEngine {
             }
         }
 
-        // Check input values >= output values (no inflation)
+        // 3. Check input values >= output values (no inflation)
         let mut input_sum = 0u64;
         for input in &tx.inputs {
             if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
@@ -82,15 +102,35 @@ impl ConsensusEngine {
 
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
-        // Calculate required fee (0.1% of transaction amount)
-        let fee_rate = 1000; // 0.1% = 1/1000
-        let min_fee = output_sum / fee_rate;
+        // 4. Dust prevention - reject outputs below threshold
+        for output in &tx.outputs {
+            if output.value > 0 && output.value < DUST_THRESHOLD {
+                return Err(format!(
+                    "Dust output detected: {} satoshis (minimum {})",
+                    output.value, DUST_THRESHOLD
+                ));
+            }
+        }
+
+        // 5. Calculate and validate fee
         let actual_fee = input_sum.saturating_sub(output_sum);
 
-        if actual_fee < min_fee {
+        // Require minimum absolute fee
+        if actual_fee < MIN_TX_FEE {
+            return Err(format!(
+                "Transaction fee too low: {} satoshis (minimum {})",
+                actual_fee, MIN_TX_FEE
+            ));
+        }
+
+        // Also check proportional fee (0.1% of transaction amount)
+        let fee_rate = 1000; // 0.1% = 1/1000
+        let min_proportional_fee = output_sum / fee_rate;
+
+        if actual_fee < min_proportional_fee {
             return Err(format!(
                 "Insufficient fee: {} satoshis < {} satoshis required (0.1% of {})",
-                actual_fee, min_fee, output_sum
+                actual_fee, min_proportional_fee, output_sum
             ));
         }
 
@@ -200,6 +240,22 @@ impl ConsensusEngine {
         };
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
         let fee = input_sum.saturating_sub(output_sum);
+
+        // Check mempool limits before adding
+        let pending_count = self.tx_pool.get_all_pending().await.len();
+        if pending_count >= MAX_MEMPOOL_TRANSACTIONS {
+            return Err(format!(
+                "Mempool full: {} transactions (max {})",
+                pending_count, MAX_MEMPOOL_TRANSACTIONS
+            ));
+        }
+
+        // Calculate approximate transaction size for future mempool byte tracking
+        let _tx_size = bincode::serialize(&tx)
+            .map_err(|e| format!("Serialization error: {}", e))?
+            .len();
+        // TODO: Track actual mempool byte size in TransactionPool
+
         self.tx_pool.add_pending(tx.clone(), fee).await;
 
         // If we are a masternode, automatically vote

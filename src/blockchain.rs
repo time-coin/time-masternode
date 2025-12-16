@@ -21,6 +21,11 @@ const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 const CATCHUP_BLOCK_INTERVAL: i64 = 60; // 1 minute per block during catchup
 const MIN_BLOCKS_BEHIND_FOR_CATCHUP: u64 = 3; // Minimum gap to enter catchup mode (lowered for current issue)
 
+// Security limits
+const MAX_BLOCK_SIZE: usize = 2_000_000; // 2MB per block
+const MAX_REORG_DEPTH: u64 = 1_000; // Maximum blocks to reorg (prevents deep history rewrites)
+const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
+
 /// Global lock to prevent duplicate concurrent block production
 /// This prevents race conditions when multiple timers or tasks try to produce the same block
 static BLOCK_PRODUCTION_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(()));
@@ -1184,6 +1189,18 @@ impl Blockchain {
 
     /// Add a block received from peers (with validation)
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
+        // 1. Validate block size (prevent DOS via oversized blocks)
+        let block_size = bincode::serialize(&block)
+            .map_err(|e| format!("Failed to serialize block: {}", e))?
+            .len();
+
+        if block_size > MAX_BLOCK_SIZE {
+            return Err(format!(
+                "Block too large: {} bytes (max {} bytes)",
+                block_size, MAX_BLOCK_SIZE
+            ));
+        }
+
         let current_height = *self.current_height.read().await;
 
         // Skip if we already have this block or newer
@@ -1525,9 +1542,8 @@ impl Blockchain {
         let reorg_depth = current_height - common_ancestor;
 
         // Safety check: prevent deep reorganizations
-        const MAX_REORG_DEPTH: u64 = 100;
-        const DEEP_REORG_THRESHOLD: u64 = 10;
-
+        // Check reorg depth limit - using global constant
+        // (Prevents deep chain rewrites from attacks or network splits)
         if reorg_depth > MAX_REORG_DEPTH {
             tracing::error!(
                 "❌ Fork too deep ({} blocks) - manual intervention required",
@@ -1539,7 +1555,7 @@ impl Blockchain {
             ));
         }
 
-        if reorg_depth > DEEP_REORG_THRESHOLD {
+        if reorg_depth > ALERT_REORG_DEPTH {
             tracing::warn!(
                 "⚠️  Deep reorganization: {} blocks will be rolled back",
                 reorg_depth
