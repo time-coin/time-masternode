@@ -229,8 +229,26 @@ impl Blockchain {
             if !peers.is_empty() {
                 tracing::info!("🔍 Checking {} peer(s) for existing blocks...", peers.len());
 
-                // Network client will handle requesting blocks when peers respond with heights
-                // Wait a bit for sync to happen via normal P2P
+                // Actively request blocks from all peers
+                if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                    tracing::info!(
+                        "📡 Actively requesting blocks {} to {} from peers",
+                        current + 1,
+                        expected
+                    );
+
+                    // Request blocks from multiple peers for redundancy
+                    for peer_ip in peers.iter().take(5) {
+                        let request = NetworkMessage::GetBlocks(current + 1, expected);
+                        if let Err(e) = peer_registry.send_to_peer(peer_ip, request).await {
+                            tracing::debug!("Failed to request blocks from {}: {}", peer_ip, e);
+                        } else {
+                            tracing::debug!("📤 Requested blocks from {}", peer_ip);
+                        }
+                    }
+                }
+
+                // Wait for blocks to arrive
                 let sync_result = self.wait_for_peer_sync(current, expected, 60).await;
 
                 if sync_result.is_ok() {
@@ -248,9 +266,17 @@ impl Blockchain {
                         new_height - current
                     );
 
-                    // If we're close to target, wait a bit more
+                    // If we're close to target, request remaining blocks again
                     if expected - new_height < 5 {
-                        tracing::info!("⏳ Nearly synced, waiting 30s more...");
+                        tracing::info!("⏳ Nearly synced, requesting remaining blocks...");
+
+                        if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                            for peer_ip in peers.iter().take(3) {
+                                let request = NetworkMessage::GetBlocks(new_height + 1, expected);
+                                let _ = peer_registry.send_to_peer(peer_ip, request).await;
+                            }
+                        }
+
                         if self
                             .wait_for_peer_sync(new_height, expected, 30)
                             .await
@@ -786,6 +812,7 @@ impl Blockchain {
 
         // Verify 3+ masternodes
         let masternodes = self.masternode_registry.list_active().await;
+
         if masternodes.len() < 3 {
             return Err(format!(
                 "Insufficient masternodes: {} (need 3)",
@@ -796,6 +823,13 @@ impl Blockchain {
         // Get finalized transactions and calculate total fees
         let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
         let total_fees = self.consensus.tx_pool.get_total_fees().await;
+
+        tracing::info!(
+            "📋 Proposing block at height {} with {} transactions, {} active masternodes",
+            height,
+            finalized_txs.len(),
+            masternodes.len()
+        );
 
         // Calculate rewards including fees
         let base_reward = BLOCK_REWARD_SATOSHIS;
@@ -835,9 +869,16 @@ impl Blockchain {
                 timestamp,
                 block_reward: total_reward,
             },
-            transactions: all_txs,
+            transactions: all_txs.clone(),
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
         };
+
+        tracing::info!(
+            "✅ Block {} produced: {} transactions, {} masternode rewards",
+            height,
+            all_txs.len(),
+            rewards.len()
+        );
 
         // If BFT consensus is enabled, propose block through BFT
         if let Some(bft) = self.bft_consensus.read().await.as_ref() {
