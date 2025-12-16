@@ -491,10 +491,12 @@ impl RpcHandler {
     }
 
     async fn get_consensus_info(&self) -> Result<Value, RpcError> {
+        let mn_count = self.consensus.masternodes.read().await.len();
+        let quorum = (2 * mn_count).div_ceil(3);
         Ok(json!({
             "type": "BFT",
-            "masternodes": self.consensus.masternodes.len(),
-            "quorum": (2 * self.consensus.masternodes.len()).div_ceil(3)
+            "masternodes": mn_count,
+            "quorum": quorum
         }))
     }
 

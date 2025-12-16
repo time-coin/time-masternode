@@ -7,36 +7,51 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+type BroadcastCallback = Arc<RwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>>>;
+
 #[allow(dead_code)]
 pub struct ConsensusEngine {
-    pub masternodes: Vec<Masternode>,
+    pub masternodes: Arc<RwLock<Vec<Masternode>>>,
     pub utxo_manager: Arc<UTXOStateManager>,
     pub votes: Arc<RwLock<HashMap<Hash256, Vec<Vote>>>>,
     pub tx_pool: Arc<TransactionPool>,
-    pub broadcast_callback: Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>,
+    pub broadcast_callback: BroadcastCallback,
+    pub our_address: Arc<RwLock<Option<String>>>,
+    pub signing_key: Arc<RwLock<Option<ed25519_dalek::SigningKey>>>,
 }
 
 impl ConsensusEngine {
     pub fn new(masternodes: Vec<Masternode>, utxo_manager: Arc<UTXOStateManager>) -> Self {
         Self {
-            masternodes,
+            masternodes: Arc::new(RwLock::new(masternodes)),
             utxo_manager,
             votes: Arc::new(RwLock::new(HashMap::new())),
             tx_pool: Arc::new(TransactionPool::new()),
-            broadcast_callback: None,
+            broadcast_callback: Arc::new(RwLock::new(None)),
+            our_address: Arc::new(RwLock::new(None)),
+            signing_key: Arc::new(RwLock::new(None)),
         }
     }
 
+    pub async fn set_identity(&self, address: String, signing_key: ed25519_dalek::SigningKey) {
+        *self.our_address.write().await = Some(address);
+        *self.signing_key.write().await = Some(signing_key);
+    }
+
+    pub async fn update_masternodes(&self, masternodes: Vec<Masternode>) {
+        *self.masternodes.write().await = masternodes;
+    }
+
     #[allow(dead_code)]
-    pub fn set_broadcast_callback<F>(&mut self, callback: F)
+    pub async fn set_broadcast_callback<F>(&self, callback: F)
     where
         F: Fn(NetworkMessage) + Send + Sync + 'static,
     {
-        self.broadcast_callback = Some(Arc::new(callback));
+        *self.broadcast_callback.write().await = Some(Arc::new(callback));
     }
 
-    fn broadcast(&self, msg: NetworkMessage) {
-        if let Some(callback) = &self.broadcast_callback {
+    async fn broadcast(&self, msg: NetworkMessage) {
+        if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
             callback(msg);
         }
     }
@@ -127,12 +142,14 @@ impl ConsensusEngine {
                     txid,
                     locked_at: chrono::Utc::now().timestamp(),
                 },
-            });
+            })
+            .await;
         }
 
         // Step 3: Add to pending pool with fee and broadcast
         self.tx_pool.add_pending(tx.clone(), fee).await;
-        self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()));
+        self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()))
+            .await;
 
         // Step 4: Process transaction through consensus
         self.process_transaction(tx).await?;
@@ -142,11 +159,14 @@ impl ConsensusEngine {
 
     pub async fn process_transaction(&self, tx: Transaction) -> Result<(), String> {
         let txid = tx.txid();
-        let n = self.masternodes.len() as u32;
+        let n = self.masternodes.read().await.len() as u32;
 
         if n == 0 {
             return Err("No masternodes available".to_string());
         }
+
+        // Validate locally first
+        self.validate_transaction(&tx).await?;
 
         // Update UTXO states to SpentPending
         for input in &tx.inputs {
@@ -164,78 +184,276 @@ impl ConsensusEngine {
             self.broadcast(NetworkMessage::UTXOStateUpdate {
                 outpoint: input.previous_output.clone(),
                 state,
-            });
+            })
+            .await;
         }
 
-        // Collect votes (simplified - in real impl, this is async network operation)
-        let mut approvals = 0u32;
-        for _mn in &self.masternodes {
-            if self.validate_transaction(&tx).await.is_ok() {
-                approvals += 1;
-            }
-        }
-
-        let quorum = (2 * n).div_ceil(3);
-
-        if approvals >= quorum {
-            // Transaction approved - finalize
+        // Add to pending pool first
+        let input_sum: u64 = {
+            let mut sum = 0u64;
             for input in &tx.inputs {
-                let state = UTXOState::SpentFinalized {
-                    txid,
-                    finalized_at: chrono::Utc::now().timestamp(),
-                    votes: approvals,
-                };
-                self.utxo_manager
-                    .update_state(&input.previous_output, state.clone())
-                    .await;
-
-                // Broadcast finalized state
-                self.broadcast(NetworkMessage::UTXOStateUpdate {
-                    outpoint: input.previous_output.clone(),
-                    state,
-                });
+                if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                    sum += utxo.value;
+                }
             }
+            sum
+        };
+        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        let fee = input_sum.saturating_sub(output_sum);
+        self.tx_pool.add_pending(tx.clone(), fee).await;
 
-            // Create new UTXOs and broadcast
-            for (i, output) in tx.outputs.iter().enumerate() {
-                let new_outpoint = OutPoint {
-                    txid,
-                    vout: i as u32,
-                };
-                let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
-                let utxo = UTXO {
-                    outpoint: new_outpoint.clone(),
-                    value: output.value,
-                    script_pubkey: output.script_pubkey.clone(),
-                    address,
-                };
+        // If we are a masternode, automatically vote
+        let our_address = self.our_address.read().await.clone();
+        let signing_key = self.signing_key.read().await.clone();
 
-                self.utxo_manager.add_utxo(utxo.clone()).await;
-
-                // Broadcast new UTXO state
-                self.broadcast(NetworkMessage::UTXOStateUpdate {
-                    outpoint: new_outpoint,
-                    state: UTXOState::Unspent,
-                });
+        if let (Some(address), Some(key)) = (our_address, signing_key) {
+            if self.is_masternode(&address).await {
+                tracing::debug!(
+                    "📝 Auto-voting on transaction {} as masternode {}",
+                    hex::encode(txid),
+                    address
+                );
+                match self.create_and_broadcast_vote(txid, true, &key).await {
+                    Ok(_) => tracing::debug!("✅ Vote sent for {}", hex::encode(txid)),
+                    Err(e) => tracing::warn!("Failed to vote: {}", e),
+                }
             }
+        }
 
-            // Move to finalized pool
-            self.tx_pool.finalize_transaction(txid).await;
+        // NOTE: Actual finalization happens in check_and_finalize_transaction()
+        // which is called when votes arrive via handle_transaction_vote()
 
-            // Broadcast finalization
-            self.broadcast(NetworkMessage::TransactionFinalized {
-                txid,
-                votes: approvals,
-            });
+        Ok(())
+    }
 
+    async fn is_masternode(&self, address: &str) -> bool {
+        self.masternodes
+            .read()
+            .await
+            .iter()
+            .any(|mn| mn.address == address)
+    }
+
+    async fn create_and_broadcast_vote(
+        &self,
+        txid: Hash256,
+        approve: bool,
+        signing_key: &ed25519_dalek::SigningKey,
+    ) -> Result<(), String> {
+        use ed25519_dalek::Signer;
+
+        let our_address = self
+            .our_address
+            .read()
+            .await
+            .clone()
+            .ok_or("No address configured")?;
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // Create vote message to sign
+        let mut vote_data = Vec::new();
+        vote_data.extend_from_slice(&txid);
+        vote_data.extend_from_slice(our_address.as_bytes());
+        vote_data.push(if approve { 1 } else { 0 });
+        vote_data.extend_from_slice(&timestamp.to_le_bytes());
+
+        let signature = signing_key.sign(&vote_data);
+
+        let vote = Vote {
+            txid,
+            voter: our_address.clone(),
+            approve,
+            timestamp,
+            signature,
+        };
+
+        // Broadcast vote
+        self.broadcast(NetworkMessage::TransactionVote(vote)).await;
+
+        Ok(())
+    }
+
+    /// Handle incoming vote from network
+    pub async fn handle_transaction_vote(&self, vote: Vote) -> Result<(), String> {
+        use ed25519_dalek::Verifier;
+
+        let txid = vote.txid;
+
+        // Verify voter is a masternode
+        let masternodes = self.masternodes.read().await;
+        let masternode = masternodes
+            .iter()
+            .find(|mn| mn.address == vote.voter)
+            .ok_or("Vote from non-masternode")?
+            .clone();
+        drop(masternodes);
+
+        // Verify signature
+        let mut vote_data = Vec::new();
+        vote_data.extend_from_slice(&vote.txid);
+        vote_data.extend_from_slice(vote.voter.as_bytes());
+        vote_data.push(if vote.approve { 1 } else { 0 });
+        vote_data.extend_from_slice(&vote.timestamp.to_le_bytes());
+
+        masternode
+            .public_key
+            .verify(&vote_data, &vote.signature)
+            .map_err(|_| "Invalid vote signature")?;
+
+        // Store vote
+        let mut votes = self.votes.write().await;
+        let tx_votes = votes.entry(txid).or_insert_with(Vec::new);
+
+        // Check for duplicate vote from same masternode
+        if tx_votes.iter().any(|v| v.voter == vote.voter) {
+            return Err("Duplicate vote from same masternode".to_string());
+        }
+
+        tx_votes.push(vote.clone());
+        let vote_count = tx_votes.len();
+        let approval_count = tx_votes.iter().filter(|v| v.approve).count() as u32;
+        let total_masternodes = self.masternodes.read().await.len();
+
+        tracing::info!(
+            "📊 Transaction {} has {}/{} votes ({} approvals)",
+            hex::encode(txid),
+            vote_count,
+            total_masternodes,
+            approval_count
+        );
+
+        drop(votes); // Release lock before calling check_and_finalize
+
+        // Check if we've reached quorum
+        self.check_and_finalize_transaction(txid).await?;
+
+        Ok(())
+    }
+
+    /// Check if transaction has enough votes to finalize
+    async fn check_and_finalize_transaction(&self, txid: Hash256) -> Result<(), String> {
+        let votes = self.votes.read().await;
+        let tx_votes = votes.get(&txid);
+
+        if tx_votes.is_none() {
+            return Ok(()); // No votes yet
+        }
+
+        let tx_votes = tx_votes.unwrap();
+        let n = self.masternodes.read().await.len() as u32;
+        let quorum = (2 * n).div_ceil(3);
+        let approval_count = tx_votes.iter().filter(|v| v.approve).count() as u32;
+        let rejection_count = tx_votes.iter().filter(|v| !v.approve).count() as u32;
+
+        drop(votes); // Release lock
+
+        // Check if we have quorum for approval
+        if approval_count >= quorum {
             tracing::info!(
-                "✅ Transaction {} finalized with {} votes",
+                "✅ Transaction {} reached approval quorum: {}/{} votes",
                 hex::encode(txid),
-                approvals
+                approval_count,
+                n
             );
-            Ok(())
-        } else {
-            // Transaction rejected - unlock UTXOs
+            self.finalize_transaction_approved(txid, approval_count)
+                .await?;
+            return Ok(());
+        }
+
+        // Check if rejection is certain (more than 1/3 rejections means quorum impossible)
+        if rejection_count > n - quorum {
+            tracing::warn!(
+                "❌ Transaction {} rejected: {}/{} rejections",
+                hex::encode(txid),
+                rejection_count,
+                n
+            );
+            self.finalize_transaction_rejected(txid, rejection_count)
+                .await?;
+            return Ok(());
+        }
+
+        // Still waiting for more votes
+        Ok(())
+    }
+
+    async fn finalize_transaction_approved(&self, txid: Hash256, votes: u32) -> Result<(), String> {
+        // Get the transaction from pending pool
+        let pending_txs = self.tx_pool.get_all_pending().await;
+        let tx = pending_txs
+            .iter()
+            .find(|t| t.txid() == txid)
+            .ok_or("Transaction not in pending pool")?
+            .clone();
+
+        // Mark inputs as SpentFinalized
+        for input in &tx.inputs {
+            let state = UTXOState::SpentFinalized {
+                txid,
+                finalized_at: chrono::Utc::now().timestamp(),
+                votes,
+            };
+            self.utxo_manager
+                .update_state(&input.previous_output, state.clone())
+                .await;
+
+            // Broadcast finalized state
+            self.broadcast(NetworkMessage::UTXOStateUpdate {
+                outpoint: input.previous_output.clone(),
+                state,
+            })
+            .await;
+        }
+
+        // Create new UTXOs
+        for (i, output) in tx.outputs.iter().enumerate() {
+            let new_outpoint = OutPoint {
+                txid,
+                vout: i as u32,
+            };
+            let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+            let utxo = UTXO {
+                outpoint: new_outpoint.clone(),
+                value: output.value,
+                script_pubkey: output.script_pubkey.clone(),
+                address,
+            };
+
+            self.utxo_manager.add_utxo(utxo.clone()).await;
+
+            // Broadcast new UTXO state
+            self.broadcast(NetworkMessage::UTXOStateUpdate {
+                outpoint: new_outpoint,
+                state: UTXOState::Unspent,
+            })
+            .await;
+        }
+
+        // Move to finalized pool
+        self.tx_pool.finalize_transaction(txid).await;
+
+        // Broadcast finalization
+        self.broadcast(NetworkMessage::TransactionFinalized { txid, votes })
+            .await;
+
+        tracing::info!(
+            "✅ Transaction {} finalized with {} votes",
+            hex::encode(txid),
+            votes
+        );
+
+        Ok(())
+    }
+
+    async fn finalize_transaction_rejected(
+        &self,
+        txid: Hash256,
+        _votes: u32,
+    ) -> Result<(), String> {
+        // Get the transaction to unlock its UTXOs
+        let pending_txs = self.tx_pool.get_all_pending().await;
+        if let Some(tx) = pending_txs.iter().find(|t| t.txid() == txid) {
+            // Unlock UTXOs
             for input in &tx.inputs {
                 self.utxo_manager
                     .update_state(&input.previous_output, UTXOState::Unspent)
@@ -245,23 +463,19 @@ impl ConsensusEngine {
                 self.broadcast(NetworkMessage::UTXOStateUpdate {
                     outpoint: input.previous_output.clone(),
                     state: UTXOState::Unspent,
-                });
+                })
+                .await;
             }
-
-            let reason = format!(
-                "Failed to reach consensus: {}/{} votes (need {})",
-                approvals, n, quorum
-            );
-            self.tx_pool.reject_transaction(txid, reason.clone()).await;
-
-            // Broadcast rejection
-            self.broadcast(NetworkMessage::TransactionRejected {
-                txid,
-                reason: reason.clone(),
-            });
-
-            Err(reason)
         }
+
+        let reason = "Failed to reach approval quorum".to_string();
+        self.tx_pool.reject_transaction(txid, reason.clone()).await;
+
+        // Broadcast rejection
+        self.broadcast(NetworkMessage::TransactionRejected { txid, reason })
+            .await;
+
+        Ok(())
     }
 
     /// Handle incoming transaction from network
@@ -302,7 +516,7 @@ impl ConsensusEngine {
 
     #[allow(dead_code)]
     pub async fn get_active_masternodes(&self) -> Vec<Masternode> {
-        self.masternodes.clone()
+        self.masternodes.read().await.clone()
     }
 
     #[allow(dead_code)]

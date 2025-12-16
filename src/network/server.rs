@@ -342,9 +342,80 @@ async fn handle_peer(
                                             continue;
                                         }
 
-                                        tracing::debug!("📥 Processing new transaction {} from {}", hex::encode(txid), peer.addr);
-                                        if let Err(e) = consensus.process_transaction(tx.clone()).await {
-                                            tracing::debug!("Tx rejected: {}", e);
+                                        tracing::info!("📥 Received new transaction {} from {}", hex::encode(txid), peer.addr);
+
+                                        // Process transaction (validates and initiates voting if we're a masternode)
+                                        match consensus.process_transaction(tx.clone()).await {
+                                            Ok(_) => {
+                                                tracing::debug!("✅ Transaction {} processed", hex::encode(txid));
+
+                                                // Gossip to other peers
+                                                match broadcast_tx.send(msg.clone()) {
+                                                    Ok(receivers) => {
+                                                        tracing::debug!("🔄 Gossiped transaction {} to {} peer(s)", hex::encode(txid), receivers.saturating_sub(1));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::debug!("Failed to gossip transaction: {}", e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
+                                            }
+                                        }
+                                    }
+                                }
+                                NetworkMessage::TransactionVote(vote) => {
+                                    if limiter.check("vote", ip_str) {
+                                        let txid = vote.txid;
+                                        tracing::info!("🗳️  Received vote for {} from {} (approve: {})",
+                                            hex::encode(txid), vote.voter, vote.approve);
+
+                                        match consensus.handle_transaction_vote(vote.clone()).await {
+                                            Ok(_) => {
+                                                tracing::debug!("✅ Vote processed for {}", hex::encode(txid));
+
+                                                // Gossip vote to other peers
+                                                match broadcast_tx.send(msg.clone()) {
+                                                    Ok(receivers) => {
+                                                        tracing::debug!("🔄 Gossiped vote to {} peer(s)", receivers.saturating_sub(1));
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::debug!("Failed to gossip vote: {}", e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("❌ Vote rejected: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                NetworkMessage::TransactionFinalized { txid, votes } => {
+                                    tracing::info!("✅ Transaction {} finalized with {} votes (from {})",
+                                        hex::encode(*txid), votes, peer.addr);
+
+                                    // Gossip finalization to other peers
+                                    match broadcast_tx.send(msg.clone()) {
+                                        Ok(receivers) => {
+                                            tracing::debug!("🔄 Gossiped finalization to {} peer(s)", receivers.saturating_sub(1));
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Failed to gossip finalization: {}", e);
+                                        }
+                                    }
+                                }
+                                NetworkMessage::TransactionRejected { txid, reason } => {
+                                    tracing::warn!("❌ Transaction {} rejected: {} (from {})",
+                                        hex::encode(*txid), reason, peer.addr);
+
+                                    // Gossip rejection to other peers
+                                    match broadcast_tx.send(msg.clone()) {
+                                        Ok(receivers) => {
+                                            tracing::debug!("🔄 Gossiped rejection to {} peer(s)", receivers.saturating_sub(1));
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Failed to gossip rejection: {}", e);
                                         }
                                     }
                                 }

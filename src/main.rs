@@ -297,6 +297,52 @@ async fn main() {
     // Initialize consensus engine
     let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
 
+    // Set identity if we're a masternode
+    if let Some(ref mn) = masternode_info {
+        consensus_engine
+            .set_identity(mn.address.clone(), wallet.signing_key().clone())
+            .await;
+        tracing::info!(
+            "✓ Consensus engine identity set for masternode: {}",
+            mn.address
+        );
+    }
+
+    // Set up broadcast callback for consensus engine
+    let consensus_registry = registry.clone();
+    consensus_engine
+        .set_broadcast_callback(move |msg| {
+            let registry = consensus_registry.clone();
+            tokio::spawn(async move {
+                registry.broadcast_message(msg).await;
+            });
+        })
+        .await;
+
+    // Start background task to sync masternodes from registry to consensus engine
+    let consensus_sync = consensus_engine.clone();
+    let registry_sync = registry.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+
+            // Get current masternodes from registry
+            let masternode_infos = registry_sync.get_all().await;
+            let masternodes: Vec<Masternode> = masternode_infos
+                .into_iter()
+                .map(|info| info.masternode)
+                .collect();
+
+            // Update consensus engine with latest masternode list
+            consensus_sync.update_masternodes(masternodes.clone()).await;
+            tracing::debug!(
+                "✅ Updated consensus engine with {} masternodes",
+                masternodes.len()
+            );
+        }
+    });
+
     // Initialize blockchain
     let blockchain = Arc::new(Blockchain::new(
         block_storage,
