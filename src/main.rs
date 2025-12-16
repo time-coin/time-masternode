@@ -815,6 +815,7 @@ async fn main() {
         blockchain_server.clone(),
         peer_manager.clone(),
         connection_manager.clone(),
+        peer_registry.clone(),
     )
     .await
     {

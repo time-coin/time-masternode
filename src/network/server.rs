@@ -7,7 +7,7 @@ use crate::utxo_manager::UTXOStateManager;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
@@ -27,6 +27,7 @@ pub struct NetworkServer {
     pub seen_blocks: Arc<RwLock<HashSet<u64>>>, // Track seen block heights
     pub seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>, // Track seen transaction hashes
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
+    pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
 }
 
 pub struct PeerConnection {
@@ -44,6 +45,7 @@ impl NetworkServer {
         blockchain: Arc<crate::blockchain::Blockchain>,
         peer_manager: Arc<crate::peer_manager::PeerManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -63,6 +65,7 @@ impl NetworkServer {
             seen_blocks: Arc::new(RwLock::new(HashSet::new())),
             seen_transactions: Arc::new(RwLock::new(HashSet::new())),
             connection_manager,
+            peer_registry,
         })
     }
 
@@ -146,6 +149,7 @@ impl NetworkServer {
             let seen_blocks = self.seen_blocks.clone();
             let seen_txs = self.seen_transactions.clone();
             let conn_mgr = self.connection_manager.clone();
+            let peer_reg = self.peer_registry.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -165,6 +169,7 @@ impl NetworkServer {
                     seen_blocks,
                     seen_txs,
                     conn_mgr,
+                    peer_reg,
                 )
                 .await;
             });
@@ -209,6 +214,7 @@ async fn handle_peer(
     seen_blocks: Arc<RwLock<HashSet<u64>>>,
     seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
+    peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -236,7 +242,7 @@ async fn handle_peer(
     let connection_start = std::time::Instant::now();
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
-    let mut writer = BufWriter::new(writer);
+    let mut writer = Some(BufWriter::new(writer));
     let mut line = String::new();
     let mut failed_parse_count = 0;
     let mut handshake_done = false;
@@ -290,21 +296,21 @@ async fn handle_peer(
                                         tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
                                         handshake_done = true;
 
+                                        // Register writer in peer registry after successful handshake
+                                        if let Some(w) = writer.take() {
+                                            peer_registry.register_peer(ip_str.clone(), w).await;
+                                            tracing::debug!("📝 Registered {} in PeerConnectionRegistry", ip_str);
+                                        }
+
                                         // Send ACK to confirm handshake was processed
                                         let ack_msg = NetworkMessage::Ack {
                                             message_type: "Handshake".to_string(),
                                         };
-                                        if let Ok(json) = serde_json::to_string(&ack_msg) {
-                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                            let _ = writer.flush().await;
-                                        }
+                                        let _ = peer_registry.send_to_peer(&ip_str, ack_msg).await;
 
                                         // Request peer list for peer discovery
                                         let get_peers_msg = NetworkMessage::GetPeers;
-                                        if let Ok(json) = serde_json::to_string(&get_peers_msg) {
-                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                            let _ = writer.flush().await;
-                                        }
+                                        let _ = peer_registry.send_to_peer(&ip_str, get_peers_msg).await;
 
                                         line.clear();
                                         continue;
@@ -428,10 +434,7 @@ async fn handle_peer(
                                             }
                                         }
                                         let reply = NetworkMessage::UTXOStateResponse(responses);
-                                        if let Ok(json) = serde_json::to_string(&reply) {
-                                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                            let _ = writer.flush().await;
-                                        }
+                                        let _ = peer_registry.send_to_peer(ip_str, reply).await;
                                     }
                                 }
                                 NetworkMessage::Subscribe(sub) => {
@@ -443,19 +446,13 @@ async fn handle_peer(
                                     let height = blockchain.get_height().await;
                                     tracing::debug!("📥 Received GetBlockHeight from {}, responding with height {}", peer.addr, height);
                                     let reply = NetworkMessage::BlockHeightResponse(height);
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
                                 }
                                 NetworkMessage::GetPendingTransactions => {
                                     // Get pending transactions from mempool
                                     let pending_txs = blockchain.get_pending_transactions().await;
                                     let reply = NetworkMessage::PendingTransactionsResponse(pending_txs);
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
                                 }
                                 NetworkMessage::GetBlocks(start, end) => {
                                     let mut blocks = Vec::new();
@@ -465,10 +462,7 @@ async fn handle_peer(
                                         }
                                     }
                                     let reply = NetworkMessage::BlocksResponse(blocks);
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
                                 }
                                 NetworkMessage::GetUTXOStateHash => {
                                     let height = blockchain.get_height().await;
@@ -480,20 +474,14 @@ async fn handle_peer(
                                         height,
                                         utxo_count,
                                     };
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                        tracing::debug!("📤 Sent UTXO state hash to {}", peer.addr);
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    tracing::debug!("📤 Sent UTXO state hash to {}", peer.addr);
                                 }
                                 NetworkMessage::GetUTXOSet => {
                                     let utxos = blockchain.get_all_utxos().await;
                                     let reply = NetworkMessage::UTXOSetResponse(utxos);
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                        tracing::info!("📤 Sent complete UTXO set to {}", peer.addr);
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    tracing::info!("📤 Sent complete UTXO set to {}", peer.addr);
                                 }
                                 NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
                                     // Check if this is a stable connection (>5 seconds)
@@ -548,11 +536,8 @@ async fn handle_peer(
                                     tracing::debug!("📥 Received GetPeers request from {}", peer.addr);
                                     let peers = peer_manager.get_all_peers().await;
                                     let response = NetworkMessage::PeersResponse(peers.clone());
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                        tracing::debug!("📤 Sent {} peer(s) to {}", peers.len(), peer.addr);
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, response).await;
+                                    tracing::debug!("📤 Sent {} peer(s) to {}", peers.len(), peer.addr);
                                 }
                                 NetworkMessage::GetMasternodes => {
                                     tracing::debug!("📥 Received GetMasternodes request from {}", peer.addr);
@@ -573,11 +558,8 @@ async fn handle_peer(
                                         .collect();
 
                                     let response = NetworkMessage::MasternodesResponse(mn_data);
-                                    if let Ok(json) = serde_json::to_string(&response) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                        tracing::debug!("📤 Sent {} masternode(s) to {}", all_masternodes.len(), peer.addr);
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, response).await;
+                                    tracing::debug!("📤 Sent {} masternode(s) to {}", all_masternodes.len(), peer.addr);
                                 }
                                 NetworkMessage::PeersResponse(peers) => {
                                     tracing::debug!("📥 Received PeersResponse from {} with {} peer(s)", peer.addr, peers.len());
@@ -647,10 +629,7 @@ async fn handle_peer(
                                         height: *height,
                                         hash,
                                     };
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
                                 }
                                 NetworkMessage::ConsensusQuery { height, block_hash } => {
                                     tracing::debug!("📥 Received ConsensusQuery for height {} from {}", height, peer.addr);
@@ -660,20 +639,14 @@ async fn handle_peer(
                                         height: *height,
                                         their_hash: our_hash.unwrap_or([0u8; 32]),
                                     };
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
                                 }
                                 NetworkMessage::GetBlockRange { start_height, end_height } => {
                                     tracing::debug!("📥 Received GetBlockRange({}-{}) from {}", start_height, end_height, peer.addr);
                                     let blocks = blockchain.get_block_range(*start_height, *end_height).await;
                                     let reply = NetworkMessage::BlockRangeResponse(blocks);
-                                    if let Ok(json) = serde_json::to_string(&reply) {
-                                        let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                                        let _ = writer.flush().await;
-                                        tracing::debug!("📤 Sent block range to {}", peer.addr);
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    tracing::debug!("📤 Sent block range to {}", peer.addr);
                                 }
                                 // Heartbeat Messages
                                 NetworkMessage::HeartbeatBroadcast(heartbeat) => {
@@ -722,18 +695,8 @@ async fn handle_peer(
                                         nonce: *nonce,
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
-
-                                    if let Ok(msg_json) = serde_json::to_string(&pong_msg) {
-                                        if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
-                                            tracing::warn!("❌ Failed to write pong to {}: {}", peer.addr, e);
-                                            break;
-                                        }
-                                        if let Err(e) = writer.flush().await {
-                                            tracing::warn!("❌ Failed to flush pong to {}: {}", peer.addr, e);
-                                            break;
-                                        }
-                                        tracing::debug!("📤 Sent pong to {} (nonce: {})", peer.addr, nonce);
-                                    }
+                                    let _ = peer_registry.send_to_peer(ip_str, pong_msg).await;
+                                    tracing::debug!("📤 Sent pong to {} (nonce: {})", peer.addr, nonce);
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
                                     // Inbound connections don't send pings, just log if we receive a pong
@@ -783,10 +746,7 @@ async fn handle_peer(
                             }
                         }
 
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            let _ = writer.write_all(format!("{}\n", json).as_bytes()).await;
-                            let _ = writer.flush().await;
-                        }
+                        let _ = peer_registry.send_to_peer(&ip_str, msg).await;
                     }
                     Err(_) => break,
                 }
