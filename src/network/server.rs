@@ -37,6 +37,7 @@ pub struct PeerConnection {
 }
 
 impl NetworkServer {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         bind_addr: &str,
         utxo_manager: Arc<UTXOStateManager>,
