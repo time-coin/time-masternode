@@ -1343,14 +1343,24 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Process block transactions to create UTXOs
+    /// Process block transactions to create and remove UTXOs
     async fn process_block_utxos(&self, block: &Block) {
         use crate::types::{OutPoint, UTXO};
 
         for tx in &block.transactions {
             let txid = tx.txid();
 
-            // Create UTXOs for each output
+            // First, remove UTXOs spent by inputs (except for coinbase)
+            if !tx.inputs.is_empty() {
+                for input in &tx.inputs {
+                    self.consensus
+                        .utxo_manager
+                        .remove_utxo(&input.previous_output)
+                        .await;
+                }
+            }
+
+            // Then, create new UTXOs for each output
             for (i, output) in tx.outputs.iter().enumerate() {
                 let outpoint = OutPoint {
                     txid,
