@@ -176,6 +176,12 @@ impl NetworkClient {
                             tracing::info!("⏭️  [PHASE2-PEER] Skipping self-connection to {}", ip);
                             continue;
                         }
+
+                        // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
+                        if local.as_str() >= ip.as_str() {
+                            tracing::debug!("⏸️  [PHASE2-PEER] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
+                            continue;
+                        }
                     }
 
                     // Skip if this is a masternode (already connected in Phase 1)
@@ -235,6 +241,12 @@ impl NetworkClient {
                     // CRITICAL FIX: Skip if this is our own IP
                     if let Some(ref local) = local_ip {
                         if ip == local {
+                            continue;
+                        }
+
+                        // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
+                        if local.as_str() >= ip.as_str() {
+                            tracing::debug!("⏸️  [PHASE3-MN-PRIORITY] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
                             continue;
                         }
                     }
@@ -297,6 +309,12 @@ impl NetworkClient {
                         // CRITICAL FIX: Skip if this is our own IP
                         if let Some(ref local) = local_ip {
                             if ip == local {
+                                continue;
+                            }
+
+                            // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
+                            if local.as_str() >= ip.as_str() {
+                                tracing::debug!("⏸️  [PHASE3-PEER] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
                                 continue;
                             }
                         }
