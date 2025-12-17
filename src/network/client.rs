@@ -94,6 +94,12 @@ impl NetworkClient {
                         tracing::info!("⏭️  [PHASE1-MN] Skipping self-connection to {}", ip);
                         continue;
                     }
+
+                    // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
+                    if local.as_str() >= ip.as_str() {
+                        tracing::debug!("⏸️  [PHASE1-MN] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
+                        continue;
+                    }
                 }
 
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
@@ -462,20 +468,6 @@ async fn maintain_peer_connection(
     peer_registry: Arc<PeerConnectionRegistry>,
     local_ip: Option<String>,
 ) -> Result<(), String> {
-    // CRITICAL FIX: Only connect if our IP < peer IP (deterministic connection direction)
-    // This prevents simultaneous connection attempts and race conditions
-    if let Some(ref my_ip) = local_ip {
-        if my_ip.as_str() >= ip {
-            tracing::debug!(
-                "⏸️  Skipping outbound to {} (they should connect to us: {} >= {})",
-                ip,
-                my_ip,
-                ip
-            );
-            return Ok(());
-        }
-    }
-
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
     let connection_start = std::time::Instant::now();
