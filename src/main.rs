@@ -422,7 +422,7 @@ async fn main() {
         config.network.max_peers as usize,
         connection_manager.clone(),
         peer_registry.clone(),
-        local_ip,
+        local_ip.clone(),
     );
     network_client.start().await;
 
@@ -816,6 +816,7 @@ async fn main() {
         peer_manager.clone(),
         connection_manager.clone(),
         peer_registry.clone(),
+        local_ip.clone(),
     )
     .await
     {

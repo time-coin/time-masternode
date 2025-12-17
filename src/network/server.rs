@@ -28,6 +28,7 @@ pub struct NetworkServer {
     pub seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>, // Track seen transaction hashes
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
 }
 
 pub struct PeerConnection {
@@ -47,6 +48,7 @@ impl NetworkServer {
         peer_manager: Arc<crate::peer_manager::PeerManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        local_ip: Option<String>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -67,6 +69,7 @@ impl NetworkServer {
             seen_transactions: Arc::new(RwLock::new(HashSet::new())),
             connection_manager,
             peer_registry,
+            local_ip,
         })
     }
 
@@ -151,6 +154,7 @@ impl NetworkServer {
             let seen_txs = self.seen_transactions.clone();
             let conn_mgr = self.connection_manager.clone();
             let peer_reg = self.peer_registry.clone();
+            let local_ip = self.local_ip.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -171,6 +175,7 @@ impl NetworkServer {
                     seen_txs,
                     conn_mgr,
                     peer_reg,
+                    local_ip,
                 )
                 .await;
             });
@@ -216,6 +221,7 @@ async fn handle_peer(
     seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    local_ip: Option<String>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -227,13 +233,32 @@ async fn handle_peer(
 
     let ip_str = ip.to_string();
 
-    // Check if we already have an outbound connection to this IP
-    if connection_manager.is_connected(&ip_str).await {
-        tracing::info!(
-            "🔄 Rejecting duplicate inbound connection from {} (already have outbound)",
-            peer.addr
+    // Tie-breaking for simultaneous connections:
+    // If both peers try to connect at the same time, only the peer with the
+    // lexicographically smaller IP should maintain an outbound connection.
+    // The other peer should only accept inbound connections.
+    let local_ip_str = local_ip.as_deref().unwrap_or("0.0.0.0");
+    let has_outbound = connection_manager.is_connected(&ip_str).await;
+
+    if has_outbound {
+        // We have an outbound connection to this peer
+        // Use deterministic tie-breaking: reject if we have lower IP
+        if local_ip_str < ip_str.as_str() {
+            tracing::debug!(
+                "🔄 Rejecting duplicate inbound from {} (have outbound, local {} < remote {})",
+                peer.addr,
+                local_ip_str,
+                ip_str
+            );
+            return Ok(());
+        }
+        // Otherwise, accept this inbound and let the outbound fail naturally
+        tracing::debug!(
+            "✅ Accepting inbound from {} (have outbound but local {} >= remote {}, will converge)",
+            peer.addr,
+            local_ip_str,
+            ip_str
         );
-        return Ok(());
     }
 
     // Mark this inbound connection
