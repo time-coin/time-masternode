@@ -466,7 +466,7 @@ async fn maintain_peer_connection(
     attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
-    local_ip: Option<String>,
+    _local_ip: Option<String>,
 ) -> Result<(), String> {
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
