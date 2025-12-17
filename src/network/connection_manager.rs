@@ -64,6 +64,14 @@ impl ConnectionManager {
         ips.remove(ip);
     }
 
+    /// Force remove connection (used when accepting inbound over outbound)
+    pub async fn remove(&self, ip: &str) {
+        let mut outbound = self.connected_ips.write().await;
+        let mut inbound = self.inbound_ips.write().await;
+        outbound.remove(ip);
+        inbound.remove(ip);
+    }
+
     /// Remove IP when inbound connection ends
     #[allow(dead_code)]
     pub async fn mark_inbound_disconnected(&self, ip: &str) {

@@ -233,36 +233,9 @@ async fn handle_peer(
 
     let ip_str = ip.to_string();
 
-    // Tie-breaking for simultaneous connections:
-    // If both peers try to connect at the same time, only the peer with the
-    // lexicographically smaller IP should maintain an outbound connection.
-    // The other peer should only accept inbound connections.
-    let local_ip_str = local_ip.as_deref().unwrap_or("0.0.0.0");
-    let has_outbound = connection_manager.is_connected(&ip_str).await;
-
-    if has_outbound {
-        // We have an outbound connection to this peer
-        // Use deterministic tie-breaking: reject if we have lower IP
-        if local_ip_str < ip_str.as_str() {
-            tracing::debug!(
-                "🔄 Rejecting duplicate inbound from {} (have outbound, local {} < remote {})",
-                peer.addr,
-                local_ip_str,
-                ip_str
-            );
-            return Ok(());
-        }
-        // Otherwise, accept this inbound and let the outbound fail naturally
-        tracing::debug!(
-            "✅ Accepting inbound from {} (have outbound but local {} >= remote {}, will converge)",
-            peer.addr,
-            local_ip_str,
-            ip_str
-        );
-    }
-
-    // Mark this inbound connection
-    connection_manager.mark_inbound(&ip_str).await;
+    // DON'T reject duplicate connections immediately - wait for handshake first
+    // This prevents race conditions where both peers connect simultaneously
+    // and both reject before handshake completes
 
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let connection_start = std::time::Instant::now();
@@ -321,6 +294,45 @@ async fn handle_peer(
                                         }
                                         tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
                                         handshake_done = true;
+
+                                        // NOW check for duplicate connections after handshake
+                                        // This prevents race conditions where both peers connect simultaneously
+                                        let local_ip_str = local_ip.as_deref().unwrap_or("0.0.0.0");
+                                        let has_outbound = connection_manager.is_connected(&ip_str).await;
+
+                                        if has_outbound {
+                                            // We have an outbound connection to this peer
+                                            // Use deterministic tie-breaking: reject if we have lower IP
+                                            if local_ip_str < ip_str.as_str() {
+                                                tracing::debug!(
+                                                    "🔄 Rejecting duplicate inbound from {} after handshake (have outbound, local {} < remote {})",
+                                                    peer.addr,
+                                                    local_ip_str,
+                                                    ip_str
+                                                );
+                                                // Send ACK first so client doesn't get "connection reset"
+                                                let ack_msg = NetworkMessage::Ack {
+                                                    message_type: "Handshake".to_string(),
+                                                };
+                                                if let Some(w) = writer.take() {
+                                                    peer_registry.register_peer(ip_str.clone(), w).await;
+                                                    let _ = peer_registry.send_to_peer(&ip_str, ack_msg).await;
+                                                }
+                                                break; // Close connection gracefully
+                                            }
+                                            // Otherwise, accept this inbound and close the outbound
+                                            tracing::debug!(
+                                                "✅ Accepting inbound from {} (have outbound but local {} >= remote {}, closing outbound)",
+                                                peer.addr,
+                                                local_ip_str,
+                                                ip_str
+                                            );
+                                            // Close the outbound connection in favor of this inbound
+                                            connection_manager.remove(&ip_str).await;
+                                        }
+
+                                        // Mark this inbound connection
+                                        connection_manager.mark_inbound(&ip_str).await;
 
                                         // Register writer in peer registry after successful handshake
                                         if let Some(w) = writer.take() {

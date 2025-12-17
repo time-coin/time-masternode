@@ -120,6 +120,7 @@ impl NetworkClient {
                     peer_manager.clone(),
                     peer_registry.clone(),
                     true, // is_masternode flag
+                    local_ip.clone(),
                 );
 
                 sleep(Duration::from_millis(100)).await;
@@ -198,6 +199,7 @@ impl NetworkClient {
                         peer_manager.clone(),
                         peer_registry.clone(),
                         false, // regular peer
+                        local_ip.clone(),
                     );
 
                     sleep(Duration::from_millis(100)).await;
@@ -249,6 +251,7 @@ impl NetworkClient {
                             peer_manager.clone(),
                             peer_registry.clone(),
                             true,
+                            local_ip.clone(),
                         );
                     }
                 }
@@ -328,6 +331,7 @@ impl NetworkClient {
                             peer_manager.clone(),
                             peer_registry.clone(),
                             false,
+                            local_ip.clone(),
                         );
 
                         sleep(Duration::from_millis(100)).await;
@@ -350,6 +354,7 @@ fn spawn_connection_task(
     peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
     is_masternode: bool,
+    local_ip: Option<String>,
 ) {
     let tag = if is_masternode { "[MASTERNODE]" } else { "" };
     tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
@@ -369,6 +374,7 @@ fn spawn_connection_task(
                 attestation_system.clone(),
                 peer_manager.clone(),
                 peer_registry.clone(),
+                local_ip.clone(),
             )
             .await
             {
@@ -454,7 +460,22 @@ async fn maintain_peer_connection(
     attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
+    local_ip: Option<String>,
 ) -> Result<(), String> {
+    // CRITICAL FIX: Only connect if our IP < peer IP (deterministic connection direction)
+    // This prevents simultaneous connection attempts and race conditions
+    if let Some(ref my_ip) = local_ip {
+        if my_ip.as_str() >= ip {
+            tracing::debug!(
+                "⏸️  Skipping outbound to {} (they should connect to us: {} >= {})",
+                ip,
+                my_ip,
+                ip
+            );
+            return Ok(());
+        }
+    }
+
     // Connect directly - connection manager just tracks we're connected
     let addr = format!("{}:{}", ip, port);
     let connection_start = std::time::Instant::now();
