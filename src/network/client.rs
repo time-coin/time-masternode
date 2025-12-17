@@ -297,30 +297,40 @@ impl NetworkClient {
                             continue;
                         }
 
+                        // Check if already connected OR already connecting (prevents race condition)
                         if connection_manager.is_connected(ip).await {
                             continue;
                         }
 
-                        if connection_manager.mark_connecting(ip).await {
-                            tracing::info!(
-                                "🔗 [PHASE3-PEER] Discovered new peer, connecting to: {}",
-                                ip
-                            );
-
-                            spawn_connection_task(
-                                ip.clone(),
-                                p2p_port,
-                                connection_manager.clone(),
-                                masternode_registry.clone(),
-                                blockchain.clone(),
-                                attestation_system.clone(),
-                                peer_manager.clone(),
-                                peer_registry.clone(),
-                                false,
-                            );
-
-                            sleep(Duration::from_millis(100)).await;
+                        // Check if peer is in reconnection backoff - don't start duplicate connection
+                        if connection_manager.is_reconnecting(ip).await {
+                            continue;
                         }
+
+                        // Atomically check and mark as connecting
+                        if !connection_manager.mark_connecting(ip).await {
+                            // Another task already connecting, skip
+                            continue;
+                        }
+
+                        tracing::info!(
+                            "🔗 [PHASE3-PEER] Discovered new peer, connecting to: {}",
+                            ip
+                        );
+
+                        spawn_connection_task(
+                            ip.clone(),
+                            p2p_port,
+                            connection_manager.clone(),
+                            masternode_registry.clone(),
+                            blockchain.clone(),
+                            attestation_system.clone(),
+                            peer_manager.clone(),
+                            peer_registry.clone(),
+                            false,
+                        );
+
+                        sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
@@ -386,6 +396,7 @@ fn spawn_connection_task(
                             ip,
                             consecutive_failures
                         );
+                        connection_manager.clear_reconnecting(&ip).await;
                         break;
                     }
 
@@ -398,7 +409,15 @@ fn spawn_connection_task(
             let tag = if is_masternode { "[MASTERNODE]" } else { "" };
             tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
 
+            // Mark peer as in reconnection backoff to prevent duplicate connection attempts
+            connection_manager
+                .mark_reconnecting(&ip, retry_delay, consecutive_failures)
+                .await;
+
             sleep(Duration::from_secs(retry_delay)).await;
+
+            // Clear reconnection state after backoff completes
+            connection_manager.clear_reconnecting(&ip).await;
 
             // Check if already connected/connecting before reconnecting
             if connection_manager.is_connected(&ip).await {
@@ -531,6 +550,8 @@ async fn maintain_peer_connection(
     match ack_timeout {
         Ok(Ok(())) => {
             tracing::info!("🤝 Handshake completed with {}", ip);
+            // Clear any reconnection backoff state since we successfully connected
+            connection_manager.clear_reconnecting(ip).await;
         }
         Ok(Err(e)) => {
             return Err(format!("Handshake ACK failed: {}", e));
@@ -538,6 +559,7 @@ async fn maintain_peer_connection(
         Err(_) => {
             tracing::warn!("⏱️  Handshake ACK timeout from {} - proceeding anyway", ip);
             // Continue anyway for backward compatibility with older nodes
+            connection_manager.clear_reconnecting(ip).await;
         }
     }
 

@@ -42,6 +42,8 @@ cache_size_mb = 256
 voting_timeout_ms = 3000
 min_masternodes = 3
 quorum_percentage = 67  # 2/3 = 66.67%
+# Genesis block file (required for testnet/mainnet)
+genesis_file = "genesis.testnet.json"
 
 [block]
 # Block production settings
