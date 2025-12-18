@@ -20,9 +20,11 @@ use tracing::{debug, info};
 const MIN_WITNESS_ATTESTATIONS: usize = 3;
 
 // Keep this many recent heartbeats in memory for verification
+#[allow(dead_code)]
 const MAX_HEARTBEAT_HISTORY: usize = 1000;
 
 // Heartbeat is valid for this many seconds
+#[allow(dead_code)]
 const HEARTBEAT_VALIDITY_WINDOW: i64 = 180; // 3 minutes
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -79,6 +81,7 @@ impl SignedHeartbeat {
             .is_ok()
     }
 
+    #[allow(dead_code)]
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(self.masternode_address.as_bytes());
@@ -98,6 +101,7 @@ pub struct WitnessAttestation {
 }
 
 impl WitnessAttestation {
+    #[allow(dead_code)]
     pub fn new(
         heartbeat: &SignedHeartbeat,
         witness_address: String,
@@ -246,6 +250,7 @@ impl HeartbeatAttestationSystem {
 
     /// Receive and validate a heartbeat from another masternode
     /// Returns an attestation if we're a masternode and successfully validated
+    #[allow(dead_code)]
     pub async fn receive_heartbeat(
         &self,
         heartbeat: SignedHeartbeat,
@@ -322,6 +327,7 @@ impl HeartbeatAttestationSystem {
     }
 
     /// Add a witness attestation to an existing heartbeat
+    #[allow(dead_code)]
     pub async fn add_attestation(&self, attestation: WitnessAttestation) -> Result<(), String> {
         if !attestation.verify() {
             return Err("Invalid attestation signature".to_string());

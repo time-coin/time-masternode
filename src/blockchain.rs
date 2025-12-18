@@ -1101,10 +1101,12 @@ impl Blockchain {
         *self.current_height.read().await
     }
 
+    #[allow(dead_code)]
     pub async fn is_syncing(&self) -> bool {
         *self.is_syncing.read().await
     }
 
+    #[allow(dead_code)]
     pub async fn set_syncing(&self, syncing: bool) {
         *self.is_syncing.write().await = syncing;
     }
@@ -1122,6 +1124,7 @@ impl Blockchain {
     }
 
     /// Reconcile UTXO state with remote peer (REQUIRES VERIFICATION)
+    #[allow(dead_code)]
     pub async fn reconcile_utxo_state(&self, remote_utxos: Vec<crate::types::UTXO>) {
         // CRITICAL FIX: Don't blindly accept peer UTXO sets
         // This is a security vulnerability - a malicious peer could delete our UTXOs
@@ -1172,6 +1175,7 @@ impl Blockchain {
     }
 
     /// Add a transaction to the mempool (called when syncing from peers)
+    #[allow(dead_code)]
     pub async fn add_pending_transaction(&self, tx: Transaction) -> Result<(), String> {
         // Simple validation and add to pool
         self.consensus.validate_transaction(&tx).await?;

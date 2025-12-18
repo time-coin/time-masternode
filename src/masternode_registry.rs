@@ -398,6 +398,7 @@ impl MasternodeRegistry {
         *self.local_masternode_address.write().await = Some(address);
     }
 
+    #[allow(dead_code)]
     pub async fn register_masternode(
         &self,
         address: String,
@@ -508,6 +509,7 @@ impl MasternodeRegistry {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn broadcast_attestation(
         &self,
         attestation: crate::heartbeat_attestation::WitnessAttestation,
