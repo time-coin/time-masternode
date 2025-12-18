@@ -225,7 +225,7 @@ async fn handle_peer(
     seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
-    local_ip: Option<String>,
+    _local_ip: Option<String>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -301,18 +301,19 @@ async fn handle_peer(
 
                                         // NOW check for duplicate connections after handshake
                                         // This prevents race conditions where both peers connect simultaneously
-                                        let local_ip_str = local_ip.as_deref().unwrap_or("0.0.0.0");
                                         let has_outbound = connection_manager.is_connected(&ip_str).await;
 
                                         if has_outbound {
                                             // We have an outbound connection to this peer
-                                            // Use deterministic tie-breaking: reject if we have lower IP
-                                            if local_ip_str < ip_str.as_str() {
+                                            // Use deterministic tie-breaking based on IP comparison
+                                            let should_we_connect = connection_manager.should_connect_to(&ip_str).await;
+
+                                            if should_we_connect {
+                                                // Our IP is higher, we should be the one connecting OUT
+                                                // So reject this INbound connection
                                                 tracing::debug!(
-                                                    "🔄 Rejecting duplicate inbound from {} after handshake (have outbound, local {} < remote {})",
-                                                    peer.addr,
-                                                    local_ip_str,
-                                                    ip_str
+                                                    "🔄 Rejecting duplicate inbound from {} after handshake (we should connect OUT to them)",
+                                                    peer.addr
                                                 );
                                                 // Send ACK first so client doesn't get "connection reset"
                                                 let ack_msg = NetworkMessage::Ack {
@@ -326,10 +327,8 @@ async fn handle_peer(
                                             }
                                             // Otherwise, accept this inbound and close the outbound
                                             tracing::debug!(
-                                                "✅ Accepting inbound from {} (have outbound but local {} >= remote {}, closing outbound)",
-                                                peer.addr,
-                                                local_ip_str,
-                                                ip_str
+                                                "✅ Accepting inbound from {} (they should connect OUT, closing our outbound)",
+                                                peer.addr
                                             );
                                             // Close the outbound connection in favor of this inbound
                                             connection_manager.remove(&ip_str).await;

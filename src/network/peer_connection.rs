@@ -11,6 +11,7 @@ use crate::network::message::NetworkMessage;
 use crate::MasternodeRegistry;
 
 /// Direction of connection establishment
+#[allow(dead_code)] // Will be used in upcoming refactor
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionDirection {
     /// They connected to us
@@ -20,6 +21,7 @@ pub enum ConnectionDirection {
 }
 
 /// State for tracking ping/pong health
+#[allow(dead_code)] // Will be used in upcoming refactor
 #[derive(Debug)]
 struct PingState {
     last_ping_sent: Option<Instant>,
@@ -28,6 +30,7 @@ struct PingState {
     missed_pongs: u32,
 }
 
+#[allow(dead_code)] // Will be used in upcoming refactor
 impl PingState {
     fn new() -> Self {
         Self {
@@ -90,6 +93,7 @@ impl PingState {
 }
 
 /// Unified peer connection handling both inbound and outbound connections
+#[allow(dead_code)] // Will be used in upcoming refactor
 pub struct PeerConnection {
     /// Peer's IP address (identity)
     peer_ip: String,
@@ -114,6 +118,7 @@ pub struct PeerConnection {
     remote_port: u16,
 }
 
+#[allow(dead_code)] // Will be used in upcoming refactor
 impl PeerConnection {
     const PING_INTERVAL: Duration = Duration::from_secs(30);
     const TIMEOUT_CHECK_INTERVAL: Duration = Duration::from_secs(10);

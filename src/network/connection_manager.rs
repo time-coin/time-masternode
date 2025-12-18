@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -9,6 +10,7 @@ pub struct ConnectionManager {
     connected_ips: Arc<RwLock<HashSet<String>>>,
     inbound_ips: Arc<RwLock<HashSet<String>>>, // Track inbound connections separately
     reconnecting: Arc<RwLock<HashMap<String, ReconnectionState>>>, // Track backoff state
+    local_ip: Arc<RwLock<Option<String>>>, // Our local IP for deterministic connection direction
 }
 
 /// State for tracking reconnection backoff
@@ -25,6 +27,42 @@ impl ConnectionManager {
             connected_ips: Arc::new(RwLock::new(HashSet::new())),
             inbound_ips: Arc::new(RwLock::new(HashSet::new())),
             reconnecting: Arc::new(RwLock::new(HashMap::new())),
+            local_ip: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set our local IP address for deterministic connection direction
+    pub async fn set_local_ip(&self, ip: String) {
+        let mut local = self.local_ip.write().await;
+        *local = Some(ip);
+    }
+
+    /// Determine if we should initiate connection based on IP comparison
+    /// Returns true if our IP is "higher" than peer IP (we should connect)
+    /// Returns false if peer IP is "higher" (they should connect to us)
+    pub async fn should_connect_to(&self, peer_ip: &str) -> bool {
+        let local = self.local_ip.read().await;
+
+        if let Some(local_ip) = local.as_ref() {
+            // Parse both IPs for comparison
+            if let (Ok(local_addr), Ok(peer_addr)) =
+                (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
+            {
+                // Compare as bytes to get deterministic ordering
+                match (local_addr, peer_addr) {
+                    (IpAddr::V4(l), IpAddr::V4(p)) => l.octets() > p.octets(),
+                    (IpAddr::V6(l), IpAddr::V6(p)) => l.octets() > p.octets(),
+                    // Mixed v4/v6: v6 > v4
+                    (IpAddr::V6(_), IpAddr::V4(_)) => true,
+                    (IpAddr::V4(_), IpAddr::V6(_)) => false,
+                }
+            } else {
+                // Fallback to string comparison if parsing fails
+                local_ip.as_str() > peer_ip
+            }
+        } else {
+            // If we don't know our IP, allow connection
+            true
         }
     }
 

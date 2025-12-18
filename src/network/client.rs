@@ -65,7 +65,7 @@ impl NetworkClient {
         let attestation_system = self.attestation_system.clone();
         let connection_manager = self.connection_manager.clone();
         let peer_registry = self.peer_registry.clone();
-        let peer_state = self.peer_state.clone();
+        let _peer_state = self.peer_state.clone();
         let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;

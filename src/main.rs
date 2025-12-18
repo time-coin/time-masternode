@@ -420,6 +420,8 @@ async fn main() {
 
     if let Some(ref ip) = local_ip {
         tracing::info!("🏠 Local public IP detected: {}", ip);
+        // Set local IP in connection manager for deterministic direction
+        connection_manager.set_local_ip(ip.clone()).await;
     }
 
     // Start network client for outbound connections and masternode announcements
