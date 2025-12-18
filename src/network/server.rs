@@ -15,7 +15,7 @@ use tokio::sync::RwLock;
 
 pub struct NetworkServer {
     pub listener: TcpListener,
-    pub peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    pub peers: Arc<RwLock<HashMap<String, PeerInfo>>>,
     pub subscriptions: Arc<RwLock<HashMap<String, Subscription>>>,
     pub tx_notifier: broadcast::Sender<NetworkMessage>,
     pub utxo_manager: Arc<UTXOStateManager>,
@@ -34,7 +34,7 @@ pub struct NetworkServer {
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
 }
 
-pub struct PeerConnection {
+pub struct PeerInfo {
     pub addr: String,
     #[allow(dead_code)]
     pub is_masternode: bool,
@@ -139,7 +139,7 @@ impl NetworkServer {
                 }
             }
 
-            let peer = PeerConnection {
+            let peer = PeerInfo {
                 addr: addr_str.clone(),
                 is_masternode: false,
             };
@@ -210,8 +210,8 @@ impl NetworkServer {
 #[allow(clippy::too_many_arguments)]
 async fn handle_peer(
     stream: TcpStream,
-    peer: PeerConnection,
-    _peers: Arc<RwLock<HashMap<String, PeerConnection>>>,
+    peer: PeerInfo,
+    _peers: Arc<RwLock<HashMap<String, PeerInfo>>>,
     subs: Arc<RwLock<HashMap<String, Subscription>>>,
     mut notifier: broadcast::Receiver<NetworkMessage>,
     utxo_mgr: Arc<UTXOStateManager>,
