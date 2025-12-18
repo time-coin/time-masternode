@@ -151,3 +151,102 @@ pub struct MasternodeAnnouncementData {
     pub tier: MasternodeTier,
     pub public_key: VerifyingKey,
 }
+
+impl NetworkMessage {
+    /// Get the message type name as a string (for logging/debugging)
+    pub fn message_type(&self) -> &'static str {
+        match self {
+            NetworkMessage::GetGenesisHash => "GetGenesisHash",
+            NetworkMessage::GenesisHashResponse(_) => "GenesisHashResponse",
+            NetworkMessage::GetBlockHeight => "GetBlockHeight",
+            NetworkMessage::BlockHeightResponse(_) => "BlockHeightResponse",
+            NetworkMessage::GetBlocks(_, _) => "GetBlocks",
+            NetworkMessage::BlocksResponse(_) => "BlocksResponse",
+            NetworkMessage::Handshake { .. } => "Handshake",
+            NetworkMessage::Ack { .. } => "Ack",
+            NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
+            NetworkMessage::TransactionVoteRequest(_) => "TransactionVoteRequest",
+            NetworkMessage::TransactionVote(_) => "TransactionVote",
+            NetworkMessage::TransactionFinalized { .. } => "TransactionFinalized",
+            NetworkMessage::TransactionRejected { .. } => "TransactionRejected",
+            NetworkMessage::UTXOStateQuery(_) => "UTXOStateQuery",
+            NetworkMessage::UTXOStateResponse(_) => "UTXOStateResponse",
+            NetworkMessage::UTXOStateNotification(_) => "UTXOStateNotification",
+            NetworkMessage::UTXOStateUpdate { .. } => "UTXOStateUpdate",
+            NetworkMessage::Subscribe(_) => "Subscribe",
+            NetworkMessage::Unsubscribe(_) => "Unsubscribe",
+            NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+            NetworkMessage::BlockRequest(_) => "BlockRequest",
+            NetworkMessage::BlockResponse(_) => "BlockResponse",
+            NetworkMessage::GetUTXOSet => "GetUTXOSet",
+            NetworkMessage::UTXOSetResponse(_) => "UTXOSetResponse",
+            NetworkMessage::GetUTXOStateHash => "GetUTXOStateHash",
+            NetworkMessage::UTXOStateHashResponse { .. } => "UTXOStateHashResponse",
+            NetworkMessage::MasternodeAnnouncement { .. } => "MasternodeAnnouncement",
+            NetworkMessage::GetMasternodes => "GetMasternodes",
+            NetworkMessage::MasternodesResponse(_) => "MasternodesResponse",
+            NetworkMessage::Version { .. } => "Version",
+            NetworkMessage::Ping { .. } => "Ping",
+            NetworkMessage::Pong { .. } => "Pong",
+            NetworkMessage::GetPendingTransactions => "GetPendingTransactions",
+            NetworkMessage::PendingTransactionsResponse(_) => "PendingTransactionsResponse",
+            NetworkMessage::GetPeers => "GetPeers",
+            NetworkMessage::PeersResponse(_) => "PeersResponse",
+            NetworkMessage::HeartbeatBroadcast(_) => "HeartbeatBroadcast",
+            NetworkMessage::HeartbeatAttestation(_) => "HeartbeatAttestation",
+            NetworkMessage::GetBlockHash(_) => "GetBlockHash",
+            NetworkMessage::BlockHashResponse { .. } => "BlockHashResponse",
+            NetworkMessage::ConsensusQuery { .. } => "ConsensusQuery",
+            NetworkMessage::ConsensusQueryResponse { .. } => "ConsensusQueryResponse",
+            NetworkMessage::GetBlockRange { .. } => "GetBlockRange",
+            NetworkMessage::BlockRangeResponse(_) => "BlockRangeResponse",
+            NetworkMessage::BlockProposal { .. } => "BlockProposal",
+            NetworkMessage::BlockVote { .. } => "BlockVote",
+            NetworkMessage::BlockCommit { .. } => "BlockCommit",
+        }
+    }
+
+    /// Check if this is a critical message requiring acknowledgment
+    pub fn requires_ack(&self) -> bool {
+        matches!(
+            self,
+            NetworkMessage::Handshake { .. }
+                | NetworkMessage::BlockProposal { .. }
+                | NetworkMessage::BlockCommit { .. }
+                | NetworkMessage::TransactionFinalized { .. }
+        )
+    }
+
+    /// Check if this is a response message (not a request)
+    pub fn is_response(&self) -> bool {
+        matches!(
+            self,
+            NetworkMessage::GenesisHashResponse(_)
+                | NetworkMessage::BlockHeightResponse(_)
+                | NetworkMessage::BlocksResponse(_)
+                | NetworkMessage::Ack { .. }
+                | NetworkMessage::UTXOStateResponse(_)
+                | NetworkMessage::UTXOSetResponse(_)
+                | NetworkMessage::UTXOStateHashResponse { .. }
+                | NetworkMessage::MasternodesResponse(_)
+                | NetworkMessage::PendingTransactionsResponse(_)
+                | NetworkMessage::PeersResponse(_)
+                | NetworkMessage::BlockHashResponse { .. }
+                | NetworkMessage::ConsensusQueryResponse { .. }
+                | NetworkMessage::BlockRangeResponse(_)
+                | NetworkMessage::Pong { .. }
+                | NetworkMessage::BlockResponse(_)
+        )
+    }
+
+    /// Check if this is a high priority message
+    pub fn is_high_priority(&self) -> bool {
+        matches!(
+            self,
+            NetworkMessage::Ping { .. }
+                | NetworkMessage::Pong { .. }
+                | NetworkMessage::BlockProposal { .. }
+                | NetworkMessage::BlockCommit { .. }
+        )
+    }
+}

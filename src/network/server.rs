@@ -716,21 +716,14 @@ async fn handle_peer(
                                 NetworkMessage::BlockProposal { .. } |
                                 NetworkMessage::BlockVote { .. } |
                                 NetworkMessage::BlockCommit { .. } => {
-                                    tracing::debug!("📥 Received BFT message from {}", peer.addr);
-
                                     // Handle BFT message through blockchain
                                     if let Err(e) = blockchain.handle_bft_message(msg.clone()).await {
                                         tracing::warn!("Failed to handle BFT message: {}", e);
                                     }
 
                                     // Gossip BFT messages to other peers
-                                    match broadcast_tx.send(msg.clone()) {
-                                        Ok(receivers) => {
-                                            tracing::debug!("🔄 Gossiped BFT message to {} peer(s)", receivers.saturating_sub(1));
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!("Failed to gossip BFT message: {}", e);
-                                        }
+                                    if let Err(e) = broadcast_tx.send(msg.clone()) {
+                                        tracing::debug!("Failed to gossip BFT message: {}", e);
                                     }
                                 }
                                 // Health Check Messages
@@ -740,21 +733,20 @@ async fn handle_peer(
                                         nonce: *nonce,
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
-                                    tracing::info!("📨 [INBOUND] Received ping from {} (nonce: {}), sending pong", peer.addr, nonce);
-                                    tracing::debug!("🔍 Sending pong to IP: {} (peer.addr: {})", ip_str, peer.addr);
+                                    tracing::info!("📨 [INBOUND] Received ping from {} (nonce: {})", peer.addr, nonce);
 
                                     match peer_registry.send_to_peer(&ip_str, pong_msg).await {
                                         Ok(()) => {
                                             tracing::info!("✅ [INBOUND] Sent pong to {} (nonce: {})", peer.addr, nonce);
                                         }
                                         Err(e) => {
-                                            tracing::error!("❌ [INBOUND] Failed to send pong to {} (IP: {}): {}", peer.addr, ip_str, e);
+                                            tracing::warn!("❌ [INBOUND] Failed to send pong to {}: {}", peer.addr, e);
                                         }
                                     }
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
                                     // Inbound connections don't send pings, just log if we receive a pong
-                                    tracing::info!("📥 [INBOUND] Received unexpected pong from {} (nonce: {})", peer.addr, nonce);
+                                    tracing::debug!("📥 [INBOUND] Received pong from {} (nonce: {})", peer.addr, nonce);
                                 }
                                 _ => {}
                             }

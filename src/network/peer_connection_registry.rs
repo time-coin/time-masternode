@@ -56,21 +56,12 @@ impl PeerConnectionRegistry {
     pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
         // Extract IP only (remove port if present)
         let ip_only = extract_ip(peer_ip);
-        debug!(
-            "🔍 send_to_peer called for IP: {} (extracted: {})",
-            peer_ip, ip_only
-        );
 
         let mut connections = self.connections.write().await;
-        debug!("🔍 Registry has {} connections", connections.len());
 
         if let Some(writer) = connections.get_mut(ip_only) {
-            debug!("✅ Found writer for {}", ip_only);
-
             let msg_json = serde_json::to_string(&message)
                 .map_err(|e| format!("Failed to serialize message: {}", e))?;
-
-            debug!("📝 Serialized message for {}: {}", ip_only, msg_json);
 
             writer
                 .write_all(format!("{}\n", msg_json).as_bytes())
@@ -82,7 +73,6 @@ impl PeerConnectionRegistry {
                 .await
                 .map_err(|e| format!("Failed to flush to peer {}: {}", ip_only, e))?;
 
-            debug!("✅ Successfully sent message to {}", ip_only);
             Ok(())
         } else {
             warn!(
@@ -150,9 +140,9 @@ impl PeerConnectionRegistry {
         }
     }
 
-    /// Broadcast a message to all connected peers
+    /// Broadcast a message to all connected peers (pre-serializes for efficiency)
     pub async fn broadcast(&self, message: NetworkMessage) {
-        let mut connections = self.connections.write().await;
+        // Serialize once instead of per-peer
         let msg_json = match serde_json::to_string(&message) {
             Ok(json) => json,
             Err(e) => {
@@ -161,10 +151,13 @@ impl PeerConnectionRegistry {
             }
         };
 
+        let msg_bytes = format!("{}\n", msg_json);
+        let mut connections = self.connections.write().await;
         let mut disconnected_peers = Vec::new();
 
         for (peer_ip, writer) in connections.iter_mut() {
-            if let Err(e) = writer.write_all(format!("{}\n", msg_json).as_bytes()).await {
+            // Write pre-serialized bytes to avoid redundant serialization
+            if let Err(e) = writer.write_all(msg_bytes.as_bytes()).await {
                 warn!("Failed to broadcast to {}: {}", peer_ip, e);
                 disconnected_peers.push(peer_ip.clone());
                 continue;
@@ -192,6 +185,84 @@ impl PeerConnectionRegistry {
     pub async fn peer_count(&self) -> usize {
         let connections = self.connections.read().await;
         connections.len()
+    }
+
+    /// Send multiple messages to a peer in a batch (more efficient than individual sends)
+    pub async fn send_batch_to_peer(&self, peer_ip: &str, messages: &[NetworkMessage]) -> Result<(), String> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+
+        let ip_only = extract_ip(peer_ip);
+        let mut connections = self.connections.write().await;
+
+        if let Some(writer) = connections.get_mut(ip_only) {
+            // Serialize all messages and batch writes
+            for message in messages {
+                let msg_json = serde_json::to_string(message)
+                    .map_err(|e| format!("Failed to serialize message: {}", e))?;
+
+                writer
+                    .write_all(format!("{}\n", msg_json).as_bytes())
+                    .await
+                    .map_err(|e| format!("Failed to write to peer {}: {}", ip_only, e))?;
+            }
+
+            // Single flush for all messages
+            writer
+                .flush()
+                .await
+                .map_err(|e| format!("Failed to flush to peer {}: {}", ip_only, e))?;
+
+            Ok(())
+        } else {
+            warn!("❌ Peer {} not found in registry", ip_only);
+            Err(format!("Peer {} not connected", ip_only))
+        }
+    }
+
+    /// Broadcast multiple messages to all connected peers efficiently
+    pub async fn broadcast_batch(&self, messages: &[NetworkMessage]) {
+        if messages.is_empty() {
+            return;
+        }
+
+        // Pre-serialize all messages once
+        let serialized: Vec<String> = messages
+            .iter()
+            .filter_map(|msg| {
+                serde_json::to_string(msg)
+                    .ok()
+                    .map(|json| format!("{}\n", json))
+            })
+            .collect();
+
+        if serialized.is_empty() {
+            warn!("Failed to serialize broadcast batch messages");
+            return;
+        }
+
+        let combined = serialized.join("");
+        let mut connections = self.connections.write().await;
+        let mut disconnected_peers = Vec::new();
+
+        for (peer_ip, writer) in connections.iter_mut() {
+            if let Err(e) = writer.write_all(combined.as_bytes()).await {
+                warn!("Failed to broadcast batch to {}: {}", peer_ip, e);
+                disconnected_peers.push(peer_ip.clone());
+                continue;
+            }
+
+            if let Err(e) = writer.flush().await {
+                warn!("Failed to flush broadcast batch to {}: {}", peer_ip, e);
+                disconnected_peers.push(peer_ip.clone());
+            }
+        }
+
+        // Remove disconnected peers
+        for peer_ip in disconnected_peers {
+            connections.remove(&peer_ip);
+        }
     }
 }
 

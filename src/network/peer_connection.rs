@@ -227,7 +227,7 @@ impl PeerConnection {
             state.record_ping_sent(nonce);
         }
 
-        debug!(
+        info!(
             "📤 [{:?}] Sent ping to {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
@@ -239,7 +239,7 @@ impl PeerConnection {
     /// Handle received ping
     async fn handle_ping(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
         info!(
-            "📨 [{:?}] RECEIVED PING from {} (nonce: {}), sending pong",
+            "📨 [{:?}] RECEIVED PING from {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
 
@@ -398,30 +398,16 @@ impl PeerConnection {
         let message: NetworkMessage =
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
 
-        info!(
-            "📨 [{:?}] Processing message from {}: {:?}",
-            self.direction,
-            self.peer_ip,
-            match &message {
-                NetworkMessage::Ping { nonce, .. } => format!("Ping({})", nonce),
-                NetworkMessage::Pong { nonce, .. } => format!("Pong({})", nonce),
-                _ => format!("{:?}", message),
-            }
-        );
-
-        match message {
+        match &message {
             NetworkMessage::Ping { nonce, timestamp } => {
-                self.handle_ping(nonce, timestamp).await?;
+                self.handle_ping(*nonce, *timestamp).await?;
             }
             NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(nonce, timestamp).await?;
+                self.handle_pong(*nonce, *timestamp).await?;
             }
             _ => {
-                // TODO: Handle other message types
-                debug!(
-                    "📨 [{:?}] Received message from {}: {:?}",
-                    self.direction, self.peer_ip, message
-                );
+                // Other message types not handled by PeerConnection yet
+                // TODO: Extend PeerConnection to handle other message types
             }
         }
 
