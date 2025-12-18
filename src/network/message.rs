@@ -154,6 +154,8 @@ pub struct MasternodeAnnouncementData {
 
 impl NetworkMessage {
     /// Get the message type name as a string (for logging/debugging)
+    /// Note: Used in Phase 2 optimizations
+    #[allow(dead_code)]
     pub fn message_type(&self) -> &'static str {
         match self {
             NetworkMessage::GetGenesisHash => "GetGenesisHash",
@@ -207,6 +209,8 @@ impl NetworkMessage {
     }
 
     /// Check if this is a critical message requiring acknowledgment
+    /// Note: Used in Phase 2 message routing
+    #[allow(dead_code)]
     pub fn requires_ack(&self) -> bool {
         matches!(
             self,
@@ -218,6 +222,8 @@ impl NetworkMessage {
     }
 
     /// Check if this is a response message (not a request)
+    /// Note: Used in Phase 2 message routing
+    #[allow(dead_code)]
     pub fn is_response(&self) -> bool {
         matches!(
             self,
@@ -240,6 +246,8 @@ impl NetworkMessage {
     }
 
     /// Check if this is a high priority message
+    /// Note: Used in Phase 2 message routing
+    #[allow(dead_code)]
     pub fn is_high_priority(&self) -> bool {
         matches!(
             self,
