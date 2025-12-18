@@ -9,6 +9,11 @@ use tracing::{debug, warn};
 type PeerWriter = BufWriter<OwnedWriteHalf>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
 
+/// Extract IP address from "IP:PORT" or just "IP" strings
+fn extract_ip(addr: &str) -> &str {
+    addr.split(':').next().unwrap_or(addr)
+}
+
 /// Registry of active peer connections with ability to send targeted messages
 /// Note: Infrastructure for Phase 2 of PeerConnectionRegistry integration
 /// See analysis/TODO_PeerConnectionRegistry_Integration.md
@@ -49,38 +54,40 @@ impl PeerConnectionRegistry {
 
     /// Send a message to a specific peer
     pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
-        debug!("🔍 send_to_peer called for IP: {}", peer_ip);
+        // Extract IP only (remove port if present)
+        let ip_only = extract_ip(peer_ip);
+        debug!("🔍 send_to_peer called for IP: {} (extracted: {})", peer_ip, ip_only);
 
         let mut connections = self.connections.write().await;
         debug!("🔍 Registry has {} connections", connections.len());
 
-        if let Some(writer) = connections.get_mut(peer_ip) {
-            debug!("✅ Found writer for {}", peer_ip);
+        if let Some(writer) = connections.get_mut(ip_only) {
+            debug!("✅ Found writer for {}", ip_only);
 
             let msg_json = serde_json::to_string(&message)
                 .map_err(|e| format!("Failed to serialize message: {}", e))?;
 
-            debug!("📝 Serialized message for {}: {}", peer_ip, msg_json);
+            debug!("📝 Serialized message for {}: {}", ip_only, msg_json);
 
             writer
                 .write_all(format!("{}\n", msg_json).as_bytes())
                 .await
-                .map_err(|e| format!("Failed to write to peer {}: {}", peer_ip, e))?;
+                .map_err(|e| format!("Failed to write to peer {}: {}", ip_only, e))?;
 
             writer
                 .flush()
                 .await
-                .map_err(|e| format!("Failed to flush to peer {}: {}", peer_ip, e))?;
+                .map_err(|e| format!("Failed to flush to peer {}: {}", ip_only, e))?;
 
-            debug!("✅ Successfully sent message to {}", peer_ip);
+            debug!("✅ Successfully sent message to {}", ip_only);
             Ok(())
         } else {
             warn!(
                 "❌ Peer {} not found in registry (available: {:?})",
-                peer_ip,
+                ip_only,
                 connections.keys().collect::<Vec<_>>()
             );
-            Err(format!("Peer {} not connected", peer_ip))
+            Err(format!("Peer {} not connected", ip_only))
         }
     }
 
@@ -91,19 +98,21 @@ impl PeerConnectionRegistry {
         message: NetworkMessage,
         timeout_secs: u64,
     ) -> Result<NetworkMessage, String> {
+        // Extract IP only
+        let ip_only = extract_ip(peer_ip);
         let (tx, rx) = oneshot::channel();
 
         // Register pending response
         {
             let mut pending = self.pending_responses.write().await;
             pending
-                .entry(peer_ip.to_string())
+                .entry(ip_only.to_string())
                 .or_insert_with(Vec::new)
                 .push(tx);
         }
 
         // Send the message
-        self.send_to_peer(peer_ip, message).await?;
+        self.send_to_peer(ip_only, message).await?;
 
         // Wait for response with timeout
         match tokio::time::timeout(tokio::time::Duration::from_secs(timeout_secs), rx).await {
@@ -112,7 +121,7 @@ impl PeerConnectionRegistry {
             Err(_) => {
                 // Clean up pending response on timeout
                 let mut pending = self.pending_responses.write().await;
-                if let Some(senders) = pending.get_mut(peer_ip) {
+                if let Some(senders) = pending.get_mut(ip_only) {
                     senders.retain(|_| false); // Remove all pending for simplicity
                 }
                 Err(format!("Timeout waiting for response from {}", peer_ip))
@@ -122,14 +131,16 @@ impl PeerConnectionRegistry {
 
     /// Handle an incoming response message (called from message loop)
     pub async fn handle_response(&self, peer_ip: &str, message: NetworkMessage) {
+        // Extract IP only
+        let ip_only = extract_ip(peer_ip);
         let mut pending = self.pending_responses.write().await;
 
-        if let Some(senders) = pending.get_mut(peer_ip) {
+        if let Some(senders) = pending.get_mut(ip_only) {
             if let Some(sender) = senders.pop() {
                 if sender.send(message).is_err() {
                     warn!(
                         "Failed to send response to awaiting task for peer {}",
-                        peer_ip
+                        ip_only
                     );
                 }
             }
