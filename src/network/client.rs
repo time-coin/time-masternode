@@ -1059,33 +1059,33 @@ async fn maintain_peer_connection(
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
 
-                                    tracing::info!("📨 Received ping from {} (nonce: {}), sending pong", ip, nonce);
+                                    tracing::info!("📨 [OUTBOUND] Received ping from {} (nonce: {}), sending pong", ip, nonce);
                                     if let Err(e) = peer_registry.send_to_peer(ip, pong_msg).await {
-                                        tracing::warn!("❌ Failed to send pong to {}: {}", ip, e);
+                                        tracing::warn!("❌ [OUTBOUND] Failed to send pong to {}: {}", ip, e);
                                         break;
                                     }
-                                    tracing::info!("✅ Sent pong to {} (nonce: {})", ip, nonce);
+                                    tracing::info!("✅ [OUTBOUND] Sent pong to {} (nonce: {})", ip, nonce);
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
-                                    tracing::info!("📨 Received pong from {} (nonce: {})", ip, nonce);
+                                    tracing::info!("📨 [OUTBOUND] Received pong from {} (nonce: {})", ip, nonce);
                                     // Check if this pong matches our pending ping
                                     if let Some((pending_nonce, sent_time)) = pending_ping {
                                         if nonce == pending_nonce {
                                             let rtt = sent_time.elapsed();
                                             tracing::info!(
-                                                "✅ Pong matches! {} (nonce: {}, RTT: {}ms) - clearing pending_ping",
+                                                "✅ [OUTBOUND] Pong matches! {} (nonce: {}, RTT: {}ms) - clearing pending_ping",
                                                 ip, nonce, rtt.as_millis()
                                             );
                                             pending_ping = None;
                                             consecutive_missed_pongs = 0; // Reset counter on successful pong
                                         } else {
                                             tracing::warn!(
-                                                "⚠️ Received pong with wrong nonce from {} (expected: {}, got: {})",
+                                                "⚠️ [OUTBOUND] Received pong with wrong nonce from {} (expected: {}, got: {})",
                                                 ip, pending_nonce, nonce
                                             );
                                         }
                                     } else {
-                                        tracing::info!("📥 Received unexpected pong from {} (no pending ping)", ip);
+                                        tracing::info!("📥 [OUTBOUND] Received unexpected pong from {} (no pending ping)", ip);
                                     }
                                 }
                                 _ => {}
