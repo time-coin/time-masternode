@@ -10,8 +10,9 @@ use tracing::{debug, error, info, warn};
 use crate::network::message::NetworkMessage;
 use crate::MasternodeRegistry;
 
+// Allow dead code during refactor
+#[allow(dead_code)]
 /// Direction of connection establishment
-#[allow(dead_code)] // Will be used in upcoming refactor
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionDirection {
     /// They connected to us
@@ -21,7 +22,7 @@ pub enum ConnectionDirection {
 }
 
 /// State for tracking ping/pong health
-#[allow(dead_code)] // Will be used in upcoming refactor
+#[allow(dead_code)]
 #[derive(Debug)]
 struct PingState {
     last_ping_sent: Option<Instant>,
@@ -30,7 +31,7 @@ struct PingState {
     missed_pongs: u32,
 }
 
-#[allow(dead_code)] // Will be used in upcoming refactor
+#[allow(dead_code)]
 impl PingState {
     fn new() -> Self {
         Self {
@@ -93,7 +94,7 @@ impl PingState {
 }
 
 /// Unified peer connection handling both inbound and outbound connections
-#[allow(dead_code)] // Will be used in upcoming refactor
+#[allow(dead_code)]
 pub struct PeerConnection {
     /// Peer's IP address (identity)
     peer_ip: String,
@@ -111,14 +112,13 @@ pub struct PeerConnection {
     ping_state: Arc<RwLock<PingState>>,
 
     /// Local listening port (for logging)
-    #[allow(dead_code)]
     local_port: u16,
 
     /// Remote port for this connection (ephemeral)
     remote_port: u16,
 }
 
-#[allow(dead_code)] // Will be used in upcoming refactor
+#[allow(dead_code)]
 impl PeerConnection {
     const PING_INTERVAL: Duration = Duration::from_secs(30);
     const TIMEOUT_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -239,8 +239,8 @@ impl PeerConnection {
 
     /// Handle received ping
     async fn handle_ping(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
-        debug!(
-            "📨 [{:?}] Received ping from {} (nonce: {}), sending pong",
+        info!(
+            "📨 [{:?}] RECEIVED PING from {} (nonce: {}), sending pong",
             self.direction, self.peer_ip, nonce
         );
 
@@ -248,8 +248,8 @@ impl PeerConnection {
         self.send_message(&NetworkMessage::Pong { nonce, timestamp })
             .await?;
 
-        debug!(
-            "✅ [{:?}] Sent pong to {} (nonce: {})",
+        info!(
+            "✅ [{:?}] SENT PONG to {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
 
@@ -258,18 +258,40 @@ impl PeerConnection {
 
     /// Handle received pong
     async fn handle_pong(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
+        info!(
+            "📨 [{:?}] RECEIVED PONG from {} (nonce: {})",
+            self.direction, self.peer_ip, nonce
+        );
+
         let mut state = self.ping_state.write().await;
 
+        info!(
+            "📊 [{:?}] Before pong: {} pending pings, {} missed",
+            self.direction,
+            state.pending_pings.len(),
+            state.missed_pongs
+        );
+
         if state.record_pong_received(nonce) {
-            debug!(
-                "✅ [{:?}] Received pong from {} (nonce: {})",
-                self.direction, self.peer_ip, nonce
+            info!(
+                "✅ [{:?}] Pong MATCHED for {} (nonce: {}), {} pending pings remain",
+                self.direction,
+                self.peer_ip,
+                nonce,
+                state.pending_pings.len()
             );
             Ok(())
         } else {
             warn!(
-                "⚠️ [{:?}] Received unexpected pong from {} (nonce: {})",
-                self.direction, self.peer_ip, nonce
+                "⚠️ [{:?}] Pong NOT MATCHED from {} (nonce: {}), pending: {:?}",
+                self.direction,
+                self.peer_ip,
+                nonce,
+                state
+                    .pending_pings
+                    .iter()
+                    .map(|(n, _)| n)
+                    .collect::<Vec<_>>()
             );
             Ok(())
         }
@@ -378,6 +400,17 @@ impl PeerConnection {
 
         let message: NetworkMessage =
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
+
+        info!(
+            "📨 [{:?}] Processing message from {}: {:?}",
+            self.direction,
+            self.peer_ip,
+            match &message {
+                NetworkMessage::Ping { nonce, .. } => format!("Ping({})", nonce),
+                NetworkMessage::Pong { nonce, .. } => format!("Pong({})", nonce),
+                _ => format!("{:?}", message),
+            }
+        );
 
         match message {
             NetworkMessage::Ping { nonce, timestamp } => {

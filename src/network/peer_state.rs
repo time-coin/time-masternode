@@ -8,6 +8,7 @@ use super::message::NetworkMessage;
 
 /// Direction of the connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ConnectionDirection {
     Inbound,  // Peer connected to us
     Outbound, // We connected to peer
@@ -15,6 +16,7 @@ pub enum ConnectionDirection {
 
 /// Active connection state for a peer
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct PeerConnection {
     /// Peer's IP address (unique identifier)
     pub ip: String,
@@ -38,6 +40,7 @@ pub struct PeerConnection {
     pub missed_pings: Arc<RwLock<u32>>,
 }
 
+#[allow(dead_code)]
 impl PeerConnection {
     pub fn new(
         ip: String,
@@ -89,11 +92,13 @@ impl PeerConnection {
 }
 
 /// Manages all active peer connections
+#[allow(dead_code)]
 pub struct PeerStateManager {
     /// Active connections by IP address (only one connection per IP)
     connections: Arc<RwLock<HashMap<String, PeerConnection>>>,
 }
 
+#[allow(dead_code)]
 impl PeerStateManager {
     pub fn new() -> Self {
         Self {
