@@ -200,7 +200,11 @@ impl PeerConnectionRegistry {
     }
 
     /// Send multiple messages to a peer in a batch (more efficient than individual sends)
-    pub async fn send_batch_to_peer(&self, peer_ip: &str, messages: &[NetworkMessage]) -> Result<(), String> {
+    pub async fn send_batch_to_peer(
+        &self,
+        peer_ip: &str,
+        messages: &[NetworkMessage],
+    ) -> Result<(), String> {
         if messages.is_empty() {
             return Ok(());
         }

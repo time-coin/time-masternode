@@ -492,14 +492,14 @@ async fn maintain_peer_connection(
 ) -> Result<(), String> {
     // Use the unified PeerConnection for outbound connections
     let peer_conn = PeerConnection::new_outbound(ip.to_string(), port).await?;
-    
+
     tracing::info!("✓ Connected to peer: {}", ip);
-    
+
     // Run the unified message loop which handles ping/pong correctly
     let result = peer_conn.run_message_loop().await;
-    
+
     // Clean up on disconnect
     connection_manager.mark_disconnected(ip).await;
-    
+
     result
 }

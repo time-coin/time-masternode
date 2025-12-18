@@ -312,9 +312,7 @@ impl PeerConnection {
     }
 
     /// Run the unified message loop for this connection
-    pub async fn run_message_loop(
-        mut self,
-    ) -> Result<(), String> {
+    pub async fn run_message_loop(mut self) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
         let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
         let mut buffer = String::new();
@@ -386,10 +384,7 @@ impl PeerConnection {
     }
 
     /// Handle a single message
-    async fn handle_message(
-        &self,
-        line: &str,
-    ) -> Result<(), String> {
+    async fn handle_message(&self, line: &str) -> Result<(), String> {
         let line = line.trim();
         if line.is_empty() {
             return Ok(());
