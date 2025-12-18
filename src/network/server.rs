@@ -370,7 +370,8 @@ async fn handle_peer(
                             }
 
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
-                            let ip_str = &peer.addr;
+                            let ip_only = peer.addr.split(':').next().unwrap_or("").to_string();
+                            let ip_str = ip_only.as_str();
                             let mut limiter = rate_limiter.write().await;
 
                             match &msg {
