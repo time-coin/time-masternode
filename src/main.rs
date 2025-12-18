@@ -114,7 +114,13 @@ async fn main() {
     let p2p_addr = config.network.full_listen_address(&network_type);
     let rpc_addr = config.rpc.full_listen_address(&network_type);
 
-    println!("\n🚀 TIME Coin Protocol Daemon v{}", config.node.version);
+    // Get version info
+    let version = env!("CARGO_PKG_VERSION");
+    let git_hash = option_env!("GIT_HASH").unwrap_or("unknown");
+    let build_date = option_env!("BUILD_DATE").unwrap_or("unknown");
+
+    println!("\n🚀 TIME Coin Protocol Daemon v{} ({})", version, git_hash);
+    println!("  └─ Build: {}", build_date);
     println!("═══════════════════════════════════════════════════════");
     println!();
     println!("📡 Network: {:?}", network_type);
