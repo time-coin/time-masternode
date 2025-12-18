@@ -49,11 +49,18 @@ impl PeerConnectionRegistry {
 
     /// Send a message to a specific peer
     pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
+        debug!("🔍 send_to_peer called for IP: {}", peer_ip);
+
         let mut connections = self.connections.write().await;
+        debug!("🔍 Registry has {} connections", connections.len());
 
         if let Some(writer) = connections.get_mut(peer_ip) {
+            debug!("✅ Found writer for {}", peer_ip);
+
             let msg_json = serde_json::to_string(&message)
                 .map_err(|e| format!("Failed to serialize message: {}", e))?;
+
+            debug!("📝 Serialized message for {}: {}", peer_ip, msg_json);
 
             writer
                 .write_all(format!("{}\n", msg_json).as_bytes())
@@ -65,9 +72,14 @@ impl PeerConnectionRegistry {
                 .await
                 .map_err(|e| format!("Failed to flush to peer {}: {}", peer_ip, e))?;
 
-            debug!("📤 Sent message to {}", peer_ip);
+            debug!("✅ Successfully sent message to {}", peer_ip);
             Ok(())
         } else {
+            warn!(
+                "❌ Peer {} not found in registry (available: {:?})",
+                peer_ip,
+                connections.keys().collect::<Vec<_>>()
+            );
             Err(format!("Peer {} not connected", peer_ip))
         }
     }

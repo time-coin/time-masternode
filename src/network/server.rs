@@ -340,8 +340,11 @@ async fn handle_peer(
 
                                         // Register writer in peer registry after successful handshake
                                         if let Some(w) = writer.take() {
+                                            tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer.addr: {})", ip_str, peer.addr);
                                             peer_registry.register_peer(ip_str.clone(), w).await;
-                                            tracing::debug!("📝 Registered {} in PeerConnectionRegistry", ip_str);
+                                            tracing::debug!("✅ Successfully registered {} in registry", ip_str);
+                                        } else {
+                                            tracing::error!("❌ Writer already taken for {}, cannot register!", ip_str);
                                         }
 
                                         // Send ACK to confirm handshake was processed
@@ -738,8 +741,16 @@ async fn handle_peer(
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
                                     tracing::info!("📨 [INBOUND] Received ping from {} (nonce: {}), sending pong", peer.addr, nonce);
-                                    let _ = peer_registry.send_to_peer(ip_str, pong_msg).await;
-                                    tracing::info!("✅ [INBOUND] Sent pong to {} (nonce: {})", peer.addr, nonce);
+                                    tracing::debug!("🔍 Sending pong to IP: {} (peer.addr: {})", ip_str, peer.addr);
+
+                                    match peer_registry.send_to_peer(ip_str, pong_msg).await {
+                                        Ok(()) => {
+                                            tracing::info!("✅ [INBOUND] Sent pong to {} (nonce: {})", peer.addr, nonce);
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("❌ [INBOUND] Failed to send pong to {} (IP: {}): {}", peer.addr, ip_str, e);
+                                        }
+                                    }
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
                                     // Inbound connections don't send pings, just log if we receive a pong
