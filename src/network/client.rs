@@ -707,7 +707,7 @@ async fn maintain_peer_connection(
                 }
 
                 pending_ping = Some((nonce, std::time::Instant::now()));
-                tracing::debug!("📤 Sent ping to {} (nonce: {})", ip, nonce);
+                tracing::info!("📤 Sent ping to {} (nonce: {})", ip, nonce);
             }
 
             // Send periodic heartbeat and sync check
@@ -1059,19 +1059,21 @@ async fn maintain_peer_connection(
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
 
+                                    tracing::info!("📨 Received ping from {} (nonce: {}), sending pong", ip, nonce);
                                     if let Err(e) = peer_registry.send_to_peer(ip, pong_msg).await {
                                         tracing::warn!("❌ Failed to send pong to {}: {}", ip, e);
                                         break;
                                     }
-                                    tracing::debug!("📤 Sent pong to {} (nonce: {})", ip, nonce);
+                                    tracing::info!("✅ Sent pong to {} (nonce: {})", ip, nonce);
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
+                                    tracing::info!("📨 Received pong from {} (nonce: {})", ip, nonce);
                                     // Check if this pong matches our pending ping
                                     if let Some((pending_nonce, sent_time)) = pending_ping {
                                         if nonce == pending_nonce {
                                             let rtt = sent_time.elapsed();
-                                            tracing::debug!(
-                                                "✅ Received pong from {} (nonce: {}, RTT: {}ms)",
+                                            tracing::info!(
+                                                "✅ Pong matches! {} (nonce: {}, RTT: {}ms) - clearing pending_ping",
                                                 ip, nonce, rtt.as_millis()
                                             );
                                             pending_ping = None;
@@ -1083,7 +1085,7 @@ async fn maintain_peer_connection(
                                             );
                                         }
                                     } else {
-                                        tracing::debug!("📥 Received unexpected pong from {} (no pending ping)", ip);
+                                        tracing::info!("📥 Received unexpected pong from {} (no pending ping)", ip);
                                     }
                                 }
                                 _ => {}

@@ -733,12 +733,13 @@ async fn handle_peer(
                                         nonce: *nonce,
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
+                                    tracing::info!("📨 [INBOUND] Received ping from {} (nonce: {}), sending pong", peer.addr, nonce);
                                     let _ = peer_registry.send_to_peer(ip_str, pong_msg).await;
-                                    tracing::debug!("📤 Sent pong to {} (nonce: {})", peer.addr, nonce);
+                                    tracing::info!("✅ [INBOUND] Sent pong to {} (nonce: {})", peer.addr, nonce);
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
                                     // Inbound connections don't send pings, just log if we receive a pong
-                                    tracing::debug!("📥 Received unexpected pong from {} (nonce: {})", peer.addr, nonce);
+                                    tracing::info!("📥 [INBOUND] Received unexpected pong from {} (nonce: {})", peer.addr, nonce);
                                 }
                                 _ => {}
                             }
