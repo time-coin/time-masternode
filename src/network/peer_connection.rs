@@ -8,7 +8,6 @@ use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::network::message::NetworkMessage;
-use crate::MasternodeRegistry;
 
 // Allow dead code during refactor
 #[allow(dead_code)]
@@ -315,7 +314,6 @@ impl PeerConnection {
     /// Run the unified message loop for this connection
     pub async fn run_message_loop(
         mut self,
-        masternode_registry: Arc<RwLock<MasternodeRegistry>>,
     ) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
         let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
@@ -346,7 +344,7 @@ impl PeerConnection {
                             break;
                         }
                         Ok(_) => {
-                            if let Err(e) = self.handle_message(&buffer, &masternode_registry).await {
+                            if let Err(e) = self.handle_message(&buffer).await {
                                 warn!("⚠️ [{:?}] Error handling message from {}: {}",
                                       self.direction, self.peer_ip, e);
                             }
@@ -391,7 +389,6 @@ impl PeerConnection {
     async fn handle_message(
         &self,
         line: &str,
-        _masternode_registry: &Arc<RwLock<MasternodeRegistry>>,
     ) -> Result<(), String> {
         let line = line.trim();
         if line.is_empty() {
