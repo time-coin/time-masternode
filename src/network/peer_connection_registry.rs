@@ -56,7 +56,10 @@ impl PeerConnectionRegistry {
     pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
         // Extract IP only (remove port if present)
         let ip_only = extract_ip(peer_ip);
-        debug!("🔍 send_to_peer called for IP: {} (extracted: {})", peer_ip, ip_only);
+        debug!(
+            "🔍 send_to_peer called for IP: {} (extracted: {})",
+            peer_ip, ip_only
+        );
 
         let mut connections = self.connections.write().await;
         debug!("🔍 Registry has {} connections", connections.len());

@@ -370,8 +370,7 @@ async fn handle_peer(
                             }
 
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
-                            let ip_only = peer.addr.split(':').next().unwrap_or("").to_string();
-                            let ip_str = ip_only.as_str();
+                            // ip_str already defined at top of function from peer IP extraction
                             let mut limiter = rate_limiter.write().await;
 
                             match &msg {
@@ -380,7 +379,7 @@ async fn handle_peer(
                                     // ACKs are informational, no action needed
                                 }
                                 NetworkMessage::TransactionBroadcast(tx) => {
-                                    if limiter.check("tx", ip_str) {
+                                    if limiter.check("tx", &ip_str) {
                                         // Check if we've already seen this transaction
                                         let txid = tx.txid();
                                         let already_seen = {
@@ -418,7 +417,7 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TransactionVote(vote) => {
-                                    if limiter.check("vote", ip_str) {
+                                    if limiter.check("vote", &ip_str) {
                                         let txid = vote.txid;
                                         tracing::info!("🗳️  Received vote for {} from {} (approve: {})",
                                             hex::encode(txid), vote.voter, vote.approve);
@@ -472,7 +471,7 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::UTXOStateQuery(outpoints) => {
-                                    if limiter.check("utxo_query", ip_str) {
+                                    if limiter.check("utxo_query", &ip_str) {
                                         let mut responses = Vec::new();
                                         for op in outpoints {
                                             if let Some(state) = utxo_mgr.get_state(op).await {
@@ -480,11 +479,11 @@ async fn handle_peer(
                                             }
                                         }
                                         let reply = NetworkMessage::UTXOStateResponse(responses);
-                                        let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                        let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                     }
                                 }
                                 NetworkMessage::Subscribe(sub) => {
-                                    if limiter.check("subscribe", ip_str) {
+                                    if limiter.check("subscribe", &ip_str) {
                                         subs.write().await.insert(sub.id.clone(), sub.clone());
                                     }
                                 }
@@ -492,13 +491,13 @@ async fn handle_peer(
                                     let height = blockchain.get_height().await;
                                     tracing::debug!("📥 Received GetBlockHeight from {}, responding with height {}", peer.addr, height);
                                     let reply = NetworkMessage::BlockHeightResponse(height);
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetPendingTransactions => {
                                     // Get pending transactions from mempool
                                     let pending_txs = blockchain.get_pending_transactions().await;
                                     let reply = NetworkMessage::PendingTransactionsResponse(pending_txs);
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetBlocks(start, end) => {
                                     let mut blocks = Vec::new();
@@ -508,7 +507,7 @@ async fn handle_peer(
                                         }
                                     }
                                     let reply = NetworkMessage::BlocksResponse(blocks);
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetUTXOStateHash => {
                                     let height = blockchain.get_height().await;
@@ -520,13 +519,13 @@ async fn handle_peer(
                                         height,
                                         utxo_count,
                                     };
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                     tracing::debug!("📤 Sent UTXO state hash to {}", peer.addr);
                                 }
                                 NetworkMessage::GetUTXOSet => {
                                     let utxos = blockchain.get_all_utxos().await;
                                     let reply = NetworkMessage::UTXOSetResponse(utxos);
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                     tracing::info!("📤 Sent complete UTXO set to {}", peer.addr);
                                 }
                                 NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
@@ -582,7 +581,7 @@ async fn handle_peer(
                                     tracing::debug!("📥 Received GetPeers request from {}", peer.addr);
                                     let peers = peer_manager.get_all_peers().await;
                                     let response = NetworkMessage::PeersResponse(peers.clone());
-                                    let _ = peer_registry.send_to_peer(ip_str, response).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     tracing::debug!("📤 Sent {} peer(s) to {}", peers.len(), peer.addr);
                                 }
                                 NetworkMessage::GetMasternodes => {
@@ -604,7 +603,7 @@ async fn handle_peer(
                                         .collect();
 
                                     let response = NetworkMessage::MasternodesResponse(mn_data);
-                                    let _ = peer_registry.send_to_peer(ip_str, response).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     tracing::debug!("📤 Sent {} masternode(s) to {}", all_masternodes.len(), peer.addr);
                                 }
                                 NetworkMessage::PeersResponse(peers) => {
@@ -675,7 +674,7 @@ async fn handle_peer(
                                         height: *height,
                                         hash,
                                     };
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::ConsensusQuery { height, block_hash } => {
                                     tracing::debug!("📥 Received ConsensusQuery for height {} from {}", height, peer.addr);
@@ -685,13 +684,13 @@ async fn handle_peer(
                                         height: *height,
                                         their_hash: our_hash.unwrap_or([0u8; 32]),
                                     };
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetBlockRange { start_height, end_height } => {
                                     tracing::debug!("📥 Received GetBlockRange({}-{}) from {}", start_height, end_height, peer.addr);
                                     let blocks = blockchain.get_block_range(*start_height, *end_height).await;
                                     let reply = NetworkMessage::BlockRangeResponse(blocks);
-                                    let _ = peer_registry.send_to_peer(ip_str, reply).await;
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                     tracing::debug!("📤 Sent block range to {}", peer.addr);
                                 }
                                 // Heartbeat Messages
@@ -744,7 +743,7 @@ async fn handle_peer(
                                     tracing::info!("📨 [INBOUND] Received ping from {} (nonce: {}), sending pong", peer.addr, nonce);
                                     tracing::debug!("🔍 Sending pong to IP: {} (peer.addr: {})", ip_str, peer.addr);
 
-                                    match peer_registry.send_to_peer(ip_str, pong_msg).await {
+                                    match peer_registry.send_to_peer(&ip_str, pong_msg).await {
                                         Ok(()) => {
                                             tracing::info!("✅ [INBOUND] Sent pong to {} (nonce: {})", peer.addr, nonce);
                                         }
