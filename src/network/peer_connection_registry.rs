@@ -52,7 +52,7 @@ impl PeerConnectionRegistry {
         pending.remove(peer_ip);
     }
 
-    /// Send a message to a specific peer
+    /// Send a message to a specific peer (optimized, minimal logging)
     pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
         // Extract IP only (remove port if present)
         let ip_only = extract_ip(peer_ip);
@@ -185,6 +185,18 @@ impl PeerConnectionRegistry {
     pub async fn peer_count(&self) -> usize {
         let connections = self.connections.read().await;
         connections.len()
+    }
+
+    /// Get a snapshot of connected peer IPs (for stats/monitoring)
+    pub async fn get_connected_peers_list(&self) -> Vec<String> {
+        let connections = self.connections.read().await;
+        connections.keys().cloned().collect()
+    }
+
+    /// Get statistics about pending responses (for monitoring)
+    pub async fn pending_response_count(&self) -> usize {
+        let pending = self.pending_responses.read().await;
+        pending.values().map(|senders| senders.len()).sum()
     }
 
     /// Send multiple messages to a peer in a batch (more efficient than individual sends)
