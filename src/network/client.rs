@@ -4,6 +4,7 @@ use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
+use crate::network::peer_state::PeerStateManager;
 use crate::peer_manager::PeerManager;
 use crate::NetworkType;
 use std::sync::Arc;
@@ -17,6 +18,7 @@ pub struct NetworkClient {
     attestation_system: Arc<HeartbeatAttestationSystem>,
     connection_manager: Arc<ConnectionManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
+    peer_state: Arc<PeerStateManager>,
     p2p_port: u16,
     max_peers: usize,
     reserved_masternode_slots: usize, // Reserved slots for masternodes
@@ -34,6 +36,7 @@ impl NetworkClient {
         max_peers: usize,
         connection_manager: Arc<ConnectionManager>,
         peer_registry: Arc<PeerConnectionRegistry>,
+        peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>, // Our own public IP to avoid self-connection
     ) -> Self {
         // Reserve 40% of slots for masternodes, minimum 20 slots, max 30 slots
@@ -46,6 +49,7 @@ impl NetworkClient {
             attestation_system,
             connection_manager,
             peer_registry,
+            peer_state,
             p2p_port: network_type.default_p2p_port(),
             max_peers,
             reserved_masternode_slots,
@@ -61,6 +65,7 @@ impl NetworkClient {
         let attestation_system = self.attestation_system.clone();
         let connection_manager = self.connection_manager.clone();
         let peer_registry = self.peer_registry.clone();
+        let peer_state = self.peer_state.clone();
         let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;

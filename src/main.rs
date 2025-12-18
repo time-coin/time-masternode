@@ -26,6 +26,7 @@ use consensus::ConsensusEngine;
 use heartbeat_attestation::HeartbeatAttestationSystem;
 use masternode_registry::MasternodeRegistry;
 use network::peer_connection_registry::PeerConnectionRegistry;
+use network::peer_state::PeerStateManager;
 use network::server::NetworkServer;
 use network_type::NetworkType;
 use peer_manager::PeerManager;
@@ -396,6 +397,9 @@ async fn main() {
     // Create shared peer connection registry for managing active connections
     let peer_registry = Arc::new(PeerConnectionRegistry::new());
 
+    // Create unified peer state manager for connection tracking
+    let peer_state = Arc::new(PeerStateManager::new());
+
     // Set peer registry on blockchain for request/response queries
     blockchain.set_peer_registry(peer_registry.clone()).await;
 
@@ -428,6 +432,7 @@ async fn main() {
         config.network.max_peers as usize,
         connection_manager.clone(),
         peer_registry.clone(),
+        peer_state.clone(),
         local_ip.clone(),
     );
     network_client.start().await;
@@ -822,6 +827,7 @@ async fn main() {
         peer_manager.clone(),
         connection_manager.clone(),
         peer_registry.clone(),
+        peer_state.clone(),
         local_ip.clone(),
     )
     .await

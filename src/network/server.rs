@@ -1,6 +1,7 @@
 use crate::consensus::ConsensusEngine;
 use crate::network::blacklist::IPBlacklist;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
+use crate::network::peer_state::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::OutPoint;
 use crate::utxo_manager::UTXOStateManager;
@@ -28,6 +29,7 @@ pub struct NetworkServer {
     pub seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>, // Track seen transaction hashes
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
 }
 
@@ -48,6 +50,7 @@ impl NetworkServer {
         peer_manager: Arc<crate::peer_manager::PeerManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
@@ -69,6 +72,7 @@ impl NetworkServer {
             seen_transactions: Arc::new(RwLock::new(HashSet::new())),
             connection_manager,
             peer_registry,
+            peer_state,
             local_ip,
         })
     }
