@@ -21,7 +21,6 @@ pub enum ConnectionDirection {
 }
 
 /// State for tracking ping/pong health
-#[allow(dead_code)]
 #[derive(Debug)]
 struct PingState {
     last_ping_sent: Option<Instant>,
@@ -30,7 +29,6 @@ struct PingState {
     missed_pongs: u32,
 }
 
-#[allow(dead_code)]
 impl PingState {
     fn new() -> Self {
         Self {
@@ -93,7 +91,6 @@ impl PingState {
 }
 
 /// Unified peer connection handling both inbound and outbound connections
-#[allow(dead_code)]
 pub struct PeerConnection {
     /// Peer's IP address (identity)
     peer_ip: String,
@@ -111,13 +108,13 @@ pub struct PeerConnection {
     ping_state: Arc<RwLock<PingState>>,
 
     /// Local listening port (for logging)
+    #[allow(dead_code)]
     local_port: u16,
 
     /// Remote port for this connection (ephemeral)
     remote_port: u16,
 }
 
-#[allow(dead_code)]
 impl PeerConnection {
     const PING_INTERVAL: Duration = Duration::from_secs(30);
     const TIMEOUT_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -156,6 +153,7 @@ impl PeerConnection {
     }
 
     /// Create a new inbound connection from a peer
+    #[allow(dead_code)]
     pub async fn new_inbound(stream: TcpStream) -> Result<Self, String> {
         let peer_addr = stream
             .peer_addr()
@@ -188,11 +186,13 @@ impl PeerConnection {
     }
 
     /// Get connection direction
+    #[allow(dead_code)]
     pub fn direction(&self) -> ConnectionDirection {
         self.direction
     }
 
     /// Get remote port for this connection
+    #[allow(dead_code)]
     pub fn remote_port(&self) -> u16 {
         self.remote_port
     }
