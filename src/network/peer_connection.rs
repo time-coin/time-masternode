@@ -443,3 +443,110 @@ impl PeerConnection {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ping_state_new() {
+        let state = PingState::new();
+        assert_eq!(state.missed_pongs, 0);
+        assert!(state.pending_pings.is_empty());
+        assert!(state.last_ping_sent.is_none());
+        assert!(state.last_pong_received.is_none());
+    }
+
+    #[test]
+    fn test_record_ping_sent() {
+        let mut state = PingState::new();
+        state.record_ping_sent(12345);
+
+        assert_eq!(state.pending_pings.len(), 1);
+        assert_eq!(state.pending_pings[0].0, 12345);
+        assert!(state.last_ping_sent.is_some());
+    }
+
+    #[test]
+    fn test_record_pong_matching() {
+        let mut state = PingState::new();
+        state.record_ping_sent(12345);
+
+        let matched = state.record_pong_received(12345);
+
+        assert!(matched);
+        assert!(state.pending_pings.is_empty());
+        assert_eq!(state.missed_pongs, 0);
+    }
+
+    #[test]
+    fn test_record_pong_non_matching() {
+        let mut state = PingState::new();
+        state.record_ping_sent(12345);
+
+        let matched = state.record_pong_received(99999);
+
+        assert!(!matched);
+        assert_eq!(state.pending_pings.len(), 1); // Original ping still there
+    }
+
+    #[test]
+    fn test_multiple_pending_pings() {
+        let mut state = PingState::new();
+
+        // Send multiple pings
+        for i in 1..=5 {
+            state.record_ping_sent(i);
+        }
+
+        assert_eq!(state.pending_pings.len(), 5);
+
+        // Respond to one
+        let matched = state.record_pong_received(3);
+        assert!(matched);
+        assert_eq!(state.pending_pings.len(), 4);
+    }
+
+    #[test]
+    fn test_pending_pings_limit() {
+        let mut state = PingState::new();
+
+        // Send 7 pings (more than the limit of 5)
+        for i in 1..=7 {
+            state.record_ping_sent(i);
+        }
+
+        // Should only keep last 5
+        assert_eq!(state.pending_pings.len(), 5);
+
+        // Oldest ping (1 and 2) should be removed
+        let nonces: Vec<u64> = state.pending_pings.iter().map(|(n, _)| *n).collect();
+        assert_eq!(nonces, vec![3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn test_direction_inbound() {
+        let dir = ConnectionDirection::Inbound;
+        assert_eq!(dir, ConnectionDirection::Inbound);
+        assert_ne!(dir, ConnectionDirection::Outbound);
+    }
+
+    #[test]
+    fn test_direction_outbound() {
+        let dir = ConnectionDirection::Outbound;
+        assert_eq!(dir, ConnectionDirection::Outbound);
+        assert_ne!(dir, ConnectionDirection::Inbound);
+    }
+
+    #[test]
+    fn test_ping_state_reset_on_pong() {
+        let mut state = PingState::new();
+        state.missed_pongs = 5; // Simulate some missed pongs
+
+        state.record_ping_sent(100);
+        let matched = state.record_pong_received(100);
+
+        assert!(matched);
+        assert_eq!(state.missed_pongs, 0); // Should be reset
+    }
+}
