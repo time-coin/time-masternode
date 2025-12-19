@@ -322,6 +322,26 @@ impl PeerConnection {
             self.direction, self.peer_ip, self.remote_port
         );
 
+        // Send initial handshake (required by protocol)
+        let handshake = NetworkMessage::Handshake {
+            magic: *b"TIME",
+            protocol_version: 1,
+            network: "mainnet".to_string(),
+        };
+
+        if let Err(e) = self.send_message(&handshake).await {
+            error!(
+                "❌ [{:?}] Failed to send handshake to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        info!(
+            "🤝 [{:?}] Sent handshake to {}",
+            self.direction, self.peer_ip
+        );
+
         // Send initial ping
         if let Err(e) = self.send_ping().await {
             error!(
