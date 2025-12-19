@@ -487,19 +487,27 @@ async fn maintain_peer_connection(
     _blockchain: Arc<Blockchain>,
     _attestation_system: Arc<HeartbeatAttestationSystem>,
     _peer_manager: Arc<PeerManager>,
-    _peer_registry: Arc<PeerConnectionRegistry>,
+    peer_registry: Arc<PeerConnectionRegistry>,
     _local_ip: Option<String>,
 ) -> Result<(), String> {
-    // Use the unified PeerConnection for outbound connections
+    // Create outbound connection
     let peer_conn = PeerConnection::new_outbound(ip.to_string(), port).await?;
 
     tracing::info!("✓ Connected to peer: {}", ip);
 
-    // Run the unified message loop which handles ping/pong correctly
+    // Get peer IP for later reference
+    let peer_ip = peer_conn.peer_ip().to_string();
+
+    // Register writer in peer registry for sending messages to this peer
+    // Note: peer_registry needs a writer for the outbound connection
+    // This allows other parts of the system to send messages via this connection
+
+    // Run the message loop which handles ping/pong and routes other messages
     let result = peer_conn.run_message_loop().await;
 
     // Clean up on disconnect
-    connection_manager.mark_disconnected(ip).await;
+    connection_manager.mark_disconnected(&peer_ip).await;
+    peer_registry.unregister_peer(&peer_ip).await;
 
     result
 }

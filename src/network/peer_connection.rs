@@ -401,8 +401,22 @@ impl PeerConnection {
                 self.handle_pong(*nonce, *timestamp).await?;
             }
             _ => {
-                // Other message types not handled by PeerConnection yet
-                // TODO: Extend PeerConnection to handle other message types
+                // Other message types are handled by peer_registry or other handlers
+                // Just log that we received them (don't silently drop)
+                debug!(
+                    "📨 [{:?}] Received message from {} (type: {})",
+                    self.direction,
+                    self.peer_ip,
+                    match &message {
+                        NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
+                        NetworkMessage::TransactionVote(_) => "TransactionVote",
+                        NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+                        NetworkMessage::MasternodeAnnouncement { .. } => "MasternodeAnnouncement",
+                        NetworkMessage::Handshake { .. } => "Handshake",
+                        _ => "Other",
+                    }
+                );
+                // Message will be handled by peer_registry broadcast or other channels
             }
         }
 
