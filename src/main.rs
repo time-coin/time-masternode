@@ -478,7 +478,7 @@ async fn main() {
                     tier: mn.tier.clone(),
                     public_key: mn.public_key,
                 };
-                registry.broadcast_message(announcement).await;
+                peer_registry.broadcast(announcement).await;
                 tracing::info!("📢 Broadcast masternode announcement to network peers");
             }
             Err(e) => {
