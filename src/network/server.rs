@@ -1,13 +1,15 @@
 use crate::consensus::ConsensusEngine;
 use crate::network::blacklist::IPBlacklist;
+use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::peer_state::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::OutPoint;
 use crate::utxo_manager::UTXOStateManager;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -25,8 +27,8 @@ pub struct NetworkServer {
     pub masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     pub blockchain: Arc<crate::blockchain::Blockchain>,
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
-    pub seen_blocks: Arc<RwLock<HashSet<u64>>>, // Track seen block heights
-    pub seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>, // Track seen transaction hashes
+    pub seen_blocks: Arc<DeduplicationFilter>, // Bloom filter for block heights
+    pub seen_transactions: Arc<DeduplicationFilter>, // Bloom filter for tx hashes
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     #[allow(dead_code)]
@@ -69,8 +71,8 @@ impl NetworkServer {
             masternode_registry: masternode_registry.clone(),
             blockchain,
             peer_manager,
-            seen_blocks: Arc::new(RwLock::new(HashSet::new())),
-            seen_transactions: Arc::new(RwLock::new(HashSet::new())),
+            seen_blocks: Arc::new(DeduplicationFilter::new(Duration::from_secs(300))), // 5 min rotation
+            seen_transactions: Arc::new(DeduplicationFilter::new(Duration::from_secs(600))), // 10 min rotation
             connection_manager,
             peer_registry,
             peer_state,
@@ -88,21 +90,7 @@ impl NetworkServer {
             }
         });
 
-        // Spawn cleanup task for seen transactions cache
-        let seen_txs_cleanup = self.seen_transactions.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(600)).await; // Every 10 minutes
-                let mut seen = seen_txs_cleanup.write().await;
-                let old_size = seen.len();
-
-                // Keep only recent 10,000 transactions to prevent unbounded memory growth
-                if old_size > 10000 {
-                    seen.clear();
-                    tracing::debug!("🧹 Cleared seen_transactions cache ({} entries)", old_size);
-                }
-            }
-        });
+        // Note: Deduplication filter handles its own cleanup with automatic rotation
 
         loop {
             let (stream, addr) = self.listener.accept().await?;
@@ -222,8 +210,8 @@ async fn handle_peer(
     blockchain: Arc<crate::blockchain::Blockchain>,
     peer_manager: Arc<crate::peer_manager::PeerManager>,
     broadcast_tx: broadcast::Sender<NetworkMessage>,
-    seen_blocks: Arc<RwLock<HashSet<u64>>>,
-    seen_transactions: Arc<RwLock<HashSet<[u8; 32]>>>,
+    seen_blocks: Arc<DeduplicationFilter>,
+    seen_transactions: Arc<DeduplicationFilter>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     _local_ip: Option<String>,
@@ -380,12 +368,9 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::TransactionBroadcast(tx) => {
                                     if limiter.check("tx", &ip_str) {
-                                        // Check if we've already seen this transaction
+                                        // Check if we've already seen this transaction using Bloom filter
                                         let txid = tx.txid();
-                                        let already_seen = {
-                                            let mut seen = seen_transactions.write().await;
-                                            !seen.insert(txid)
-                                        };
+                                        let already_seen = seen_transactions.check_and_insert(&txid).await;
 
                                         if already_seen {
                                             tracing::debug!("🔁 Ignoring duplicate transaction {} from {}", hex::encode(txid), peer.addr);
@@ -621,22 +606,9 @@ async fn handle_peer(
                                 NetworkMessage::BlockAnnouncement(block) => {
                                     let block_height = block.header.height;
 
-                                    // Check if we've already seen this block
-                                    let already_seen = {
-                                        let mut seen = seen_blocks.write().await;
-                                        if seen.contains(&block_height) {
-                                            true
-                                        } else {
-                                            seen.insert(block_height);
-
-                                            // Keep cache from growing forever - remove old blocks
-                                            if seen.len() > 1000 {
-                                                let min_height = block_height.saturating_sub(1000);
-                                                seen.retain(|&h| h > min_height);
-                                            }
-                                            false
-                                        }
-                                    };
+                                    // Check if we've already seen this block using Bloom filter
+                                    let block_height_bytes = block_height.to_le_bytes();
+                                    let already_seen = seen_blocks.check_and_insert(&block_height_bytes).await;
 
                                     if already_seen {
                                         tracing::debug!("🔁 Ignoring duplicate block {} from {}", block_height, peer.addr);

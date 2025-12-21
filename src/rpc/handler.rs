@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
+use tokio::time::Duration;
 
 pub struct RpcHandler {
     consensus: Arc<ConsensusEngine>,
@@ -83,6 +84,8 @@ impl RpcHandler {
                     message: "address parameter required".to_string(),
                 }),
             },
+            "gettransactionfinality" => self.get_transaction_finality(&params_array).await,
+            "waittransactionfinality" => self.wait_transaction_finality(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -768,5 +771,125 @@ impl RpcHandler {
             "latest_sequence": latest_seq,
             "recent_heartbeats": heartbeats
         }))
+    }
+
+    async fn get_transaction_finality(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Transaction ID parameter required".to_string(),
+            })?;
+
+        let txid_bytes = hex::decode(txid).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid transaction ID format".to_string(),
+        })?;
+
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Transaction ID must be 32 bytes".to_string(),
+            });
+        }
+
+        let mut txid_array = [0u8; 32];
+        txid_array.copy_from_slice(&txid_bytes);
+
+        // Check if transaction is finalized
+        if self.blockchain.is_transaction_finalized(&txid_array).await {
+            let confirmations = self
+                .blockchain
+                .get_transaction_confirmations(&txid_array)
+                .await
+                .unwrap_or(0);
+            return Ok(json!({
+                "txid": txid,
+                "finalized": true,
+                "confirmations": confirmations,
+                "finality_type": "bft"
+            }));
+        }
+
+        // Check if transaction is in mempool
+        let mempool = self.mempool.read().await;
+        if mempool.contains_key(&txid_array) {
+            return Ok(json!({
+                "txid": txid,
+                "finalized": false,
+                "status": "pending",
+                "in_mempool": true
+            }));
+        }
+        drop(mempool);
+
+        // Transaction not found
+        Err(RpcError {
+            code: -5,
+            message: format!("Transaction not found: {}", txid),
+        })
+    }
+
+    async fn wait_transaction_finality(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Transaction ID parameter required".to_string(),
+            })?;
+
+        let timeout_secs = params.get(1).and_then(|v| v.as_u64()).unwrap_or(300);
+
+        let txid_bytes = hex::decode(txid).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid transaction ID format".to_string(),
+        })?;
+
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Transaction ID must be 32 bytes".to_string(),
+            });
+        }
+
+        let mut txid_array = [0u8; 32];
+        txid_array.copy_from_slice(&txid_bytes);
+
+        let start_time = tokio::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+
+        loop {
+            // Check if transaction is finalized
+            if self.blockchain.is_transaction_finalized(&txid_array).await {
+                let confirmations = self
+                    .blockchain
+                    .get_transaction_confirmations(&txid_array)
+                    .await
+                    .unwrap_or(0);
+                return Ok(json!({
+                    "txid": txid,
+                    "finalized": true,
+                    "confirmations": confirmations,
+                    "finality_type": "bft",
+                    "wait_time_ms": start_time.elapsed().as_millis()
+                }));
+            }
+
+            // Check timeout
+            if start_time.elapsed() >= timeout {
+                return Err(RpcError {
+                    code: -11,
+                    message: format!(
+                        "Transaction finality timeout after {} seconds",
+                        timeout_secs
+                    ),
+                });
+            }
+
+            // Wait a bit before checking again
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 }

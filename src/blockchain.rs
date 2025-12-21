@@ -400,18 +400,24 @@ impl Blockchain {
         expected_height: u64,
         _peer_manager: Arc<crate::peer_manager::PeerManager>,
     ) -> Result<bool, String> {
-        // For now, simple heuristic: if we have active masternodes and are significantly behind,
-        // assume network-wide catchup is needed
+        // Single nodes should be able to sync blocks from peers without requiring 3+ masternodes
+        // This allows individual nodes to catch up with the network and perform fork detection
+        // independently. Block generation (not sync) requires 3+ masternodes for consensus.
         //
-        // Full implementation would:
-        // 1. Query all peers for their current height
-        // 2. If 2/3+ peers are at similar height to us (all behind), return true
-        // 3. If any peer is at expected height, return false (blocks exist, just sync issue)
+        // For sync purposes:
+        // - Allow single nodes to sync available blocks from peers
+        // - Fork detection will identify wrong chains
+        // - Block generation is separately gated by masternode count
 
         let masternodes = self.masternode_registry.list_active().await;
 
+        // Allow sync even with 0 active masternodes - this is a node startup scenario
+        // where we're syncing from the peer network, not generating blocks
         if masternodes.is_empty() {
-            return Err("No active masternodes for catchup consensus".to_string());
+            tracing::info!(
+                "ℹ️  No active masternodes - allowing sync from peers for initial catchup"
+            );
+            return Ok(true); // Allow catchup (sync from peers)
         }
 
         let blocks_behind = expected_height - our_height;
@@ -422,9 +428,9 @@ impl Blockchain {
             masternodes.len()
         );
 
-        // If we're significantly behind and have masternodes, assume network-wide catchup
-        // This is a simplified heuristic - production would query actual peer heights
-        Ok(blocks_behind >= MIN_BLOCKS_BEHIND_FOR_CATCHUP && masternodes.len() >= 3)
+        // For sync purposes, any gap >= MIN_BLOCKS_BEHIND_FOR_CATCHUP allows us to sync
+        // We don't need 3+ masternodes for sync - only for block generation
+        Ok(blocks_behind >= MIN_BLOCKS_BEHIND_FOR_CATCHUP)
     }
 
     /// Traditional peer sync (fallback when BFT catchup not possible)
@@ -2107,6 +2113,43 @@ impl Blockchain {
             }
         }
         blocks
+    }
+
+    /// Check if a transaction is in any block (finalized)
+    pub async fn is_transaction_finalized(&self, txid: &[u8; 32]) -> bool {
+        let current_height = self.get_height().await;
+        for height in 0..=current_height {
+            if let Ok(block) = self.get_block(height) {
+                if block.transactions.iter().any(|tx| &tx.txid() == txid) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the block height containing a transaction
+    pub async fn get_transaction_height(&self, txid: &[u8; 32]) -> Option<u64> {
+        let current_height = self.get_height().await;
+        for height in 0..=current_height {
+            if let Ok(block) = self.get_block(height) {
+                if block.transactions.iter().any(|tx| &tx.txid() == txid) {
+                    return Some(height);
+                }
+            }
+        }
+        None
+    }
+
+    /// Get confirmation count for a transaction
+    pub async fn get_transaction_confirmations(&self, txid: &[u8; 32]) -> Option<u64> {
+        match self.get_transaction_height(txid).await {
+            Some(tx_height) => {
+                let current_height = self.get_height().await;
+                Some(current_height - tx_height + 1)
+            }
+            None => None,
+        }
     }
 
     /// Calculate merkle root of transactions

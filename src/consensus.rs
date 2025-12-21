@@ -1,9 +1,10 @@
 use crate::block::types::Block;
 use crate::network::message::NetworkMessage;
+use crate::state_notifier::StateNotifier;
 use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -21,11 +22,12 @@ type BroadcastCallback = Arc<RwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + S
 pub struct ConsensusEngine {
     pub masternodes: Arc<RwLock<Vec<Masternode>>>,
     pub utxo_manager: Arc<UTXOStateManager>,
-    pub votes: Arc<RwLock<HashMap<Hash256, Vec<Vote>>>>,
+    pub votes: Arc<DashMap<Hash256, Vec<Vote>>>,
     pub tx_pool: Arc<TransactionPool>,
     pub broadcast_callback: BroadcastCallback,
     pub our_address: Arc<RwLock<Option<String>>>,
     pub signing_key: Arc<RwLock<Option<ed25519_dalek::SigningKey>>>,
+    pub state_notifier: Arc<StateNotifier>,
 }
 
 impl ConsensusEngine {
@@ -33,11 +35,12 @@ impl ConsensusEngine {
         Self {
             masternodes: Arc::new(RwLock::new(masternodes)),
             utxo_manager,
-            votes: Arc::new(RwLock::new(HashMap::new())),
+            votes: Arc::new(DashMap::new()),
             tx_pool: Arc::new(TransactionPool::new()),
             broadcast_callback: Arc::new(RwLock::new(None)),
             our_address: Arc::new(RwLock::new(None)),
             signing_key: Arc::new(RwLock::new(None)),
+            state_notifier: Arc::new(StateNotifier::new()),
         }
     }
 
@@ -144,6 +147,54 @@ impl ConsensusEngine {
         Ok(())
     }
 
+    /// Submit a new transaction to the network with lock-based double-spend prevention
+    /// This implements the instant finality protocol:
+    /// 1. ATOMICALLY lock UTXOs and validate transaction
+    /// 2. Broadcast to network
+    /// 3. Collect votes from masternodes
+    /// 4. Finalize (2/3 quorum) or reject
+    #[allow(dead_code)]
+    pub async fn lock_and_validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
+        let txid = tx.txid();
+        let now = chrono::Utc::now().timestamp();
+
+        // CRITICAL: Attempt to lock ALL inputs BEFORE validation
+        // This is atomic from the perspective of the consensus engine
+        for input in &tx.inputs {
+            self.utxo_manager
+                .lock_utxo(&input.previous_output, txid)
+                .await
+                .map_err(|e| format!("UTXO double-spend prevented: {}", e))?;
+        }
+
+        // Now validate knowing inputs are locked and won't change
+        self.validate_transaction(tx).await?;
+
+        // Notify clients of locks
+        for input in &tx.inputs {
+            let old_state = Some(UTXOState::Unspent);
+            let new_state = UTXOState::Locked {
+                txid,
+                locked_at: now,
+            };
+            self.state_notifier
+                .notify_state_change(input.previous_output.clone(), old_state, new_state)
+                .await;
+
+            // Also broadcast lock state to network
+            self.broadcast(NetworkMessage::UTXOStateUpdate {
+                outpoint: input.previous_output.clone(),
+                state: UTXOState::Locked {
+                    txid,
+                    locked_at: now,
+                },
+            })
+            .await;
+        }
+
+        Ok(())
+    }
+
     /// Submit a new transaction to the network
     /// This implements the instant finality protocol:
     /// 1. Validate transaction
@@ -155,8 +206,8 @@ impl ConsensusEngine {
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
         let txid = tx.txid();
 
-        // Step 1: Validate transaction
-        self.validate_transaction(&tx).await?;
+        // Step 1: Atomically lock and validate
+        self.lock_and_validate_transaction(&tx).await?;
 
         // Calculate fee
         let mut input_sum = 0u64;
@@ -168,30 +219,12 @@ impl ConsensusEngine {
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
         let fee = input_sum.saturating_sub(output_sum);
 
-        // Step 2: Lock UTXOs
-        for input in &tx.inputs {
-            self.utxo_manager
-                .lock_utxo(&input.previous_output, txid)
-                .await
-                .map_err(|e| format!("Failed to lock UTXO: {}", e))?;
-
-            // Broadcast UTXO lock state
-            self.broadcast(NetworkMessage::UTXOStateUpdate {
-                outpoint: input.previous_output.clone(),
-                state: UTXOState::Locked {
-                    txid,
-                    locked_at: chrono::Utc::now().timestamp(),
-                },
-            })
-            .await;
-        }
-
-        // Step 3: Add to pending pool with fee and broadcast
+        // Step 2: Add to pending pool with fee and broadcast
         self.tx_pool.add_pending(tx.clone(), fee).await;
         self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()))
             .await;
 
-        // Step 4: Process transaction through consensus
+        // Step 3: Process transaction through consensus
         self.process_transaction(tx).await?;
 
         Ok(txid)
@@ -209,21 +242,28 @@ impl ConsensusEngine {
         self.validate_transaction(&tx).await?;
 
         // Update UTXO states to SpentPending
+        let now = chrono::Utc::now().timestamp();
         for input in &tx.inputs {
-            let state = UTXOState::SpentPending {
+            let old_state = self.utxo_manager.get_state(&input.previous_output).await;
+            let new_state = UTXOState::SpentPending {
                 txid,
                 votes: 0,
                 total_nodes: n,
-                spent_at: chrono::Utc::now().timestamp(),
+                spent_at: now,
             };
             self.utxo_manager
-                .update_state(&input.previous_output, state.clone())
+                .update_state(&input.previous_output, new_state.clone())
+                .await;
+
+            // Notify clients of state change
+            self.state_notifier
+                .notify_state_change(input.previous_output.clone(), old_state, new_state.clone())
                 .await;
 
             // Broadcast state update
             self.broadcast(NetworkMessage::UTXOStateUpdate {
                 outpoint: input.previous_output.clone(),
-                state,
+                state: new_state,
             })
             .await;
         }
@@ -356,9 +396,8 @@ impl ConsensusEngine {
             .verify(&vote_data, &vote.signature)
             .map_err(|_| "Invalid vote signature")?;
 
-        // Store vote
-        let mut votes = self.votes.write().await;
-        let tx_votes = votes.entry(txid).or_insert_with(Vec::new);
+        // Store vote using DashMap (lock-free)
+        let mut tx_votes = self.votes.entry(txid).or_default();
 
         // Check for duplicate vote from same masternode
         if tx_votes.iter().any(|v| v.voter == vote.voter) {
@@ -378,7 +417,7 @@ impl ConsensusEngine {
             approval_count
         );
 
-        drop(votes); // Release lock before calling check_and_finalize
+        drop(tx_votes); // Release DashMap entry reference
 
         // Check if we've reached quorum
         self.check_and_finalize_transaction(txid).await?;
@@ -388,20 +427,20 @@ impl ConsensusEngine {
 
     /// Check if transaction has enough votes to finalize
     async fn check_and_finalize_transaction(&self, txid: Hash256) -> Result<(), String> {
-        let votes = self.votes.read().await;
-        let tx_votes = votes.get(&txid);
+        let tx_votes = self.votes.get(&txid);
 
         if tx_votes.is_none() {
             return Ok(()); // No votes yet
         }
 
-        let tx_votes = tx_votes.unwrap();
+        let votes_ref = tx_votes.unwrap();
+        let vote_vec = votes_ref.value();
         let n = self.masternodes.read().await.len() as u32;
         let quorum = (2 * n).div_ceil(3);
-        let approval_count = tx_votes.iter().filter(|v| v.approve).count() as u32;
-        let rejection_count = tx_votes.iter().filter(|v| !v.approve).count() as u32;
+        let approval_count = vote_vec.iter().filter(|v| v.approve).count() as u32;
+        let rejection_count = vote_vec.iter().filter(|v| !v.approve).count() as u32;
 
-        drop(votes); // Release lock
+        drop(votes_ref); // Release DashMap entry reference
 
         // Check if we have quorum for approval
         if approval_count >= quorum {
@@ -442,26 +481,34 @@ impl ConsensusEngine {
             .ok_or("Transaction not in pending pool")?
             .clone();
 
-        // Mark inputs as SpentFinalized
+        let now = chrono::Utc::now().timestamp();
+
+        // Mark inputs as SpentFinalized with real-time notification
         for input in &tx.inputs {
-            let state = UTXOState::SpentFinalized {
+            let old_state = self.utxo_manager.get_state(&input.previous_output).await;
+            let new_state = UTXOState::SpentFinalized {
                 txid,
-                finalized_at: chrono::Utc::now().timestamp(),
+                finalized_at: now,
                 votes,
             };
             self.utxo_manager
-                .update_state(&input.previous_output, state.clone())
+                .update_state(&input.previous_output, new_state.clone())
+                .await;
+
+            // 🔥 NOTIFY clients of instant finality!
+            self.state_notifier
+                .notify_state_change(input.previous_output.clone(), old_state, new_state.clone())
                 .await;
 
             // Broadcast finalized state
             self.broadcast(NetworkMessage::UTXOStateUpdate {
                 outpoint: input.previous_output.clone(),
-                state,
+                state: new_state,
             })
             .await;
         }
 
-        // Create new UTXOs
+        // Create new UTXOs with notifications
         for (i, output) in tx.outputs.iter().enumerate() {
             let new_outpoint = OutPoint {
                 txid,
@@ -476,6 +523,11 @@ impl ConsensusEngine {
             };
 
             self.utxo_manager.add_utxo(utxo.clone()).await;
+
+            // Notify clients of new UTXO creation (finalized!)
+            self.state_notifier
+                .notify_state_change(new_outpoint.clone(), None, UTXOState::Unspent)
+                .await;
 
             // Broadcast new UTXO state
             self.broadcast(NetworkMessage::UTXOStateUpdate {
@@ -493,7 +545,7 @@ impl ConsensusEngine {
             .await;
 
         tracing::info!(
-            "✅ Transaction {} finalized with {} votes",
+            "⚡ INSTANT FINALITY: Transaction {} finalized with {} votes",
             hex::encode(txid),
             votes
         );
@@ -509,10 +561,18 @@ impl ConsensusEngine {
         // Get the transaction to unlock its UTXOs
         let pending_txs = self.tx_pool.get_all_pending().await;
         if let Some(tx) = pending_txs.iter().find(|t| t.txid() == txid) {
-            // Unlock UTXOs
+            // Unlock UTXOs with notifications
             for input in &tx.inputs {
+                let old_state = self.utxo_manager.get_state(&input.previous_output).await;
+                let new_state = UTXOState::Unspent;
+
                 self.utxo_manager
-                    .update_state(&input.previous_output, UTXOState::Unspent)
+                    .update_state(&input.previous_output, new_state.clone())
+                    .await;
+
+                // Notify clients of unlock
+                self.state_notifier
+                    .notify_state_change(input.previous_output.clone(), old_state, new_state)
                     .await;
 
                 // Broadcast unlock
@@ -530,6 +590,11 @@ impl ConsensusEngine {
         // Broadcast rejection
         self.broadcast(NetworkMessage::TransactionRejected { txid, reason })
             .await;
+
+        tracing::warn!(
+            "❌ Transaction {} rejected - failed to reach quorum",
+            hex::encode(txid)
+        );
 
         Ok(())
     }

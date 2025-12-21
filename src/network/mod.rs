@@ -1,6 +1,8 @@
 pub mod blacklist;
 pub mod client;
 pub mod connection_manager;
+pub mod connection_state;
+pub mod dedup_filter;
 pub mod message;
 pub mod peer_connection; // NEW: Unified peer connection
 pub mod peer_connection_registry;

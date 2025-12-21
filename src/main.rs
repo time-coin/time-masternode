@@ -10,11 +10,13 @@ mod network;
 mod network_type;
 mod peer_manager;
 mod rpc;
+mod state_notifier;
 mod storage;
 mod time_sync;
 mod transaction_pool;
 mod types;
 mod utxo_manager;
+mod vdf;
 mod wallet;
 
 use bft_consensus::BFTConsensus;

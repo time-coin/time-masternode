@@ -81,14 +81,19 @@ impl NetworkClient {
                 tracing::info!("🏠 Local IP: {} (will skip self-connections)", ip);
             }
 
-            // PHASE 1: Connect to all active masternodes FIRST (priority)
+            // PHASE 1: Connect to all active masternodes FIRST (priority) - PARALLEL
             let masternodes = masternode_registry.list_active().await;
             tracing::info!(
-                "🎯 Connecting to {} active masternode(s) with priority...",
+                "🎯 Connecting to {} active masternode(s) with priority (parallel)...",
                 masternodes.len()
             );
 
+            const CONCURRENT_DIALS: usize = 10;
+            const BURST_INTERVAL_MS: u64 = 50;
+
+            let mut masternode_tasks = Vec::new();
             let mut masternode_connections = 0;
+
             for mn in masternodes.iter().take(reserved_masternode_slots) {
                 let ip = mn.masternode.address.clone();
 
@@ -120,29 +125,54 @@ impl NetworkClient {
                 }
 
                 masternode_connections += 1;
-                spawn_connection_task(
-                    ip,
-                    p2p_port,
-                    connection_manager.clone(),
-                    masternode_registry.clone(),
-                    blockchain.clone(),
-                    attestation_system.clone(),
-                    peer_manager.clone(),
-                    peer_registry.clone(),
-                    true, // is_masternode flag
-                    local_ip.clone(),
-                );
 
-                sleep(Duration::from_millis(100)).await;
+                let ip_clone = ip.clone();
+                let conn_mgr = connection_manager.clone();
+                let mn_reg = masternode_registry.clone();
+                let bc = blockchain.clone();
+                let attest = attestation_system.clone();
+                let peer_mgr = peer_manager.clone();
+                let peer_reg = peer_registry.clone();
+                let local_ip_clone = local_ip.clone();
+
+                // Spawn task without waiting for it to complete
+                let task = tokio::spawn(async move {
+                    spawn_connection_task(
+                        ip_clone,
+                        p2p_port,
+                        conn_mgr,
+                        mn_reg,
+                        bc,
+                        attest,
+                        peer_mgr,
+                        peer_reg,
+                        true, // is_masternode flag
+                        local_ip_clone,
+                    );
+                });
+
+                masternode_tasks.push(task);
+
+                // Burst control: limit concurrent dials
+                if masternode_tasks.len() >= CONCURRENT_DIALS {
+                    sleep(Duration::from_millis(BURST_INTERVAL_MS)).await;
+                }
             }
 
+            // Wait for all masternode connections to initiate
+            let start_time = std::time::Instant::now();
+            for task in masternode_tasks {
+                let _ = task.await;
+            }
+            let elapsed = start_time.elapsed();
             tracing::info!(
-                "✅ Connected to {} masternode(s), {} slots available for regular peers",
+                "✅ Connected to {} masternode(s) in {:.2}s, {} slots available for regular peers",
                 masternode_connections,
+                elapsed.as_secs_f64(),
                 max_peers.saturating_sub(masternode_connections)
             );
 
-            // PHASE 2: Fill remaining slots with regular peers
+            // PHASE 2: Fill remaining slots with regular peers - PARALLEL
             let available_slots = max_peers.saturating_sub(masternode_connections);
             if available_slots > 0 {
                 let peers = peer_manager.get_all_peers().await;
@@ -168,10 +198,12 @@ impl NetworkClient {
                     .collect();
 
                 tracing::info!(
-                    "🔌 Filling {} remaining slot(s) with {} unique regular peers",
+                    "🔌 Filling {} remaining slot(s) with {} unique regular peers (parallel)",
                     available_slots,
                     unique_peers.len()
                 );
+
+                let mut peer_tasks = Vec::new();
 
                 for ip in unique_peers.iter().take(available_slots) {
                     // CRITICAL FIX: Skip if this is our own IP
@@ -205,21 +237,49 @@ impl NetworkClient {
 
                     tracing::info!("🔗 [PHASE2-PEER] Connecting to: {}", ip);
 
-                    spawn_connection_task(
-                        ip.clone(),
-                        p2p_port,
-                        connection_manager.clone(),
-                        masternode_registry.clone(),
-                        blockchain.clone(),
-                        attestation_system.clone(),
-                        peer_manager.clone(),
-                        peer_registry.clone(),
-                        false, // regular peer
-                        local_ip.clone(),
-                    );
+                    let ip_clone = ip.clone();
+                    let conn_mgr = connection_manager.clone();
+                    let mn_reg = masternode_registry.clone();
+                    let bc = blockchain.clone();
+                    let attest = attestation_system.clone();
+                    let peer_mgr = peer_manager.clone();
+                    let peer_reg = peer_registry.clone();
+                    let local_ip_clone = local_ip.clone();
 
-                    sleep(Duration::from_millis(100)).await;
+                    // Spawn task without waiting
+                    let task = tokio::spawn(async move {
+                        spawn_connection_task(
+                            ip_clone,
+                            p2p_port,
+                            conn_mgr,
+                            mn_reg,
+                            bc,
+                            attest,
+                            peer_mgr,
+                            peer_reg,
+                            false, // regular peer
+                            local_ip_clone,
+                        );
+                    });
+
+                    peer_tasks.push(task);
+
+                    // Burst control: limit concurrent dials
+                    if peer_tasks.len() >= CONCURRENT_DIALS {
+                        sleep(Duration::from_millis(BURST_INTERVAL_MS)).await;
+                    }
                 }
+
+                // Wait for all peer connections to initiate
+                let start_time = std::time::Instant::now();
+                for task in peer_tasks {
+                    let _ = task.await;
+                }
+                let elapsed = start_time.elapsed();
+                tracing::info!(
+                    "✅ Regular peer connections initiated in {:.2}s",
+                    elapsed.as_secs_f64()
+                );
             }
 
             // PHASE 3: Periodic peer discovery with masternode priority

@@ -280,6 +280,77 @@ impl PeerConnectionRegistry {
             connections.remove(&peer_ip);
         }
     }
+
+    /// Selective gossip: send to random subset of peers to reduce bandwidth
+    /// Default fan-out: 20 peers (configurable)
+    pub async fn gossip_selective(
+        &self,
+        message: NetworkMessage,
+        source_peer: Option<&str>,
+    ) -> usize {
+        self.gossip_selective_with_config(message, source_peer, 20)
+            .await
+    }
+
+    /// Selective gossip with configurable fan-out
+    /// Returns number of peers message was sent to
+    pub async fn gossip_selective_with_config(
+        &self,
+        message: NetworkMessage,
+        source_peer: Option<&str>,
+        fan_out: usize,
+    ) -> usize {
+        // Serialize once for all peers
+        let msg_json = match serde_json::to_string(&message) {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("Failed to serialize gossip message: {}", e);
+                return 0;
+            }
+        };
+
+        let msg_bytes = format!("{}\n", msg_json);
+
+        // Select random subset of peers (fan-out)
+        let target_ips = {
+            let connections = self.connections.read().await;
+            let mut ips: Vec<String> = connections
+                .keys()
+                .filter(|ip| source_peer.is_none_or(|src| *ip != src))
+                .cloned()
+                .collect();
+
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            ips.shuffle(&mut rng);
+            ips
+        };
+
+        let mut sent = 0;
+        let target_count = target_ips.len().min(fan_out);
+
+        // Send to selected peers
+        for ip in target_ips.iter().take(target_count) {
+            let mut connections = self.connections.write().await;
+            if let Some(writer) = connections.get_mut(ip) {
+                match writer.write_all(msg_bytes.as_bytes()).await {
+                    Ok(()) => {
+                        if writer.flush().await.is_ok() {
+                            sent += 1;
+                        } else {
+                            warn!("Failed to flush gossip to {}", ip);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to send gossip to {}: {}", ip, e);
+                    }
+                }
+            }
+            drop(connections);
+        }
+
+        sent
+    }
 }
 
 impl Default for PeerConnectionRegistry {
