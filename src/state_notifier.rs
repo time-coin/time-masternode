@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
 /// Notification sent when a UTXO's state changes
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct StateChangeNotification {
     pub outpoint: OutPoint,
@@ -21,6 +22,7 @@ pub struct StateNotifier {
 }
 
 impl StateNotifier {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let (global_tx, _) = broadcast::channel(10_000);
         Self {

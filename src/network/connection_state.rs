@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
 /// Represents the state of a peer connection
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Not connected, no attempt in progress
@@ -21,6 +22,7 @@ pub enum ConnectionState {
 }
 
 impl ConnectionState {
+    #[allow(dead_code)]
     pub fn is_connected(&self) -> bool {
         matches!(self, ConnectionState::Connected { .. })
     }
@@ -43,6 +45,7 @@ impl ConnectionState {
 
 /// Connection state machine that prevents race conditions
 /// and ensures deterministic connection state management
+#[allow(dead_code)]
 pub struct ConnectionStateMachine {
     states: Arc<RwLock<HashMap<String, ConnectionState>>>,
 }
