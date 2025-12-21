@@ -27,6 +27,7 @@ use config::Config;
 use consensus::ConsensusEngine;
 use heartbeat_attestation::HeartbeatAttestationSystem;
 use masternode_registry::MasternodeRegistry;
+use network::message::NetworkMessage;
 use network::peer_connection_registry::PeerConnectionRegistry;
 use network::peer_state::PeerStateManager;
 use network::server::NetworkServer;
@@ -469,6 +470,16 @@ async fn main() {
 
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Heartbeat attestation identity configured");
+
+                // Broadcast masternode announcement to the network so peers discover us
+                let announcement = NetworkMessage::MasternodeAnnouncement {
+                    address: mn.address.clone(),
+                    reward_address: mn.wallet_address.clone(),
+                    tier: mn.tier.clone(),
+                    public_key: mn.public_key,
+                };
+                registry.broadcast_message(announcement).await;
+                tracing::info!("📢 Broadcast masternode announcement to network peers");
             }
             Err(e) => {
                 tracing::error!("❌ Failed to register masternode: {}", e);
