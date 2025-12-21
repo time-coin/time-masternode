@@ -491,6 +491,8 @@ async fn main() {
         let registry_clone = registry.clone();
         let attestation_clone = attestation_system.clone();
         let mn_address = mn.address.clone();
+        let mn_clone = mn.clone();
+        let peer_registry_clone = peer_registry.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
@@ -500,6 +502,15 @@ async fn main() {
                 if let Err(e) = registry_clone.heartbeat(&mn_address).await {
                     tracing::warn!("❌ Failed to send heartbeat: {}", e);
                 }
+
+                // Broadcast masternode announcement periodically so peers discover us
+                let announcement = NetworkMessage::MasternodeAnnouncement {
+                    address: mn_clone.address.clone(),
+                    reward_address: mn_clone.wallet_address.clone(),
+                    tier: mn_clone.tier.clone(),
+                    public_key: mn_clone.public_key,
+                };
+                peer_registry_clone.broadcast(announcement).await;
 
                 // Create and broadcast attestable heartbeat
                 match attestation_clone.create_heartbeat().await {
