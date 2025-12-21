@@ -4,7 +4,7 @@ use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::peer_state::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
-use crate::types::OutPoint;
+use crate::types::{Masternode, OutPoint};
 use crate::utxo_manager::UTXOStateManager;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -601,6 +601,33 @@ async fn handle_peer(
                                     }
                                     if added > 0 {
                                         tracing::info!("✓ Added {} new peer candidate(s) from {}", added, peer.addr);
+                                    }
+                                }
+                                NetworkMessage::MasternodesResponse(masternodes) => {
+                                    tracing::debug!("📥 Received MasternodesResponse from {} with {} masternode(s)", peer.addr, masternodes.len());
+                                    let mut registered = 0;
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs();
+                                    for mn_data in masternodes {
+                                        // Reconstruct Masternode object from response data
+                                        let masternode = Masternode {
+                                            address: mn_data.address.clone(),
+                                            wallet_address: mn_data.reward_address.clone(),
+                                            tier: mn_data.tier.clone(),
+                                            public_key: mn_data.public_key,
+                                            collateral: 0, // Collateral unknown from peer response
+                                            registered_at: now,
+                                        };
+                                        // Register each masternode from the response
+                                        match masternode_registry.register(masternode, mn_data.reward_address.clone()).await {
+                                            Ok(_) => registered += 1,
+                                            Err(_) => {} // Ignore duplicates or errors
+                                        }
+                                    }
+                                    if registered > 0 {
+                                        tracing::info!("✓ Registered {} masternode(s) from peer exchange with {}", registered, peer.addr);
                                     }
                                 }
                                 NetworkMessage::BlockAnnouncement(block) => {

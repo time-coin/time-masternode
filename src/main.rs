@@ -512,6 +512,11 @@ async fn main() {
                 };
                 peer_registry_clone.broadcast(announcement).await;
 
+                // Request masternodes from all connected peers for peer exchange
+                peer_registry_clone
+                    .broadcast(NetworkMessage::GetMasternodes)
+                    .await;
+
                 // Create and broadcast attestable heartbeat
                 match attestation_clone.create_heartbeat().await {
                     Ok(heartbeat) => {
