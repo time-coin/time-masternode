@@ -32,6 +32,7 @@ impl StateNotifier {
     }
 
     /// Subscribe to a specific UTXO's state changes
+    #[allow(dead_code)]
     pub async fn subscribe_to_outpoint(
         &self,
         outpoint: OutPoint,
@@ -50,6 +51,7 @@ impl StateNotifier {
     }
 
     /// Subscribe to all state changes globally
+    #[allow(dead_code)]
     pub fn subscribe_globally(&self) -> broadcast::Receiver<StateChangeNotification> {
         self.global_tx.subscribe()
     }
@@ -78,6 +80,7 @@ impl StateNotifier {
     }
 
     /// Check if there are subscribers for an outpoint
+    #[allow(dead_code)]
     pub async fn has_subscribers(&self, outpoint: &OutPoint) -> bool {
         self.subscribers
             .read()
@@ -88,6 +91,7 @@ impl StateNotifier {
     }
 
     /// Get total subscriber count
+    #[allow(dead_code)]
     pub async fn total_subscribers(&self) -> usize {
         self.subscribers
             .read()

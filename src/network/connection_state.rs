@@ -27,14 +27,17 @@ impl ConnectionState {
         matches!(self, ConnectionState::Connected { .. })
     }
 
+    #[allow(dead_code)]
     pub fn is_connecting(&self) -> bool {
         matches!(self, ConnectionState::Connecting { .. })
     }
 
+    #[allow(dead_code)]
     pub fn is_disconnected(&self) -> bool {
         matches!(self, ConnectionState::Disconnected)
     }
 
+    #[allow(dead_code)]
     pub fn attempt_number(&self) -> u32 {
         match self {
             ConnectionState::Reconnecting { attempt, .. } => *attempt,
@@ -51,6 +54,7 @@ pub struct ConnectionStateMachine {
 }
 
 impl ConnectionStateMachine {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             states: Arc::new(RwLock::new(HashMap::new())),
@@ -58,6 +62,7 @@ impl ConnectionStateMachine {
     }
 
     /// Get current state of a peer
+    #[allow(dead_code)]
     pub async fn get_state(&self, peer_ip: &str) -> ConnectionState {
         self.states
             .read()
@@ -69,6 +74,7 @@ impl ConnectionStateMachine {
 
     /// Try to transition from current state to new state
     /// Returns true if transition succeeded, false if it was invalid
+    #[allow(dead_code)]
     pub async fn try_transition(&self, peer_ip: &str, new_state: ConnectionState) -> bool {
         let mut states = self.states.write().await;
         let current = states.get(peer_ip).copied();
@@ -116,6 +122,7 @@ impl ConnectionStateMachine {
     }
 
     /// Helper: Try to mark as connecting
+    #[allow(dead_code)]
     pub async fn mark_connecting(&self, peer_ip: &str) -> bool {
         self.try_transition(
             peer_ip,
@@ -127,6 +134,7 @@ impl ConnectionStateMachine {
     }
 
     /// Helper: Mark as connected
+    #[allow(dead_code)]
     pub async fn mark_connected(&self, peer_ip: &str) -> bool {
         self.try_transition(
             peer_ip,
@@ -138,6 +146,7 @@ impl ConnectionStateMachine {
     }
 
     /// Helper: Mark as reconnecting with exponential backoff
+    #[allow(dead_code)]
     pub async fn mark_reconnecting(&self, peer_ip: &str) -> bool {
         let state = self.get_state(peer_ip).await;
         let attempt = state.attempt_number() + 1;
@@ -157,12 +166,14 @@ impl ConnectionStateMachine {
     }
 
     /// Helper: Mark as disconnected
+    #[allow(dead_code)]
     pub async fn mark_disconnected(&self, peer_ip: &str) -> bool {
         self.try_transition(peer_ip, ConnectionState::Disconnected)
             .await
     }
 
     /// Check if peer is ready to reconnect (backoff expired)
+    #[allow(dead_code)]
     pub async fn is_ready_to_reconnect(&self, peer_ip: &str) -> bool {
         match self.get_state(peer_ip).await {
             ConnectionState::Reconnecting { backoff_until, .. } => Instant::now() >= backoff_until,
@@ -171,6 +182,7 @@ impl ConnectionStateMachine {
     }
 
     /// Get list of all peers currently connected
+    #[allow(dead_code)]
     pub async fn get_connected_peers(&self) -> Vec<String> {
         let states = self.states.read().await;
         states
@@ -181,6 +193,7 @@ impl ConnectionStateMachine {
     }
 
     /// Get list of all peers in connecting state
+    #[allow(dead_code)]
     pub async fn get_connecting_peers(&self) -> Vec<String> {
         let states = self.states.read().await;
         states
@@ -191,11 +204,13 @@ impl ConnectionStateMachine {
     }
 
     /// Remove a peer's state (for cleanup)
+    #[allow(dead_code)]
     pub async fn remove_peer(&self, peer_ip: &str) {
         self.states.write().await.remove(peer_ip);
     }
 
     /// Get statistics about connection states
+    #[allow(dead_code)]
     pub async fn get_stats(&self) -> ConnectionStats {
         let states = self.states.read().await;
         let mut stats = ConnectionStats::default();
@@ -221,6 +236,7 @@ impl Default for ConnectionStateMachine {
 }
 
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ConnectionStats {
     pub total: usize,
     pub disconnected: usize,
