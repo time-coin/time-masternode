@@ -4,10 +4,12 @@ use crate::state_notifier::StateNotifier;
 use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use ed25519_dalek::Verifier;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 // Resource limits to prevent DOS attacks
@@ -20,39 +22,65 @@ const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
 
 type BroadcastCallback = Arc<RwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>>>;
 
+struct NodeIdentity {
+    address: String,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
 #[allow(dead_code)]
 pub struct ConsensusEngine {
-    pub masternodes: Arc<RwLock<Vec<Masternode>>>,
+    // Lock-free reads using ArcSwap (changes are infrequent)
+    masternodes: ArcSwap<Vec<Masternode>>,
+    // Set once at startup - use OnceLock
+    identity: OnceLock<NodeIdentity>,
     pub utxo_manager: Arc<UTXOStateManager>,
+    // Vote storage - clean up votes on finalization
     pub votes: Arc<DashMap<Hash256, Vec<Vote>>>,
     pub tx_pool: Arc<TransactionPool>,
     pub broadcast_callback: BroadcastCallback,
-    pub our_address: Arc<RwLock<Option<String>>>,
-    pub signing_key: Arc<RwLock<Option<ed25519_dalek::SigningKey>>>,
     pub state_notifier: Arc<StateNotifier>,
 }
 
 impl ConsensusEngine {
     pub fn new(masternodes: Vec<Masternode>, utxo_manager: Arc<UTXOStateManager>) -> Self {
         Self {
-            masternodes: Arc::new(RwLock::new(masternodes)),
+            masternodes: ArcSwap::from_pointee(masternodes),
+            identity: OnceLock::new(),
             utxo_manager,
             votes: Arc::new(DashMap::new()),
             tx_pool: Arc::new(TransactionPool::new()),
             broadcast_callback: Arc::new(RwLock::new(None)),
-            our_address: Arc::new(RwLock::new(None)),
-            signing_key: Arc::new(RwLock::new(None)),
             state_notifier: Arc::new(StateNotifier::new()),
         }
     }
 
-    pub async fn set_identity(&self, address: String, signing_key: ed25519_dalek::SigningKey) {
-        *self.our_address.write().await = Some(address);
-        *self.signing_key.write().await = Some(signing_key);
+    pub fn set_identity(
+        &self,
+        address: String,
+        signing_key: ed25519_dalek::SigningKey,
+    ) -> Result<(), String> {
+        self.identity
+            .set(NodeIdentity {
+                address,
+                signing_key,
+            })
+            .map_err(|_| "Identity already set".to_string())
     }
 
-    pub async fn update_masternodes(&self, masternodes: Vec<Masternode>) {
-        *self.masternodes.write().await = masternodes;
+    pub fn update_masternodes(&self, masternodes: Vec<Masternode>) {
+        self.masternodes.store(Arc::new(masternodes));
+    }
+
+    // Lock-free read of masternodes
+    fn get_masternodes(&self) -> arc_swap::Guard<Arc<Vec<Masternode>>> {
+        self.masternodes.load()
+    }
+
+    fn is_masternode(&self, address: &str) -> bool {
+        self.masternodes
+            .load()
+            .iter()
+            .any(|mn| mn.address == address)
     }
 
     #[allow(dead_code)]
@@ -338,7 +366,8 @@ impl ConsensusEngine {
 
     pub async fn process_transaction(&self, tx: Transaction) -> Result<(), String> {
         let txid = tx.txid();
-        let n = self.masternodes.read().await.len() as u32;
+        let masternodes = self.get_masternodes();
+        let n = masternodes.len() as u32;
 
         if n == 0 {
             return Err("No masternodes available".to_string());
@@ -404,17 +433,17 @@ impl ConsensusEngine {
         self.tx_pool.add_pending(tx.clone(), fee).await;
 
         // If we are a masternode, automatically vote
-        let our_address = self.our_address.read().await.clone();
-        let signing_key = self.signing_key.read().await.clone();
-
-        if let (Some(address), Some(key)) = (our_address, signing_key) {
-            if self.is_masternode(&address).await {
+        if let Some(identity) = self.identity.get() {
+            if self.is_masternode(&identity.address) {
                 tracing::debug!(
                     "📝 Auto-voting on transaction {} as masternode {}",
                     hex::encode(txid),
-                    address
+                    identity.address
                 );
-                match self.create_and_broadcast_vote(txid, true, &key).await {
+                match self
+                    .create_and_broadcast_vote(txid, true, &identity.signing_key)
+                    .await
+                {
                     Ok(_) => tracing::debug!("✅ Vote sent for {}", hex::encode(txid)),
                     Err(e) => tracing::warn!("Failed to vote: {}", e),
                 }
@@ -427,10 +456,9 @@ impl ConsensusEngine {
         Ok(())
     }
 
-    async fn is_masternode(&self, address: &str) -> bool {
+    async fn is_masternode_check(&self, address: &str) -> bool {
         self.masternodes
-            .read()
-            .await
+            .load()
             .iter()
             .any(|mn| mn.address == address)
     }
@@ -443,18 +471,13 @@ impl ConsensusEngine {
     ) -> Result<(), String> {
         use ed25519_dalek::Signer;
 
-        let our_address = self
-            .our_address
-            .read()
-            .await
-            .clone()
-            .ok_or("No address configured")?;
+        let identity = self.identity.get().ok_or("Identity not set")?;
         let timestamp = chrono::Utc::now().timestamp();
 
         // Create vote message to sign
         let mut vote_data = Vec::new();
         vote_data.extend_from_slice(&txid);
-        vote_data.extend_from_slice(our_address.as_bytes());
+        vote_data.extend_from_slice(identity.address.as_bytes());
         vote_data.push(if approve { 1 } else { 0 });
         vote_data.extend_from_slice(&timestamp.to_le_bytes());
 
@@ -462,7 +485,7 @@ impl ConsensusEngine {
 
         let vote = Vote {
             txid,
-            voter: our_address.clone(),
+            voter: identity.address.clone(),
             approve,
             timestamp,
             signature,
@@ -480,8 +503,8 @@ impl ConsensusEngine {
 
         let txid = vote.txid;
 
-        // Verify voter is a masternode
-        let masternodes = self.masternodes.read().await;
+        // Verify voter is a masternode (no need to lock for read)
+        let masternodes = self.get_masternodes();
         let masternode = masternodes
             .iter()
             .find(|mn| mn.address == vote.voter)
@@ -512,7 +535,7 @@ impl ConsensusEngine {
         tx_votes.push(vote.clone());
         let vote_count = tx_votes.len();
         let approval_count = tx_votes.iter().filter(|v| v.approve).count() as u32;
-        let total_masternodes = self.masternodes.read().await.len();
+        let total_masternodes = self.get_masternodes().len();
 
         tracing::info!(
             "📊 Transaction {} has {}/{} votes ({} approvals)",
@@ -540,7 +563,7 @@ impl ConsensusEngine {
 
         let votes_ref = tx_votes.unwrap();
         let vote_vec = votes_ref.value();
-        let n = self.masternodes.read().await.len() as u32;
+        let n = self.get_masternodes().len() as u32;
         let quorum = (2 * n).div_ceil(3);
         let approval_count = vote_vec.iter().filter(|v| v.approve).count() as u32;
         let rejection_count = vote_vec.iter().filter(|v| !v.approve).count() as u32;
@@ -557,6 +580,10 @@ impl ConsensusEngine {
             );
             self.finalize_transaction_approved(txid, approval_count)
                 .await?;
+
+            // Clean up votes for this transaction
+            self.votes.remove(&txid);
+
             return Ok(());
         }
 
@@ -570,6 +597,10 @@ impl ConsensusEngine {
             );
             self.finalize_transaction_rejected(txid, rejection_count)
                 .await?;
+
+            // Clean up votes for this transaction
+            self.votes.remove(&txid);
+
             return Ok(());
         }
 
@@ -578,13 +609,12 @@ impl ConsensusEngine {
     }
 
     async fn finalize_transaction_approved(&self, txid: Hash256, votes: u32) -> Result<(), String> {
-        // Get the transaction from pending pool
-        let pending_txs = self.tx_pool.get_all_pending().await;
-        let tx = pending_txs
-            .iter()
-            .find(|t| t.txid() == txid)
-            .ok_or("Transaction not in pending pool")?
-            .clone();
+        // Get the transaction from pending pool (optimized - no full clone)
+        let tx = self
+            .tx_pool
+            .get_pending(&txid)
+            .await
+            .ok_or("Transaction not in pending pool")?;
 
         let now = chrono::Utc::now().timestamp();
 
@@ -662,9 +692,8 @@ impl ConsensusEngine {
         txid: Hash256,
         _votes: u32,
     ) -> Result<(), String> {
-        // Get the transaction to unlock its UTXOs
-        let pending_txs = self.tx_pool.get_all_pending().await;
-        if let Some(tx) = pending_txs.iter().find(|t| t.txid() == txid) {
+        // Get the transaction to unlock its UTXOs (optimized - no full clone)
+        if let Some(tx) = self.tx_pool.get_pending(&txid).await {
             // Unlock UTXOs with notifications
             for input in &tx.inputs {
                 let old_state = self.utxo_manager.get_state(&input.previous_output);
@@ -740,7 +769,7 @@ impl ConsensusEngine {
 
     #[allow(dead_code)]
     pub async fn get_active_masternodes(&self) -> Vec<Masternode> {
-        self.masternodes.read().await.clone()
+        self.get_masternodes().iter().cloned().collect()
     }
 
     #[allow(dead_code)]

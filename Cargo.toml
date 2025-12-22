@@ -59,6 +59,7 @@ dashmap = "5.5"                                     # Lock-free concurrent hashm
 lru = "0.12"                                        # Bounded LRU cache
 rayon = "1.8"                                       # Data parallelism
 parking_lot = "0.12"                                # Faster locks than std
+arc-swap = "1.7"                                    # Lock-free atomic pointer swapping
 
 [dev-dependencies]
 tempfile = "3.8"

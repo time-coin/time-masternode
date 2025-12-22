@@ -318,13 +318,16 @@ async fn main() {
 
     // Set identity if we're a masternode
     if let Some(ref mn) = masternode_info {
-        consensus_engine
-            .set_identity(mn.address.clone(), wallet.signing_key().clone())
-            .await;
-        tracing::info!(
-            "✓ Consensus engine identity set for masternode: {}",
-            mn.address
-        );
+        if let Err(e) =
+            consensus_engine.set_identity(mn.address.clone(), wallet.signing_key().clone())
+        {
+            tracing::error!("Failed to set consensus identity: {}", e);
+        } else {
+            tracing::info!(
+                "✓ Consensus engine identity set for masternode: {}",
+                mn.address
+            );
+        }
     }
 
     // Set up broadcast callback for consensus engine
@@ -354,7 +357,7 @@ async fn main() {
                 .collect();
 
             // Update consensus engine with latest masternode list
-            consensus_sync.update_masternodes(masternodes.clone()).await;
+            consensus_sync.update_masternodes(masternodes.clone());
             tracing::debug!(
                 "✅ Updated consensus engine with {} masternodes",
                 masternodes.len()

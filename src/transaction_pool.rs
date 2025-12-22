@@ -84,6 +84,11 @@ impl TransactionPool {
         self.pending.read().await.values().cloned().collect()
     }
 
+    /// Get a specific pending transaction by ID (no full pool clone)
+    pub async fn get_pending(&self, txid: &Hash256) -> Option<Transaction> {
+        self.pending.read().await.get(txid).cloned()
+    }
+
     /// Check if transaction is finalized
     #[allow(dead_code)]
     pub async fn is_finalized(&self, txid: &Hash256) -> bool {
