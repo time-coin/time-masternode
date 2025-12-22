@@ -671,7 +671,7 @@ impl Blockchain {
         }
 
         // Get any pending finalized transactions
-        let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
+        let finalized_txs = self.consensus.get_finalized_transactions_for_block();
         let total_fees = self.consensus.tx_pool.get_total_fees();
 
         // Calculate rewards including fees
@@ -835,7 +835,7 @@ impl Blockchain {
         }
 
         // Get finalized transactions and calculate total fees
-        let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
+        let finalized_txs = self.consensus.get_finalized_transactions_for_block();
         let total_fees = self.consensus.tx_pool.get_total_fees();
 
         tracing::info!(
@@ -2209,6 +2209,7 @@ impl Blockchain {
         // Query up to 7 random peers (enough for Byzantine quorum)
         // In production: cycle through peers and query their block at fork_height
         let peers_to_query = if peers.len() > 7 { 7 } else { peers.len() };
+        #[allow(unused_assignments)]
         let mut peer_block_votes = 0usize;
         let our_block_votes = 0usize;
         #[allow(unused_assignments)]

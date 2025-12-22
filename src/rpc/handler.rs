@@ -494,7 +494,7 @@ impl RpcHandler {
     }
 
     async fn get_consensus_info(&self) -> Result<Value, RpcError> {
-        let masternodes = self.consensus.get_active_masternodes().await;
+        let masternodes = self.consensus.get_active_masternodes();
         let mn_count = masternodes.len() as u32;
         let quorum = (2 * mn_count).div_ceil(3);
         Ok(json!({

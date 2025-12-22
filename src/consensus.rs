@@ -363,24 +363,11 @@ impl ConsensusEngine {
         // Step 1: Atomically lock and validate
         self.lock_and_validate_transaction(&tx).await?;
 
-        // Calculate fee
-        let mut input_sum = 0u64;
-        for input in &tx.inputs {
-            if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
-                input_sum += utxo.value;
-            }
-        }
-        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-        let fee = input_sum.saturating_sub(output_sum);
-
-        // Step 2: Add to pending pool with fee and broadcast
-        self.tx_pool
-            .add_pending(tx.clone(), fee)
-            .map_err(|e| format!("Failed to add to pool: {}", e))?;
+        // Step 2: Broadcast to network
         self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()))
             .await;
 
-        // Step 3: Process transaction through consensus
+        // Step 3: Process transaction through consensus (this adds to pool)
         self.process_transaction(tx).await?;
 
         Ok(txid)
@@ -775,24 +762,24 @@ impl ConsensusEngine {
         self.utxo_manager.update_state(&outpoint, state);
     }
 
-    pub async fn get_finalized_transactions_for_block(&self) -> Vec<Transaction> {
+    pub fn get_finalized_transactions_for_block(&self) -> Vec<Transaction> {
         self.tx_pool.get_finalized_transactions()
     }
 
     #[allow(dead_code)]
-    pub async fn clear_finalized_transactions(&self) {
+    pub fn clear_finalized_transactions(&self) {
         self.tx_pool.clear_finalized();
     }
 
     #[allow(dead_code)]
-    pub async fn get_mempool_info(&self) -> (usize, usize) {
+    pub fn get_mempool_info(&self) -> (usize, usize) {
         let pending = self.tx_pool.pending_count();
         let finalized = self.tx_pool.finalized_count();
         (pending, finalized)
     }
 
     #[allow(dead_code)]
-    pub async fn get_active_masternodes(&self) -> Vec<Masternode> {
+    pub fn get_active_masternodes(&self) -> Vec<Masternode> {
         self.get_masternodes().iter().cloned().collect()
     }
 
@@ -800,8 +787,8 @@ impl ConsensusEngine {
     pub async fn generate_deterministic_block(&self, height: u64, _timestamp: i64) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
-        let finalized_txs = self.get_finalized_transactions_for_block().await;
-        let masternodes = self.get_active_masternodes().await;
+        let finalized_txs = self.get_finalized_transactions_for_block();
+        let masternodes = self.get_active_masternodes();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
@@ -823,7 +810,7 @@ impl ConsensusEngine {
     ) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
-        let finalized_txs = self.get_finalized_transactions_for_block().await;
+        let finalized_txs = self.get_finalized_transactions_for_block();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
@@ -848,7 +835,7 @@ impl ConsensusEngine {
     ) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
-        let finalized_txs = self.get_finalized_transactions_for_block().await;
+        let finalized_txs = self.get_finalized_transactions_for_block();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
