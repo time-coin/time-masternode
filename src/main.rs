@@ -235,18 +235,19 @@ async fn main() {
 
     // Helper function to calculate appropriate cache size based on available memory
     fn calculate_cache_size() -> u64 {
-        use sysinfo::System;
-        let mut sys = System::new_all();
-        sys.refresh_memory();
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+        let sys = System::new_with_specifics(
+            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
+        );
         let available_memory = sys.available_memory();
 
         // Use 10% of available memory per database, cap at 256MB each
         let cache_size = std::cmp::min(available_memory / 10, 256 * 1024 * 1024);
 
         tracing::info!(
-            "📊 Configuring sled cache: {} MB (available memory: {} MB)",
-            cache_size / (1024 * 1024),
-            available_memory / (1024 * 1024)
+            cache_mb = cache_size / (1024 * 1024),
+            available_mb = available_memory / (1024 * 1024),
+            "Configuring sled cache"
         );
 
         cache_size
