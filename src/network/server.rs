@@ -570,7 +570,7 @@ async fn handle_peer(
                                     tracing::debug!("📤 Sent {} peer(s) to {}", peers.len(), peer.addr);
                                 }
                                 NetworkMessage::GetMasternodes => {
-                                    tracing::debug!("📥 Received GetMasternodes request from {}", peer.addr);
+                                    tracing::info!("📥 Received GetMasternodes request from {}", peer.addr);
                                     let all_masternodes = masternode_registry.list_all().await;
                                     let mn_data: Vec<crate::network::message::MasternodeAnnouncementData> = all_masternodes
                                         .iter()
@@ -589,7 +589,7 @@ async fn handle_peer(
 
                                     let response = NetworkMessage::MasternodesResponse(mn_data);
                                     let _ = peer_registry.send_to_peer(&ip_str, response).await;
-                                    tracing::debug!("📤 Sent {} masternode(s) to {}", all_masternodes.len(), peer.addr);
+                                    tracing::info!("📤 Responded with {} masternode(s) to {}", all_masternodes.len(), peer.addr);
                                 }
                                 NetworkMessage::PeersResponse(peers) => {
                                     tracing::debug!("📥 Received PeersResponse from {} with {} peer(s)", peer.addr, peers.len());

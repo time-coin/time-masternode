@@ -513,6 +513,7 @@ async fn main() {
                 peer_registry_clone.broadcast(announcement).await;
 
                 // Request masternodes from all connected peers for peer exchange
+                tracing::info!("📤 Broadcasting GetMasternodes to all peers");
                 peer_registry_clone
                     .broadcast(NetworkMessage::GetMasternodes)
                     .await;

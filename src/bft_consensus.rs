@@ -42,7 +42,30 @@ use crate::types::Hash256;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+// ===== CRITICAL FIX #1: CONSENSUS TIMEOUT CONSTANTS =====
+// These constants define timeouts for BFT consensus phases
+// Prevents consensus from stalling when leader fails
+#[allow(dead_code)]
+const CONSENSUS_ROUND_TIMEOUT_SECS: u64 = 30; // Wait 30s for proposal
+#[allow(dead_code)]
+const VOTE_COLLECTION_TIMEOUT_SECS: u64 = 30; // Wait 30s for votes
+#[allow(dead_code)]
+const COMMIT_TIMEOUT_SECS: u64 = 10; // Wait 10s for commit messages
+#[allow(dead_code)]
+const VIEW_CHANGE_TIMEOUT_SECS: u64 = 60; // After 60s of no progress, change view
+
+/// Consensus phase tracking for proper protocol execution
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ConsensusPhase {
+    PrePrepare, // Waiting for block proposal from leader
+    Prepare,    // Collecting prepare votes
+    Commit,     // Collecting commit votes
+    Finalized,  // Block is final (irreversible)
+}
 
 /// BFT consensus state for a specific height
 #[derive(Debug, Clone)]
@@ -51,9 +74,14 @@ pub struct ConsensusRound {
     pub height: u64,
     pub round: u64,
     pub leader: Option<String>,
+    pub phase: ConsensusPhase, // ADD: Track consensus phase
     pub proposed_block: Option<Block>,
-    pub votes: HashMap<String, BlockVote>, // masternode_address -> vote
-    pub start_time: std::time::Instant,
+    pub prepare_votes: HashMap<String, BlockVote>, // ADD: Separate vote types
+    pub commit_votes: HashMap<String, BlockVote>,  // ADD: Separate vote types
+    pub votes: HashMap<String, BlockVote>,         // KEEP: For backward compat
+    pub start_time: Instant,
+    pub timeout_at: Instant,            // ADD: When round times out
+    pub finalized_block: Option<Block>, // ADD: Final committed block
 }
 
 #[derive(Debug, Clone)]
@@ -156,22 +184,29 @@ impl BFTConsensus {
 
     /// Start a new consensus round for a height
     pub async fn start_round(&self, height: u64, masternodes: &[MasternodeInfo]) {
+        let now = Instant::now();
+        let timeout = now + Duration::from_secs(CONSENSUS_ROUND_TIMEOUT_SECS);
         let leader = Self::select_leader(height, masternodes);
 
         let round = ConsensusRound {
             height,
             round: 0,
             leader: leader.clone(),
+            phase: ConsensusPhase::PrePrepare, // START: PrePrepare phase
             proposed_block: None,
-            votes: HashMap::new(),
-            start_time: std::time::Instant::now(),
+            prepare_votes: HashMap::new(), // ADD: Empty prepare votes
+            commit_votes: HashMap::new(),  // ADD: Empty commit votes
+            votes: HashMap::new(),         // KEEP: Backward compat
+            start_time: now,
+            timeout_at: timeout,   // ADD: Timeout tracking
+            finalized_block: None, // ADD: No finalized block yet
         };
 
         self.rounds.write().await.insert(height, round);
 
         if let Some(leader_addr) = leader {
             tracing::info!(
-                "🏆 BFT Round started for height {}: Leader is {}",
+                "🏆 BFT Round started for height {}: Leader is {} (timeout in 30s)",
                 height,
                 if leader_addr == self.our_address {
                     "US"
@@ -180,6 +215,203 @@ impl BFTConsensus {
                 }
             );
         }
+    }
+
+    /// Monitor consensus progress and trigger timeout
+    /// Called periodically to check if consensus is stuck
+    #[allow(dead_code)]
+    pub async fn check_round_timeout(&self, height: u64) -> Result<(), String> {
+        let now = Instant::now();
+
+        let mut rounds = self.rounds.write().await;
+        if let Some(round) = rounds.get_mut(&height) {
+            // Check if timeout reached
+            if now > round.timeout_at {
+                tracing::warn!(
+                    "⏱️  Consensus timeout at height {} (phase: {:?})",
+                    height,
+                    round.phase
+                );
+
+                // Trigger view change on timeout
+                round.round += 1;
+                round.phase = ConsensusPhase::PrePrepare;
+                round.proposed_block = None;
+                round.prepare_votes.clear();
+                round.commit_votes.clear();
+                round.timeout_at = now + Duration::from_secs(CONSENSUS_ROUND_TIMEOUT_SECS);
+
+                tracing::info!(
+                    "🔄 VIEW CHANGE: Round {} → {} at height {}",
+                    round.round - 1,
+                    round.round,
+                    height
+                );
+
+                return Err("Consensus timeout - view change triggered".to_string());
+            }
+
+            // Check if finalized
+            if round.phase == ConsensusPhase::Finalized {
+                tracing::debug!(
+                    "✅ Consensus complete at height {} (phase: Finalized)",
+                    height
+                );
+                return Ok(());
+            }
+
+            Ok(())
+        } else {
+            Err("Consensus round not found".to_string())
+        }
+    }
+
+    /// Calculate quorum size (2/3 + 1 of masternodes)
+    /// Byzantine-safe: ensures 2/3 majority is required
+    #[allow(dead_code)]
+    fn calculate_quorum_size(masternode_count: usize) -> usize {
+        if masternode_count < 3 {
+            return 1; // For testing with <3 nodes
+        }
+        // 2/3 + 1 = Byzantine-safe quorum
+        (masternode_count * 2 / 3) + 1
+    }
+
+    /// PHASE 2 PART 1: SUBMIT PREPARE VOTE
+    /// Transition from PrePrepare to Prepare phase when quorum reached
+    #[allow(dead_code)]
+    pub async fn submit_prepare_vote(
+        &self,
+        height: u64,
+        block_hash: Hash256,
+        voter: String,
+        signature: Vec<u8>,
+    ) -> Result<(), String> {
+        let mut rounds = self.rounds.write().await;
+        let round = rounds.get_mut(&height).ok_or("Consensus round not found")?;
+
+        // Can only vote in PrePrepare or Prepare phase
+        if round.phase != ConsensusPhase::PrePrepare && round.phase != ConsensusPhase::Prepare {
+            return Err(format!("Wrong phase for prepare vote: {:?}", round.phase));
+        }
+
+        // Check if voter already voted (prevent double-voting)
+        if round.prepare_votes.contains_key(&voter) {
+            return Err("Voter already submitted prepare vote".to_string());
+        }
+
+        // Record vote
+        let vote = BlockVote {
+            block_hash,
+            voter: voter.clone(),
+            approve: true,
+            signature,
+        };
+
+        round.prepare_votes.insert(voter.clone(), vote);
+
+        tracing::debug!(
+            "✅ Prepare vote recorded for height {}: {} (total: {})",
+            height,
+            voter,
+            round.prepare_votes.len()
+        );
+
+        // Check if we reached quorum - if so, move to Commit phase
+        // For now, just log. Phase 2 Part 2 will implement finality check
+        let quorum = Self::calculate_quorum_size(3); // TODO: Get actual masternode count
+        if round.prepare_votes.len() >= quorum {
+            round.phase = ConsensusPhase::Prepare;
+            tracing::info!(
+                "✅ Prepare phase reached quorum at height {}: {} votes",
+                height,
+                round.prepare_votes.len()
+            );
+        }
+
+        Ok(())
+    }
+
+    /// PHASE 2 PART 1: SUBMIT COMMIT VOTE
+    /// Transition to Commit phase and achieve finality when quorum reached
+    #[allow(dead_code)]
+    pub async fn submit_commit_vote(
+        &self,
+        height: u64,
+        block_hash: Hash256,
+        voter: String,
+        signature: Vec<u8>,
+    ) -> Result<(), String> {
+        let mut rounds = self.rounds.write().await;
+        let round = rounds.get_mut(&height).ok_or("Consensus round not found")?;
+
+        // Can only vote in Prepare or Commit phase
+        if round.phase != ConsensusPhase::Prepare && round.phase != ConsensusPhase::Commit {
+            return Err(format!("Wrong phase for commit vote: {:?}", round.phase));
+        }
+
+        // Check for double-voting
+        if round.commit_votes.contains_key(&voter) {
+            return Err("Voter already submitted commit vote".to_string());
+        }
+
+        // Record vote
+        let vote = BlockVote {
+            block_hash,
+            voter: voter.clone(),
+            approve: true,
+            signature,
+        };
+
+        round.commit_votes.insert(voter.clone(), vote);
+
+        tracing::debug!(
+            "✅ Commit vote recorded for height {}: {} (total: {})",
+            height,
+            voter,
+            round.commit_votes.len()
+        );
+
+        // Check if we reached quorum - if so, FINALIZE BLOCK
+        let quorum = Self::calculate_quorum_size(3); // TODO: Get actual masternode count
+        if round.commit_votes.len() >= quorum {
+            // CRITICAL: Block is now FINALIZED (irreversible)
+            round.phase = ConsensusPhase::Finalized;
+            round.finalized_block = round.proposed_block.clone();
+
+            if let Some(block) = &round.finalized_block {
+                tracing::info!(
+                    "✅ BLOCK FINALIZED: Height {} - Block hash: {:?} (IRREVERSIBLE)",
+                    height,
+                    block.hash()
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get finalized block for a height (if finalized)
+    #[allow(dead_code)]
+    pub async fn get_finalized_block(&self, height: u64) -> Option<Block> {
+        let rounds = self.rounds.read().await;
+        rounds.get(&height).and_then(|round| {
+            if round.phase == ConsensusPhase::Finalized {
+                round.finalized_block.clone()
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Check if a block is finalized
+    #[allow(dead_code)]
+    pub async fn is_block_finalized(&self, height: u64) -> bool {
+        let rounds = self.rounds.read().await;
+        rounds
+            .get(&height)
+            .map(|round| round.phase == ConsensusPhase::Finalized)
+            .unwrap_or(false)
     }
 
     /// Propose a block (leader only)

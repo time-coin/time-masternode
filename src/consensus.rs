@@ -5,6 +5,8 @@ use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
+use ed25519_dalek::Verifier;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -143,6 +145,111 @@ impl ConsensusEngine {
                 input_sum, output_sum
             ));
         }
+
+        // ===== CRITICAL FIX #1: VERIFY SIGNATURES ON ALL INPUTS =====
+        for (idx, _input) in tx.inputs.iter().enumerate() {
+            self.verify_input_signature(tx, idx).await?;
+        }
+
+        tracing::info!(
+            "✅ Transaction signatures verified: {} inputs, {} outputs",
+            tx.inputs.len(),
+            tx.outputs.len()
+        );
+
+        Ok(())
+    }
+
+    /// Create the message that should be signed for a transaction input
+    /// Message format: SHA256(txid || input_index || outputs_hash)
+    /// This prevents signature reuse and output tampering attacks
+    fn create_signature_message(
+        &self,
+        tx: &Transaction,
+        input_idx: usize,
+    ) -> Result<Vec<u8>, String> {
+        // Compute transaction hash
+        let tx_hash = tx.txid();
+
+        // Create message: txid || input_index || outputs_hash
+        let mut message = Vec::new();
+
+        // Add transaction hash (32 bytes)
+        message.extend_from_slice(&tx_hash);
+
+        // Add input index (4 bytes, little-endian)
+        message.extend_from_slice(&(input_idx as u32).to_le_bytes());
+
+        // Add hash of all outputs (prevents output amount tampering)
+        let outputs_bytes = bincode::serialize(&tx.outputs)
+            .map_err(|e| format!("Failed to serialize outputs: {}", e))?;
+        let outputs_hash = Sha256::digest(&outputs_bytes);
+        message.extend_from_slice(&outputs_hash);
+
+        Ok(message)
+    }
+
+    /// Verify a single input's cryptographic signature
+    /// Uses ed25519 signature scheme for verification
+    async fn verify_input_signature(
+        &self,
+        tx: &Transaction,
+        input_idx: usize,
+    ) -> Result<(), String> {
+        use ed25519_dalek::Signature;
+
+        // Get the input
+        let input = tx.inputs.get(input_idx).ok_or("Input index out of range")?;
+
+        // Get the UTXO being spent
+        let utxo = self
+            .utxo_manager
+            .get_utxo(&input.previous_output)
+            .await
+            .ok_or_else(|| format!("UTXO not found: {:?}", input.previous_output))?;
+
+        // Extract public key from UTXO's script_pubkey
+        // In ed25519 setup, script_pubkey IS the 32-byte public key
+        if utxo.script_pubkey.len() != 32 {
+            return Err(format!(
+                "Invalid public key length: {} (expected 32)",
+                utxo.script_pubkey.len()
+            ));
+        }
+
+        let public_key = ed25519_dalek::VerifyingKey::from_bytes(
+            &utxo.script_pubkey[0..32]
+                .try_into()
+                .map_err(|_| "Failed to convert public key bytes")?,
+        )
+        .map_err(|e| format!("Invalid public key: {}", e))?;
+
+        // Parse signature from script_sig (must be exactly 64 bytes)
+        if input.script_sig.len() != 64 {
+            return Err(format!(
+                "Invalid signature length: {} (expected 64 bytes)",
+                input.script_sig.len()
+            ));
+        }
+
+        let signature = Signature::from_bytes(
+            &input.script_sig[0..64]
+                .try_into()
+                .map_err(|_| "Failed to convert signature bytes")?,
+        );
+
+        // Create the message that should have been signed
+        let message = self.create_signature_message(tx, input_idx)?;
+
+        // Verify signature
+        public_key.verify(&message, &signature).map_err(|_| {
+            format!(
+                "Signature verification FAILED for input {}: signature doesn't match message",
+                input_idx
+            )
+        })?;
+
+        tracing::debug!("✅ Signature verified for input {}", input_idx);
 
         Ok(())
     }

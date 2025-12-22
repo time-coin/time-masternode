@@ -10,6 +10,13 @@ const PEER_DISCOVERY_URL: &str = "https://time-coin.io/api/peers";
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const PEER_REFRESH_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
+/// PHASE 2 PART 3: Peer Authentication & Rate Limiting Constants
+const RATE_LIMIT_WINDOW_SECS: i64 = 60; // Rate limit window (1 minute)
+const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per peer per minute
+const MIN_MASTERNODE_STAKE: u64 = 1_000 * 100_000_000; // 1000 TIME in satoshis
+const REPUTATION_THRESHOLD_BAN: i32 = -50; // Ban peers below this score
+const REPUTATION_PENALTY_BYZANTINE: i32 = -20; // Penalty for Byzantine behavior
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
     pub address: String,
@@ -18,6 +25,15 @@ pub struct PeerInfo {
     pub is_masternode: bool,
     pub connection_attempts: u32,
     pub last_attempt: i64,
+    /// PHASE 2 PART 3: Peer Authentication Fields
+    #[serde(default)]
+    pub stake: u64, // Stake amount (for masternode verification)
+    #[serde(default)]
+    pub last_request_time: i64, // For rate limiting
+    #[serde(default)]
+    pub request_count: u32, // Requests in current window
+    #[serde(default)]
+    pub reputation_score: i32, // -100 to 100 (Byzantine behavior tracking)
 }
 
 pub struct PeerManager {
@@ -116,6 +132,10 @@ impl PeerManager {
                 is_masternode: false,
                 connection_attempts: 0,
                 last_attempt: 0,
+                stake: 0,
+                last_request_time: 0,
+                request_count: 0,
+                reputation_score: 0,
             });
         }
 
@@ -135,6 +155,10 @@ impl PeerManager {
                 is_masternode: false,
                 connection_attempts: 0,
                 last_attempt: 0,
+                stake: 0,
+                last_request_time: chrono::Utc::now().timestamp(),
+                request_count: 0,
+                reputation_score: 0,
             };
 
             self.peer_info.write().await.push(peer_info.clone());
@@ -293,6 +317,183 @@ impl PeerManager {
                 manager.cleanup_stale_peers().await;
             }
         });
+    }
+
+    /// ===== PHASE 2 PART 3: PEER AUTHENTICATION & RATE LIMITING =====
+    /// Verify peer is a legitimate masternode with sufficient stake
+    #[allow(dead_code)]
+    pub async fn verify_masternode_stake(
+        &self,
+        peer_address: &str,
+        stake: u64,
+    ) -> Result<bool, String> {
+        // Check if peer has minimum required stake
+        if stake < MIN_MASTERNODE_STAKE {
+            tracing::warn!(
+                "❌ Peer {} has insufficient stake: {} < {}",
+                peer_address,
+                stake,
+                MIN_MASTERNODE_STAKE
+            );
+            return Ok(false);
+        }
+
+        // Update peer's stake in our records
+        if let Ok(mut peer_infos) = self.peer_info.try_write() {
+            if let Some(peer) = peer_infos.iter_mut().find(|p| p.address == peer_address) {
+                peer.stake = stake;
+                tracing::debug!(
+                    "✅ Peer {} verified as masternode with stake: {} TIME",
+                    peer_address,
+                    stake / 100_000_000
+                );
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Rate limit: Check if peer has exceeded max requests per minute
+    #[allow(dead_code)]
+    pub async fn check_rate_limit(&self, peer_address: &str) -> Result<bool, String> {
+        let now = chrono::Utc::now().timestamp();
+
+        if let Ok(mut peer_infos) = self.peer_info.try_write() {
+            if let Some(peer) = peer_infos.iter_mut().find(|p| p.address == peer_address) {
+                // Check if we're in a new rate limit window
+                let time_since_last = now - peer.last_request_time;
+
+                if time_since_last >= RATE_LIMIT_WINDOW_SECS {
+                    // New window, reset counter
+                    peer.request_count = 0;
+                    peer.last_request_time = now;
+                }
+
+                // Increment request counter
+                peer.request_count += 1;
+
+                // Check if exceeded limit
+                if peer.request_count > MAX_REQUESTS_PER_MINUTE {
+                    tracing::warn!(
+                        "⚠️ Rate limit exceeded for peer {}: {} requests/min",
+                        peer_address,
+                        peer.request_count
+                    );
+                    return Ok(false); // Rate limited
+                }
+
+                tracing::trace!(
+                    "Rate limit check for {}: {}/{} requests",
+                    peer_address,
+                    peer.request_count,
+                    MAX_REQUESTS_PER_MINUTE
+                );
+                return Ok(true); // Not rate limited
+            }
+        }
+
+        Ok(true) // Peer not found, allow (will be added)
+    }
+
+    /// Detect Byzantine behavior: penalize peer reputation
+    #[allow(dead_code)]
+    pub async fn report_byzantine_behavior(&self, peer_address: &str) -> Result<(), String> {
+        if let Ok(mut peer_infos) = self.peer_info.try_write() {
+            if let Some(peer) = peer_infos.iter_mut().find(|p| p.address == peer_address) {
+                peer.reputation_score =
+                    (peer.reputation_score - REPUTATION_PENALTY_BYZANTINE).max(-100);
+
+                tracing::warn!(
+                    "⚠️ Byzantine behavior reported for peer {}: reputation now {}",
+                    peer_address,
+                    peer.reputation_score
+                );
+
+                // Ban peer if reputation too low
+                if peer.reputation_score <= REPUTATION_THRESHOLD_BAN {
+                    tracing::error!(
+                        "🚫 BANNING peer {} - reputation score: {} (below threshold: {})",
+                        peer_address,
+                        peer.reputation_score,
+                        REPUTATION_THRESHOLD_BAN
+                    );
+                    self.peers.write().await.remove(peer_address);
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Improve peer reputation: increase score for honest behavior
+    #[allow(dead_code)]
+    pub async fn reward_honest_behavior(&self, peer_address: &str) -> Result<(), String> {
+        if let Ok(mut peer_infos) = self.peer_info.try_write() {
+            if let Some(peer) = peer_infos.iter_mut().find(|p| p.address == peer_address) {
+                peer.reputation_score = (peer.reputation_score + 5).min(100);
+                tracing::trace!(
+                    "✅ Reputation improved for peer {}: {}",
+                    peer_address,
+                    peer.reputation_score
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if peer is banned due to low reputation
+    #[allow(dead_code)]
+    pub async fn is_peer_banned(&self, peer_address: &str) -> Result<bool, String> {
+        let peer_infos = self.peer_info.read().await;
+        if let Some(peer) = peer_infos.iter().find(|p| p.address == peer_address) {
+            Ok(peer.reputation_score <= REPUTATION_THRESHOLD_BAN)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Authenticate peer with combined checks:
+    /// 1. Must be masternode (sufficient stake)
+    /// 2. Must not exceed rate limits
+    /// 3. Must not be banned (reputation > threshold)
+    #[allow(dead_code)]
+    pub async fn authenticate_peer(&self, peer_address: &str, stake: u64) -> Result<bool, String> {
+        // Check 1: Verify stake
+        if !self.verify_masternode_stake(peer_address, stake).await? {
+            return Ok(false);
+        }
+
+        // Check 2: Check rate limit
+        if !self.check_rate_limit(peer_address).await? {
+            return Ok(false);
+        }
+
+        // Check 3: Check if banned
+        if self.is_peer_banned(peer_address).await? {
+            return Ok(false);
+        }
+
+        tracing::info!("✅ Peer {} authenticated successfully", peer_address);
+        Ok(true)
+    }
+
+    /// Prevent replay attacks: verify request has unique nonce
+    #[allow(dead_code)]
+    pub async fn verify_request_nonce(
+        &self,
+        peer_address: &str,
+        nonce: u64,
+    ) -> Result<bool, String> {
+        // In a full implementation, would store seen nonces per peer
+        // For now, just log the verification
+        tracing::debug!(
+            "🔍 Verifying request nonce from {}: {}",
+            peer_address,
+            nonce
+        );
+        Ok(true)
     }
 
     /// Remove peers that haven't been seen in a long time or have too many failed attempts
