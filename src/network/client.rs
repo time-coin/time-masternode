@@ -113,13 +113,13 @@ impl NetworkClient {
 
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
 
-                if connection_manager.is_connected(&ip).await {
+                if connection_manager.is_connected(&ip) {
                     tracing::debug!("Already connected to masternode {}", ip);
                     masternode_connections += 1;
                     continue;
                 }
 
-                if !connection_manager.mark_connecting(&ip).await {
+                if !connection_manager.mark_connecting(&ip) {
                     tracing::debug!("[PHASE1-MN] Already connecting to {}, skipping", ip);
                     continue;
                 }
@@ -225,12 +225,12 @@ impl NetworkClient {
                         continue;
                     }
 
-                    if connection_manager.is_connected(ip).await {
+                    if connection_manager.is_connected(ip) {
                         tracing::debug!("Already connected to {}", ip);
                         continue;
                     }
 
-                    if !connection_manager.mark_connecting(ip).await {
+                    if !connection_manager.mark_connecting(ip) {
                         tracing::debug!("[PHASE2-PEER] Already connecting to {}, skipping", ip);
                         continue;
                     }
@@ -289,7 +289,7 @@ impl NetworkClient {
 
                 // Always check masternodes first
                 let masternodes = masternode_registry.list_active().await;
-                let connected_count = connection_manager.connected_count().await;
+                let connected_count = connection_manager.connected_count();
 
                 tracing::info!(
                     "🔍 Peer check: {} connected, {} active masternodes, {} total slots",
@@ -315,8 +315,8 @@ impl NetworkClient {
                         }
                     }
 
-                    if !connection_manager.is_connected(ip).await
-                        && connection_manager.mark_connecting(ip).await
+                    if !connection_manager.is_connected(ip)
+                        && connection_manager.mark_connecting(ip)
                     {
                         tracing::info!(
                             "🎯 [PHASE3-MN-PRIORITY] Reconnecting to masternode: {}",
@@ -389,17 +389,17 @@ impl NetworkClient {
                         }
 
                         // Check if already connected OR already connecting (prevents race condition)
-                        if connection_manager.is_connected(ip).await {
+                        if connection_manager.is_connected(ip) {
                             continue;
                         }
 
                         // Check if peer is in reconnection backoff - don't start duplicate connection
-                        if connection_manager.is_reconnecting(ip).await {
+                        if connection_manager.is_reconnecting(ip) {
                             continue;
                         }
 
                         // Atomically check and mark as connecting
-                        if !connection_manager.mark_connecting(ip).await {
+                        if !connection_manager.mark_connecting(ip) {
                             // Another task already connecting, skip
                             continue;
                         }
@@ -490,7 +490,7 @@ fn spawn_connection_task(
                             ip,
                             consecutive_failures
                         );
-                        connection_manager.clear_reconnecting(&ip).await;
+                        connection_manager.clear_reconnecting(&ip);
                         break;
                     }
 
@@ -498,23 +498,21 @@ fn spawn_connection_task(
                 }
             }
 
-            connection_manager.mark_disconnected(&ip).await;
+            connection_manager.mark_disconnected(&ip);
 
             let tag = if is_masternode { "[MASTERNODE]" } else { "" };
             tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
 
             // Mark peer as in reconnection backoff to prevent duplicate connection attempts
-            connection_manager
-                .mark_reconnecting(&ip, retry_delay, consecutive_failures)
-                .await;
+            connection_manager.mark_reconnecting(&ip, retry_delay, consecutive_failures);
 
             sleep(Duration::from_secs(retry_delay)).await;
 
             // Clear reconnection state after backoff completes
-            connection_manager.clear_reconnecting(&ip).await;
+            connection_manager.clear_reconnecting(&ip);
 
             // Check if already connected/connecting before reconnecting
-            if connection_manager.is_connected(&ip).await {
+            if connection_manager.is_connected(&ip) {
                 tracing::debug!(
                     "{} Already connected to {} during reconnect, task exiting",
                     tag,
@@ -523,7 +521,7 @@ fn spawn_connection_task(
                 break;
             }
 
-            if !connection_manager.mark_connecting(&ip).await {
+            if !connection_manager.mark_connecting(&ip) {
                 tracing::debug!(
                     "{} Already connecting to {} during reconnect, task exiting",
                     tag,
@@ -533,7 +531,7 @@ fn spawn_connection_task(
             }
         }
 
-        connection_manager.mark_disconnected(&ip).await;
+        connection_manager.mark_disconnected(&ip);
     });
 }
 
@@ -566,7 +564,7 @@ async fn maintain_peer_connection(
     let result = peer_conn.run_message_loop().await;
 
     // Clean up on disconnect
-    connection_manager.mark_disconnected(&peer_ip).await;
+    connection_manager.mark_disconnected(&peer_ip);
     peer_registry.unregister_peer(&peer_ip).await;
 
     result

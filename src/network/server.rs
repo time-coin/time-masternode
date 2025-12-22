@@ -290,12 +290,12 @@ async fn handle_peer(
 
                                         // NOW check for duplicate connections after handshake
                                         // This prevents race conditions where both peers connect simultaneously
-                                        let has_outbound = connection_manager.is_connected(&ip_str).await;
+                                        let has_outbound = connection_manager.is_connected(&ip_str);
 
                                         if has_outbound {
                                             // We have an outbound connection to this peer
                                             // Use deterministic tie-breaking based on IP comparison
-                                            let should_we_connect = connection_manager.should_connect_to(&ip_str).await;
+                                            let should_we_connect = connection_manager.should_connect_to(&ip_str);
 
                                             if should_we_connect {
                                                 // Our IP is higher, we should be the one connecting OUT
@@ -320,11 +320,11 @@ async fn handle_peer(
                                                 peer.addr
                                             );
                                             // Close the outbound connection in favor of this inbound
-                                            connection_manager.remove(&ip_str).await;
+                                            connection_manager.remove(&ip_str);
                                         }
 
                                         // Mark this inbound connection
-                                        connection_manager.mark_inbound(&ip_str).await;
+                                        connection_manager.mark_inbound(&ip_str);
 
                                         // Register writer in peer registry after successful handshake
                                         if let Some(w) = writer.take() {
@@ -480,7 +480,7 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::GetPendingTransactions => {
                                     // Get pending transactions from mempool
-                                    let pending_txs = blockchain.get_pending_transactions().await;
+                                    let pending_txs = blockchain.get_pending_transactions();
                                     let reply = NetworkMessage::PendingTransactionsResponse(pending_txs);
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
@@ -800,7 +800,7 @@ async fn handle_peer(
     }
 
     // Cleanup: mark inbound connection as disconnected
-    connection_manager.mark_inbound_disconnected(&ip_str).await;
+    connection_manager.mark_inbound_disconnected(&ip_str);
     tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
 
     Ok(())

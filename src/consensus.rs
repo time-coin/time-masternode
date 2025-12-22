@@ -354,7 +354,9 @@ impl ConsensusEngine {
         let fee = input_sum.saturating_sub(output_sum);
 
         // Step 2: Add to pending pool with fee and broadcast
-        self.tx_pool.add_pending(tx.clone(), fee).await;
+        self.tx_pool
+            .add_pending(tx.clone(), fee)
+            .map_err(|e| format!("Failed to add to pool: {}", e))?;
         self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()))
             .await;
 
@@ -416,7 +418,7 @@ impl ConsensusEngine {
         let fee = input_sum.saturating_sub(output_sum);
 
         // Check mempool limits before adding
-        let pending_count = self.tx_pool.get_all_pending().await.len();
+        let pending_count = self.tx_pool.get_all_pending().len();
         if pending_count >= MAX_MEMPOOL_TRANSACTIONS {
             return Err(format!(
                 "Mempool full: {} transactions (max {})",
@@ -430,7 +432,9 @@ impl ConsensusEngine {
             .len();
         // TODO: Track actual mempool byte size in TransactionPool
 
-        self.tx_pool.add_pending(tx.clone(), fee).await;
+        self.tx_pool
+            .add_pending(tx.clone(), fee)
+            .map_err(|e| format!("Failed to add to pool: {}", e))?;
 
         // If we are a masternode, automatically vote
         if let Some(identity) = self.identity.get() {
@@ -613,7 +617,6 @@ impl ConsensusEngine {
         let tx = self
             .tx_pool
             .get_pending(&txid)
-            .await
             .ok_or("Transaction not in pending pool")?;
 
         let now = chrono::Utc::now().timestamp();
@@ -672,7 +675,7 @@ impl ConsensusEngine {
         }
 
         // Move to finalized pool
-        self.tx_pool.finalize_transaction(txid).await;
+        self.tx_pool.finalize_transaction(txid);
 
         // Broadcast finalization
         self.broadcast(NetworkMessage::TransactionFinalized { txid, votes })
@@ -693,7 +696,7 @@ impl ConsensusEngine {
         _votes: u32,
     ) -> Result<(), String> {
         // Get the transaction to unlock its UTXOs (optimized - no full clone)
-        if let Some(tx) = self.tx_pool.get_pending(&txid).await {
+        if let Some(tx) = self.tx_pool.get_pending(&txid) {
             // Unlock UTXOs with notifications
             for input in &tx.inputs {
                 let old_state = self.utxo_manager.get_state(&input.previous_output);
@@ -717,7 +720,7 @@ impl ConsensusEngine {
         }
 
         let reason = "Failed to reach approval quorum".to_string();
-        self.tx_pool.reject_transaction(txid, reason.clone()).await;
+        self.tx_pool.reject_transaction(txid, reason.clone());
 
         // Broadcast rejection
         self.broadcast(NetworkMessage::TransactionRejected { txid, reason })
@@ -737,7 +740,7 @@ impl ConsensusEngine {
         let txid = tx.txid();
 
         // Skip if already processed
-        if self.tx_pool.is_pending(&txid).await || self.tx_pool.is_finalized(&txid).await {
+        if self.tx_pool.is_pending(&txid) || self.tx_pool.is_finalized(&txid) {
             return Ok(());
         }
 
@@ -752,18 +755,18 @@ impl ConsensusEngine {
     }
 
     pub async fn get_finalized_transactions_for_block(&self) -> Vec<Transaction> {
-        self.tx_pool.get_finalized_transactions().await
+        self.tx_pool.get_finalized_transactions()
     }
 
     #[allow(dead_code)]
     pub async fn clear_finalized_transactions(&self) {
-        self.tx_pool.clear_finalized().await;
+        self.tx_pool.clear_finalized();
     }
 
     #[allow(dead_code)]
     pub async fn get_mempool_info(&self) -> (usize, usize) {
-        let pending = self.tx_pool.pending_count().await;
-        let finalized = self.tx_pool.finalized_count().await;
+        let pending = self.tx_pool.pending_count();
+        let finalized = self.tx_pool.finalized_count();
         (pending, finalized)
     }
 

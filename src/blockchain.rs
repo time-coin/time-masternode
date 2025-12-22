@@ -672,7 +672,7 @@ impl Blockchain {
 
         // Get any pending finalized transactions
         let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
-        let total_fees = self.consensus.tx_pool.get_total_fees().await;
+        let total_fees = self.consensus.tx_pool.get_total_fees();
 
         // Calculate rewards including fees
         let total_reward = BLOCK_REWARD_SATOSHIS + total_fees;
@@ -836,7 +836,7 @@ impl Blockchain {
 
         // Get finalized transactions and calculate total fees
         let finalized_txs = self.consensus.get_finalized_transactions_for_block().await;
-        let total_fees = self.consensus.tx_pool.get_total_fees().await;
+        let total_fees = self.consensus.tx_pool.get_total_fees();
 
         tracing::info!(
             "📋 Proposing block at height {} with {} transactions, {} active masternodes",
@@ -1179,8 +1179,8 @@ impl Blockchain {
     }
 
     /// Get all pending transactions from the mempool
-    pub async fn get_pending_transactions(&self) -> Vec<Transaction> {
-        self.consensus.tx_pool.get_all_pending().await
+    pub fn get_pending_transactions(&self) -> Vec<Transaction> {
+        self.consensus.tx_pool.get_all_pending()
     }
 
     /// Add a transaction to the mempool (called when syncing from peers)
@@ -1189,7 +1189,10 @@ impl Blockchain {
         // Simple validation and add to pool
         self.consensus.validate_transaction(&tx).await?;
         let fee = 1000; // Default fee for synced transactions
-        self.consensus.tx_pool.add_pending(tx, fee).await;
+        self.consensus
+            .tx_pool
+            .add_pending(tx, fee)
+            .map_err(|e| format!("Failed to add to pool: {}", e))?;
         Ok(())
     }
 

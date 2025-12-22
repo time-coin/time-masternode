@@ -1,16 +1,20 @@
-use std::collections::{HashMap, HashSet};
+use arc_swap::ArcSwapOption;
+use dashmap::DashMap;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
 
-/// Tracks which IPs we have active connections to (prevents duplicate connections)
-/// Shared between client (outbound) and server (inbound) to detect duplicates
-pub struct ConnectionManager {
-    connected_ips: Arc<RwLock<HashSet<String>>>,
-    inbound_ips: Arc<RwLock<HashSet<String>>>, // Track inbound connections separately
-    reconnecting: Arc<RwLock<HashMap<String, ReconnectionState>>>, // Track backoff state
-    local_ip: Arc<RwLock<Option<String>>>, // Our local IP for deterministic connection direction
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Clone)]
+struct ConnectionState {
+    direction: ConnectionDirection,
+    connected_at: Instant,
 }
 
 /// State for tracking reconnection backoff
@@ -21,29 +25,45 @@ struct ReconnectionState {
     attempt_count: u64,
 }
 
+/// Tracks which IPs we have active connections to (prevents duplicate connections)
+/// Uses lock-free concurrent access with DashMap and atomic counters
+pub struct ConnectionManager {
+    // Single map for all connections with direction tracking
+    connections: DashMap<String, ConnectionState>,
+    // Track reconnection backoff
+    reconnecting: DashMap<String, ReconnectionState>,
+    // Local IP - set once, read many (lock-free with ArcSwapOption)
+    local_ip: ArcSwapOption<String>,
+    // Metrics (atomic, no locks)
+    inbound_count: AtomicUsize,
+    outbound_count: AtomicUsize,
+}
+
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
-            connected_ips: Arc::new(RwLock::new(HashSet::new())),
-            inbound_ips: Arc::new(RwLock::new(HashSet::new())),
-            reconnecting: Arc::new(RwLock::new(HashMap::new())),
-            local_ip: Arc::new(RwLock::new(None)),
+            connections: DashMap::new(),
+            reconnecting: DashMap::new(),
+            local_ip: ArcSwapOption::empty(),
+            inbound_count: AtomicUsize::new(0),
+            outbound_count: AtomicUsize::new(0),
         }
     }
 
-    /// Set our local IP address for deterministic connection direction
-    pub async fn set_local_ip(&self, ip: String) {
-        let mut local = self.local_ip.write().await;
-        *local = Some(ip);
+    /// Set our local IP address for deterministic connection direction (call once at startup)
+    pub fn set_local_ip(&self, ip: String) {
+        self.local_ip.store(Some(Arc::new(ip)));
     }
 
     /// Determine if we should initiate connection based on IP comparison
     /// Returns true if our IP is "higher" than peer IP (we should connect)
     /// Returns false if peer IP is "higher" (they should connect to us)
-    pub async fn should_connect_to(&self, peer_ip: &str) -> bool {
-        let local = self.local_ip.read().await;
+    pub fn should_connect_to(&self, peer_ip: &str) -> bool {
+        let local_ip_guard = self.local_ip.load();
 
-        if let Some(local_ip) = local.as_ref() {
+        if let Some(local_ip_arc) = local_ip_guard.as_ref() {
+            let local_ip = local_ip_arc.as_str();
+
             // Parse both IPs for comparison
             if let (Ok(local_addr), Ok(peer_addr)) =
                 (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
@@ -58,7 +78,7 @@ impl ConnectionManager {
                 }
             } else {
                 // Fallback to string comparison if parsing fails
-                local_ip.as_str() > peer_ip
+                local_ip > peer_ip
             }
         } else {
             // If we don't know our IP, allow connection
@@ -68,70 +88,105 @@ impl ConnectionManager {
 
     /// Mark that we're connecting to this IP (outbound)
     /// Returns true if successfully marked (wasn't already connecting)
-    /// Returns false if already connecting (prevents duplicate connection attempts)
-    pub async fn mark_connecting(&self, ip: &str) -> bool {
-        let mut ips = self.connected_ips.write().await;
-        let inbound = self.inbound_ips.read().await;
+    pub fn mark_connecting(&self, ip: &str) -> bool {
+        use dashmap::mapref::entry::Entry;
 
-        // Check if already connected in either direction
-        if ips.contains(ip) || inbound.contains(ip) {
-            return false;
+        match self.connections.entry(ip.to_string()) {
+            Entry::Vacant(e) => {
+                e.insert(ConnectionState {
+                    direction: ConnectionDirection::Outbound,
+                    connected_at: Instant::now(),
+                });
+                self.outbound_count.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Entry::Occupied(_) => false,
         }
-
-        // Insert and return true only if it's new
-        ips.insert(ip.to_string())
     }
 
-    /// Check if we're already connected/connecting to this IP (either direction)
-    pub async fn is_connected(&self, ip: &str) -> bool {
-        let outbound = self.connected_ips.read().await;
-        let inbound = self.inbound_ips.read().await;
-        outbound.contains(ip) || inbound.contains(ip)
+    /// Check if we're already connected/connecting to this IP (lock-free)
+    pub fn is_connected(&self, ip: &str) -> bool {
+        self.connections.contains_key(ip)
     }
 
     /// Mark an inbound connection
-    #[allow(dead_code)]
-    pub async fn mark_inbound(&self, ip: &str) -> bool {
-        let mut ips = self.inbound_ips.write().await;
-        ips.insert(ip.to_string())
+    pub fn mark_inbound(&self, ip: &str) -> bool {
+        use dashmap::mapref::entry::Entry;
+
+        match self.connections.entry(ip.to_string()) {
+            Entry::Vacant(e) => {
+                e.insert(ConnectionState {
+                    direction: ConnectionDirection::Inbound,
+                    connected_at: Instant::now(),
+                });
+                self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
+    /// Get connection direction
+    pub fn get_direction(&self, ip: &str) -> Option<ConnectionDirection> {
+        self.connections.get(ip).map(|e| e.direction)
     }
 
     /// Remove IP when connection ends (outbound)
-    pub async fn mark_disconnected(&self, ip: &str) {
-        let mut ips = self.connected_ips.write().await;
-        ips.remove(ip);
+    pub fn mark_disconnected(&self, ip: &str) {
+        if let Some((_, state)) = self.connections.remove(ip) {
+            match state.direction {
+                ConnectionDirection::Inbound => {
+                    self.inbound_count.fetch_sub(1, Ordering::Relaxed);
+                }
+                ConnectionDirection::Outbound => {
+                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// Force remove connection (used when accepting inbound over outbound)
-    pub async fn remove(&self, ip: &str) {
-        let mut outbound = self.connected_ips.write().await;
-        let mut inbound = self.inbound_ips.write().await;
-        outbound.remove(ip);
-        inbound.remove(ip);
+    pub fn remove(&self, ip: &str) {
+        if let Some((_, state)) = self.connections.remove(ip) {
+            match state.direction {
+                ConnectionDirection::Inbound => {
+                    self.inbound_count.fetch_sub(1, Ordering::Relaxed);
+                }
+                ConnectionDirection::Outbound => {
+                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
     }
 
     /// Remove IP when inbound connection ends
-    #[allow(dead_code)]
-    pub async fn mark_inbound_disconnected(&self, ip: &str) {
-        let mut ips = self.inbound_ips.write().await;
-        ips.remove(ip);
+    pub fn mark_inbound_disconnected(&self, ip: &str) {
+        if let Some((_, state)) = self.connections.remove(ip) {
+            if state.direction == ConnectionDirection::Inbound {
+                self.inbound_count.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
     }
 
-    /// Get count of connected peers (both directions)
-    pub async fn connected_count(&self) -> usize {
-        let outbound = self.connected_ips.read().await;
-        let inbound = self.inbound_ips.read().await;
-        // Count unique IPs across both sets
-        let mut all_ips = outbound.clone();
-        all_ips.extend(inbound.iter().cloned());
-        all_ips.len()
+    /// Get count of connected peers (both directions) - O(1) with atomics
+    pub fn connected_count(&self) -> usize {
+        self.inbound_count.load(Ordering::Relaxed) + self.outbound_count.load(Ordering::Relaxed)
+    }
+
+    /// Get inbound connection count
+    pub fn inbound_count(&self) -> usize {
+        self.inbound_count.load(Ordering::Relaxed)
+    }
+
+    /// Get outbound connection count
+    pub fn outbound_count(&self) -> usize {
+        self.outbound_count.load(Ordering::Relaxed)
     }
 
     /// Mark that a peer is in reconnection backoff
     /// This prevents duplicate connection attempts during backoff period
-    pub async fn mark_reconnecting(&self, ip: &str, retry_delay: u64, attempt_count: u64) {
-        let mut reconnecting = self.reconnecting.write().await;
-        reconnecting.insert(
+    pub fn mark_reconnecting(&self, ip: &str, retry_delay: u64, attempt_count: u64) {
+        self.reconnecting.insert(
             ip.to_string(),
             ReconnectionState {
                 next_attempt: Instant::now() + std::time::Duration::from_secs(retry_delay),
@@ -142,9 +197,8 @@ impl ConnectionManager {
 
     /// Check if a peer is in reconnection backoff
     /// Returns true if we should skip connecting (still in backoff)
-    pub async fn is_reconnecting(&self, ip: &str) -> bool {
-        let reconnecting = self.reconnecting.read().await;
-        if let Some(state) = reconnecting.get(ip) {
+    pub fn is_reconnecting(&self, ip: &str) -> bool {
+        if let Some(state) = self.reconnecting.get(ip) {
             // Check if backoff period has elapsed
             Instant::now() < state.next_attempt
         } else {
@@ -153,8 +207,15 @@ impl ConnectionManager {
     }
 
     /// Clear reconnection state when connection succeeds or is abandoned
-    pub async fn clear_reconnecting(&self, ip: &str) {
-        let mut reconnecting = self.reconnecting.write().await;
-        reconnecting.remove(ip);
+    pub fn clear_reconnecting(&self, ip: &str) {
+        self.reconnecting.remove(ip);
+    }
+
+    /// Cleanup stale reconnection states (call periodically)
+    pub fn cleanup_reconnecting(&self, max_age: std::time::Duration) {
+        let now = Instant::now();
+        self.reconnecting.retain(|_, state| {
+            now < state.next_attempt || now.duration_since(state.next_attempt) < max_age
+        });
     }
 }
