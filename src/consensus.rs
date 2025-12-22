@@ -84,7 +84,7 @@ impl ConsensusEngine {
 
         // 2. Check inputs exist and are unspent
         for input in &tx.inputs {
-            match self.utxo_manager.get_state(&input.previous_output).await {
+            match self.utxo_manager.get_state(&input.previous_output) {
                 Some(UTXOState::Unspent) => {}
                 Some(state) => {
                     return Err(format!("UTXO not unspent: {:?}", state));
@@ -270,7 +270,6 @@ impl ConsensusEngine {
         for input in &tx.inputs {
             self.utxo_manager
                 .lock_utxo(&input.previous_output, txid)
-                .await
                 .map_err(|e| format!("UTXO double-spend prevented: {}", e))?;
         }
 
@@ -351,7 +350,7 @@ impl ConsensusEngine {
         // Update UTXO states to SpentPending
         let now = chrono::Utc::now().timestamp();
         for input in &tx.inputs {
-            let old_state = self.utxo_manager.get_state(&input.previous_output).await;
+            let old_state = self.utxo_manager.get_state(&input.previous_output);
             let new_state = UTXOState::SpentPending {
                 txid,
                 votes: 0,
@@ -359,8 +358,7 @@ impl ConsensusEngine {
                 spent_at: now,
             };
             self.utxo_manager
-                .update_state(&input.previous_output, new_state.clone())
-                .await;
+                .update_state(&input.previous_output, new_state.clone());
 
             // Notify clients of state change
             self.state_notifier
@@ -592,15 +590,14 @@ impl ConsensusEngine {
 
         // Mark inputs as SpentFinalized with real-time notification
         for input in &tx.inputs {
-            let old_state = self.utxo_manager.get_state(&input.previous_output).await;
+            let old_state = self.utxo_manager.get_state(&input.previous_output);
             let new_state = UTXOState::SpentFinalized {
                 txid,
                 finalized_at: now,
                 votes,
             };
             self.utxo_manager
-                .update_state(&input.previous_output, new_state.clone())
-                .await;
+                .update_state(&input.previous_output, new_state.clone());
 
             // 🔥 NOTIFY clients of instant finality!
             self.state_notifier
@@ -670,12 +667,11 @@ impl ConsensusEngine {
         if let Some(tx) = pending_txs.iter().find(|t| t.txid() == txid) {
             // Unlock UTXOs with notifications
             for input in &tx.inputs {
-                let old_state = self.utxo_manager.get_state(&input.previous_output).await;
+                let old_state = self.utxo_manager.get_state(&input.previous_output);
                 let new_state = UTXOState::Unspent;
 
                 self.utxo_manager
-                    .update_state(&input.previous_output, new_state.clone())
-                    .await;
+                    .update_state(&input.previous_output, new_state.clone());
 
                 // Notify clients of unlock
                 self.state_notifier
@@ -722,8 +718,8 @@ impl ConsensusEngine {
 
     /// Handle incoming UTXO state update from network
     #[allow(dead_code)]
-    pub async fn handle_utxo_state_update(&self, outpoint: OutPoint, state: UTXOState) {
-        self.utxo_manager.update_state(&outpoint, state).await;
+    pub fn handle_utxo_state_update(&self, outpoint: OutPoint, state: UTXOState) {
+        self.utxo_manager.update_state(&outpoint, state);
     }
 
     pub async fn get_finalized_transactions_for_block(&self) -> Vec<Transaction> {

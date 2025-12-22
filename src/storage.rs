@@ -3,14 +3,32 @@ use crate::types::{OutPoint, UTXO};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tokio::task::spawn_blocking;
+
+#[derive(thiserror::Error, Debug)]
+pub enum StorageError {
+    #[error("Serialization failed: {0}")]
+    Serialization(#[from] bincode::Error),
+
+    #[error("Database error: {0}")]
+    Database(#[from] sled::Error),
+
+    #[error("Task join error: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
+
+    #[error("UTXO not found: {0:?}")]
+    NotFound(OutPoint),
+}
 
 #[async_trait::async_trait]
 #[allow(dead_code)]
 pub trait UtxoStorage: Send + Sync {
     async fn get_utxo(&self, outpoint: &OutPoint) -> Option<UTXO>;
-    async fn add_utxo(&self, utxo: UTXO) -> Result<(), String>;
-    async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), String>;
+    async fn add_utxo(&self, utxo: UTXO) -> Result<(), StorageError>;
+    async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), StorageError>;
     async fn list_utxos(&self) -> Vec<UTXO>;
+    async fn batch_update(&self, add: Vec<UTXO>, remove: Vec<OutPoint>)
+        -> Result<(), StorageError>;
 }
 
 #[async_trait::async_trait]
@@ -46,18 +64,33 @@ impl UtxoStorage for InMemoryUtxoStorage {
         self.utxos.read().await.get(outpoint).cloned()
     }
 
-    async fn add_utxo(&self, utxo: UTXO) -> Result<(), String> {
+    async fn add_utxo(&self, utxo: UTXO) -> Result<(), StorageError> {
         self.utxos.write().await.insert(utxo.outpoint.clone(), utxo);
         Ok(())
     }
 
-    async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), String> {
+    async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), StorageError> {
         self.utxos.write().await.remove(outpoint);
         Ok(())
     }
 
     async fn list_utxos(&self) -> Vec<UTXO> {
         self.utxos.read().await.values().cloned().collect()
+    }
+
+    async fn batch_update(
+        &self,
+        add: Vec<UTXO>,
+        remove: Vec<OutPoint>,
+    ) -> Result<(), StorageError> {
+        let mut utxos = self.utxos.write().await;
+        for utxo in add {
+            utxos.insert(utxo.outpoint.clone(), utxo);
+        }
+        for outpoint in remove {
+            utxos.remove(&outpoint);
+        }
+        Ok(())
     }
 }
 
@@ -66,11 +99,12 @@ pub struct SledUtxoStorage {
 }
 
 impl SledUtxoStorage {
-    pub fn new(path: &str) -> Result<Self, String> {
-        use sysinfo::System;
+    pub fn new(path: &str) -> Result<Self, StorageError> {
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
-        let mut sys = System::new_all();
-        sys.refresh_memory();
+        let sys = System::new_with_specifics(
+            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
+        );
         let available_memory = sys.available_memory();
         let cache_size = std::cmp::min(available_memory / 10, 512 * 1024 * 1024);
 
@@ -78,42 +112,102 @@ impl SledUtxoStorage {
             .path(path)
             .cache_capacity(cache_size)
             .flush_every_ms(Some(1000))
-            .open()
-            .map_err(|e| e.to_string())?;
+            .mode(sled::Mode::HighThroughput)
+            .open()?;
 
         Ok(Self { db })
+    }
+
+    pub fn db(&self) -> sled::Db {
+        self.db.clone()
     }
 }
 
 #[async_trait::async_trait]
 impl UtxoStorage for SledUtxoStorage {
     async fn get_utxo(&self, outpoint: &OutPoint) -> Option<UTXO> {
+        let db = self.db.clone();
         let key = bincode::serialize(outpoint).ok()?;
-        let value = self.db.get(&key).ok()??;
-        bincode::deserialize(&value).ok()
+
+        spawn_blocking(move || {
+            let value = db.get(&key).ok()??;
+            bincode::deserialize(&value).ok()
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
-    async fn add_utxo(&self, utxo: UTXO) -> Result<(), String> {
-        let key = bincode::serialize(&utxo.outpoint).map_err(|e| e.to_string())?;
-        let value = bincode::serialize(&utxo).map_err(|e| e.to_string())?;
-        self.db.insert(key, value).map_err(|e| e.to_string())?;
+    async fn add_utxo(&self, utxo: UTXO) -> Result<(), StorageError> {
+        let db = self.db.clone();
+        let key = bincode::serialize(&utxo.outpoint)?;
+        let value = bincode::serialize(&utxo)?;
+
+        spawn_blocking(move || db.insert(key, value))
+            .await
+            .map_err(StorageError::TaskJoin)??;
+
         Ok(())
     }
 
-    async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), String> {
-        let key = bincode::serialize(outpoint).map_err(|e| e.to_string())?;
-        self.db.remove(key).map_err(|e| e.to_string())?;
+    async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), StorageError> {
+        let db = self.db.clone();
+        let key = bincode::serialize(outpoint)?;
+
+        spawn_blocking(move || db.remove(key))
+            .await
+            .map_err(StorageError::TaskJoin)??;
+
         Ok(())
     }
 
     async fn list_utxos(&self) -> Vec<UTXO> {
-        self.db
-            .iter()
-            .filter_map(|item| {
-                let (_, value) = item.ok()?;
-                bincode::deserialize(&value).ok()
-            })
-            .collect()
+        let db = self.db.clone();
+
+        match spawn_blocking(move || {
+            db.iter()
+                .filter_map(|item| {
+                    let (_, value) = item.ok()?;
+                    bincode::deserialize(&value).ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        {
+            Ok(utxos) => utxos,
+            Err(e) => {
+                tracing::error!("Failed to list UTXOs: {}", e);
+                Vec::new()
+            }
+        }
+    }
+
+    async fn batch_update(
+        &self,
+        add: Vec<UTXO>,
+        remove: Vec<OutPoint>,
+    ) -> Result<(), StorageError> {
+        let db = self.db.clone();
+
+        spawn_blocking(move || {
+            let mut batch = sled::Batch::default();
+
+            for outpoint in remove {
+                let key = bincode::serialize(&outpoint)?;
+                batch.remove(key);
+            }
+
+            for utxo in add {
+                let key = bincode::serialize(&utxo.outpoint)?;
+                let value = bincode::serialize(&utxo)?;
+                batch.insert(key, value);
+            }
+
+            db.apply_batch(batch)?;
+            Ok::<_, StorageError>(())
+        })
+        .await
+        .map_err(StorageError::TaskJoin)?
     }
 }
 
@@ -124,29 +218,27 @@ pub struct SledBlockStorage {
 
 #[allow(dead_code)]
 impl SledBlockStorage {
-    pub fn new(path: &str) -> Result<Self, String> {
-        use sysinfo::System;
+    pub fn new(path: &str) -> Result<Self, StorageError> {
+        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
-        // Get available system memory
-        let mut sys = System::new_all();
-        sys.refresh_memory();
+        let sys = System::new_with_specifics(
+            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
+        );
         let available_memory = sys.available_memory();
-
-        // Use 10% of available memory for cache, capped at 512MB
         let cache_size = std::cmp::min(available_memory / 10, 512 * 1024 * 1024);
 
         tracing::info!(
-            "📊 Configuring sled cache: {} MB (available memory: {} MB)",
-            cache_size / (1024 * 1024),
-            available_memory / (1024 * 1024)
+            cache_mb = cache_size / (1024 * 1024),
+            available_mb = available_memory / (1024 * 1024),
+            "Configured sled cache"
         );
 
         let db = sled::Config::new()
             .path(path)
             .cache_capacity(cache_size)
             .flush_every_ms(Some(1000))
-            .open()
-            .map_err(|e| e.to_string())?;
+            .mode(sled::Mode::HighThroughput)
+            .open()?;
 
         Ok(Self { db })
     }
@@ -159,24 +251,32 @@ impl SledBlockStorage {
 #[async_trait::async_trait]
 impl BlockStorage for SledBlockStorage {
     async fn get_block(&self, height: u64) -> Option<Block> {
+        let db = self.db.clone();
         let key = format!("block:{}", height);
-        let value = self.db.get(key.as_bytes()).ok()??;
-        bincode::deserialize(&value).ok()
+
+        spawn_blocking(move || {
+            let value = db.get(key.as_bytes()).ok()??;
+            bincode::deserialize(&value).ok()
+        })
+        .await
+        .ok()
+        .flatten()
     }
 
     async fn store_block(&self, block: &Block) -> Result<(), String> {
+        let db = self.db.clone();
+        let block = block.clone();
         let key = format!("block:{}", block.header.height);
-        let value = bincode::serialize(block).map_err(|e| e.to_string())?;
-        self.db
-            .insert(key.as_bytes(), value)
-            .map_err(|e| e.to_string())?;
 
-        // Update tip
-        self.db
-            .insert(b"tip_height", block.header.height.to_le_bytes().as_ref())
-            .map_err(|e| e.to_string())?;
-
-        Ok(())
+        spawn_blocking(move || {
+            let value = bincode::serialize(&block)?;
+            db.insert(key.as_bytes(), value)?;
+            db.insert(b"tip_height", block.header.height.to_le_bytes().as_ref())?;
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
     }
 
     async fn get_tip(&self) -> Result<Block, String> {
@@ -187,14 +287,19 @@ impl BlockStorage for SledBlockStorage {
     }
 
     async fn get_height(&self) -> u64 {
-        self.db
-            .get(b"tip_height")
-            .ok()
-            .flatten()
-            .and_then(|bytes| {
-                let arr: [u8; 8] = bytes.as_ref().try_into().ok()?;
-                Some(u64::from_le_bytes(arr))
-            })
-            .unwrap_or(0)
+        let db = self.db.clone();
+
+        spawn_blocking(move || {
+            db.get(b"tip_height")
+                .ok()
+                .flatten()
+                .and_then(|bytes| {
+                    let arr: [u8; 8] = bytes.as_ref().try_into().ok()?;
+                    Some(u64::from_le_bytes(arr))
+                })
+                .unwrap_or(0)
+        })
+        .await
+        .unwrap_or(0)
     }
 }

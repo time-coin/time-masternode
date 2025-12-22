@@ -459,7 +459,7 @@ async fn handle_peer(
                                     if limiter.check("utxo_query", &ip_str) {
                                         let mut responses = Vec::new();
                                         for op in outpoints {
-                                            if let Some(state) = utxo_mgr.get_state(op).await {
+                                            if let Some(state) = utxo_mgr.get_state(op) {
                                                 responses.push((op.clone(), state));
                                             }
                                         }

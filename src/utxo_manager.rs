@@ -1,20 +1,22 @@
 use crate::storage::UtxoStorage;
 use crate::types::*;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Debug, thiserror::Error)]
 #[allow(dead_code)]
 pub enum UtxoError {
     #[error("UTXO already locked or spent")]
     AlreadyUsed,
+
+    #[error("Storage error: {0}")]
+    Storage(#[from] crate::storage::StorageError),
 }
 
 #[allow(dead_code)]
 pub struct UTXOStateManager {
     pub storage: Arc<dyn UtxoStorage>,
-    pub utxo_states: Arc<RwLock<HashMap<OutPoint, UTXOState>>>,
+    pub utxo_states: DashMap<OutPoint, UTXOState>,
 }
 
 impl UTXOStateManager {
@@ -23,61 +25,59 @@ impl UTXOStateManager {
         use crate::storage::InMemoryUtxoStorage;
         Self {
             storage: Arc::new(InMemoryUtxoStorage::new()),
-            utxo_states: Arc::new(RwLock::new(HashMap::new())),
+            utxo_states: DashMap::new(),
         }
     }
 
     pub fn new_with_storage(storage: Arc<dyn UtxoStorage>) -> Self {
         Self {
             storage,
-            utxo_states: Arc::new(RwLock::new(HashMap::new())),
+            utxo_states: DashMap::new(),
         }
     }
 
-    pub async fn add_utxo(&self, utxo: UTXO) {
+    pub async fn add_utxo(&self, utxo: UTXO) -> Result<(), UtxoError> {
         let outpoint = utxo.outpoint.clone();
-        let _ = self.storage.add_utxo(utxo).await;
-        self.utxo_states
-            .write()
-            .await
-            .insert(outpoint, UTXOState::Unspent);
+        self.storage.add_utxo(utxo).await?;
+        self.utxo_states.insert(outpoint, UTXOState::Unspent);
+        Ok(())
     }
 
-    pub async fn remove_utxo(&self, outpoint: &OutPoint) {
-        let _ = self.storage.remove_utxo(outpoint).await;
-        self.utxo_states.write().await.remove(outpoint);
+    pub async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
+        self.storage.remove_utxo(outpoint).await?;
+        self.utxo_states.remove(outpoint);
+        Ok(())
     }
 
     #[allow(dead_code)]
-    pub async fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
-        let mut states = self.utxo_states.write().await;
-        match states.get(outpoint) {
-            Some(UTXOState::Unspent) => {
-                states.insert(
-                    outpoint.clone(),
-                    UTXOState::Locked {
+    pub fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
+        use dashmap::mapref::entry::Entry;
+
+        match self.utxo_states.entry(outpoint.clone()) {
+            Entry::Occupied(mut entry) => {
+                if matches!(entry.get(), UTXOState::Unspent) {
+                    entry.insert(UTXOState::Locked {
                         txid,
                         locked_at: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs() as i64,
-                    },
-                );
-                Ok(())
+                    });
+                    Ok(())
+                } else {
+                    Err(UtxoError::AlreadyUsed)
+                }
             }
-            _ => Err(UtxoError::AlreadyUsed),
+            Entry::Vacant(_) => Err(UtxoError::AlreadyUsed),
         }
     }
 
-    pub async fn get_state(&self, outpoint: &OutPoint) -> Option<UTXOState> {
-        self.utxo_states.read().await.get(outpoint).cloned()
+    pub fn get_state(&self, outpoint: &OutPoint) -> Option<UTXOState> {
+        self.utxo_states.get(outpoint).map(|r| r.value().clone())
     }
 
-    pub async fn update_state(&self, outpoint: &OutPoint, state: UTXOState) {
-        self.utxo_states
-            .write()
-            .await
-            .insert(outpoint.clone(), state);
+    pub fn update_state(&self, outpoint: &OutPoint, state: UTXOState) {
+        self.utxo_states.insert(outpoint.clone(), state);
     }
 
     #[allow(dead_code)]
@@ -95,16 +95,14 @@ impl UTXOStateManager {
         self.storage.list_utxos().await
     }
 
-    /// Calculate hash of entire UTXO set for state comparison
+    /// Calculate hash of entire UTXO set for state comparison - optimized with direct byte comparison
     pub async fn calculate_utxo_set_hash(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
         let mut utxos = self.list_all_utxos().await;
-        // Sort by outpoint for deterministic ordering
-        utxos.sort_by(|a, b| {
-            let a_key = format!("{}:{}", hex::encode(a.outpoint.txid), a.outpoint.vout);
-            let b_key = format!("{}:{}", hex::encode(b.outpoint.txid), b.outpoint.vout);
-            a_key.cmp(&b_key)
+        // Sort by bytes directly - no string allocations!
+        utxos.sort_unstable_by(|a, b| {
+            (&a.outpoint.txid, a.outpoint.vout).cmp(&(&b.outpoint.txid, b.outpoint.vout))
         });
 
         let mut hasher = Sha256::new();
@@ -165,11 +163,11 @@ impl UTXOStateManager {
             if let Err(e) = self.storage.remove_utxo(&outpoint).await {
                 tracing::warn!("Failed to remove UTXO during reconciliation: {}", e);
             }
-            self.utxo_states.write().await.remove(&outpoint);
+            self.utxo_states.remove(&outpoint);
         }
 
         for utxo in to_add {
-            self.add_utxo(utxo).await;
+            let _ = self.add_utxo(utxo).await;
         }
 
         tracing::info!(
