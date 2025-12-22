@@ -621,7 +621,7 @@ async fn handle_peer(
                                             registered_at: now,
                                         };
                                         // Register each masternode from the response
-                                        if let Ok(_) = masternode_registry.register(masternode, mn_data.reward_address.clone()).await {
+                                        if masternode_registry.register(masternode, mn_data.reward_address.clone()).await.is_ok() {
                                             registered += 1;
                                         }
                                     }

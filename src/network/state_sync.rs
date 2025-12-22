@@ -378,11 +378,10 @@ mod tests {
 
     #[test]
     fn test_state_sync_manager_creation() {
-        let manager = StateSyncManager::new();
+        let _manager = StateSyncManager::new();
         // Verify manager is created with no pending blocks
-        assert_eq!(
+        assert!(
             std::mem::size_of::<StateSyncManager>() > 0,
-            true,
             "Manager size should be non-zero"
         );
     }

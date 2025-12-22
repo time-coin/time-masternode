@@ -33,6 +33,7 @@ pub struct AppContext {
 impl AppContext {
     /// Create a minimal context for testing
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn test_context() -> Self {
         unimplemented!("Use AppBuilder for test setup")
     }
