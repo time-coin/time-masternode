@@ -153,6 +153,17 @@ impl PeerConnectionRegistry {
 
         let msg_bytes = format!("{}\n", msg_json);
         let mut connections = self.connections.write().await;
+        let peer_count = connections.len();
+
+        if peer_count == 0 {
+            debug!(
+                "⚠️  Broadcast: no peers connected (message type: {})",
+                std::any::type_name_of_val(&message)
+            );
+            return;
+        }
+
+        debug!("📡 Broadcasting to {} peer(s)", peer_count);
         let mut disconnected_peers = Vec::new();
 
         for (peer_ip, writer) in connections.iter_mut() {
@@ -172,6 +183,7 @@ impl PeerConnectionRegistry {
         // Remove disconnected peers
         for peer_ip in disconnected_peers {
             connections.remove(&peer_ip);
+            debug!("🔌 Removed disconnected peer from registry: {}", peer_ip);
         }
     }
 

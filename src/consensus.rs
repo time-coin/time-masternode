@@ -425,7 +425,7 @@ impl ConsensusEngine {
         let fee = input_sum.saturating_sub(output_sum);
 
         // Check mempool limits before adding
-        let pending_count = self.tx_pool.get_all_pending().len();
+        let pending_count = self.tx_pool.pending_count();
         if pending_count >= MAX_MEMPOOL_TRANSACTIONS {
             return Err(format!(
                 "Mempool full: {} transactions (max {})",

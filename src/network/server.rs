@@ -341,9 +341,26 @@ async fn handle_peer(
                                         };
                                         let _ = peer_registry.send_to_peer(&ip_str, ack_msg).await;
 
+                                        // Send our masternode announcement if we're a masternode
+                                        let local_masternodes = masternode_registry.get_all().await;
+                                        for mn_info in local_masternodes {
+                                            let announcement = NetworkMessage::MasternodeAnnouncement {
+                                                address: mn_info.masternode.address.clone(),
+                                                reward_address: mn_info.reward_address.clone(),
+                                                tier: mn_info.masternode.tier.clone(),
+                                                public_key: mn_info.masternode.public_key,
+                                            };
+                                            let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
+                                            tracing::info!("📢 Sent masternode announcement to newly connected peer {}", ip_str);
+                                        }
+
                                         // Request peer list for peer discovery
                                         let get_peers_msg = NetworkMessage::GetPeers;
                                         let _ = peer_registry.send_to_peer(&ip_str, get_peers_msg).await;
+
+                                        // Request masternodes for peer discovery
+                                        let get_mn_msg = NetworkMessage::GetMasternodes;
+                                        let _ = peer_registry.send_to_peer(&ip_str, get_mn_msg).await;
 
                                         line.clear();
                                         continue;
