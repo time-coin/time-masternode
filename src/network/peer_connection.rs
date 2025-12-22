@@ -311,7 +311,174 @@ impl PeerConnection {
         }
     }
 
+    /// Run the unified message loop for this connection with broadcast channel integration
+    pub async fn run_message_loop_with_registry(
+        mut self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) -> Result<(), String> {
+        let mut ping_interval = interval(Self::PING_INTERVAL);
+        let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
+        let mut buffer = String::new();
+
+        info!(
+            "🔄 [{:?}] Starting message loop for {} (port: {})",
+            self.direction, self.peer_ip, self.remote_port
+        );
+
+        // Send initial handshake (required by protocol)
+        let handshake = NetworkMessage::Handshake {
+            magic: *b"TIME",
+            protocol_version: 1,
+            network: "mainnet".to_string(),
+        };
+
+        if let Err(e) = self.send_message(&handshake).await {
+            error!(
+                "❌ [{:?}] Failed to send handshake to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        info!(
+            "🤝 [{:?}] Sent handshake to {}",
+            self.direction, self.peer_ip
+        );
+
+        // Send initial ping
+        if let Err(e) = self.send_ping().await {
+            error!(
+                "❌ [{:?}] Failed to send initial ping to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        loop {
+            tokio::select! {
+                // Receive messages from peer
+                result = self.reader.read_line(&mut buffer) => {
+                    match result {
+                        Ok(0) => {
+                            info!("🔌 [{:?}] Connection to {} closed by peer (EOF)",
+                                  self.direction, self.peer_ip);
+                            break;
+                        }
+                        Ok(_) => {
+                            if let Err(e) = self.handle_message_with_registry(&buffer, &peer_registry).await {
+                                warn!("⚠️ [{:?}] Error handling message from {}: {}",
+                                      self.direction, self.peer_ip, e);
+                            }
+                            buffer.clear();
+                        }
+                        Err(e) => {
+                            error!("❌ [{:?}] Error reading from {}: {}",
+                                   self.direction, self.peer_ip, e);
+                            break;
+                        }
+                    }
+                }
+
+                // Send periodic pings
+                _ = ping_interval.tick() => {
+                    if let Err(e) = self.send_ping().await {
+                        error!("❌ [{:?}] Failed to send ping to {}: {}",
+                               self.direction, self.peer_ip, e);
+                        break;
+                    }
+                }
+
+                // Check for timeout
+                _ = timeout_check.tick() => {
+                    if self.should_disconnect().await {
+                        error!("❌ [{:?}] Disconnecting {} due to timeout",
+                               self.direction, self.peer_ip);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!(
+            "🔌 [{:?}] Message loop ended for {}",
+            self.direction, self.peer_ip
+        );
+        Ok(())
+    }
+
+    /// Handle a single message with peer registry for master node discovery
+    async fn handle_message_with_registry(
+        &self,
+        line: &str,
+        _peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+
+        let message: NetworkMessage =
+            serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
+
+        match &message {
+            NetworkMessage::Ping { nonce, timestamp } => {
+                self.handle_ping(*nonce, *timestamp).await?;
+            }
+            NetworkMessage::Pong { nonce, timestamp } => {
+                self.handle_pong(*nonce, *timestamp).await?;
+            }
+            NetworkMessage::MasternodeAnnouncement {
+                address,
+                reward_address: _,
+                tier: _,
+                public_key: _,
+            } => {
+                // Log received masternode announcement from outbound connection
+                info!(
+                    "📨 [{:?}] Received masternode announcement from {} for IP: {}",
+                    self.direction, self.peer_ip, address
+                );
+                // NOTE: Full processing happens in NetworkServer for inbound connections
+                // For outbound connections, we just log - NetworkServer handles the registration
+            }
+            NetworkMessage::GetMasternodes => {
+                // Outbound connection received GetMasternodes request
+                debug!(
+                    "📥 [{:?}] Received GetMasternodes request from {}",
+                    self.direction, self.peer_ip
+                );
+            }
+            NetworkMessage::MasternodesResponse(masternodes) => {
+                // Outbound connection received masternode list from peer
+                debug!(
+                    "📥 [{:?}] Received MasternodesResponse from {} with {} masternode(s)",
+                    self.direction,
+                    self.peer_ip,
+                    masternodes.len()
+                );
+            }
+            _ => {
+                // Other message types are logged but not processed here
+                debug!(
+                    "📨 [{:?}] Received message from {} (type: {})",
+                    self.direction,
+                    self.peer_ip,
+                    match &message {
+                        NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
+                        NetworkMessage::TransactionVote(_) => "TransactionVote",
+                        NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+                        NetworkMessage::Handshake { .. } => "Handshake",
+                        _ => "Other",
+                    }
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Run the unified message loop for this connection
+    #[allow(dead_code)]
     pub async fn run_message_loop(mut self) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
         let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
@@ -404,6 +571,7 @@ impl PeerConnection {
     }
 
     /// Handle a single message
+    #[allow(dead_code)]
     async fn handle_message(&self, line: &str) -> Result<(), String> {
         let line = line.trim();
         if line.is_empty() {

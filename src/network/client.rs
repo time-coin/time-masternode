@@ -556,16 +556,16 @@ async fn maintain_peer_connection(
     // Get peer IP for later reference
     let peer_ip = peer_conn.peer_ip().to_string();
 
-    // Register writer in peer registry for sending messages to this peer
-    // Note: peer_registry needs a writer for the outbound connection
-    // This allows other parts of the system to send messages via this connection
-
     // Run the message loop which handles ping/pong and routes other messages
-    let result = peer_conn.run_message_loop().await;
+    // Pass peer_registry so it can register incoming messages from this peer
+    let result = peer_conn
+        .run_message_loop_with_registry(peer_registry.clone())
+        .await;
 
     // Clean up on disconnect
     connection_manager.mark_disconnected(&peer_ip);
     peer_registry.unregister_peer(&peer_ip).await;
+    tracing::debug!("🔌 Unregistered peer {}", peer_ip);
 
     result
 }
