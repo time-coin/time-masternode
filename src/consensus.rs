@@ -679,7 +679,7 @@ impl ConsensusEngine {
                 address,
             };
 
-            self.utxo_manager.add_utxo(utxo.clone()).await;
+            let _ = self.utxo_manager.add_utxo(utxo.clone()).await;
 
             // Notify clients of new UTXO creation (finalized!)
             self.state_notifier

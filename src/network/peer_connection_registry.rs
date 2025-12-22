@@ -316,7 +316,7 @@ impl PeerConnectionRegistry {
             let connections = self.connections.read().await;
             let mut ips: Vec<String> = connections
                 .keys()
-                .filter(|ip| source_peer.is_none_or(|src| *ip != src))
+                .filter(|ip| source_peer.is_none() || source_peer.map_or(true, |src| *ip != src))
                 .cloned()
                 .collect();
 

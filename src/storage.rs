@@ -17,6 +17,7 @@ pub enum StorageError {
     TaskJoin(#[from] tokio::task::JoinError),
 
     #[error("UTXO not found: {0:?}")]
+    #[allow(dead_code)]
     NotFound(OutPoint),
 }
 
@@ -118,6 +119,7 @@ impl SledUtxoStorage {
         Ok(Self { db })
     }
 
+    #[allow(dead_code)]
     pub fn db(&self) -> sled::Db {
         self.db.clone()
     }

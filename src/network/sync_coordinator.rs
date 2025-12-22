@@ -10,7 +10,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+#[allow(dead_code)]
 const SYNC_CHECK_INTERVAL_SECS: u64 = 30;
+#[allow(dead_code)]
 const CONSENSUS_THRESHOLD: f64 = 0.666; // 2/3 majority
 
 /// Coordinates synchronization between network and blockchain layers

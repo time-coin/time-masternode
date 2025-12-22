@@ -127,6 +127,7 @@ impl ConnectionManager {
     }
 
     /// Get connection direction
+    #[allow(dead_code)]
     pub fn get_direction(&self, ip: &str) -> Option<ConnectionDirection> {
         self.connections.get(ip).map(|e| e.direction)
     }
@@ -174,17 +175,20 @@ impl ConnectionManager {
     }
 
     /// Get inbound connection count
+    #[allow(dead_code)]
     pub fn inbound_count(&self) -> usize {
         self.inbound_count.load(Ordering::Relaxed)
     }
 
     /// Get outbound connection count
+    #[allow(dead_code)]
     pub fn outbound_count(&self) -> usize {
         self.outbound_count.load(Ordering::Relaxed)
     }
 
     /// Mark that a peer is in reconnection backoff
     /// This prevents duplicate connection attempts during backoff period
+    #[allow(dead_code)]
     pub fn mark_reconnecting(&self, ip: &str, retry_delay: u64, attempt_count: u64) {
         self.reconnecting.insert(
             ip.to_string(),
@@ -212,6 +216,7 @@ impl ConnectionManager {
     }
 
     /// Cleanup stale reconnection states (call periodically)
+    #[allow(dead_code)]
     pub fn cleanup_reconnecting(&self, max_age: std::time::Duration) {
         let now = Instant::now();
         self.reconnecting.retain(|_, state| {

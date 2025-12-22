@@ -1,0 +1,43 @@
+[Unit]
+Description=TIME Coin Protocol Daemon
+Documentation=https://github.com/time-coin/timed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=timecoin
+Group=timecoin
+
+# Working directory
+WorkingDirectory=/opt/timecoin
+
+# Binary location
+ExecStart=/usr/local/bin/timed --config /etc/timecoin/config.toml
+
+# Restart policy
+Restart=on-failure
+RestartSec=10s
+
+# Resource limits
+LimitNOFILE=65536
+Nice=-5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/timecoin/data /var/log/timecoin
+
+# Environment
+Environment="RUST_LOG=info"
+Environment="RUST_BACKTRACE=1"
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=timed
+
+[Install]
+WantedBy=multi-user.target

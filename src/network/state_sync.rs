@@ -15,8 +15,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
+#[allow(dead_code)]
 const MAX_PENDING_BLOCKS: usize = 100;
 const STATE_SYNC_TIMEOUT_SECS: u64 = 30;
+#[allow(dead_code)]
 const PEER_STATE_CACHE_TTL_SECS: i64 = 300; // 5 minutes
 
 /// Tracks peer's blockchain state for synchronization

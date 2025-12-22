@@ -6,12 +6,14 @@ use thiserror::Error;
 
 const MAX_POOL_SIZE: usize = 10_000;
 const MAX_POOL_BYTES: usize = 300 * 1024 * 1024; // 300MB
+#[allow(dead_code)]
 const REJECT_CACHE_SIZE: usize = 1000;
 
 #[derive(Clone)]
 struct PoolEntry {
     tx: Transaction,
     fee: u64,
+    #[allow(dead_code)]
     added_at: Instant,
     size: usize,
 }
@@ -151,6 +153,7 @@ impl TransactionPool {
     }
 
     /// Get rejection reason
+    #[allow(dead_code)]
     pub fn get_rejection_reason(&self, txid: &Hash256) -> Option<String> {
         self.rejected.get(txid).map(|e| e.0.clone())
     }
@@ -161,11 +164,13 @@ impl TransactionPool {
     }
 
     /// Get fee for a specific transaction
+    #[allow(dead_code)]
     pub fn get_fee(&self, txid: &Hash256) -> Option<u64> {
         self.pending.get(txid).map(|e| e.fee)
     }
 
     /// Get pool metrics
+    #[allow(dead_code)]
     pub fn get_metrics(&self) -> PoolMetrics {
         let now = Instant::now();
         let oldest_age = self
@@ -196,6 +201,7 @@ impl TransactionPool {
     }
 
     /// Clean up old rejected entries (call periodically)
+    #[allow(dead_code)]
     pub fn cleanup_rejected(&self, max_age_secs: u64) {
         let now = Instant::now();
         self.rejected.retain(|_, (_, rejected_at)| {
@@ -219,6 +225,7 @@ impl TransactionPool {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PoolMetrics {
     pub pending_count: usize,
     pub pending_bytes: usize,

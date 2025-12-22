@@ -372,7 +372,7 @@ impl Blockchain {
             }
 
             // Log progress every 10 seconds
-            if start_time.elapsed().as_secs().is_multiple_of(10) {
+            if start_time.elapsed().as_secs() % 10 == 0 {
                 let progress = ((current - start_height) as f64
                     / (target_height - start_height) as f64)
                     * 100.0;
@@ -535,7 +535,7 @@ impl Blockchain {
                     last_leader_activity = std::time::Instant::now();
 
                     // Log progress
-                    if current.is_multiple_of(10) || current == params.target {
+                    if current % 10 == 0 || current == params.target {
                         let progress = ((current - params.current) as f64
                             / params.blocks_to_catch as f64)
                             * 100.0;
@@ -603,7 +603,7 @@ impl Blockchain {
                     current = next_height;
 
                     // Log progress every 10 blocks or at milestones
-                    if current.is_multiple_of(10) || current == params.target {
+                    if current % 10 == 0 || current == params.target {
                         let progress = ((current - params.current) as f64
                             / params.blocks_to_catch as f64)
                             * 100.0;
@@ -1427,7 +1427,8 @@ impl Blockchain {
             // First, remove UTXOs spent by inputs (except for coinbase)
             if !tx.inputs.is_empty() {
                 for input in &tx.inputs {
-                    self.consensus
+                    let _ = self
+                        .consensus
                         .utxo_manager
                         .remove_utxo(&input.previous_output)
                         .await;
@@ -1451,7 +1452,7 @@ impl Blockchain {
                     address,
                 };
 
-                self.consensus.utxo_manager.add_utxo(utxo).await;
+                let _ = self.consensus.utxo_manager.add_utxo(utxo).await;
             }
         }
     }
@@ -1910,7 +1911,7 @@ impl Blockchain {
                 };
 
                 // Remove the UTXO
-                self.consensus.utxo_manager.remove_utxo(&outpoint).await;
+                let _ = self.consensus.utxo_manager.remove_utxo(&outpoint).await;
                 tracing::trace!("Reverted UTXO {}:{}", hex::encode(txid), i);
             }
 
