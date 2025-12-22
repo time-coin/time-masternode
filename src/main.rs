@@ -13,6 +13,7 @@ mod network;
 mod network_type;
 mod peer_manager;
 mod rpc;
+mod shutdown;
 mod state_notifier;
 mod storage;
 mod time_sync;
@@ -37,6 +38,7 @@ use network::server::NetworkServer;
 use network_type::NetworkType;
 use peer_manager::PeerManager;
 use rpc::server::RpcServer;
+use shutdown::ShutdownManager;
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
@@ -116,6 +118,9 @@ async fn main() {
     };
 
     setup_logging(&config.logging, args.verbose);
+
+    let mut shutdown_manager = ShutdownManager::new();
+    let shutdown_token = shutdown_manager.token();
 
     let network_type = config.node.network_type();
     let p2p_addr = config.network.full_listen_address(&network_type);
@@ -496,47 +501,55 @@ async fn main() {
         let mn_address = mn.address.clone();
         let mn_clone = mn.clone();
         let peer_registry_clone = peer_registry.clone();
-        tokio::spawn(async move {
+        let shutdown_token_clone = shutdown_token.clone();
+        let heartbeat_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
-                interval.tick().await;
-
-                // Update old-style heartbeat
-                if let Err(e) = registry_clone.heartbeat(&mn_address).await {
-                    tracing::warn!("❌ Failed to send heartbeat: {}", e);
-                }
-
-                // Broadcast masternode announcement periodically so peers discover us
-                let announcement = NetworkMessage::MasternodeAnnouncement {
-                    address: mn_clone.address.clone(),
-                    reward_address: mn_clone.wallet_address.clone(),
-                    tier: mn_clone.tier.clone(),
-                    public_key: mn_clone.public_key,
-                };
-                peer_registry_clone.broadcast(announcement).await;
-
-                // Request masternodes from all connected peers for peer exchange
-                tracing::info!("📤 Broadcasting GetMasternodes to all peers");
-                peer_registry_clone
-                    .broadcast(NetworkMessage::GetMasternodes)
-                    .await;
-
-                // Create and broadcast attestable heartbeat
-                match attestation_clone.create_heartbeat().await {
-                    Ok(heartbeat) => {
-                        tracing::debug!(
-                            "💓 Created signed heartbeat seq {}",
-                            heartbeat.sequence_number
-                        );
-                        // Broadcast to network
-                        registry_clone.broadcast_heartbeat(heartbeat).await;
+                tokio::select! {
+                    _ = shutdown_token_clone.cancelled() => {
+                        tracing::debug!("🛑 Heartbeat task shutting down gracefully");
+                        break;
                     }
-                    Err(e) => {
-                        tracing::warn!("❌ Failed to create attestable heartbeat: {}", e);
+                    _ = interval.tick() => {
+                        // Update old-style heartbeat
+                        if let Err(e) = registry_clone.heartbeat(&mn_address).await {
+                            tracing::warn!("❌ Failed to send heartbeat: {}", e);
+                        }
+
+                        // Broadcast masternode announcement periodically so peers discover us
+                        let announcement = NetworkMessage::MasternodeAnnouncement {
+                            address: mn_clone.address.clone(),
+                            reward_address: mn_clone.wallet_address.clone(),
+                            tier: mn_clone.tier.clone(),
+                            public_key: mn_clone.public_key,
+                        };
+                        peer_registry_clone.broadcast(announcement).await;
+
+                        // Request masternodes from all connected peers for peer exchange
+                        tracing::info!("📤 Broadcasting GetMasternodes to all peers");
+                        peer_registry_clone
+                            .broadcast(NetworkMessage::GetMasternodes)
+                            .await;
+
+                        // Create and broadcast attestable heartbeat
+                        match attestation_clone.create_heartbeat().await {
+                            Ok(heartbeat) => {
+                                tracing::debug!(
+                                    "💓 Created signed heartbeat seq {}",
+                                    heartbeat.sequence_number
+                                );
+                                // Broadcast to network
+                                registry_clone.broadcast_heartbeat(heartbeat).await;
+                            }
+                            Err(e) => {
+                                tracing::warn!("❌ Failed to create attestable heartbeat: {}", e);
+                            }
+                        }
                     }
                 }
             }
         });
+        shutdown_manager.register_task(heartbeat_handle);
     }
 
     // Initialize genesis and catchup in background
@@ -615,7 +628,8 @@ async fn main() {
     // Start block production timer (every 10 minutes)
     let block_registry = registry.clone();
     let block_blockchain = blockchain.clone();
-    tokio::spawn(async move {
+    let shutdown_token_clone = shutdown_token.clone();
+    let block_production_handle = tokio::spawn(async move {
         // Calculate time until next 10-minute boundary
         let now = chrono::Utc::now();
         let minute = now.minute();
@@ -629,154 +643,169 @@ async fn main() {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            interval.tick().await;
-
-            // Mark start of new block period
-            block_registry.start_new_block_period().await;
-
-            let now = chrono::Utc::now();
-            let timestamp = now
-                .date_naive()
-                .and_hms_opt(now.hour(), (now.minute() / 10) * 10, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp();
-
-            // Get masternodes eligible for rewards (active for entire block period)
-            let eligible = block_registry.get_eligible_for_rewards().await;
-            let masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _)| mn.clone()).collect();
-
-            // Require at least 3 masternodes for block production
-            if masternodes.len() < 3 {
-                tracing::warn!(
-                    "⚠️ Skipping block production: only {} masternodes active (minimum 3 required)",
-                    masternodes.len()
-                );
-                continue;
-            }
-
-            let current_height = block_blockchain.get_height().await;
-            let expected_height = block_blockchain.calculate_expected_height();
-
-            // Determine what to do based on height comparison
-            if current_height < expected_height - 1 {
-                // More than 1 block behind - need catchup
-                tracing::info!(
-                    "🧱 Catching up: height {} → {} at {} ({}:{}0) with {} eligible masternodes",
-                    current_height,
-                    expected_height,
-                    timestamp,
-                    now.hour(),
-                    (now.minute() / 10),
-                    masternodes.len()
-                );
-
-                match block_blockchain.catchup_blocks().await {
-                    Ok(()) => {
-                        tracing::info!("✅ Catchup complete");
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ Failed to catchup blocks: {}", e);
-                        continue;
-                    }
+            tokio::select! {
+                _ = shutdown_token_clone.cancelled() => {
+                    tracing::debug!("🛑 Block production task shutting down gracefully");
+                    break;
                 }
-            } else if current_height == expected_height - 1 || current_height == expected_height {
-                // At expected height or one behind (normal) - determine if we should produce
+                _ = interval.tick() => {
+                    // Mark start of new block period
+                    block_registry.start_new_block_period().await;
 
-                // Use VDF to select block producer deterministically
-                let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        tracing::error!("Failed to get previous block hash: {}", e);
+                    let now = chrono::Utc::now();
+                    let timestamp = now
+                        .date_naive()
+                        .and_hms_opt(now.hour(), (now.minute() / 10) * 10, 0)
+                        .unwrap()
+                        .and_utc()
+                        .timestamp();
+
+                    // Get masternodes eligible for rewards (active for entire block period)
+                    let eligible = block_registry.get_eligible_for_rewards().await;
+                    let masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _)| mn.clone()).collect();
+
+                    // Require at least 3 masternodes for block production
+                    if masternodes.len() < 3 {
+                        tracing::warn!(
+                            "⚠️ Skipping block production: only {} masternodes active (minimum 3 required)",
+                            masternodes.len()
+                        );
                         continue;
                     }
-                };
 
-                // Use deterministic leader selection based on previous block hash
-                // This provides fair rotation without expensive VDF computation
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(prev_block_hash);
-                hasher.update(current_height.to_le_bytes());
-                let selection_hash: [u8; 32] = hasher.finalize().into();
+                    let current_height = block_blockchain.get_height().await;
+                    let expected_height = block_blockchain.calculate_expected_height();
 
-                // Select producer: hash mod masternode_count
-                let producer_index = {
-                    let mut val = 0u64;
-                    for (i, &byte) in selection_hash.iter().take(8).enumerate() {
-                        val |= (byte as u64) << (i * 8);
-                    }
-                    (val % masternodes.len() as u64) as usize
-                };
+                    // Determine what to do based on height comparison
+                    if current_height < expected_height - 1 {
+                        // More than 1 block behind - need catchup
+                        tracing::info!(
+                            "🧱 Catching up: height {} → {} at {} ({}:{}0) with {} eligible masternodes",
+                            current_height,
+                            expected_height,
+                            timestamp,
+                            now.hour(),
+                            (now.minute() / 10),
+                            masternodes.len()
+                        );
 
-                let selected_producer = &masternodes[producer_index];
-                let is_producer = masternode_info
-                    .as_ref()
-                    .map(|mn| mn.address == selected_producer.address)
-                    .unwrap_or(false);
+                        match block_blockchain.catchup_blocks().await {
+                            Ok(()) => {
+                                tracing::info!("✅ Catchup complete");
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to catchup blocks: {}", e);
+                                continue;
+                            }
+                        }
+                    } else if current_height == expected_height - 1 || current_height == expected_height {
+                        // At expected height or one behind (normal) - determine if we should produce
 
-                if is_producer {
-                    tracing::info!(
-                        "🎯 Selected as block producer for height {} at {} ({}:{}0)",
-                        current_height + 1,
-                        timestamp,
-                        now.hour(),
-                        (now.minute() / 10),
-                    );
+                        // Use VDF to select block producer deterministically
+                        let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
+                            Ok(hash) => hash,
+                            Err(e) => {
+                                tracing::error!("Failed to get previous block hash: {}", e);
+                                continue;
+                            }
+                        };
 
-                    match block_blockchain.produce_block().await {
-                        Ok(block) => {
+                        // Use deterministic leader selection based on previous block hash
+                        // This provides fair rotation without expensive VDF computation
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(prev_block_hash);
+                        hasher.update(current_height.to_le_bytes());
+                        let selection_hash: [u8; 32] = hasher.finalize().into();
+
+                        // Select producer: hash mod masternode_count
+                        let producer_index = {
+                            let mut val = 0u64;
+                            for (i, &byte) in selection_hash.iter().take(8).enumerate() {
+                                val |= (byte as u64) << (i * 8);
+                            }
+                            (val % masternodes.len() as u64) as usize
+                        };
+
+                        let selected_producer = &masternodes[producer_index];
+                        let is_producer = masternode_info
+                            .as_ref()
+                            .map(|mn| mn.address == selected_producer.address)
+                            .unwrap_or(false);
+
+                        if is_producer {
                             tracing::info!(
-                                "✅ Block {} produced: {} transactions, {} masternode rewards",
-                                block.header.height,
-                                block.transactions.len(),
-                                block.masternode_rewards.len()
+                                "🎯 Selected as block producer for height {} at {} ({}:{}0)",
+                                current_height + 1,
+                                timestamp,
+                                now.hour(),
+                                (now.minute() / 10),
                             );
 
-                            // Broadcast block to all peers
-                            block_registry.broadcast_block(block).await;
+                            match block_blockchain.produce_block().await {
+                                Ok(block) => {
+                                    tracing::info!(
+                                        "✅ Block {} produced: {} transactions, {} masternode rewards",
+                                        block.header.height,
+                                        block.transactions.len(),
+                                        block.masternode_rewards.len()
+                                    );
+
+                                    // Broadcast block to all peers
+                                    block_registry.broadcast_block(block).await;
+                                }
+                                Err(e) => {
+                                    tracing::error!("❌ Failed to produce block: {}", e);
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                "⏸️  Not selected for block {} (producer: {})",
+                                current_height + 1,
+                                selected_producer.address
+                            );
                         }
-                        Err(e) => {
-                            tracing::error!("❌ Failed to produce block: {}", e);
-                        }
+                    } else {
+                        tracing::warn!(
+                            "⚠️ Height {} ahead of expected {}, skipping block production",
+                            current_height,
+                            expected_height
+                        );
                     }
-                } else {
-                    tracing::debug!(
-                        "⏸️  Not selected for block {} (producer: {})",
-                        current_height + 1,
-                        selected_producer.address
-                    );
                 }
-            } else {
-                tracing::warn!(
-                    "⚠️ Height {} ahead of expected {}, skipping block production",
-                    current_height,
-                    expected_height
-                );
             }
         }
     });
+    shutdown_manager.register_task(block_production_handle);
 
     // Start BFT committed block processor (every 5 seconds)
     if bft_consensus.is_some() {
         let bft_blockchain = blockchain.clone();
-        tokio::spawn(async move {
+        let shutdown_token_clone = shutdown_token.clone();
+        let bft_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
             loop {
-                interval.tick().await;
-
-                // Process any BFT-committed blocks
-                match bft_blockchain.process_bft_committed_blocks().await {
-                    Ok(count) if count > 0 => {
-                        tracing::info!("✅ Processed {} BFT-committed block(s)", count);
+                tokio::select! {
+                    _ = shutdown_token_clone.cancelled() => {
+                        tracing::debug!("🛑 BFT block processor task shutting down gracefully");
+                        break;
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("❌ Failed to process BFT-committed blocks: {}", e);
+                    _ = interval.tick() => {
+                        // Process any BFT-committed blocks
+                        match bft_blockchain.process_bft_committed_blocks().await {
+                            Ok(count) if count > 0 => {
+                                tracing::info!("✅ Processed {} BFT-committed block(s)", count);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::error!("❌ Failed to process BFT-committed blocks: {}", e);
+                            }
+                        }
                     }
                 }
             }
         });
+        shutdown_manager.register_task(bft_handle);
     }
 
     // Start network server
@@ -790,8 +819,9 @@ async fn main() {
     let rpc_blockchain = blockchain.clone();
     let rpc_addr_clone = rpc_addr.clone();
     let rpc_network = network_type;
+    let rpc_shutdown_token = shutdown_token.clone();
 
-    tokio::spawn(async move {
+    let rpc_handle = tokio::spawn(async move {
         match RpcServer::new(
             &rpc_addr_clone,
             rpc_consensus,
@@ -804,18 +834,29 @@ async fn main() {
         .await
         {
             Ok(mut server) => {
-                let _ = server.run().await;
+                tokio::select! {
+                    _ = rpc_shutdown_token.cancelled() => {
+                        tracing::debug!("🛑 RPC server shutting down gracefully");
+                    }
+                    result = server.run() => {
+                        if let Err(e) = result {
+                            eprintln!("RPC server error: {}", e);
+                        }
+                    }
+                }
             }
             Err(e) => {
                 eprintln!("  ❌ Failed to start RPC server: {}", e);
             }
         }
     });
+    shutdown_manager.register_task(rpc_handle);
 
     // Periodic status report - logs at :05, :15, :25, :35, :45, :55 (midway between block times)
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
-    tokio::spawn(async move {
+    let shutdown_token_clone = shutdown_token.clone();
+    let status_handle = tokio::spawn(async move {
         loop {
             // Wait until next 5-minute mark (:05, :15, :25, :35, :45, :55)
             let now = std::time::SystemTime::now()
@@ -841,17 +882,24 @@ async fn main() {
 
             let seconds_until = (minutes_until * 60) - second;
 
-            tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)).await;
-
-            let height = status_blockchain.get_height().await;
-            let mn_count = status_registry.list_active().await.len();
-            tracing::info!(
-                "📊 Status: Height={}, Active Masternodes={}",
-                height,
-                mn_count
-            );
+            tokio::select! {
+                _ = shutdown_token_clone.cancelled() => {
+                    tracing::debug!("🛑 Status report task shutting down gracefully");
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)) => {
+                    let height = status_blockchain.get_height().await;
+                    let mn_count = status_registry.list_active().await.len();
+                    tracing::info!(
+                        "📊 Status: Height={}, Active Masternodes={}",
+                        height,
+                        mn_count
+                    );
+                }
+            }
         }
     });
+    shutdown_manager.register_task(status_handle);
 
     match NetworkServer::new(
         &p2p_addr,
@@ -886,9 +934,23 @@ async fn main() {
             println!("╚═══════════════════════════════════════════════════════╝");
             println!("\nPress Ctrl+C to stop\n");
 
-            if let Err(e) = server.run().await {
-                println!("❌ Server error: {}", e);
-            }
+            let shutdown_token_net = shutdown_token.clone();
+            let server_handle = tokio::spawn(async move {
+                tokio::select! {
+                    _ = shutdown_token_net.cancelled() => {
+                        tracing::debug!("🛑 Network server shutting down gracefully");
+                    }
+                    result = server.run() => {
+                        if let Err(e) = result {
+                            println!("❌ Server error: {}", e);
+                        }
+                    }
+                }
+            });
+            shutdown_manager.register_task(server_handle);
+
+            // Wait for shutdown signal
+            shutdown_manager.wait_for_shutdown().await;
         }
         Err(e) => {
             println!("  ❌ Failed to start network: {}", e);
