@@ -34,6 +34,9 @@ pub enum AppError {
 
     #[error("Task join error: {0}")]
     TaskJoin(#[from] tokio::task::JoinError),
+
+    #[error("Initialization error: {0}")]
+    Initialization(String),
 }
 
 #[derive(Error, Debug)]
