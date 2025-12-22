@@ -8,6 +8,9 @@ pub enum AppError {
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
 
+    #[error("Storage initialization error: {0}")]
+    StorageInit(String),
+
     #[error("Network error: {0}")]
     Network(String),
 
