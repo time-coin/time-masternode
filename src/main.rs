@@ -1,9 +1,12 @@
 mod address;
+mod app_context;
+mod app_utils;
 mod bft_consensus;
 mod block;
 mod blockchain;
 mod config;
 mod consensus;
+mod error;
 mod heartbeat_attestation;
 mod masternode_registry;
 mod network;

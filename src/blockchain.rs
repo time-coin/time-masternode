@@ -2185,8 +2185,8 @@ impl Blockchain {
     async fn query_fork_consensus_multi_peer(
         &self,
         fork_height: u64,
-        peer_block_hash: crate::types::Hash256,
-        our_block_hash: Option<crate::types::Hash256>,
+        _peer_block_hash: crate::types::Hash256,
+        _our_block_hash: Option<crate::types::Hash256>,
     ) -> Result<ForkConsensus, String> {
         let peer_manager = match self.peer_manager.read().await.as_ref() {
             Some(pm) => pm.clone(),
