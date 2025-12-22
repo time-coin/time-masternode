@@ -158,7 +158,7 @@ impl PeerConnectionRegistry {
         if peer_count == 0 {
             debug!(
                 "⚠️  Broadcast: no peers connected (message type: {})",
-                std::any::type_name_of_val(&message)
+                std::any::type_name::<NetworkMessage>()
             );
             return;
         }

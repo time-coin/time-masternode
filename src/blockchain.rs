@@ -908,7 +908,9 @@ impl Blockchain {
                     "🏆 We are BFT leader for height {}, proposing block",
                     height
                 );
-                bft.propose_block(block.clone(), signature).await;
+                if let Err(e) = bft.propose_block(block.clone(), signature).await {
+                    tracing::error!("Failed to propose block: {}", e);
+                }
             } else {
                 tracing::debug!(
                     "⏸️  Not BFT leader for height {}, waiting for proposal",

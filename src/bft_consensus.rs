@@ -49,15 +49,20 @@ use std::time::{Duration, Instant};
 
 // ===== CONSENSUS TIMEOUT CONSTANTS =====
 const CONSENSUS_ROUND_TIMEOUT_SECS: u64 = 30;
+#[allow(dead_code)]
 const VOTE_COLLECTION_TIMEOUT_SECS: u64 = 30;
+#[allow(dead_code)]
 const COMMIT_TIMEOUT_SECS: u64 = 10;
+#[allow(dead_code)]
 const VIEW_CHANGE_TIMEOUT_SECS: u64 = 60;
 
 /// Consensus phase tracking for proper protocol execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsensusPhase {
     PrePrepare,
+    #[allow(dead_code)]
     Prepare,
+    #[allow(dead_code)]
     Commit,
     Finalized,
 }
@@ -65,6 +70,7 @@ pub enum ConsensusPhase {
 /// Vote type tracking for BFT phases
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoteType {
+    #[allow(dead_code)]
     Prepare,
     Commit,
 }
@@ -72,6 +78,7 @@ pub enum VoteType {
 /// BFT consensus state for a specific height
 #[derive(Debug, Clone)]
 pub struct ConsensusRound {
+    #[allow(dead_code)]
     pub height: u64,
     pub round: u64,
     pub leader: Option<String>,
@@ -79,6 +86,7 @@ pub struct ConsensusRound {
     pub proposed_block: Option<Block>,
     pub votes: std::collections::HashMap<String, BlockVote>,
     pub start_time: Instant,
+    #[allow(dead_code)]
     pub timeout_at: Instant,
     pub finalized_block: Option<Block>,
 }
@@ -89,10 +97,12 @@ pub struct BlockVote {
     pub voter: String,
     pub vote_type: VoteType,
     pub approve: bool,
+    #[allow(dead_code)]
     pub signature: Vec<u8>,
 }
 
 impl ConsensusRound {
+    #[allow(dead_code)]
     pub fn prepare_vote_count(&self) -> usize {
         self.votes
             .values()
@@ -170,6 +180,7 @@ impl BFTConsensus {
     }
 
     /// Update masternode count
+    #[allow(dead_code)]
     pub fn update_masternode_count(&self, count: usize) {
         self.masternode_count.store(count, Ordering::Relaxed);
     }
@@ -255,6 +266,7 @@ impl BFTConsensus {
     }
 
     /// Check all rounds for timeout and handle view changes
+    #[allow(dead_code)]
     pub async fn check_all_timeouts(&self) {
         let now = Instant::now();
         let mut timed_out = Vec::new();
@@ -287,6 +299,7 @@ impl BFTConsensus {
     }
 
     /// Start background timeout monitor
+    #[allow(dead_code)]
     pub fn start_timeout_monitor(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let consensus = Arc::clone(self);
 
@@ -421,11 +434,13 @@ impl BFTConsensus {
     }
 
     /// Clear committed blocks
+    #[allow(dead_code)]
     pub fn clear_committed_blocks(&self) {
         self.committed_blocks.lock().clear();
     }
 
     /// Get round info for monitoring
+    #[allow(dead_code)]
     pub fn get_round_info(&self, height: u64) -> Option<(u64, ConsensusPhase, usize)> {
         self.rounds
             .get(&height)
