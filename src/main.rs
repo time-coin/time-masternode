@@ -382,17 +382,18 @@ async fn main() {
 
         // Set up BFT to broadcast messages through registry
         let bft_registry = registry.clone();
-        bft.set_broadcast_callback(move |msg| {
+        if let Err(e) = bft.set_broadcast_callback(move |msg| {
             let registry = bft_registry.clone();
             tokio::spawn(async move {
                 // Broadcast through peer manager
                 registry.broadcast_message(msg).await;
             });
-        })
-        .await;
+        }) {
+            tracing::error!("Failed to set BFT broadcast callback: {}", e);
+        }
 
         // Link BFT to blockchain for validation
-        bft.set_blockchain(blockchain.clone()).await;
+        bft.set_blockchain(blockchain.clone());
 
         // Link blockchain to BFT
         blockchain.set_bft_consensus(bft.clone()).await;
@@ -476,8 +477,11 @@ async fn main() {
 
                 // Set signing key for BFT consensus
                 if let Some(ref bft) = bft_consensus {
-                    bft.set_signing_key(signing_key.clone()).await;
-                    tracing::info!("✓ BFT consensus signing key configured");
+                    if let Err(e) = bft.set_signing_key(signing_key.clone()) {
+                        tracing::error!("Failed to set BFT signing key: {}", e);
+                    } else {
+                        tracing::info!("✓ BFT consensus signing key configured");
+                    }
                 }
 
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);

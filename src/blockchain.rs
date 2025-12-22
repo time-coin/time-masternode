@@ -926,7 +926,7 @@ impl Blockchain {
     /// Process BFT-committed blocks
     pub async fn process_bft_committed_blocks(&self) -> Result<usize, String> {
         if let Some(bft) = self.bft_consensus.read().await.as_ref() {
-            let committed_blocks = bft.get_committed_blocks().await;
+            let committed_blocks = bft.get_committed_blocks();
             let count = committed_blocks.len();
 
             for block in committed_blocks {
@@ -985,10 +985,11 @@ impl Blockchain {
                     let vote = crate::bft_consensus::BlockVote {
                         block_hash,
                         voter,
+                        vote_type: crate::bft_consensus::VoteType::Commit,
                         approve,
                         signature,
                     };
-                    bft.handle_vote(vote).await
+                    bft.handle_vote(vote)
                 }
                 NetworkMessage::BlockCommit {
                     block_hash: _,
