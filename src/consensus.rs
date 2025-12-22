@@ -219,62 +219,82 @@ impl ConsensusEngine {
 
     /// Verify a single input's cryptographic signature
     /// Uses ed25519 signature scheme for verification
+    /// CPU-intensive crypto is moved to spawn_blocking to prevent async runtime blocking
     async fn verify_input_signature(
         &self,
         tx: &Transaction,
         input_idx: usize,
     ) -> Result<(), String> {
-        use ed25519_dalek::Signature;
-
         // Get the input
         let input = tx.inputs.get(input_idx).ok_or("Input index out of range")?;
 
-        // Get the UTXO being spent
+        // Get the UTXO being spent (async operation)
         let utxo = self
             .utxo_manager
             .get_utxo(&input.previous_output)
             .await
             .ok_or_else(|| format!("UTXO not found: {:?}", input.previous_output))?;
 
-        // Extract public key from UTXO's script_pubkey
-        // In ed25519 setup, script_pubkey IS the 32-byte public key
-        if utxo.script_pubkey.len() != 32 {
-            return Err(format!(
-                "Invalid public key length: {} (expected 32)",
-                utxo.script_pubkey.len()
-            ));
-        }
-
-        let public_key = ed25519_dalek::VerifyingKey::from_bytes(
-            &utxo.script_pubkey[0..32]
-                .try_into()
-                .map_err(|_| "Failed to convert public key bytes")?,
-        )
-        .map_err(|e| format!("Invalid public key: {}", e))?;
-
-        // Parse signature from script_sig (must be exactly 64 bytes)
-        if input.script_sig.len() != 64 {
-            return Err(format!(
-                "Invalid signature length: {} (expected 64 bytes)",
-                input.script_sig.len()
-            ));
-        }
-
-        let signature = Signature::from_bytes(
-            &input.script_sig[0..64]
-                .try_into()
-                .map_err(|_| "Failed to convert signature bytes")?,
-        );
-
         // Create the message that should have been signed
         let message = self.create_signature_message(tx, input_idx)?;
 
-        // Verify signature
-        public_key.verify(&message, &signature).map_err(|_| {
-            format!(
-                "Signature verification FAILED for input {}: signature doesn't match message",
-                input_idx
+        // Clone data needed for blocking task
+        let pubkey_bytes = utxo.script_pubkey.clone();
+        let sig_bytes = input.script_sig.clone();
+
+        // Move CPU-intensive signature verification to blocking pool
+        tokio::task::spawn_blocking(move || {
+            use ed25519_dalek::Signature;
+
+            // Extract public key from UTXO's script_pubkey
+            // In ed25519 setup, script_pubkey IS the 32-byte public key
+            if pubkey_bytes.len() != 32 {
+                return Err(format!(
+                    "Invalid public key length: {} (expected 32)",
+                    pubkey_bytes.len()
+                ));
+            }
+
+            let public_key = ed25519_dalek::VerifyingKey::from_bytes(
+                &pubkey_bytes[0..32]
+                    .try_into()
+                    .map_err(|_| "Failed to convert public key bytes")?,
             )
+            .map_err(|e| format!("Invalid public key: {}", e))?;
+
+            // Parse signature from script_sig (must be exactly 64 bytes)
+            if sig_bytes.len() != 64 {
+                return Err(format!(
+                    "Invalid signature length: {} (expected 64 bytes)",
+                    sig_bytes.len()
+                ));
+            }
+
+            let signature = Signature::from_bytes(
+                &sig_bytes[0..64]
+                    .try_into()
+                    .map_err(|_| "Failed to convert signature bytes")?,
+            );
+
+            // Verify signature (CPU intensive)
+            public_key.verify(&message, &signature).map_err(|_| {
+                format!(
+                    "Signature verification FAILED for input {}: signature doesn't match message",
+                    input_idx
+                )
+            })?;
+
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|e| format!("Signature verification task failed: {}", e))?
+        .map_err(|e| {
+            tracing::warn!(
+                "Signature verification failed for input {}: {}",
+                input_idx,
+                e
+            );
+            e
         })?;
 
         tracing::debug!("✅ Signature verified for input {}", input_idx);
