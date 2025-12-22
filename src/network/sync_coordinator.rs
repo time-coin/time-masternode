@@ -26,6 +26,7 @@ pub struct SyncCoordinator {
 }
 
 impl SyncCoordinator {
+    #[allow(dead_code)]
     pub fn new(state_sync: Arc<StateSyncManager>) -> Self {
         Self {
             blockchain: Arc::new(RwLock::new(None)),
@@ -37,21 +38,25 @@ impl SyncCoordinator {
     }
 
     /// Set blockchain reference for sync operations
+    #[allow(dead_code)]
     pub async fn set_blockchain(&self, blockchain: Arc<Blockchain>) {
         *self.blockchain.write().await = Some(blockchain);
     }
 
     /// Set peer manager reference
+    #[allow(dead_code)]
     pub async fn set_peer_manager(&self, peer_manager: Arc<PeerManager>) {
         *self.peer_manager.write().await = Some(peer_manager);
     }
 
     /// Set peer registry reference
+    #[allow(dead_code)]
     pub async fn set_peer_registry(&self, peer_registry: Arc<PeerConnectionRegistry>) {
         *self.peer_registry.write().await = Some(peer_registry);
     }
 
     /// Start synchronization loop
+    #[allow(dead_code)]
     pub async fn start_sync_loop(&self) {
         let coordinator = self.clone();
 
@@ -72,6 +77,7 @@ impl SyncCoordinator {
     }
 
     /// Check if sync is needed and perform synchronization
+    #[allow(dead_code)]
     pub async fn check_and_sync(&self) -> Result<(), String> {
         // Prevent concurrent sync attempts
         if *self.sync_in_progress.read().await {
@@ -111,6 +117,7 @@ impl SyncCoordinator {
     }
 
     /// Execute synchronization
+    #[allow(dead_code)]
     async fn perform_sync(
         &self,
         blockchain: Arc<Blockchain>,
@@ -184,6 +191,7 @@ impl SyncCoordinator {
     }
 
     /// Verify all peers have same genesis block (security critical)
+    #[allow(dead_code)]
     async fn verify_network_genesis_consensus(
         &self,
         peer_manager: &Arc<PeerManager>,
@@ -226,6 +234,7 @@ impl SyncCoordinator {
     }
 
     /// Verify blockchain state is consistent across peers
+    #[allow(dead_code)]
     async fn verify_network_state_consistency(
         &self,
         peer_manager: &Arc<PeerManager>,
@@ -301,11 +310,13 @@ impl SyncCoordinator {
     }
 
     /// Force manual sync check
+    #[allow(dead_code)]
     pub async fn manual_sync(&self) -> Result<(), String> {
         self.check_and_sync().await
     }
 
     /// Get sync status
+    #[allow(dead_code)]
     pub async fn is_syncing(&self) -> bool {
         self.state_sync.is_syncing().await || *self.sync_in_progress.read().await
     }

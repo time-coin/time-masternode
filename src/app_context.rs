@@ -13,6 +13,7 @@ use crate::wallet::WalletManager;
 use std::sync::Arc;
 
 /// Shared application context containing all major components
+#[allow(dead_code)]
 pub struct AppContext {
     pub config: crate::config::Config,
     pub blockchain: Arc<Blockchain>,

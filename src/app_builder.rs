@@ -1,6 +1,7 @@
 use tracing::info;
 
 /// Helper to calculate appropriate cache size based on available memory
+#[allow(dead_code)]
 pub fn calculate_cache_size() -> u64 {
     use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 
@@ -20,6 +21,8 @@ pub fn calculate_cache_size() -> u64 {
 }
 
 /// Helper to open a sled database with standard configuration
+/// Helper to calculate appropriate cache size based on available memory
+#[allow(dead_code)]
 pub fn open_sled_database(
     base_path: &str,
     name: &str,

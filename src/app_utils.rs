@@ -3,6 +3,7 @@ use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use tracing::{error, info};
 
 /// Calculate optimal cache size based on available memory
+#[allow(dead_code)]
 pub fn calculate_cache_size() -> u64 {
     let sys =
         System::new_with_specifics(RefreshKind::new().with_memory(MemoryRefreshKind::everything()));
@@ -20,6 +21,7 @@ pub fn calculate_cache_size() -> u64 {
 }
 
 /// Open a sled database with optimized configuration
+#[allow(dead_code)]
 pub fn open_database(base_path: &str, name: &str, cache_size: u64) -> Result<sled::Db, AppError> {
     let path = format!("{}/{}", base_path, name);
 
@@ -38,6 +40,7 @@ pub fn open_database(base_path: &str, name: &str, cache_size: u64) -> Result<sle
 }
 
 /// Extract IP from address string without allocation
+#[allow(dead_code)]
 pub fn extract_ip(address: &str) -> &str {
     address.split(':').next().unwrap_or(address)
 }

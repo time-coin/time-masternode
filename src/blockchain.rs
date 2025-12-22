@@ -2210,7 +2210,8 @@ impl Blockchain {
         // In production: cycle through peers and query their block at fork_height
         let peers_to_query = if peers.len() > 7 { 7 } else { peers.len() };
         let mut peer_block_votes = 0usize;
-        let mut our_block_votes = 0usize;
+        let our_block_votes = 0usize;
+        #[allow(unused_assignments)]
         let mut responses = 0usize;
 
         // PLACEHOLDER: In production, query peers for their block hash at fork_height

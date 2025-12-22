@@ -14,6 +14,7 @@ pub enum ConnectionDirection {
 #[derive(Clone)]
 struct ConnectionState {
     direction: ConnectionDirection,
+    #[allow(dead_code)]
     connected_at: Instant,
 }
 

@@ -480,6 +480,7 @@ impl ConsensusEngine {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn is_masternode_check(&self, address: &str) -> bool {
         self.masternodes
             .load()

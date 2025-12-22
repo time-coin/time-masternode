@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum AppError {
     #[error("Configuration error: {0}")]
     Config(String),
@@ -40,6 +41,7 @@ pub enum AppError {
 }
 
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum StorageError {
     #[error("Failed to open {name} database: {source}")]
     DatabaseOpen {
