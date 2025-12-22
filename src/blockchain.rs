@@ -7,10 +7,9 @@ use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
-use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::RwLock;
 
@@ -28,7 +27,11 @@ const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
 /// Global lock to prevent duplicate concurrent block production
 /// This prevents race conditions when multiple timers or tasks try to produce the same block
-static BLOCK_PRODUCTION_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(()));
+static BLOCK_PRODUCTION_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+
+fn get_block_production_lock() -> &'static TokioMutex<()> {
+    BLOCK_PRODUCTION_LOCK.get_or_init(|| TokioMutex::new(()))
+}
 
 /// Result of fork consensus query
 #[derive(Debug, PartialEq)]
@@ -782,7 +785,7 @@ impl Blockchain {
     /// Produce a block at the scheduled time
     pub async fn produce_block(&self) -> Result<Block, String> {
         // Try to acquire the production lock - prevents duplicate concurrent block production
-        let _guard = match BLOCK_PRODUCTION_LOCK.try_lock() {
+        let _guard = match get_block_production_lock().try_lock() {
             Ok(guard) => guard,
             Err(_) => {
                 tracing::debug!(

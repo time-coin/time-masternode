@@ -2040,7 +2040,6 @@ dependencies = [
  "hostname",
  "lru",
  "num-bigint",
- "once_cell",
  "parking_lot 0.12.5",
  "rand",
  "rayon",
