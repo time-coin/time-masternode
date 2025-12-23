@@ -303,14 +303,13 @@ impl MasternodeRegistry {
         }
     }
 
-    /// Get masternodes that were active for the ENTIRE block period
+    /// Get masternodes that are currently active (regardless of when they joined this period)
     pub async fn get_eligible_for_rewards(&self) -> Vec<(Masternode, String)> {
-        let block_period_start = *self.block_period_start.read().await;
         let masternodes = self.masternodes.read().await;
 
         masternodes
             .values()
-            .filter(|info| info.is_active && info.uptime_start <= block_period_start)
+            .filter(|info| info.is_active)
             .map(|info| (info.masternode.clone(), info.reward_address.clone()))
             .collect()
     }
