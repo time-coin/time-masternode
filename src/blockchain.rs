@@ -331,8 +331,11 @@ impl Blockchain {
         // Update height
         *self.current_height.write().await = block.header.height;
 
+        // Clear finalized transactions now that they're in a block (archived)
+        self.consensus.clear_finalized_transactions();
+
         tracing::debug!(
-            "✓ Block {} added (txs: {})",
+            "✓ Block {} added (txs: {}), finalized pool cleared",
             block.header.height,
             block.transactions.len()
         );

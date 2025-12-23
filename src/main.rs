@@ -674,15 +674,29 @@ async fn main() {
 
                             match block_blockchain.produce_block().await {
                                 Ok(block) => {
+                                    let block_height = block.header.height;
                                     tracing::info!(
                                         "✅ Block {} produced: {} transactions, {} masternode rewards",
-                                        block.header.height,
+                                        block_height,
                                         block.transactions.len(),
                                         block.masternode_rewards.len()
                                     );
 
+                                    // Add block to our own chain first
+                                    if let Err(e) = block_blockchain.add_block(block.clone()).await {
+                                        tracing::error!("❌ Failed to add block to chain: {}", e);
+                                        continue;
+                                    }
+
+                                    tracing::info!(
+                                        "✅ Block {} added to chain, height now: {}",
+                                        block_height,
+                                        block_blockchain.get_height().await
+                                    );
+
                                     // Broadcast block to all peers
                                     block_registry.broadcast_block(block).await;
+                                    tracing::info!("📡 Block {} broadcast to peers", block_height);
                                 }
                                 Err(e) => {
                                     tracing::error!("❌ Failed to produce block: {}", e);
