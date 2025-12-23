@@ -1,6 +1,6 @@
 /// Phase 5: Fork Resolution Testing
 /// Tests network partition recovery and fork resolution using VRF-based canonical chain selection
-/// 
+///
 /// Success Criteria:
 /// - Network partition creates fork
 /// - Each partition continues consensus independently
@@ -131,7 +131,6 @@ mod tests {
                 }
             }
         }
-
     }
 
     #[test]

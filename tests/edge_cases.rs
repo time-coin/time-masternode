@@ -281,11 +281,7 @@ mod tests {
         let mut validators = vec!["node_a", "node_b", "node_c"];
         validators.retain(|v| *v != "node_a" && *v != "node_b");
 
-        assert_eq!(
-            validators.len(),
-            1,
-            "Only 1 validator left (quorum lost)"
-        );
+        assert_eq!(validators.len(), 1, "Only 1 validator left (quorum lost)");
 
         // Need 2 out of 3 for consensus
         let consensus_threshold = 2;
@@ -343,6 +339,9 @@ mod tests {
 
         let is_expired = tx_age_seconds > tx_expiry_seconds;
 
-        assert!(!is_expired, "Transaction should not be expired before 72 hours");
+        assert!(
+            !is_expired,
+            "Transaction should not be expired before 72 hours"
+        );
     }
 }

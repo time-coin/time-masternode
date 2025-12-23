@@ -1,6 +1,6 @@
 /// Phase 5: Multi-Node Consensus Testing
 /// Tests ECVRF-based leader selection and block finalization across multiple nodes
-/// 
+///
 /// Success Criteria:
 /// - All 3 nodes reach consensus on same block
 /// - Block is proposed by ECVRF-selected leader
@@ -162,10 +162,7 @@ mod tests {
         );
 
         // Verify blocks were created
-        assert!(
-            !blocks.is_empty(),
-            "At least one block should be created"
-        );
+        assert!(!blocks.is_empty(), "At least one block should be created");
     }
 
     #[test]
@@ -284,8 +281,14 @@ mod tests {
             .map(|n| n.lock().unwrap().blocks.len())
             .collect();
 
-        assert_eq!(heights[0], heights[1], "Node A and B should have same height");
-        assert_eq!(heights[1], heights[2], "Node B and C should have same height");
+        assert_eq!(
+            heights[0], heights[1],
+            "Node A and B should have same height"
+        );
+        assert_eq!(
+            heights[1], heights[2],
+            "Node B and C should have same height"
+        );
         assert_eq!(heights[0], 10, "Chain height should be 10");
     }
 
@@ -293,9 +296,9 @@ mod tests {
     fn test_weighted_stake_selection() {
         // Setup network with different stake amounts
         let validators = vec![
-            ("rich_node".to_string(), 300), // 50% stake
+            ("rich_node".to_string(), 300),   // 50% stake
             ("normal_node".to_string(), 200), // 33% stake
-            ("poor_node".to_string(), 100), // 17% stake
+            ("poor_node".to_string(), 100),   // 17% stake
         ];
         let network = TestNetwork::new(validators);
 
