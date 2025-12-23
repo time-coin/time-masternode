@@ -8,7 +8,7 @@ Comprehensive documentation for the TIME Coin Protocol.
 - **[TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)** - Complete protocol specification
   - Core architecture and components
   - UTXO state machine (6-state lifecycle)
-  - Instant finality and BFT consensus
+  - Instant finality and Avalanche consensus
   - Masternode system and tiers
   - Heartbeat attestation
   - Block production and rewards
@@ -26,8 +26,8 @@ Comprehensive documentation for the TIME Coin Protocol.
 ## Key Features
 
 ### Instant Finality
-- **Transaction finalization in <3 seconds**
-- Byzantine Fault Tolerant (BFT) consensus
+- **Transaction finalization in <1 second (Avalanche)**
+- Continuous quorum voting consensus
 - 2/3 masternode quorum required
 - No need for multiple confirmations
 
@@ -76,7 +76,7 @@ For implementation details, architectural decisions, and status reports, see `/a
 - [Protocol Overview](TIMECOIN_PROTOCOL.md#overview)
 - [UTXO State Machine](TIMECOIN_PROTOCOL.md#utxo-state-machine)
 - [Instant Finality](TIMECOIN_PROTOCOL.md#instant-finality)
-- [BFT Consensus](TIMECOIN_PROTOCOL.md#bft-consensus)
+- [Avalanche Consensus](TIMECOIN_PROTOCOL.md#avalanche-consensus)
 - [Masternode System](TIMECOIN_PROTOCOL.md#masternode-system)
 - [Heartbeat Attestation](TIMECOIN_PROTOCOL.md#heartbeat-attestation)
 - [Reward Distribution](TIMECOIN_PROTOCOL.md#reward-distribution)

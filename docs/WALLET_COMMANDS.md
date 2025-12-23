@@ -31,7 +31,7 @@ time-cli send-to-address TIME0xyz789... 0.5
 4. Creates change output back to your wallet (if applicable)
 5. Broadcasts transaction to the network
 6. Consensus engine validates and processes the transaction
-7. Network achieves instant finality (<3 seconds) via BFT voting
+7. Network achieves instant finality (<1 second) via Avalanche voting
 8. Returns the transaction ID
 
 **Fee:**
@@ -140,7 +140,7 @@ time-cli masternode-status
 ## Notes
 
 - All amounts are in TIME (the base unit)
-- Transactions achieve instant finality via BFT consensus
+- Transactions achieve instant finality via Avalanche consensus
 - Minimum transaction fee: 0.00001 TIME
 - UTXOs are locked during transaction processing
 - Rejected transactions will unlock UTXOs automatically

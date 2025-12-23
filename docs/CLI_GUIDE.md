@@ -119,8 +119,8 @@ Returns status of this node's masternode (if configured).
 ```bash
 time-cli get-consensus-info
 ```
-Returns information about the BFT consensus:
-- Type (BFT)
+Returns information about the Avalanche consensus:
+- Type (Avalanche)
 - Number of masternodes
 - Quorum requirements
 - Finality time
@@ -204,7 +204,7 @@ All commands return JSON output:
 {
   "chain": "main",
   "blocks": 1,
-  "consensus": "BFT",
+  "consensus": "Avalanche",
   "instant_finality": true
 }
 ```

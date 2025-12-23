@@ -15,7 +15,7 @@ const RATE_LIMIT_WINDOW_SECS: i64 = 60; // Rate limit window (1 minute)
 const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per peer per minute
 const MIN_MASTERNODE_STAKE: u64 = 1_000 * 100_000_000; // 1000 TIME in satoshis
 const REPUTATION_THRESHOLD_BAN: i32 = -50; // Ban peers below this score
-const REPUTATION_PENALTY_BYZANTINE: i32 = -20; // Penalty for Byzantine behavior
+const REPUTATION_PENALTY_MISBEHAVIOR: i32 = -20; // Penalty for misbehaving peer
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -33,7 +33,7 @@ pub struct PeerInfo {
     #[serde(default)]
     pub request_count: u32, // Requests in current window
     #[serde(default)]
-    pub reputation_score: i32, // -100 to 100 (Byzantine behavior tracking)
+    pub reputation_score: i32, // -100 to 100 (misbehavior tracking)
 }
 
 pub struct PeerManager {
@@ -395,16 +395,16 @@ impl PeerManager {
         Ok(true) // Peer not found, allow (will be added)
     }
 
-    /// Detect Byzantine behavior: penalize peer reputation
+    /// Detect misbehaving peer: penalize peer reputation
     #[allow(dead_code)]
-    pub async fn report_byzantine_behavior(&self, peer_address: &str) -> Result<(), String> {
+    pub async fn report_misbehavior(&self, peer_address: &str) -> Result<(), String> {
         if let Ok(mut peer_infos) = self.peer_info.try_write() {
             if let Some(peer) = peer_infos.iter_mut().find(|p| p.address == peer_address) {
                 peer.reputation_score =
-                    (peer.reputation_score - REPUTATION_PENALTY_BYZANTINE).max(-100);
+                    (peer.reputation_score - REPUTATION_PENALTY_MISBEHAVIOR).max(-100);
 
                 tracing::warn!(
-                    "⚠️ Byzantine behavior reported for peer {}: reputation now {}",
+                    "⚠️ Misbehavior reported for peer {}: reputation now {}",
                     peer_address,
                     peer.reputation_score
                 );

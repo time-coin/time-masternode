@@ -2,7 +2,7 @@
 //!
 //! This module implements the Avalanche consensus protocol for instant transaction finality.
 //! Key components:
-//! - Avalanche: Byzantine fault tolerant consensus with quorum voting
+//! - Avalanche: Continuous voting consensus with quorum sampling
 //! - Snowflake/Snowball: Low-latency consensus primitives
 //! - Transaction validation and UTXO management
 //! - Stake-weighted validator sampling

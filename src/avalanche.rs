@@ -1,5 +1,5 @@
 /// Avalanche consensus protocol implementation for TimeCoin
-/// Provides instant transaction finality without Byzantine quorum requirements
+/// Provides instant transaction finality with continuous voting
 use crate::consensus::{AvalancheConfig, AvalancheConsensus, Preference};
 use crate::masternode_registry::MasternodeRegistry;
 use crate::transaction_pool::TransactionPool;
