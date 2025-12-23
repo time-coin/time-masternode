@@ -2,9 +2,8 @@ use crate::blockchain::Blockchain;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
-use crate::network::peer_connection::PeerConnection;
+use crate::network::peer_connection::{PeerConnection, PeerStateManager};
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use crate::network::peer_state::PeerStateManager;
 use crate::peer_manager::PeerManager;
 use crate::NetworkType;
 use std::sync::Arc;
@@ -15,17 +14,16 @@ pub struct NetworkClient {
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
-    connection_manager: Arc<ConnectionManager>,
-    peer_registry: Arc<PeerConnectionRegistry>,
+    peer_connection_registry: Arc<PeerConnectionRegistry>,
     peer_state: Arc<PeerStateManager>,
+    connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     p2p_port: u16,
     max_peers: usize,
-    reserved_masternode_slots: usize, // Reserved slots for masternodes
-    local_ip: Option<String>,         // Our own public IP (without port) to avoid self-connection
+    reserved_masternode_slots: usize,
+    local_ip: Option<String>,
 }
 
 impl NetworkClient {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer_manager: Arc<PeerManager>,
         masternode_registry: Arc<MasternodeRegistry>,
@@ -33,12 +31,11 @@ impl NetworkClient {
         attestation_system: Arc<HeartbeatAttestationSystem>,
         network_type: NetworkType,
         max_peers: usize,
-        connection_manager: Arc<ConnectionManager>,
-        peer_registry: Arc<PeerConnectionRegistry>,
+        peer_connection_registry: Arc<PeerConnectionRegistry>,
         peer_state: Arc<PeerStateManager>,
-        local_ip: Option<String>, // Our own public IP to avoid self-connection
+        connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
+        local_ip: Option<String>,
     ) -> Self {
-        // Reserve 40% of slots for masternodes, minimum 20 slots, max 30 slots
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
 
         Self {
@@ -46,9 +43,9 @@ impl NetworkClient {
             masternode_registry,
             blockchain,
             attestation_system,
-            connection_manager,
-            peer_registry,
+            peer_connection_registry,
             peer_state,
+            connection_manager,
             p2p_port: network_type.default_p2p_port(),
             max_peers,
             reserved_masternode_slots,
@@ -56,15 +53,15 @@ impl NetworkClient {
         }
     }
 
-    /// Start persistent connections to all known peers
     pub async fn start(&self) {
         let peer_manager = self.peer_manager.clone();
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
         let attestation_system = self.attestation_system.clone();
-        let connection_manager = self.connection_manager.clone();
-        let peer_registry = self.peer_registry.clone();
+        let peer_connection_registry = self.peer_connection_registry.clone();
+        let peer_registry = self.peer_connection_registry.clone();
         let _peer_state = self.peer_state.clone();
+        let connection_manager = self.connection_manager.clone();
         let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;
@@ -504,7 +501,11 @@ fn spawn_connection_task(
             tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
 
             // Mark peer as in reconnection backoff to prevent duplicate connection attempts
-            connection_manager.mark_reconnecting(&ip, retry_delay, consecutive_failures);
+            connection_manager.mark_reconnecting(
+                &ip,
+                std::time::Duration::from_secs(retry_delay),
+                consecutive_failures,
+            );
 
             sleep(Duration::from_secs(retry_delay)).await;
 

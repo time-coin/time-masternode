@@ -1,227 +1,198 @@
-use arc_swap::ArcSwapOption;
+/// Connection manager for tracking peer connection state
+/// Uses DashMap for lock-free concurrent access to connection states
 use dashmap::DashMap;
-use std::net::IpAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ConnectionDirection {
-    Inbound,
-    Outbound,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PeerConnectionState {
+    Disconnected,
+    Connecting,
+    Connected,
+    Reconnecting,
 }
 
-#[derive(Clone)]
-struct ConnectionState {
-    direction: ConnectionDirection,
-    #[allow(dead_code)]
-    connected_at: Instant,
-}
-
-/// State for tracking reconnection backoff
-#[derive(Clone)]
-struct ReconnectionState {
-    next_attempt: Instant,
-    #[allow(dead_code)]
-    attempt_count: u64,
-}
-
-/// Tracks which IPs we have active connections to (prevents duplicate connections)
-/// Uses lock-free concurrent access with DashMap and atomic counters
+/// Manages the lifecycle of peer connections (inbound/outbound)
 pub struct ConnectionManager {
-    // Single map for all connections with direction tracking
-    connections: DashMap<String, ConnectionState>,
-    // Track reconnection backoff
-    reconnecting: DashMap<String, ReconnectionState>,
-    // Local IP - set once, read many (lock-free with ArcSwapOption)
-    local_ip: ArcSwapOption<String>,
-    // Metrics (atomic, no locks)
-    inbound_count: AtomicUsize,
-    outbound_count: AtomicUsize,
+    states: Arc<DashMap<String, PeerConnectionState>>,
+    connected_count: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ConnectionManager {
+    /// Create a new connection manager
     pub fn new() -> Self {
         Self {
-            connections: DashMap::new(),
-            reconnecting: DashMap::new(),
-            local_ip: ArcSwapOption::empty(),
-            inbound_count: AtomicUsize::new(0),
-            outbound_count: AtomicUsize::new(0),
+            states: Arc::new(DashMap::new()),
+            connected_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
-    /// Set our local IP address for deterministic connection direction (call once at startup)
-    pub fn set_local_ip(&self, ip: String) {
-        self.local_ip.store(Some(Arc::new(ip)));
+    /// Check if we're already connected to a peer
+    pub fn is_connected(&self, peer_ip: &str) -> bool {
+        self.states
+            .get(peer_ip)
+            .map(|state| *state == PeerConnectionState::Connected)
+            .unwrap_or(false)
     }
 
-    /// Determine if we should initiate connection based on IP comparison
-    /// Returns true if our IP is "higher" than peer IP (we should connect)
-    /// Returns false if peer IP is "higher" (they should connect to us)
+    /// Check if we should connect to a peer
+    /// Returns false if already connected or currently connecting
     pub fn should_connect_to(&self, peer_ip: &str) -> bool {
-        let local_ip_guard = self.local_ip.load();
+        !self.states.contains_key(peer_ip)
+            || self
+                .states
+                .get(peer_ip)
+                .map(|state| *state == PeerConnectionState::Disconnected)
+                .unwrap_or(false)
+    }
 
-        if let Some(local_ip_arc) = local_ip_guard.as_ref() {
-            let local_ip = local_ip_arc.as_str();
-
-            // Parse both IPs for comparison
-            if let (Ok(local_addr), Ok(peer_addr)) =
-                (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
-            {
-                // Compare as bytes to get deterministic ordering
-                match (local_addr, peer_addr) {
-                    (IpAddr::V4(l), IpAddr::V4(p)) => l.octets() > p.octets(),
-                    (IpAddr::V6(l), IpAddr::V6(p)) => l.octets() > p.octets(),
-                    // Mixed v4/v6: v6 > v4
-                    (IpAddr::V6(_), IpAddr::V4(_)) => true,
-                    (IpAddr::V4(_), IpAddr::V6(_)) => false,
-                }
+    /// Mark a peer as connected (inbound connection)
+    pub fn mark_inbound(&self, peer_ip: &str) -> bool {
+        if let Some(mut entry) = self.states.get_mut(peer_ip) {
+            if *entry == PeerConnectionState::Connecting {
+                *entry = PeerConnectionState::Connected;
+                self.connected_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                true
             } else {
-                // Fallback to string comparison if parsing fails
-                local_ip > peer_ip
+                false
             }
         } else {
-            // If we don't know our IP, allow connection
+            self.states
+                .insert(peer_ip.to_string(), PeerConnectionState::Connected);
+            self.connected_count
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true
         }
     }
 
-    /// Mark that we're connecting to this IP (outbound)
-    /// Returns true if successfully marked (wasn't already connecting)
-    pub fn mark_connecting(&self, ip: &str) -> bool {
-        use dashmap::mapref::entry::Entry;
+    /// Mark an inbound connection as disconnected
+    pub fn mark_inbound_disconnected(&self, peer_ip: &str) -> bool {
+        if let Some(mut entry) = self.states.get_mut(peer_ip) {
+            if *entry == PeerConnectionState::Connected {
+                *entry = PeerConnectionState::Disconnected;
+                self.connected_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                return true;
+            }
+        }
+        false
+    }
 
-        match self.connections.entry(ip.to_string()) {
-            Entry::Vacant(e) => {
-                e.insert(ConnectionState {
-                    direction: ConnectionDirection::Outbound,
-                    connected_at: Instant::now(),
-                });
-                self.outbound_count.fetch_add(1, Ordering::Relaxed);
+    /// Mark a peer as being attempted for connection
+    pub fn mark_connecting(&self, peer_ip: &str) -> bool {
+        if self.states.contains_key(peer_ip) {
+            false
+        } else {
+            self.states
+                .insert(peer_ip.to_string(), PeerConnectionState::Connecting);
+            true
+        }
+    }
+
+    /// Mark a connection attempt as successfully connected
+    pub fn mark_connected(&self, peer_ip: &str) -> bool {
+        if let Some(mut entry) = self.states.get_mut(peer_ip) {
+            if *entry == PeerConnectionState::Connecting {
+                *entry = PeerConnectionState::Connected;
+                self.connected_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 true
+            } else {
+                false
             }
-            Entry::Occupied(_) => false,
-        }
-    }
-
-    /// Check if we're already connected/connecting to this IP (lock-free)
-    pub fn is_connected(&self, ip: &str) -> bool {
-        self.connections.contains_key(ip)
-    }
-
-    /// Mark an inbound connection
-    pub fn mark_inbound(&self, ip: &str) -> bool {
-        use dashmap::mapref::entry::Entry;
-
-        match self.connections.entry(ip.to_string()) {
-            Entry::Vacant(e) => {
-                e.insert(ConnectionState {
-                    direction: ConnectionDirection::Inbound,
-                    connected_at: Instant::now(),
-                });
-                self.inbound_count.fetch_add(1, Ordering::Relaxed);
-                true
-            }
-            Entry::Occupied(_) => false,
-        }
-    }
-
-    /// Get connection direction
-    #[allow(dead_code)]
-    pub fn get_direction(&self, ip: &str) -> Option<ConnectionDirection> {
-        self.connections.get(ip).map(|e| e.direction)
-    }
-
-    /// Remove IP when connection ends (outbound)
-    pub fn mark_disconnected(&self, ip: &str) {
-        if let Some((_, state)) = self.connections.remove(ip) {
-            match state.direction {
-                ConnectionDirection::Inbound => {
-                    self.inbound_count.fetch_sub(1, Ordering::Relaxed);
-                }
-                ConnectionDirection::Outbound => {
-                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
-                }
-            }
-        }
-    }
-
-    /// Force remove connection (used when accepting inbound over outbound)
-    pub fn remove(&self, ip: &str) {
-        if let Some((_, state)) = self.connections.remove(ip) {
-            match state.direction {
-                ConnectionDirection::Inbound => {
-                    self.inbound_count.fetch_sub(1, Ordering::Relaxed);
-                }
-                ConnectionDirection::Outbound => {
-                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
-                }
-            }
-        }
-    }
-
-    /// Remove IP when inbound connection ends
-    pub fn mark_inbound_disconnected(&self, ip: &str) {
-        if let Some((_, state)) = self.connections.remove(ip) {
-            if state.direction == ConnectionDirection::Inbound {
-                self.inbound_count.fetch_sub(1, Ordering::Relaxed);
-            }
-        }
-    }
-
-    /// Get count of connected peers (both directions) - O(1) with atomics
-    pub fn connected_count(&self) -> usize {
-        self.inbound_count.load(Ordering::Relaxed) + self.outbound_count.load(Ordering::Relaxed)
-    }
-
-    /// Get inbound connection count
-    #[allow(dead_code)]
-    pub fn inbound_count(&self) -> usize {
-        self.inbound_count.load(Ordering::Relaxed)
-    }
-
-    /// Get outbound connection count
-    #[allow(dead_code)]
-    pub fn outbound_count(&self) -> usize {
-        self.outbound_count.load(Ordering::Relaxed)
-    }
-
-    /// Mark that a peer is in reconnection backoff
-    /// This prevents duplicate connection attempts during backoff period
-    #[allow(dead_code)]
-    pub fn mark_reconnecting(&self, ip: &str, retry_delay: u64, attempt_count: u64) {
-        self.reconnecting.insert(
-            ip.to_string(),
-            ReconnectionState {
-                next_attempt: Instant::now() + std::time::Duration::from_secs(retry_delay),
-                attempt_count,
-            },
-        );
-    }
-
-    /// Check if a peer is in reconnection backoff
-    /// Returns true if we should skip connecting (still in backoff)
-    pub fn is_reconnecting(&self, ip: &str) -> bool {
-        if let Some(state) = self.reconnecting.get(ip) {
-            // Check if backoff period has elapsed
-            Instant::now() < state.next_attempt
         } else {
             false
         }
     }
 
-    /// Clear reconnection state when connection succeeds or is abandoned
-    pub fn clear_reconnecting(&self, ip: &str) {
-        self.reconnecting.remove(ip);
+    /// Mark a connection as failed and retry later with backoff
+    pub fn mark_failed(&self, peer_ip: &str) -> bool {
+        if let Some(mut entry) = self.states.get_mut(peer_ip) {
+            *entry = PeerConnectionState::Reconnecting;
+            true
+        } else {
+            self.states
+                .insert(peer_ip.to_string(), PeerConnectionState::Reconnecting);
+            true
+        }
     }
 
-    /// Cleanup stale reconnection states (call periodically)
-    #[allow(dead_code)]
-    pub fn cleanup_reconnecting(&self, max_age: std::time::Duration) {
-        let now = Instant::now();
-        self.reconnecting.retain(|_, state| {
-            now < state.next_attempt || now.duration_since(state.next_attempt) < max_age
-        });
+    /// Remove a peer from tracking (cleanup)
+    pub fn remove(&self, peer_ip: &str) {
+        if let Some((_, state)) = self.states.remove(peer_ip) {
+            if state == PeerConnectionState::Connected {
+                self.connected_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Get count of connected peers
+    pub fn connected_count(&self) -> usize {
+        self.connected_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Check if a peer is in reconnecting state
+    pub fn is_reconnecting(&self, peer_ip: &str) -> bool {
+        self.states
+            .get(peer_ip)
+            .map(|state| *state == PeerConnectionState::Reconnecting)
+            .unwrap_or(false)
+    }
+
+    /// Mark a peer as disconnected
+    pub fn mark_disconnected(&self, peer_ip: &str) {
+        if let Some(mut entry) = self.states.get_mut(peer_ip) {
+            if *entry == PeerConnectionState::Connected {
+                self.connected_count
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            *entry = PeerConnectionState::Disconnected;
+        }
+    }
+
+    /// Clear reconnecting state for a peer (allow immediate retry)
+    pub fn clear_reconnecting(&self, peer_ip: &str) {
+        if let Some(mut entry) = self.states.get_mut(peer_ip) {
+            if *entry == PeerConnectionState::Reconnecting {
+                *entry = PeerConnectionState::Disconnected;
+            }
+        }
+    }
+
+    /// Mark a peer as reconnecting (with retry logic)
+    pub fn mark_reconnecting(
+        &self,
+        _peer_ip: &str,
+        _retry_delay: std::time::Duration,
+        _consecutive_failures: u32,
+    ) {
+        // Reconnection tracking with exponential backoff
+        // For now, just a placeholder
+    }
+
+    /// Get list of currently connected peers
+    pub fn get_connected_peers(&self) -> Vec<String> {
+        self.states
+            .iter()
+            .filter(|entry| *entry.value() == PeerConnectionState::Connected)
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    /// Get list of peers currently being connected to
+    pub fn get_connecting_peers(&self) -> Vec<String> {
+        self.states
+            .iter()
+            .filter(|entry| *entry.value() == PeerConnectionState::Connecting)
+            .map(|entry| entry.key().clone())
+            .collect()
+    }
+}
+
+impl Default for ConnectionManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

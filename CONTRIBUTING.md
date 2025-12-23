@@ -12,7 +12,7 @@ Thank you for your interest in contributing to TIME Coin! This document provides
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/yourusername/timecoin.git`
+2. Clone your fork: `git clone https://github.com/time-coin/timecoin.git`
 3. Create a branch: `git checkout -b feature/your-feature`
 4. Make your changes
 5. Test your changes: `cargo test && cargo clippy`
@@ -30,11 +30,35 @@ Thank you for your interest in contributing to TIME Coin! This document provides
 - Ensure `cargo clippy` passes without warnings
 - Write tests for new functionality
 
+### Network Module Development
+
+When modifying `src/network/`:
+
+- **Connection Management**: Use lock-free DashMap when possible (avoid RwLock)
+- **Async/Blocking**: Use `tokio::spawn_blocking` for CPU-intensive work
+- **Rate Limiting**: Apply per-peer limits before message processing
+- **Message Validation**: Check signature and timestamp before processing
+- **Peer Registry**: All peer registration must go through `PeerConnectionRegistry`
+- **Security**: Never bypass TLS or message signing in production paths
+
+See [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) for detailed network layer design.
+
+### Consensus Module Development
+
+When modifying consensus or UTXO logic:
+
+- Avalanche consensus must achieve finality in <1 second
+- TSDC block production every 10 minutes (configurable)
+- UTXO state machine: Unspent → Locked → Sampling → Finalized → Archived
+- All state transitions must be atomic (no partial updates)
+
 ### Commit Messages
 
 - Use clear, descriptive commit messages
 - Start with a verb (Add, Fix, Update, Remove, etc.)
 - Reference issues when applicable: `Fix #123: Description`
+- For network changes: `network: Fix connection recovery timeout`
+- For consensus changes: `consensus: Implement view change mechanism`
 
 ### Testing
 
@@ -81,6 +105,6 @@ We welcome feature requests! Please:
 
 - Join our Discord server
 - Open a GitHub Discussion
-- Email: dev@time-coin.io
+- Email: wmcorless@gmail.com
 
 Thank you for contributing! 🎉

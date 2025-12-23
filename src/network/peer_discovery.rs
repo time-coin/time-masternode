@@ -1,107 +1,58 @@
-use reqwest::Client;
-use serde::{Deserialize, Serialize};
-use std::time::Duration;
-use tracing::{error, info};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PeerInfo {
-    pub address: String,
-    pub port: u16,
-}
+/// Peer discovery service for finding peers from external sources
+/// Currently uses bootstrap peers as fallback
 
 pub struct PeerDiscovery {
-    client: Client,
-    api_url: String,
+    discovery_url: String,
 }
 
 impl PeerDiscovery {
-    pub fn new(api_url: String) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to create HTTP client");
-
-        Self { client, api_url }
+    /// Create a new peer discovery service
+    pub fn new(discovery_url: String) -> Self {
+        Self { discovery_url }
     }
 
-    pub async fn fetch_peers(&self) -> Result<Vec<PeerInfo>, String> {
-        info!("🔍 Discovering peers from {}", self.api_url);
-
-        match self.client.get(&self.api_url).send().await {
-            Ok(response) => {
-                if !response.status().is_success() {
-                    let status = response.status();
-                    return Err(format!("API returned error status: {}", status));
-                }
-
-                // Parse as array of strings: ["ip:port", "ip:port"]
-                match response.json::<Vec<String>>().await {
-                    Ok(peer_strings) => {
-                        let peers: Vec<PeerInfo> = peer_strings
-                            .iter()
-                            .filter_map(|s| {
-                                let parts: Vec<&str> = s.split(':').collect();
-                                if parts.len() == 2 {
-                                    if let Ok(port) = parts[1].parse::<u16>() {
-                                        return Some(PeerInfo {
-                                            address: parts[0].to_string(),
-                                            port,
-                                        });
-                                    }
-                                }
-                                None
-                            })
-                            .collect();
-
-                        info!("✅ Discovered {} peers", peers.len());
-                        Ok(peers)
-                    }
-                    Err(e) => {
-                        error!("❌ Failed to parse peer list: {}", e);
-                        Err(format!("Failed to parse response: {}", e))
-                    }
-                }
-            }
-            Err(e) => {
-                error!("❌ Failed to fetch peers: {}", e);
-                Err(format!("Network error: {}", e))
-            }
-        }
-    }
-
-    pub async fn fetch_peers_with_fallback(&self, fallback_peers: Vec<String>) -> Vec<PeerInfo> {
-        match self.fetch_peers().await {
-            Ok(peers) if !peers.is_empty() => peers,
-            Ok(_) | Err(_) => {
-                info!(
-                    "⚠️  Using fallback peer list ({} peers)",
-                    fallback_peers.len()
-                );
-                fallback_peers
-                    .into_iter()
-                    .map(|addr| {
-                        let parts: Vec<&str> = addr.split(':').collect();
-                        PeerInfo {
+    /// Fetch peers from the discovery service with fallback to bootstrap peers
+    ///
+    /// In a production system, this would:
+    /// 1. Make an HTTP request to the discovery_url
+    /// 2. Parse the response
+    /// 3. Fall back to bootstrap peers if the request fails
+    ///
+    /// For now, we just return the bootstrap peers directly.
+    pub async fn fetch_peers_with_fallback(
+        &self,
+        fallback_peers: Vec<String>,
+    ) -> Vec<DiscoveredPeer> {
+        // Convert bootstrap peer addresses to DiscoveredPeer format
+        fallback_peers
+            .into_iter()
+            .filter_map(|peer_str| {
+                // Parse "address:port" format
+                let parts: Vec<&str> = peer_str.split(':').collect();
+                if parts.len() == 2 {
+                    if let Ok(port) = parts[1].parse::<u16>() {
+                        Some(DiscoveredPeer {
                             address: parts[0].to_string(),
-                            port: parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(24100),
-                        }
+                            port,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    // If no port specified, use default P2P port
+                    Some(DiscoveredPeer {
+                        address: peer_str,
+                        port: 24100, // Default testnet P2P port
                     })
-                    .collect()
-            }
-        }
+                }
+            })
+            .collect()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_peer_discovery() {
-        let discovery = PeerDiscovery::new("https://time-coin.io/api/peers".to_string());
-
-        // This will fail in test environment, but demonstrates the API
-        let result = discovery.fetch_peers().await;
-        assert!(result.is_ok() || result.is_err()); // Just checking it doesn't panic
-    }
+/// Represents a discovered peer
+#[derive(Debug, Clone)]
+pub struct DiscoveredPeer {
+    pub address: String,
+    pub port: u16,
 }

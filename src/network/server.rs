@@ -2,7 +2,7 @@ use crate::consensus::ConsensusEngine;
 use crate::network::blacklist::IPBlacklist;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
-use crate::network::peer_state::PeerStateManager;
+use crate::network::peer_connection::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
 use crate::types::{Masternode, OutPoint};
 use crate::utxo_manager::UTXOStateManager;

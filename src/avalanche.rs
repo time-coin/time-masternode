@@ -92,9 +92,9 @@ impl AvalancheHandler {
 
         // Add to mempool
         let fee = self.calculate_fee(&tx).await;
-        self.tx_pool
-            .add_pending(tx.clone(), fee)
-            .map_err(|e| AvalancheError::InvalidTransaction(format!("Failed to add to pool: {}", e)))?;
+        self.tx_pool.add_pending(tx.clone(), fee).map_err(|e| {
+            AvalancheError::InvalidTransaction(format!("Failed to add to pool: {}", e))
+        })?;
 
         // Mark inputs as spent pending
         for input in &tx.inputs {
@@ -233,7 +233,10 @@ impl AvalancheHandler {
                     }
                 }
 
-                tracing::warn!("❌ Transaction {:?} rejected by Avalanche", hex::encode(txid));
+                tracing::warn!(
+                    "❌ Transaction {:?} rejected by Avalanche",
+                    hex::encode(txid)
+                );
                 Ok(())
             }
         }

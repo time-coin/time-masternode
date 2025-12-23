@@ -40,7 +40,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/timecoin.git
+git clone https://github.com/time-coin/timecoin.git
 cd timecoin
 
 # Run the installer
@@ -55,7 +55,7 @@ systemctl status timed
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/timecoin.git
+git clone https://github.com/time-coin/timecoin.git
 cd timecoin
 
 # Run the installer

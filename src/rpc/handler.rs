@@ -131,7 +131,7 @@ impl RpcHandler {
             "finality_mechanism": "Avalanche consensus",
             "instant_finality": true,
             "average_finality_time_ms": 750,
-            "block_time_seconds": 3600
+            "block_time_seconds": 600
         }))
     }
 
@@ -510,12 +510,12 @@ impl RpcHandler {
                 "description": "Instant transaction finality via random validator sampling"
             },
             "tsdc": {
-                "block_time_seconds": 3600,
+                "block_time_seconds": 600,
                 "leader_selection": "Verifiable Random Function (VRF)",
-                "description": "Deterministic 1-hour block production"
+                "description": "Deterministic 10-minute block production"
             },
             "active_validators": mn_count,
-            "finality_type": "Avalanche consensus (seconds) + TSDC blocks (1 hour)",
+            "finality_type": "Avalanche consensus (seconds) + TSDC blocks (10 minutes)",
             "instant_finality": true,
             "average_finality_time_ms": 750
         });
@@ -544,7 +544,7 @@ impl RpcHandler {
                 "validator_sampling": "random k-of-n",
                 "description": "Avalanche consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
             },
-            "note": "Transactions finalized by Avalanche in seconds, blocks produced hourly by TSDC"
+            "note": "Transactions finalized by Avalanche in seconds, blocks produced every 10 minutes by TSDC"
         }))
     }
 

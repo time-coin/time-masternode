@@ -32,9 +32,10 @@ use config::Config;
 use consensus::ConsensusEngine;
 use heartbeat_attestation::HeartbeatAttestationSystem;
 use masternode_registry::MasternodeRegistry;
+use network::connection_manager::ConnectionManager;
 use network::message::NetworkMessage;
+use network::peer_connection::PeerStateManager;
 use network::peer_connection_registry::PeerConnectionRegistry;
-use network::peer_state::PeerStateManager;
 use network::server::NetworkServer;
 use network_type::NetworkType;
 use peer_manager::PeerManager;
@@ -329,17 +330,17 @@ async fn main() {
     println!("✓ Blockchain initialized");
     println!();
 
-    // Create shared connection manager for both client and server
-    let connection_manager = Arc::new(network::connection_manager::ConnectionManager::new());
-
-    // Create shared peer connection registry for managing active connections
-    let peer_registry = Arc::new(PeerConnectionRegistry::new());
+    // Create shared peer connection registry for both client and server
+    let peer_connection_registry = Arc::new(PeerConnectionRegistry::new());
 
     // Create unified peer state manager for connection tracking
     let peer_state = Arc::new(PeerStateManager::new());
+    let connection_manager = Arc::new(ConnectionManager::new());
 
     // Set peer registry on blockchain for request/response queries
-    blockchain.set_peer_registry(peer_registry.clone()).await;
+    blockchain
+        .set_peer_registry(peer_connection_registry.clone())
+        .await;
 
     // Extract local IP from external address to prevent self-connections
     let local_ip = if let Some(ref mn) = masternode_info {
@@ -358,8 +359,8 @@ async fn main() {
 
     if let Some(ref ip) = local_ip {
         tracing::info!("🏠 Local public IP detected: {}", ip);
-        // Set local IP in connection manager for deterministic direction
-        connection_manager.set_local_ip(ip.clone());
+        // Set local IP in peer connection registry for deterministic direction
+        peer_connection_registry.set_local_ip(ip.clone());
     }
 
     // Start network client for outbound connections and masternode announcements
@@ -370,9 +371,9 @@ async fn main() {
         attestation_system.clone(),
         network_type,
         config.network.max_peers as usize,
-        connection_manager.clone(),
-        peer_registry.clone(),
+        peer_connection_registry.clone(),
         peer_state.clone(),
+        connection_manager.clone(),
         local_ip.clone(),
     );
     network_client.start().await;
@@ -415,7 +416,7 @@ async fn main() {
                     tier: mn.tier.clone(),
                     public_key: mn.public_key,
                 };
-                peer_registry.broadcast(announcement).await;
+                peer_connection_registry.broadcast(announcement).await;
                 tracing::info!("📢 Broadcast masternode announcement to network peers");
             }
             Err(e) => {
@@ -429,7 +430,7 @@ async fn main() {
         let attestation_clone = attestation_system.clone();
         let mn_address = mn.address.clone();
         let mn_clone = mn.clone();
-        let peer_registry_clone = peer_registry.clone();
+        let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
         let heartbeat_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
@@ -452,11 +453,11 @@ async fn main() {
                             tier: mn_clone.tier.clone(),
                             public_key: mn_clone.public_key,
                         };
-                        peer_registry_clone.broadcast(announcement).await;
+                        peer_connection_registry_clone.broadcast(announcement).await;
 
                         // Request masternodes from all connected peers for peer exchange
                         tracing::info!("📤 Broadcasting GetMasternodes to all peers");
-                        peer_registry_clone
+                        peer_connection_registry_clone
                             .broadcast(NetworkMessage::GetMasternodes)
                             .await;
 
@@ -808,7 +809,7 @@ async fn main() {
         blockchain_server.clone(),
         peer_manager.clone(),
         connection_manager.clone(),
-        peer_registry.clone(),
+        peer_connection_registry.clone(),
         peer_state.clone(),
         local_ip.clone(),
     )

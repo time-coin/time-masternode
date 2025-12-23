@@ -610,6 +610,184 @@ impl PeerConnection {
     }
 }
 
+// ===== PeerStateManager (formerly in peer_state.rs) =====
+
+use std::collections::HashMap;
+use tokio::sync::mpsc;
+
+/// Manages all active peer connections
+#[allow(dead_code)]
+pub struct PeerStateManager {
+    /// Active connections by IP address (only one connection per IP)
+    connections: Arc<RwLock<HashMap<String, PeerConnectionState>>>,
+}
+
+/// Active connection state for a peer
+#[derive(Clone)]
+#[allow(dead_code)]
+struct PeerConnectionState {
+    /// Peer's IP address (unique identifier)
+    pub ip: String,
+
+    /// Channel to send messages to this peer
+    pub tx: mpsc::UnboundedSender<NetworkMessage>,
+
+    /// When this connection was established
+    pub connected_at: std::time::Instant,
+
+    /// Last successful ping/pong time
+    pub last_activity: Arc<RwLock<std::time::Instant>>,
+
+    /// Missed ping count
+    pub missed_pings: Arc<RwLock<u32>>,
+}
+
+impl PeerConnectionState {
+    fn new(ip: String, tx: mpsc::UnboundedSender<NetworkMessage>) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            ip,
+            tx,
+            connected_at: now,
+            last_activity: Arc::new(RwLock::new(now)),
+            missed_pings: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    async fn mark_active(&self) {
+        let mut last = self.last_activity.write().await;
+        *last = std::time::Instant::now();
+
+        let mut missed = self.missed_pings.write().await;
+        *missed = 0;
+    }
+
+    async fn increment_missed_pings(&self) -> u32 {
+        let mut missed = self.missed_pings.write().await;
+        *missed += 1;
+        *missed
+    }
+
+    async fn idle_duration(&self) -> Duration {
+        let last = self.last_activity.read().await;
+        std::time::Instant::now().duration_since(*last)
+    }
+
+    fn send(&self, message: NetworkMessage) -> Result<(), String> {
+        self.tx
+            .send(message)
+            .map_err(|e| format!("Failed to send message: {}", e))
+    }
+}
+
+#[allow(dead_code)]
+impl PeerStateManager {
+    pub fn new() -> Self {
+        Self {
+            connections: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub async fn add_connection(
+        &self,
+        ip: String,
+        tx: mpsc::UnboundedSender<NetworkMessage>,
+    ) -> Result<bool, String> {
+        let mut conns = self.connections.write().await;
+
+        if conns.contains_key(&ip) {
+            return Ok(false);
+        }
+
+        let conn = PeerConnectionState::new(ip.clone(), tx);
+        conns.insert(ip, conn);
+        Ok(true)
+    }
+
+    pub async fn remove_connection(&self, ip: &str) -> Option<PeerConnectionState> {
+        let mut conns = self.connections.write().await;
+        conns.remove(ip)
+    }
+
+    pub async fn get_connection(&self, ip: &str) -> Option<PeerConnectionState> {
+        let conns = self.connections.read().await;
+        conns.get(ip).cloned()
+    }
+
+    pub async fn has_connection(&self, ip: &str) -> bool {
+        let conns = self.connections.read().await;
+        conns.contains_key(ip)
+    }
+
+    pub async fn connection_count(&self) -> usize {
+        let conns = self.connections.read().await;
+        conns.len()
+    }
+
+    pub async fn get_all_ips(&self) -> Vec<String> {
+        let conns = self.connections.read().await;
+        conns.keys().cloned().collect()
+    }
+
+    pub async fn get_all_connections(&self) -> Vec<PeerConnectionState> {
+        let conns = self.connections.read().await;
+        conns.values().cloned().collect()
+    }
+
+    pub async fn broadcast(&self, message: NetworkMessage) -> usize {
+        let conns = self.connections.read().await;
+        let mut sent = 0;
+        for conn in conns.values() {
+            if conn.send(message.clone()).is_ok() {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    pub async fn send_to_peer(&self, ip: &str, message: NetworkMessage) -> Result<(), String> {
+        let conns = self.connections.read().await;
+        if let Some(conn) = conns.get(ip) {
+            conn.send(message)
+        } else {
+            Err(format!("No connection to peer {}", ip))
+        }
+    }
+
+    pub async fn mark_peer_active(&self, ip: &str) {
+        let conns = self.connections.read().await;
+        if let Some(conn) = conns.get(ip) {
+            conn.mark_active().await;
+        }
+    }
+
+    pub async fn increment_missed_pings(&self, ip: &str) -> Option<u32> {
+        let conns = self.connections.read().await;
+        if let Some(conn) = conns.get(ip) {
+            Some(conn.increment_missed_pings().await)
+        } else {
+            None
+        }
+    }
+
+    pub async fn get_idle_connections(&self, idle_threshold: Duration) -> Vec<PeerConnectionState> {
+        let conns = self.connections.read().await;
+        let mut idle = Vec::new();
+        for conn in conns.values() {
+            if conn.idle_duration().await > idle_threshold {
+                idle.push(conn.clone());
+            }
+        }
+        idle
+    }
+}
+
+impl Default for PeerStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

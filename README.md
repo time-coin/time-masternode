@@ -3,18 +3,32 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)
 
-A high-performance implementation of the TIME Coin Protocol with instant finality and BFT consensus.
+A high-performance implementation of the TIME Coin Protocol v5 with sub-second instant finality via Avalanche consensus and deterministic block checkpointing.
 
 ## 🚀 Features
 
-- **Instant Finality**: <3 second transaction confirmation via BFT consensus
-- **UTXO State Machine**: Advanced state tracking (Unspent → Locked → SpentPending → SpentFinalized → Confirmed)
-- **Masternode Tiers**: Free, Bronze, Silver, Gold tiers with weighted rewards
-- **Deterministic Blocks**: 10-minute block generation (52,560 blocks/year)
+- **Instant Finality**: <1 second transaction confirmation via Avalanche Snowball consensus
+- **Deterministic Checkpointing**: 10-minute blocks with TSDC (Time-Scheduled Deterministic Consensus)
+- **Leaderless Consensus**: No BFT voting rounds or global committees
+- **Stake-Weighted Sampling**: Sybil resistance via collateral-based peer selection
+- **UTXO State Machine**: Advanced state tracking (Unspent → Locked → Sampling → Finalized → Archived)
+- **Masternode Tiers**: Free, Bronze, Silver, Gold tiers with weighted sampling power
 - **Dual Network Support**: Mainnet and Testnet configurations
 - **Real-time RPC API**: Bitcoin-compatible JSON-RPC interface
 - **P2P Networking**: Peer discovery and gossip protocol
 - **Persistent Storage**: Sled-based blockchain storage
+
+## ✅ Build Status
+
+- **Compilation**: ✅ COMPLETE (Zero errors)
+- **Latest Build**: December 23, 2024
+- **Build Time**: ~1 minute (release profile)
+- **Network Modules**: ✅ Consolidated and optimized
+  - Lock-free connection management (DashMap)
+  - Bootstrap peer discovery
+  - Secure P2P networking
+  
+See [analysis/COMPILATION_COMPLETE_QUICK_REFERENCE.md](analysis/COMPILATION_COMPLETE_QUICK_REFERENCE.md) for detailed build information.
 
 ## 📋 Requirements
 
@@ -107,64 +121,82 @@ timecoin/
 │   ├── main.rs              # Entry point
 │   ├── config.rs            # Configuration management
 │   ├── types.rs             # Core types
-│   ├── consensus.rs         # BFT consensus
+│   ├── consensus.rs         # Avalanche Snowball + TSDC consensus
 │   ├── utxo_manager.rs      # UTXO state machine
 │   ├── blockchain.rs        # Blockchain storage
 │   ├── masternode_registry.rs # Masternode tracking
 │   ├── heartbeat_attestation.rs # Uptime verification
 │   ├── block/               # Block generation & validation
 │   ├── network/             # P2P networking
+│   │   ├── connection_manager.rs   # Lock-free peer connection tracking (NEW)
+│   │   ├── peer_discovery.rs       # Bootstrap peer service (NEW)
+│   │   ├── peer_connection.rs      # Peer connection handler
+│   │   ├── peer_connection_registry.rs # Peer registry & messaging
+│   │   ├── client.rs        # Network client
+│   │   ├── server.rs        # Network server
+│   │   ├── message.rs       # Network messages
+│   │   ├── state_sync.rs    # State synchronization
+│   │   ├── blacklist.rs     # IP blacklisting
+│   │   ├── rate_limiter.rs  # Rate limiting
+│   │   ├── dedup_filter.rs  # Message deduplication
+│   │   ├── tls.rs           # TLS encryption
+│   │   ├── signed_message.rs # Message signing
+│   │   └── secure_transport.rs # Secure transport layer
 │   └── rpc/                 # RPC server
 ├── docs/                    # 📚 Complete documentation
-│   └── TIMECOIN_PROTOCOL.md # Full protocol specification
-├── analysis/                # Implementation notes
-├── config.toml              # Default config
+│   └── TIMECOIN_PROTOCOL_V5.md # Protocol v5 specification (Avalanche + TSDC)
+├── analysis/                # Implementation notes & analysis
+├── config.toml              # Default config (testnet)
 ├── config.mainnet.toml      # Mainnet config
+├── COMPILATION_COMPLETE.md  # Build status & quick reference
 └── Cargo.toml               # Dependencies
 ```
 
 ## 📚 Documentation
 
-For complete protocol documentation, see **[docs/TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md)**
+For complete protocol documentation, see **[docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md)**
 
-Key topics covered:
-- **[Core Architecture](docs/TIMECOIN_PROTOCOL.md#core-architecture)** - System components and data structures
-- **[UTXO State Machine](docs/TIMECOIN_PROTOCOL.md#utxo-state-machine)** - 6-state transaction lifecycle
-- **[Instant Finality](docs/TIMECOIN_PROTOCOL.md#instant-finality)** - Sub-3-second settlement
-- **[BFT Consensus](docs/TIMECOIN_PROTOCOL.md#bft-consensus)** - Byzantine fault tolerance
-- **[Masternode System](docs/TIMECOIN_PROTOCOL.md#masternode-system)** - Tier structure and requirements
-- **[Heartbeat Attestation](docs/TIMECOIN_PROTOCOL.md#heartbeat-attestation)** - Peer-verified uptime
-- **[Block Production](docs/TIMECOIN_PROTOCOL.md#block-production)** - Deterministic generation
-- **[Reward Distribution](docs/TIMECOIN_PROTOCOL.md#reward-distribution)** - Economic model
-- **[Network Protocol](docs/TIMECOIN_PROTOCOL.md#network-protocol)** - P2P messaging
-- **[Security Model](docs/TIMECOIN_PROTOCOL.md#security-model)** - Threat analysis
+**Additional Resources:**
+- **[docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)** - Network layer design
+- **[docs/INDEX.md](docs/INDEX.md)** - Complete documentation index
+- **[analysis/CHANGELOG_DEC_23_2024.md](analysis/CHANGELOG_DEC_23_2024.md)** - Recent changes
+
+Key topics in protocol documentation:
+- **[Protocol Overview](docs/TIMECOIN_PROTOCOL_V5.md#overview)** - Hybrid Avalanche + TSDC architecture
+- **[Protocol Architecture](docs/TIMECOIN_PROTOCOL_V5.md#protocol-architecture)** - Real-time and epoch-time layers
+- **[Avalanche Consensus](docs/TIMECOIN_PROTOCOL_V5.md#avalanche-consensus-instant-finality)** - Sub-second instant finality via Snowball
+- **[TSDC (Time-Scheduled Deterministic Consensus)](docs/TIMECOIN_PROTOCOL_V5.md#time-scheduled-deterministic-consensus-tsdc)** - 10-minute deterministic block checkpointing
+- **[Masternode System](docs/TIMECOIN_PROTOCOL_V5.md#masternode-system)** - Stake-weighted sampling tiers
+- **[Security Model](docs/TIMECOIN_PROTOCOL_V5.md#security-model)** - Safety and liveness guarantees
 
 ## 🏗️ Architecture
 
 ### UTXO State Machine
 
 ```
-Unspent → Locked → SpentPending → SpentFinalized → Confirmed
+Unspent → Locked → Sampling → Finalized → Archived
 ```
 
-### BFT Consensus
+Transactions achieve finality during the Sampling phase via Avalanche Snowball, before block inclusion.
 
-- Quorum: ⌈2n/3⌉ of masternodes
-- Vote aggregation in parallel
-- Instant finality on quorum reached
+### Consensus Mechanism
+
+**Two-Layer Design:**
+1. **Avalanche Layer (Real-Time)**: Transactions finalize in <1 second via stake-weighted peer sampling with Snowball protocol
+2. **TSDC Layer (Deterministic)**: Blocks created every 10 minutes via VRF-based leader selection
+
+No global committees, no voting rounds, no BFT stalls.
 
 ### Masternode Tiers
 
-| Tier   | Collateral | Reward Weight | Block Rewards | Governance |
-|--------|-----------|---------------|---------------|------------|
-| Free   | 0 TIME    | 100           | ✅            | ❌         |
-| Bronze | 1,000     | 1,000         | ✅            | ✅         |
-| Silver | 10,000    | 10,000        | ✅            | ✅         |
-| Gold   | 100,000   | 100,000       | ✅            | ✅         |
+| Tier   | Collateral | Sampling Weight | Reward Share |
+|--------|-----------|-----------------|--------------|
+| Free   | 0 TIME    | 1x              | ✅           |
+| Bronze | 1,000     | 10x             | ✅           |
+| Silver | 10,000    | 100x            | ✅           |
+| Gold   | 100,000   | 1,000x          | ✅           |
 
-*Free tier enables zero-barrier participation. Governance voting requires collateral to prevent Sybil attacks.*
-
-*Free tier enables zero-barrier participation. Governance voting requires collateral to prevent Sybil attacks.*
+*Sampling weight determines probability of being queried during Avalanche consensus. Free tier enables zero-barrier participation with Sybil resistance via stake weighting.*
 
 ### Block Rewards
 
@@ -221,7 +253,9 @@ finality_timeout = 3000  # milliseconds
 ## 🛣️ Roadmap
 
 - [x] Core UTXO state machine
-- [x] BFT consensus engine
+- [x] Avalanche consensus engine (Snowball)
+- [x] Time-Scheduled Deterministic Consensus (TSDC)
+- [x] Stake-weighted sampling
 - [x] Deterministic block production
 - [x] Masternode tier system
 - [x] RPC API
@@ -230,13 +264,13 @@ finality_timeout = 3000  # milliseconds
 - [x] CLI tool
 - [x] Peer discovery
 - [x] Persistent storage (Sled)
+- [ ] Heartbeat attestation (witness signatures)
 - [ ] WebSocket API
 - [ ] Block explorer
 - [ ] Signature verification
 - [ ] Mobile wallet support
 - [ ] Hardware wallet integration
 - [ ] Multi-signature support
-- [ ] Smart contract layer
 
 ## 🤝 Contributing
 
