@@ -36,7 +36,11 @@ pub enum AvalancheError {
 pub struct AvalancheConfig {
     /// Number of validators to query per round (k parameter)
     pub sample_size: usize,
+    /// Quorum size - minimum votes needed to consider a round (alpha parameter)
+    /// Per spec: alpha = 14
+    pub quorum_size: usize,
     /// Number of consecutive preference confirms needed for finality (beta)
+    /// Per spec: beta = 20
     pub finality_confidence: usize,
     /// Timeout for query responses (milliseconds)
     pub query_timeout_ms: u64,
@@ -48,7 +52,8 @@ impl Default for AvalancheConfig {
     fn default() -> Self {
         Self {
             sample_size: 20,         // Query 20 validators per round (k)
-            finality_confidence: 15, // 15 consecutive confirms for finality (beta)
+            quorum_size: 14,         // Need 14+ responses for consensus (alpha)
+            finality_confidence: 20, // 20 consecutive confirms for finality (beta)
             query_timeout_ms: 2000,  // 2 second timeout
             max_rounds: 100,
         }
@@ -71,6 +76,22 @@ impl std::fmt::Display for Preference {
     }
 }
 
+/// Information about a validator for stake-weighted sampling
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatorInfo {
+    pub address: String,
+    pub weight: usize, // Sampling weight based on tier
+}
+
+/// Vote result from a single validator with weight
+#[derive(Debug, Clone)]
+pub struct Vote {
+    pub voter_id: String,
+    pub preference: Preference,
+    pub timestamp: Instant,
+    pub weight: usize, // Stake weight of the voter
+}
+
 /// Snowflake protocol state - improved with dynamic k adjustment
 #[derive(Debug, Clone)]
 pub struct Snowflake {
@@ -82,10 +103,10 @@ pub struct Snowflake {
 }
 
 impl Snowflake {
-    pub fn new(initial_preference: Preference, validators: &[String]) -> Self {
+    pub fn new(initial_preference: Preference, validators: &[ValidatorInfo]) -> Self {
         let mut suspicion = HashMap::new();
         for validator in validators {
-            suspicion.insert(validator.clone(), 1.0); // Start with full trust
+            suspicion.insert(validator.address.clone(), 1.0); // Start with full trust
         }
 
         Self {
@@ -145,7 +166,7 @@ pub struct Snowball {
 }
 
 impl Snowball {
-    pub fn new(initial_preference: Preference, validators: &[String]) -> Self {
+    pub fn new(initial_preference: Preference, validators: &[ValidatorInfo]) -> Self {
         Self {
             snowflake: Snowflake::new(initial_preference, validators),
             last_finalized: None,
@@ -168,26 +189,18 @@ impl Snowball {
     }
 }
 
-/// Vote result from a single validator
-#[derive(Debug, Clone)]
-pub struct Vote {
-    pub voter_id: String,
-    pub preference: Preference,
-    pub timestamp: Instant,
-}
-
 /// Query round tracking - improved for better consensus detection
 #[derive(Debug)]
 pub struct QueryRound {
     pub round_number: usize,
     pub txid: Hash256,
-    pub sampled_validators: Vec<String>,
+    pub sampled_validators: Vec<ValidatorInfo>,
     pub votes_received: DashMap<String, Vote>,
     pub started_at: Instant,
 }
 
 impl QueryRound {
-    pub fn new(round_number: usize, txid: Hash256, sampled_validators: Vec<String>) -> Self {
+    pub fn new(round_number: usize, txid: Hash256, sampled_validators: Vec<ValidatorInfo>) -> Self {
         Self {
             round_number,
             txid,
@@ -244,8 +257,8 @@ pub struct AvalancheConsensus {
     /// Finalized transactions
     finalized_txs: DashMap<Hash256, Preference>,
 
-    /// Validator list for sampling
-    validators: Arc<RwLock<Vec<String>>>,
+    /// Validator list with weight info for stake-weighted sampling
+    validators: Arc<RwLock<Vec<ValidatorInfo>>>,
 
     /// Metrics
     rounds_executed: AtomicUsize,
@@ -277,31 +290,68 @@ impl AvalancheConsensus {
         })
     }
 
-    /// Update the list of active validators
-    pub fn update_validators(&self, validators: Vec<String>) {
+    /// Update the list of active validators with their weights
+    pub fn update_validators(&self, validators: Vec<ValidatorInfo>) {
         let mut v = self.validators.write();
         *v = validators;
     }
 
     /// Get current validators
-    pub fn get_validators(&self) -> Vec<String> {
+    pub fn get_validators(&self) -> Vec<ValidatorInfo> {
         self.validators.read().clone()
     }
 
-    /// Sample validators randomly with shuffle (improved randomness)
-    fn sample_validators(&self, validators: &[String], sample_size: usize) -> Vec<String> {
+    /// Get validator addresses only (for compatibility)
+    pub fn get_validator_addresses(&self) -> Vec<String> {
+        self.validators
+            .read()
+            .iter()
+            .map(|v| v.address.clone())
+            .collect()
+    }
+
+    /// Sample validators using stake-weighted probability
+    /// P(sampling node_i) = Weight_i / Total_Weight
+    fn sample_validators(
+        &self,
+        validators: &[ValidatorInfo],
+        sample_size: usize,
+    ) -> Vec<ValidatorInfo> {
         if validators.is_empty() {
             return Vec::new();
         }
 
-        let mut rng = thread_rng();
-        let mut shuffled: Vec<String> = validators.to_vec();
-        shuffled.shuffle(&mut rng);
+        // Calculate total weight
+        let total_weight: usize = validators.iter().map(|v| v.weight).sum();
+        if total_weight == 0 {
+            return Vec::new();
+        }
 
-        shuffled
-            .into_iter()
-            .take(sample_size.min(validators.len()))
-            .collect()
+        // Create weighted sampling pool
+        let mut pool = Vec::new();
+        for validator in validators {
+            // Add validator multiple times based on weight
+            for _ in 0..validator.weight {
+                pool.push(validator.clone());
+            }
+        }
+
+        // Shuffle and sample with duplication removed
+        let mut rng = thread_rng();
+        pool.shuffle(&mut rng);
+
+        // Use indices to avoid duplicates and take only sample_size
+        let mut sampled = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for validator in pool.into_iter().take(sample_size * 2) {
+            if seen.insert(validator.address.clone()) {
+                sampled.push(validator);
+                if sampled.len() >= sample_size {
+                    break;
+                }
+            }
+        }
+        sampled
     }
 
     /// Initiate consensus on a transaction
@@ -321,10 +371,19 @@ impl AvalancheConsensus {
 
     /// Submit a vote for a transaction from a validator
     pub fn submit_vote(&self, txid: Hash256, voter_id: String, preference: Preference) {
+        // Look up the validator's weight
+        let validators = self.get_validators();
+        let weight = validators
+            .iter()
+            .find(|v| v.address == voter_id)
+            .map(|v| v.weight)
+            .unwrap_or(1); // Default to 1 if not found
+
         let vote = Vote {
             voter_id: voter_id.clone(),
             preference,
             timestamp: Instant::now(),
+            weight,
         };
 
         // If there's an active round, record the vote
@@ -531,7 +590,20 @@ mod tests {
         let config = AvalancheConfig::default();
         let av = AvalancheConsensus::new(config).unwrap();
 
-        let validators = vec!["v1".to_string(), "v2".to_string(), "v3".to_string()];
+        let validators = vec![
+            ValidatorInfo {
+                address: "v1".to_string(),
+                weight: 1,
+            },
+            ValidatorInfo {
+                address: "v2".to_string(),
+                weight: 10,
+            },
+            ValidatorInfo {
+                address: "v3".to_string(),
+                weight: 100,
+            },
+        ];
         av.update_validators(validators.clone());
 
         assert_eq!(av.get_validators(), validators);

@@ -146,4 +146,15 @@ impl MasternodeTier {
             MasternodeTier::Gold => 0.98,   // 98% minimum
         }
     }
+
+    /// Sampling weight for Avalanche consensus
+    /// Used for stake-weighted sampling: P(sample node_i) = Weight_i / Total_Weight
+    pub fn sampling_weight(&self) -> usize {
+        match self {
+            MasternodeTier::Free => 1,     // 1x weight
+            MasternodeTier::Bronze => 10,  // 10x weight
+            MasternodeTier::Silver => 100, // 100x weight
+            MasternodeTier::Gold => 1000,  // 1000x weight
+        }
+    }
 }

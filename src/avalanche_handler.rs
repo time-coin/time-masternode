@@ -76,7 +76,10 @@ impl AvalancheTransactionHandler {
             .list_active()
             .await
             .into_iter()
-            .map(|mn| mn.masternode.address)
+            .map(|mn| crate::avalanche_consensus::ValidatorInfo {
+                address: mn.masternode.address,
+                weight: mn.masternode.tier.sampling_weight(),
+            })
             .collect();
 
         self.consensus.update_validators(validators);
