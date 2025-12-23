@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 60; // Masternodes must ping every 60 seconds
-const MAX_MISSED_HEARTBEATS: u64 = 3; // Allow 3 missed heartbeats before marking offline
+const MAX_MISSED_HEARTBEATS: u64 = 5; // Allow 5 missed heartbeats (5 minutes) before marking offline
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -134,7 +134,7 @@ impl MasternodeRegistry {
     }
 
     async fn monitor_heartbeats(&self) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30)); // Check every 30 seconds instead of 120
         loop {
             interval.tick().await;
 
