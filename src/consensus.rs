@@ -576,11 +576,12 @@ impl AvalancheConsensus {
     pub fn get_tx_state(&self, txid: &Hash256) -> Option<(Preference, usize, usize, bool)> {
         self.tx_state.get(txid).map(|state| {
             let s = state.read();
+            let is_finalized = s.is_finalized(self.config.finality_confidence as u32);
             (
                 s.snowflake.preference,
                 s.snowflake.confidence as usize,
                 s.snowflake.k,
-                self.finalized_txs.contains_key(txid),
+                is_finalized,
             )
         })
     }
@@ -1059,6 +1060,14 @@ impl ConsensusEngine {
         )));
         self.avalanche.tx_state.insert(txid, tx_state);
 
+        // Create initial QueryRound for vote tracking
+        let query_round = Arc::new(RwLock::new(QueryRound::new(
+            0,
+            txid,
+            validators_for_consensus.clone(),
+        )));
+        self.avalanche.active_rounds.insert(txid, query_round);
+
         tracing::info!(
             "🔄 Starting Avalanche consensus for TX {:?} with {} validators",
             hex::encode(txid),
@@ -1081,6 +1090,14 @@ impl ConsensusEngine {
             // Execute multiple Avalanche rounds for this transaction
             let max_rounds = 10;
             for round_num in 0..max_rounds {
+                // Create new QueryRound for this round
+                let query_round = Arc::new(RwLock::new(QueryRound::new(
+                    round_num,
+                    txid,
+                    validators_for_consensus.clone(),
+                )));
+                consensus.active_rounds.insert(txid, query_round);
+
                 // Sample size calculation (no RNG needed for count)
                 let sample_size = (validators_for_consensus.len() / 3)
                     .max(3)
@@ -1169,22 +1186,34 @@ impl ConsensusEngine {
                     // Move to finalized pool
                     if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
                         tracing::info!(
-                            "📦 TX {:?} moved to finalized pool (real consensus)",
+                            "📦 TX {:?} moved to finalized pool (Snowball confidence threshold reached)",
                             hex::encode(txid)
                         );
                     }
+                    // Record finalization preference for reference
+                    consensus.finalized_txs.insert(txid, preference);
                 } else {
                     // Fallback: finalize with Accept preference even if not enough votes
                     // This prevents transactions from getting stuck
                     if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
                         tracing::info!(
-                            "📦 TX {:?} finalized with fallback (preference: {})",
+                            "📦 TX {:?} finalized with fallback (max rounds reached, preference: {})",
                             hex::encode(txid),
                             preference
                         );
                     }
+                    // Record fallback finalization
+                    consensus.finalized_txs.insert(txid, preference);
                 }
             }
+
+            // Cleanup: remove QueryRound and tx_state
+            consensus.active_rounds.remove(&txid);
+            consensus.tx_state.remove(&txid);
+            tracing::debug!(
+                "🧹 Cleaned up consensus state for TX {:?}",
+                hex::encode(txid)
+            );
         });
 
         Ok(())
