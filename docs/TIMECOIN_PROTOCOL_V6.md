@@ -24,6 +24,18 @@
 13. [Security Model](#13-security-model)
 14. [Configuration Defaults](#14-configuration-defaults)
 15. [Implementation Notes](#15-implementation-notes)
+16. [Cryptographic Bindings (NORMATIVE ADDITIONS)](#16-cryptographic-bindings-normative-additions)
+17. [Transaction and Staking UTXO Details](#17-transaction-and-staking-utxo-details)
+18. [Network Transport Layer (NORMATIVE)](#18-network-transport-layer-normative)
+19. [Genesis Block and Initial State (NORMATIVE)](#19-genesis-block-and-initial-state-normative)
+20. [Clock Synchronization Requirements (NORMATIVE)](#20-clock-synchronization-requirements-normative)
+21. [Light Client and SPV Support (OPTIONAL)](#21-light-client-and-spv-support-optional)
+22. [Error Recovery and Edge Cases (NORMATIVE)](#22-error-recovery-and-edge-cases-normative)
+23. [Address Format and Wallet Integration (NORMATIVE)](#23-address-format-and-wallet-integration-normative)
+24. [Mempool Management and Fee Estimation (NORMATIVE)](#24-mempool-management-and-fee-estimation-normative)
+25. [Economic Model (NORMATIVE)](#25-economic-model-normative)
+26. [Implementation Checklist](#26-implementation-checklist)
+27. [Test Vectors](#27-test-vectors)
 
 ---
 
@@ -469,5 +481,585 @@ If honest weight dominates and the network is connected, honest transactions can
 3. **Conflict handling:** treat conflicts per outpoint; when a VFP is accepted, prune all competing spends.
 4. **Archival chain reorg tolerance:** checkpoint blocks are archival; transaction finality comes from VFP. Reorgs should not affect finalized state unless you explicitly couple rewards/state to block order.
 5. **Canonical TX serialization:** MUST be specified precisely, since `tx_hash_commitment` is signed. (Do not reuse non-canonical encodings.)
+
+---
+
+## 16. Cryptographic Bindings (NORMATIVE ADDITIONS)
+
+### 16.1 Hash Function
+**REQUIREMENT:** This specification was written with algorithm-agnosticity. For production deployment, implementations MUST pin:
+
+```
+HASH_FUNCTION = BLAKE3-256
+Alternative for compatibility: SHA-256d (two rounds of SHA-256)
+```
+
+**Usage:** All cryptographic hashes (`txid`, `block_hash`, `tx_hash_commitment`, VRF input binding) MUST use the selected function consistently across all nodes.
+
+**Why BLAKE3 (not Ed25519)?**  
+BLAKE3 is a *hash function*, Ed25519 is a *signature scheme*. They serve different purposes:
+- Hash: Create deterministic content IDs (txid, block_hash)
+- Signature: Prove origin and integrity of messages
+
+See **CRYPTOGRAPHY_RATIONALE.md** for detailed explanation.
+
+### 16.2 VRF Scheme
+**REQUIREMENT:** VRF is used in §9 for TSDC sortition. The specification MUST pin a concrete VRF construction:
+
+```
+VRF_SCHEME = ECVRF-EDWARDS25519-SHA512-TAI (RFC 9381)
+Alternative: deterministic construction from Ed25519 private key
+```
+
+**Properties:**
+- Deterministic output given the same input (same privkey + input = same score)
+- Publicly verifiable proof from public key (anyone can verify)
+- Unpredictable to adversaries (only privkey holder knows score first)
+- Rankable (numeric output allows sorting; lowest wins)
+
+**Input binding (§9.2):**
+```
+vrf_input = H_BLAKE3(prev_block_hash || uint64_le(slot_time) || uint32_le(chain_id))
+(vrf_output, vrf_proof) = VRF_Prove(vrf_sk, vrf_input)
+```
+
+**Why VRF (not Ed25519 or BLAKE3 alone)?**  
+- Ed25519 signatures cannot be ranked (are just bytes, not sortition-ready)
+- BLAKE3 hashes are predictable to everyone (no privacy advantage from a privkey)
+- VRF combines: deterministic output + unpredictability + verifiability + rankability
+
+See **CRYPTOGRAPHY_RATIONALE.md** for detailed comparison.
+
+### 16.3 Canonical Transaction Serialization
+**REQUIREMENT:** Transaction serialization MUST be fully specified, as `tx_hash_commitment` (§8.1) is signed in finality votes.
+
+**Format:**
+```
+TxSerialization = {
+  version: u32_le,
+  input_count: varint,
+  inputs: TxInput[],
+  output_count: varint,
+  outputs: TxOutput[],
+  lock_time: u64_le,
+}
+
+TxInput = {
+  prev_txid: Hash256 (big-endian),
+  prev_index: u32_le,
+  script_length: varint,
+  script: bytes[],
+}
+
+TxOutput = {
+  value: u64_le,
+  script_length: varint,
+  script: bytes[],
+}
+
+varint = variable-length integer (little-endian, 1-9 bytes)
+```
+
+**Rules:**
+- Fields MUST be serialized in the above order.
+- No padding or alignment bytes.
+- Arrays ordered as specified; no reordering.
+- Hash computed as `txid = BLAKE3(canonical_bytes)`.
+
+---
+
+## 17. Transaction and Staking UTXO Details
+
+### 17.1 Transaction Format
+**Wire format:** See §16.3. This section elaborates on script semantics.
+
+### 17.2 Staking UTXO Script System (NORMATIVE)
+§5.3 references "on-chain staking UTXO" but requires detailed script semantics for implementation.
+
+**Staking Output Script (Lock Script):**
+```
+OP_STAKE <tier_id: u8> <pubkey: 33 bytes> <unlock_height: u32> <op_unlock: 1 byte>
+```
+
+**Semantics:**
+- `tier_id`: maps to tier weights (§5.2)
+- `pubkey`: node's Ed25519 public key (masternode identity)
+- `unlock_height`: earliest checkpoint block height at which stake can be withdrawn
+- `op_unlock`: control byte for future extension
+
+**Unlock/Withdrawal (Unlock Script):**
+```
+<signature: Ed25519Sig> <unlock_witness: bytes>
+```
+
+Must satisfy:
+1. Signature from `pubkey` is valid over the spending transaction
+2. Current checkpoint block height ≥ `unlock_height`
+
+**Stake Maturation:**
+- A staking output is **mature** once included in a checkpoint block.
+- A masternode may only join the AVS after stake maturity.
+- Weight corresponds to the locked amount's tier (§5.2).
+
+**Tier Changes:**
+- Require a new staking output to be created
+- Old stake must be withdrawn before new stake becomes active
+- AVS membership transitions enforce via heartbeat attestation grace period
+
+### 17.3 Regular Transaction Outputs (Non-Staking)
+```
+<value: u64_le> <lock_script>
+
+lock_script = {
+  OP_CHECKSIG <pubkey_hash: 20 bytes>
+  |
+  OP_MULTISIG <m: u8> <pubkey1> ... <pubkeyn> <n: u8>
+  |
+  OP_RETURN <data: bytes> (unspendable)
+}
+```
+
+---
+
+## 18. Network Transport Layer (NORMATIVE)
+
+### 18.1 Transport Protocol
+**REQUIREMENT:** Specify the transport medium for §11 messages.
+
+```
+TRANSPORT_PROTOCOL = QUIC v1 (RFC 9000)
+Fallback: TCP with optional Noise Protocol handshake (Noise_NN_25519_ChaChaPoly_BLAKE2b)
+```
+
+**Justification:**
+- QUIC provides connection multiplexing and modern TLS.
+- TCP fallback for compatibility; Noise adds encryption without TLS overhead.
+
+### 18.2 Message Framing
+All messages MUST be length-prefixed:
+
+```
+Frame = {
+  length: u32_be (network byte order, excludes this field),
+  message_type: u8,
+  payload: bytes[length - 1],
+}
+```
+
+**Max message size:** `4 MB`  
+**Connection limits:** `MAX_PEERS = 125` (inbound + outbound)
+
+### 18.3 Serialization Format
+**REQUIREMENT:** Pin message serialization.
+
+```
+SERIALIZATION_FORMAT = bincode v1.0 (or protobuf v3 for external APIs)
+- bincode: compact, deterministic, suitable for internal wire protocol
+- protobuf: forward-compatible, suitable for stable RPC APIs
+```
+
+Implementations MUST define a mapping from §11 Rust enums to wire bytes.
+
+### 18.4 Peer Discovery and Bootstrap
+**Bootstrap Process:**
+1. Node reads hardcoded bootstrap peer list (DNS seeds or IP addresses).
+2. Connects to bootstrap peers via QUIC/TCP.
+3. Requests `PeerListRequest` to discover additional peers.
+4. Maintains peer database; prefer geographic diversity and low latency.
+
+**DNS Seeds (REQUIRED for mainnet):**
+```
+seed1.timecoin.dev
+seed2.timecoin.dev
+seed3.timecoin.dev
+```
+
+(To be populated by network operators.)
+
+**Message Type:**
+```rust
+PeerListRequest { limit: u16 },
+PeerListResponse { peers: Vec<PeerInfo> },
+
+pub struct PeerInfo {
+    pub addr: IpAddr,
+    pub port: u16,
+    pub services: u32,  // bitmap: validator, full_node, light_client
+}
+```
+
+---
+
+## 19. Genesis Block and Initial State (NORMATIVE)
+
+### 19.1 Genesis Block Format
+```rust
+pub struct GenesisBlock {
+    pub chain_id: u32,
+    pub timestamp: u64,  // Unix seconds
+    pub initial_utxos: Vec<UTXOEntry>,
+    pub initial_avs: Vec<InitialValidatorEntry>,
+}
+
+pub struct UTXOEntry {
+    pub txid: Hash256,
+    pub output_index: u32,
+    pub value: u64,
+    pub script: bytes,
+}
+
+pub struct InitialValidatorEntry {
+    pub mn_id: Hash256,  // derived from pubkey hash
+    pub pubkey: [u8; 32],
+    pub vrf_pubkey: [u8; 32],
+    pub tier_weight: u16,
+}
+```
+
+### 19.2 Bootstrap Procedure (Chicken-Egg Problem)
+**Challenge:** AVS is required to validate, but AVS membership is on-chain.
+
+**Solution:**
+1. Genesis block specifies `initial_avs` set (pre-agreed by operators).
+2. Each initial validator MUST stake on-chain in the first few blocks.
+3. Once staking transaction is archived, stake becomes eligible.
+4. AVS membership is then enforced by heartbeat + witness attestation (§5.4).
+
+**Testnet Genesis (example):**
+```json
+{
+  "chain_id": 1,
+  "timestamp": 1703376000,
+  "initial_avs": [
+    {
+      "mn_id": "mn_1...",
+      "pubkey": "...",
+      "tier_weight": 100
+    }
+  ]
+}
+```
+
+### 19.3 Chain ID Assignment
+- **Mainnet:** `chain_id = 1`
+- **Testnet:** `chain_id = 2`
+- **Devnet:** `chain_id = 3`
+
+All signed objects (§8.1, §5.4) MUST include the correct `chain_id` to prevent replay attacks.
+
+---
+
+## 20. Clock Synchronization Requirements (NORMATIVE)
+
+### 20.1 Wall-Clock Dependency
+TSDC (§9) relies on wall-clock time for slot alignment. Clocks MUST be synchronized to within a tight tolerance.
+
+```
+CLOCK_SYNC_REQUIREMENT = NTP v4 (RFC 5905) or GPS/PTP
+MAX_CLOCK_DRIFT = ±10 seconds (acceptable per node)
+```
+
+### 20.2 Slot Boundary Grace Period
+```
+SLOT_GRACE_PERIOD = 30 seconds
+- Blocks with slot_time in [current_slot - 30s, current_slot + 30s] are accepted
+- Prevents legitimate blocks from being rejected due to minor clock skew
+```
+
+### 20.3 Future Block Rejection
+```
+FUTURE_BLOCK_TOLERANCE = 5 seconds
+- Reject blocks with slot_time > now() + 5s
+- Defends against attacks by nodes with skewed clocks
+```
+
+### 20.4 NTP Configuration (Recommended)
+```
+# /etc/ntp.conf (Linux) or equivalent
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+server 2.pool.ntp.org iburst
+server 3.pool.ntp.org iburst
+
+# Ensure systemd-timesyncd or ntpd is running
+# Check: ntpq -p (or timedatectl status)
+```
+
+---
+
+## 21. Light Client and SPV Support (OPTIONAL)
+
+### 21.1 Light Client Model
+Clients that cannot run full validation (e.g., mobile wallets) MAY:
+- Verify transactions against **VFP** (§8) rather than replaying Snowball
+- Query trusted peers for AVS snapshots (§8.4)
+- Verify VFP signatures against AVS snapshot at transaction's `slot_index`
+
+### 21.2 Block Header Format for Light Clients
+```rust
+pub struct BlockHeader {
+    pub height: u64,
+    pub slot_index: u64,
+    pub slot_time: u64,
+    pub prev_block_hash: Hash256,
+    pub producer_id: Hash256,
+    pub vrf_output: [u8; 32],
+    pub vrf_proof: bytes,
+    pub finalized_root: Hash256,  // Merkle root of entries
+    pub timestamp_ms: u64,
+}
+```
+
+### 21.3 Merkle Proof for Entry Verification
+Light clients can verify that a specific `(txid, vfp_hash)` is included in a block:
+
+```rust
+pub struct EntryProof {
+    pub txid: Hash256,
+    pub vfp_hash: Hash256,
+    pub inclusion_path: Vec<Hash256>,  // Merkle path to finalized_root
+    pub leaf_index: u32,
+}
+
+// Verify: compute_merkle_root(txid || vfp_hash, inclusion_path, leaf_index) == block.finalized_root
+```
+
+### 21.4 Trust Model
+Light clients MUST:
+1. Trust the canonical **header chain** (validated via VRF sortition).
+2. Trust AVS snapshots returned by queried peers (or require multiple confirmations).
+3. Assume VFP signature verification is correct (standard Ed25519).
+
+---
+
+## 22. Error Recovery and Edge Cases (NORMATIVE)
+
+### 22.1 Conflicting VFPs
+**Issue (§8.7):** Two conflicting transactions both obtain valid VFPs.
+
+**Safety violation:** One or more AVS members produced signatures for conflicting transactions, or signatures were forged.
+
+**Recovery:**
+```
+ON_CONFLICTING_VFP:
+  1. Detect: compare (txid_A, vfp_A) vs (txid_B, vfp_B) for same input outpoint
+  2. Log: record both VFPs and all signatories as emergency event
+  3. Halt: stop automatic finalization for that outpoint
+  4. Surface: alert operators and light clients
+  5. (Future) Governance: require manual intervention or protocol upgrade
+     to slash dishonest validators if cryptographic proof of fraud exists
+```
+
+### 22.2 Network Partition Recovery
+**Scenario:** Network splits; subsets temporarily cannot reach each other.
+
+**Local behavior:**
+- Each partition continues local consensus and block production
+- Transactions finalize independently in each partition
+
+**Reconnection:**
+```
+ON_RECONNECTION:
+  1. Exchange block headers across partitions
+  2. Canonical chain = partition with highest cumulative AVS weight (sum of all blocks' producers' weight)
+  3. Minority partition rolls back uncommitted VFPs (§8.6)
+  4. Replay finalized transactions from majority onto minority's UTXO set
+```
+
+**Implementation note:** Requires persistent block storage and reorg logic.
+
+### 22.3 Orphan Transaction Handling
+**Scenario:** A transaction references an input UTXO that has not yet been checkpointed.
+
+**Behavior:**
+```
+ORPHAN_TXS:
+  1. Keep in separate orphan pool (max 1000 entries, by LRU)
+  2. When referenced UTXO is archived, retry orphan pool
+  3. If orphan not resolved after 72 hours, evict
+```
+
+### 22.4 AVS Membership Disputes
+**Scenario:** Node claims a masternode is AVS-active, but heartbeat attestations disagree.
+
+**Resolution:**
+```
+MEMBERSHIP_VERIFICATION:
+  - Require ≥ WITNESS_MIN (default 3) valid witness attestations
+  - If dispute, request attestations from multiple peers
+  - Canonical membership = result from peers with highest total weight
+  - Cache locally for 1 heartbeat period (60s)
+```
+
+---
+
+## 23. Address Format and Wallet Integration (NORMATIVE)
+
+### 23.1 Address Encoding
+```
+ADDRESS_FORMAT = bech32m (BIP 350)
+ADDRESS_PREFIX = "time1" (mainnet)
+ADDRESS_PREFIX = "timet" (testnet)
+```
+
+**Example address:** `time1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx`
+
+### 23.2 Address Generation
+```
+address = bech32m_encode("time1", RIPEMD160(SHA256(pubkey)))
+```
+
+### 23.3 Wallet RPC API (Recommended)
+Implementations SHOULD expose a JSON-RPC 2.0 interface:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "sendtransaction",
+  "params": { "tx": "<hex>" },
+  "id": 1
+}
+
+{
+  "jsonrpc": "2.0",
+  "method": "gettransaction",
+  "params": { "txid": "<hash>" },
+  "id": 2
+}
+
+{
+  "jsonrpc": "2.0",
+  "method": "getbalance",
+  "params": { "address": "<bech32>" },
+  "id": 3
+}
+```
+
+---
+
+## 24. Mempool Management and Fee Estimation (NORMATIVE)
+
+### 24.1 Mempool Size and Limits
+```
+MAX_MEMPOOL_SIZE = 300 MB
+MAX_ENTRIES_PER_BLOCK = 10,000
+MAX_BLOCK_SIZE = 2 MB
+EVICTION_POLICY = lowest_fee_rate_first
+```
+
+### 24.2 Transaction Expiry
+```
+TX_EXPIRY_PERIOD = 72 hours
+- Transactions not finalized within 72 hours are evicted from mempool
+- Prevents mempool bloat from stuck transactions
+```
+
+### 24.3 Fee Estimation
+Wallets should estimate fees based on:
+```
+fee_per_byte = median(fees_in_recent_finalized_txs / tx_size)
+// or dynamic algorithm observing mempool congestion
+```
+
+**Minimum fee:** `MIN_FEE = 0.001 TIME per transaction`
+
+---
+
+## 25. Economic Model (NORMATIVE)
+
+### 25.1 Initial Supply
+```
+INITIAL_SUPPLY = 0 (fair launch with no pre-mine)
+// Alternative: X TIME reserved for foundation (to be decided)
+```
+
+### 25.2 Reward Schedule
+```
+Per checkpoint block (§10):
+R = 100 * (1 + ln(N))
+where N = |AVS| at the block's slot_index
+```
+
+**Example rewards:**
+- N = 10: R ≈ 100 * (1 + 2.30) = 330 TIME
+- N = 100: R ≈ 100 * (1 + 4.61) = 561 TIME
+- N = 1000: R ≈ 100 * (1 + 6.91) = 791 TIME
+
+**Note:** Logarithmic growth has no hard cap. Consider governance discussion on whether a cap is desired.
+
+### 25.3 Reward Distribution
+- **Producer:** 10% of (R + tx_fees)
+- **AVS validators:** 90% of (R + tx_fees) proportional to weight
+
+See §10 for details.
+
+---
+
+## 26. Implementation Checklist
+
+Before shipping to mainnet, implementations MUST address:
+
+- [ ] Cryptographic primitives finalized (§16: BLAKE3, ECVRF, serialization)
+- [ ] Transaction format fully specified and tested (§17.3)
+- [ ] Staking script semantics implemented (§17.2)
+- [ ] Network transport, framing, and serialization defined (§18)
+- [ ] Peer discovery and bootstrap process working (§18.4)
+- [ ] Genesis block format and initialization tested (§19)
+- [ ] Clock synchronization verified (NTP running, offset < 10s) (§20)
+- [ ] Mempool eviction and fee estimation functioning (§24)
+- [ ] Conflicting VFP detection and logging in place (§22.1)
+- [ ] Network partition recovery tested (§22.2)
+- [ ] Address format and RPC API standardized (§23)
+- [ ] Reward calculation verified with test vectors (§25)
+- [ ] Block size and entry count limits enforced (§24.1)
+- [ ] Test vectors created for all cryptographic operations (§26)
+
+---
+
+## 27. Test Vectors
+
+All implementations MUST verify against the following test vectors (to be populated during implementation):
+
+```yaml
+test_vectors:
+  canonical_tx_serialization:
+    - input: { version: 1, inputs: [...], outputs: [...] }
+      output_hex: "..."
+      txid: "..."
+
+  vrf_output:
+    - sk: "..."
+      prev_block_hash: "..."
+      slot_time: 600
+      chain_id: 1
+      output: "..."
+      proof: "..."
+
+  finality_vote_signature:
+    - vote: { chain_id: 1, txid: "...", voter_mn_id: "..." }
+      signature: "..."
+      verification: true
+
+  vfp_threshold:
+    - avs_size: 10
+      avs_weight: 100
+      q_finality: 67
+      vote_weight: 68
+      valid: true
+
+  snowball_state_transitions:
+    - status: "Sampling"
+      confidence: 19
+      poll_result: "Valid"
+      expected_new_confidence: 20
+      expected_new_status: "LocallyAccepted"
+
+  block_validity:
+    - block_hash: "..."
+      vrf_proof_valid: true
+      entries_sorted: true
+      no_conflicts: true
+      valid: true
+```
 
 ---

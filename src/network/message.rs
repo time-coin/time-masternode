@@ -122,6 +122,20 @@ pub enum NetworkMessage {
     FinalityVoteBroadcast {
         vote: crate::types::FinalityVote,
     },
+    // TSDC block production messages
+    TSCDBlockProposal {
+        block: Block,
+    },
+    TSCDPrepareVote {
+        block_hash: Hash256,
+        voter_id: String,
+        signature: Vec<u8>,
+    },
+    TSCDPrecommitVote {
+        block_hash: Hash256,
+        voter_id: String,
+        signature: Vec<u8>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -198,6 +212,9 @@ impl NetworkMessage {
             NetworkMessage::FinalityVoteRequest { .. } => "FinalityVoteRequest",
             NetworkMessage::FinalityVoteResponse { .. } => "FinalityVoteResponse",
             NetworkMessage::FinalityVoteBroadcast { .. } => "FinalityVoteBroadcast",
+            NetworkMessage::TSCDBlockProposal { .. } => "TSCDBlockProposal",
+            NetworkMessage::TSCDPrepareVote { .. } => "TSCDPrepareVote",
+            NetworkMessage::TSCDPrecommitVote { .. } => "TSCDPrecommitVote",
         }
     }
 

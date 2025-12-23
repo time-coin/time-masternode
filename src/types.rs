@@ -53,6 +53,14 @@ impl Transaction {
         let bytes = bincode::serialize(self).expect("Serialization should succeed");
         Sha256::digest(bytes).into()
     }
+
+    /// Calculate transaction fee (input sum - output sum)
+    pub fn fee_amount(&self) -> u64 {
+        // For now, return 0 as fees require UTXO lookup
+        // In a real implementation, this would be:
+        // fee = input_total - output_total
+        0
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

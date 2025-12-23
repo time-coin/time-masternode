@@ -7,6 +7,7 @@ mod block;
 mod blockchain;
 mod config;
 mod consensus;
+mod crypto;
 mod error;
 mod finality_proof;
 mod heartbeat_attestation;
@@ -45,6 +46,7 @@ use shutdown::ShutdownManager;
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
+use tsdc::TSCDConsensus;
 use types::*;
 use utxo_manager::UTXOStateManager;
 use wallet::WalletManager;
@@ -320,6 +322,10 @@ async fn main() {
     let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
     tracing::info!("✓ Consensus engine initialized");
 
+    // Initialize TSDC consensus engine
+    let tsdc_consensus = Arc::new(TSCDConsensus::new(Default::default()));
+    tracing::info!("✓ TSDC consensus engine initialized");
+
     // Initialize blockchain
     let blockchain = Arc::new(Blockchain::new(
         block_storage,
@@ -380,7 +386,9 @@ async fn main() {
     network_client.start().await;
 
     // Register this node if running as masternode
-    if let Some(ref mn) = masternode_info {
+    let masternode_address = masternode_info.as_ref().map(|mn| mn.address.clone());
+
+    if let Some(mn) = masternode_info {
         match registry
             .register(mn.clone(), mn.wallet_address.clone())
             .await
@@ -481,6 +489,105 @@ async fn main() {
             }
         });
         shutdown_manager.register_task(heartbeat_handle);
+
+        // Start TSDC slot loop for leader election and block production
+        let tsdc_loop = tsdc_consensus.clone();
+        let consensus_tsdc = consensus_engine.clone();
+        let peer_registry_tsdc = peer_connection_registry.clone();
+        let shutdown_token_tsdc = shutdown_token.clone();
+        let mn_address_tsdc = mn.address.clone();
+        let mn_tier = mn.tier.clone();
+        let mn_public_key = mn.public_key;
+
+        // Generate VRF keys before spawn (RNG can't cross await)
+        use ed25519_dalek::SigningKey;
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut seed);
+        let vrf_sk = SigningKey::from_bytes(&seed);
+        let vrf_pk = vrf_sk.verifying_key();
+
+        let tsdc_handle = tokio::spawn(async move {
+            // Register this node as a TSDC validator
+            let validator = tsdc::TSCDValidator {
+                id: mn_address_tsdc.clone(),
+                public_key: mn_public_key.to_bytes().to_vec(),
+                stake: mn_tier.collateral(),
+                vrf_secret_key: Some(vrf_sk),
+                vrf_public_key: Some(vrf_pk),
+            };
+            tsdc_loop.set_local_validator(validator).await;
+
+            // Calculate time until next slot boundary
+            let slot_duration = 600u64; // 10 minutes
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let current_slot = now / slot_duration;
+            let slot_deadline = (current_slot + 1) * slot_duration;
+            let sleep_duration = slot_deadline.saturating_sub(now);
+
+            // Wait until next slot boundary
+            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_duration)).await;
+
+            let mut slot_interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(slot_duration));
+            slot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = shutdown_token_tsdc.cancelled() => {
+                        tracing::debug!("🛑 TSDC slot loop shutting down gracefully");
+                        break;
+                    }
+                    _ = slot_interval.tick() => {
+                        let current_slot = tsdc_loop.current_slot();
+
+                        // Try to become leader for this slot
+                        match tsdc_loop.select_leader(current_slot).await {
+                            Ok(leader) => {
+                                if leader.id == mn_address_tsdc {
+                                    tracing::info!("🎯 SELECTED AS LEADER for slot {}", current_slot);
+
+                                    // Get finalized transactions from consensus engine
+                                    let finalized_txs = consensus_tsdc.get_finalized_transactions_for_block();
+
+                                    // Propose block with finalized transactions
+                                    match tsdc_loop.propose_block(
+                                        mn_address_tsdc.clone(),
+                                        finalized_txs.clone(),
+                                        vec![], // TODO: Add masternode rewards
+                                    ).await {
+                                        Ok(block) => {
+                                            tracing::info!(
+                                                "📦 Proposed block at height {} with {} transactions",
+                                                block.header.height,
+                                                block.transactions.len()
+                                            );
+
+                                            // Broadcast block proposal to all peers
+                                            let proposal = NetworkMessage::TSCDBlockProposal { block };
+                                            peer_registry_tsdc.broadcast(proposal).await;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("Failed to propose block: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    tracing::debug!("Slot {} leader: {}", current_slot, leader.id);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to select leader for slot {}: {}", current_slot, e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        shutdown_manager.register_task(tsdc_handle);
     }
 
     // Initialize genesis and catchup in background
@@ -659,9 +766,9 @@ async fn main() {
                         };
 
                         let selected_producer = &masternodes[producer_index];
-                        let is_producer = masternode_info
+                        let is_producer = masternode_address
                             .as_ref()
-                            .map(|mn| mn.address == selected_producer.address)
+                            .map(|addr| addr == &selected_producer.address)
                             .unwrap_or(false);
 
                         if is_producer {
@@ -844,8 +951,8 @@ async fn main() {
             println!("║  Storage:    {:<40} ║", config.storage.backend);
             println!("║  P2P Port:   {:<40} ║", p2p_addr);
             println!("║  RPC Port:   {:<40} ║", rpc_addr);
-            println!("║  Consensus:  TSDC + Avalanche Hybrid                   ║");
-            println!("║  Finality:   Instant (<10 seconds)                     ║");
+            println!("║  Consensus:  TSDC + Avalanche Hybrid                  ║");
+            println!("║  Finality:   Instant (<10 seconds)                    ║");
             println!("╚═══════════════════════════════════════════════════════╝");
             println!("\nPress Ctrl+C to stop\n");
 

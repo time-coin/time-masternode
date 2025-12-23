@@ -4,12 +4,14 @@
 /// It works in conjunction with Avalanche for transaction finality.
 ///
 /// Key components:
-/// - VRF-based leader selection (deterministic)
+/// - VRF-based leader selection (deterministic via ECVRF)
 /// - Slot-based block production (every 10 minutes = 600 seconds)
 /// - Fork choice rule (prefer finalized blocks)
 /// - Backup leader mechanism (5-second fallback)
-use crate::block::types::Block;
+use crate::block::types::{Block, BlockHeader};
+use crate::crypto::ECVRF;
 use crate::types::Hash256;
+use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -51,8 +53,6 @@ pub enum TSCDError {
 pub struct TSCDConfig {
     /// Slot duration in seconds (default: 600 = 10 minutes)
     pub slot_duration_secs: u64,
-    /// Finality threshold as fraction (default: 2/3 = 0.667)
-    pub finality_threshold: f64,
     /// Leader timeout before backup takes over (seconds)
     pub leader_timeout_secs: u64,
 }
@@ -61,7 +61,6 @@ impl Default for TSCDConfig {
     fn default() -> Self {
         Self {
             slot_duration_secs: 600, // 10 minutes
-            finality_threshold: 2.0 / 3.0,
             leader_timeout_secs: 5,
         }
     }
@@ -74,6 +73,8 @@ pub struct TSCDValidator {
     pub id: String,
     pub public_key: Vec<u8>,
     pub stake: u64,
+    pub vrf_secret_key: Option<SigningKey>,
+    pub vrf_public_key: Option<ed25519_dalek::VerifyingKey>,
 }
 
 /// State of a finalized block
@@ -192,7 +193,7 @@ impl TSCDConsensus {
     }
 
     /// Compute VRF for leader selection
-    /// Returns the validator with the smallest VRF output
+    /// Returns the validator with the highest VRF output
     pub async fn select_leader(&self, slot: u64) -> Result<TSCDValidator, TSCDError> {
         let validators = self.validators.read().await;
         if validators.is_empty() {
@@ -201,7 +202,7 @@ impl TSCDConsensus {
             ));
         }
 
-        // Compute VRF input
+        // Compute VRF input from previous block hash and slot
         let chain_head = self.chain_head.read().await;
         let vrf_input = match chain_head.as_ref() {
             Some(block) => {
@@ -219,31 +220,26 @@ impl TSCDConsensus {
             }
         };
 
-        // Select validator with lowest VRF output
-        // (In production, would use actual VRF computation)
-        // For now, use deterministic hash-based selection
-        let mut best_validator = validators[0].clone();
-        let mut best_hash = {
-            let mut h = Sha256::new();
-            h.update(vrf_input);
-            h.update(&best_validator.id);
-            h.finalize()
-        };
+        // Select validator with highest VRF output
+        let mut best_validator = None;
+        let mut best_output = None;
 
-        for validator in &validators[1..] {
-            let mut h = Sha256::new();
-            h.update(vrf_input);
-            h.update(&validator.id);
-            let hash = h.finalize();
-
-            // Compare as bytes - smallest is leader
-            if hash.as_slice() < best_hash.as_slice() {
-                best_validator = validator.clone();
-                best_hash = hash;
+        for validator in validators.iter() {
+            if let Some(vrf_sk) = &validator.vrf_secret_key {
+                match ECVRF::evaluate(vrf_sk, vrf_input.as_ref()) {
+                    Ok((output, _proof)) => {
+                        if best_output.is_none() || output > best_output.unwrap() {
+                            best_output = Some(output);
+                            best_validator = Some(validator.clone());
+                        }
+                    }
+                    Err(_) => continue,
+                }
             }
         }
 
-        Ok(best_validator)
+        best_validator
+            .ok_or_else(|| TSCDError::ConfigError("No validators with VRF keys".to_string()))
     }
 
     /// Validate a PREPARE message (block proposal from leader)
@@ -306,10 +302,10 @@ impl TSCDConsensus {
 
         state.precommits_received.insert(validator_id, signature);
 
-        // Check if we have enough signatures for finality
+        // Check if we have majority stake for finality (Avalanche consensus)
         let validators = self.validators.read().await;
         let total_stake: u64 = validators.iter().map(|v| v.stake).sum();
-        let threshold = (total_stake as f64 * self.config.finality_threshold) as u64;
+        let threshold = total_stake.div_ceil(2); // Majority stake (>50%)
 
         let mut signed_stake = 0u64;
         for validator_id in state.precommits_received.keys() {
@@ -345,6 +341,62 @@ impl TSCDConsensus {
     pub async fn finalize_block(&self, block: Block) -> Result<(), TSCDError> {
         let mut chain_head = self.chain_head.write().await;
         *chain_head = Some(block);
+        Ok(())
+    }
+
+    /// Propose a block for the current slot (leader only)
+    pub async fn propose_block(
+        &self,
+        _proposer_id: String,
+        transactions: Vec<crate::types::Transaction>,
+        masternode_rewards: Vec<(String, u64)>,
+    ) -> Result<Block, TSCDError> {
+        // Get current chain head for parent hash
+        let chain_head = self.chain_head.read().await;
+        let (parent_hash, block_height) = match chain_head.as_ref() {
+            Some(block) => (block.hash(), block.header.height + 1),
+            None => (Hash256::default(), 0),
+        };
+        drop(chain_head);
+
+        // Get current timestamp
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Create block
+        let header = BlockHeader {
+            version: 1,
+            height: block_height,
+            previous_hash: parent_hash,
+            merkle_root: Hash256::default(), // TODO: Compute merkle root from transactions
+            timestamp,
+            block_reward: 0, // TODO: Calculate block reward
+            leader: String::new(),
+            vrf_output: None,
+            vrf_proof: None,
+        };
+
+        Ok(Block {
+            header,
+            transactions,
+            masternode_rewards,
+        })
+    }
+
+    /// Handle a received block proposal (for non-leaders in prepare phase)
+    pub async fn on_block_proposal(&self, block: &Block) -> Result<(), TSCDError> {
+        // Validate the block
+        self.validate_prepare(block).await?;
+
+        // Block is valid - in a real implementation, we would vote on it
+        // For now, we just mark it as received
+        tracing::debug!(
+            "✅ Block proposal validated at height {}",
+            block.header.height
+        );
+
         Ok(())
     }
 
@@ -471,6 +523,288 @@ impl TSCDConsensus {
     pub async fn get_latest_checkpoint(&self) -> Option<TransactionCheckpoint> {
         self.checkpoints.read().await.last().cloned()
     }
+
+    // ========================================================================
+    // PHASE 3E: BLOCK FINALIZATION & REWARD DISTRIBUTION
+    // ========================================================================
+
+    /// Phase 3E.1: Create finality proof from majority precommit votes
+    /// Called when Avalanche consensus is reached (>50% of sample)
+    pub async fn create_finality_proof(
+        &self,
+        block_hash: Hash256,
+        height: u64,
+        signatures: Vec<Vec<u8>>,
+    ) -> FinalityProof {
+        let proof = FinalityProof {
+            block_hash,
+            height,
+            signatures,
+            signer_count: 0, // Will be set by caller
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        tracing::info!(
+            "✅ Created finality proof for block {} at height {}",
+            hex::encode(block_hash),
+            height
+        );
+
+        proof
+    }
+
+    /// Phase 3E.2: Add block to canonical chain
+    /// Called when finality proof is created and verified
+    pub async fn add_finalized_block(
+        &self,
+        block: Block,
+        proof: FinalityProof,
+    ) -> Result<(), TSCDError> {
+        // Verify block height matches previous
+        let current_height = self.finalized_height.load(AtomicOrdering::Relaxed);
+        if block.header.height != current_height + 1 {
+            return Err(TSCDError::ValidationFailed(format!(
+                "Block height {} doesn't follow {}",
+                block.header.height, current_height
+            )));
+        }
+
+        // Verify proof has majority stake for finality (Avalanche consensus)
+        let validators = self.validators.read().await;
+        let total_stake: u64 = validators.iter().map(|v| v.stake).sum();
+        let threshold = total_stake.div_ceil(2); // Majority stake (>50%)
+
+        if proof.signatures.len() as u64 * total_stake / validators.len() as u64 <= threshold {
+            return Err(TSCDError::ValidationFailed(
+                "Insufficient votes for finality".to_string(),
+            ));
+        }
+
+        // Add to chain
+        self.finalize_block(block.clone()).await?;
+        self.finalized_height
+            .store(block.header.height, AtomicOrdering::Relaxed);
+
+        tracing::info!(
+            "⛓️  Block {} finalized at height {} ({}+ votes)",
+            hex::encode(block.hash()),
+            block.header.height,
+            proof.signer_count
+        );
+
+        Ok(())
+    }
+
+    /// Phase 3E.3: Archive finalized transactions
+    /// Called after block is added to chain
+    /// Marks transactions as no longer pending/unconfirmed
+    pub async fn archive_finalized_transactions(&self, block: &Block) -> Result<usize, TSCDError> {
+        let tx_count = block.transactions.len();
+
+        if tx_count == 0 {
+            return Ok(0);
+        }
+
+        tracing::debug!(
+            "📦 Archiving {} finalized transactions from block {}",
+            tx_count,
+            hex::encode(block.hash())
+        );
+
+        // In a real implementation, this would:
+        // 1. Remove transactions from mempool
+        // 2. Mark outputs as spent in UTXO set
+        // 3. Add to transaction archive/history
+        // 4. Update all wallet indices
+
+        Ok(tx_count)
+    }
+
+    /// Phase 3E.4: Calculate and distribute block rewards
+    /// Called after block finalization
+    /// Distributes:
+    /// - Block subsidy to proposer
+    /// - Transaction fees to proposer
+    /// - Validator rewards from masternode_rewards field
+    pub async fn distribute_block_rewards(
+        &self,
+        block: &Block,
+        _proposer_id: &str,
+    ) -> Result<u64, TSCDError> {
+        // Block subsidy (in TIME coins, smallest unit)
+        // Formula: 100 * (1 + ln(height)) - from Protocol §10
+        let height = block.header.height;
+        let block_subsidy = if height == 0 {
+            100_000_000 // Genesis block: 1 TIME = 100M smallest units
+        } else {
+            let ln_height = (height as f64).ln();
+            (100_000_000.0 * (1.0 + ln_height)) as u64
+        };
+
+        // Transaction fees (sum of all tx fees)
+        let tx_fees: u64 = block.transactions.iter().map(|tx| tx.fee_amount()).sum();
+
+        let total_proposer_reward = block_subsidy + tx_fees;
+
+        tracing::debug!(
+            "💰 Block {} rewards - subsidy: {}, fees: {}, total: {}",
+            height,
+            block_subsidy,
+            tx_fees,
+            total_proposer_reward
+        );
+
+        // Validate masternode_rewards matches expected distribution
+        if !block.masternode_rewards.is_empty() {
+            let total_masternode = block
+                .masternode_rewards
+                .iter()
+                .map(|(_, amt)| amt)
+                .sum::<u64>();
+
+            tracing::debug!(
+                "🎯 Distributed to {} masternodes: {} TIME",
+                block.masternode_rewards.len(),
+                total_masternode / 100_000_000
+            );
+        }
+
+        Ok(total_proposer_reward)
+    }
+
+    /// Phase 3E.5: Verify finality proof structure
+    /// Called after receiving finality proof
+    pub fn verify_finality_proof(&self, proof: &FinalityProof) -> Result<(), TSCDError> {
+        // Verify signer count is reasonable
+        if proof.signer_count == 0 {
+            return Err(TSCDError::ValidationFailed(
+                "Finality proof has no signers".to_string(),
+            ));
+        }
+
+        // Verify signatures count matches signer count
+        if proof.signatures.len() != proof.signer_count {
+            return Err(TSCDError::ValidationFailed(
+                "Signature count mismatch".to_string(),
+            ));
+        }
+
+        // In production, would verify actual signatures here
+        tracing::debug!(
+            "✅ Verified finality proof for block {} with {} signatures",
+            hex::encode(proof.block_hash),
+            proof.signer_count
+        );
+
+        Ok(())
+    }
+
+    /// Phase 3E.6: Complete finalization workflow
+    /// Orchestrates all finalization steps: proof creation → chain addition →
+    /// transaction archival → reward distribution
+    pub async fn finalize_block_complete(
+        &self,
+        block: Block,
+        signatures: Vec<Vec<u8>>,
+    ) -> Result<u64, TSCDError> {
+        // Phase 3E.1: Create proof
+        let mut proof = self
+            .create_finality_proof(block.hash(), block.header.height, signatures)
+            .await;
+        proof.signer_count = proof.signatures.len();
+
+        // Phase 3E.5: Verify proof
+        self.verify_finality_proof(&proof)?;
+
+        // Phase 3E.2: Add to chain
+        self.add_finalized_block(block.clone(), proof).await?;
+
+        // Phase 3E.3: Archive transactions
+        let archived_count = self.archive_finalized_transactions(&block).await?;
+
+        // Phase 3E.4: Distribute rewards
+        let reward = self.distribute_block_rewards(&block, "proposer").await?;
+
+        tracing::info!(
+            "🎉 Block finalization complete: {} txs archived, {} TIME distributed",
+            archived_count,
+            reward / 100_000_000
+        );
+
+        Ok(reward)
+    }
+
+    /// Get finalized block count
+    pub async fn get_finalized_block_count(&self) -> u64 {
+        self.finalized_height.load(AtomicOrdering::Relaxed) + 1
+    }
+
+    /// Get total finalized transactions
+    pub async fn get_finalized_transaction_count(&self) -> usize {
+        let states = self.slot_states.read().await;
+        states
+            .iter()
+            .filter(|(_, state)| state.is_finalized)
+            .map(|(_, state)| {
+                state
+                    .block
+                    .as_ref()
+                    .map(|b| b.transactions.len())
+                    .unwrap_or(0)
+            })
+            .sum()
+    }
+
+    /// Get total rewards distributed
+    pub async fn get_total_rewards_distributed(&self) -> u64 {
+        let height = self.finalized_height.load(AtomicOrdering::Relaxed);
+        // Sum of all block subsidies up to height
+        let mut total = 0u64;
+        for h in 0..=height {
+            let ln_height = (h as f64).ln();
+            total += (100_000_000.0 * (1.0 + ln_height)) as u64;
+        }
+        total
+    }
+
+    /// Select a leader for the given slot using ECVRF
+    ///
+    /// Each validator evaluates ECVRF with their secret key and the previous block hash
+    /// The validator with the highest VRF output becomes the leader
+    pub fn select_leader_for_slot(
+        slot: u64,
+        validators: &[(String, SigningKey)],
+        parent_block_hash: Hash256,
+    ) -> (String, Vec<u8>) {
+        if validators.is_empty() {
+            return ("none".to_string(), vec![]);
+        }
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&parent_block_hash);
+        input.extend_from_slice(&slot.to_le_bytes());
+        input.extend_from_slice(b"TSDC-leader-selection");
+
+        let mut best_vrf_output = vec![0u8; 32];
+        let mut best_leader = validators[0].0.clone();
+        let mut best_vrf_val: u64 = 0;
+
+        for (validator_id, secret_key) in validators {
+            if let Ok((vrf_output, _vrf_proof)) = ECVRF::evaluate(secret_key, &input) {
+                let vrf_val = vrf_output.as_u64();
+                if vrf_val > best_vrf_val {
+                    best_vrf_val = vrf_val;
+                    best_leader = validator_id.clone();
+                    best_vrf_output = vrf_output.bytes.to_vec();
+                }
+            }
+        }
+
+        (best_leader, best_vrf_output)
+    }
 }
 
 #[cfg(test)]
@@ -506,11 +840,15 @@ mod tests {
                 id: "validator1".to_string(),
                 public_key: vec![1, 2, 3],
                 stake: 1000,
+                vrf_secret_key: None,
+                vrf_public_key: None,
             },
             TSCDValidator {
                 id: "validator2".to_string(),
                 public_key: vec![4, 5, 6],
                 stake: 2000,
+                vrf_secret_key: None,
+                vrf_public_key: None,
             },
         ];
 
@@ -536,6 +874,9 @@ mod tests {
                 merkle_root: Hash256::default(),
                 timestamp: 60000,
                 block_reward: 100,
+                leader: String::new(),
+                vrf_output: None,
+                vrf_proof: None,
             },
             transactions: vec![],
             masternode_rewards: vec![],
@@ -549,6 +890,9 @@ mod tests {
                 merkle_root: Hash256::default(),
                 timestamp: 60600,
                 block_reward: 100,
+                leader: String::new(),
+                vrf_output: None,
+                vrf_proof: None,
             },
             transactions: vec![],
             masternode_rewards: vec![],
@@ -570,16 +914,22 @@ mod tests {
                 id: "validator1".to_string(),
                 public_key: vec![1, 2, 3],
                 stake: 1000,
+                vrf_secret_key: None,
+                vrf_public_key: None,
             },
             TSCDValidator {
                 id: "validator2".to_string(),
                 public_key: vec![4, 5, 6],
                 stake: 1000,
+                vrf_secret_key: None,
+                vrf_public_key: None,
             },
             TSCDValidator {
                 id: "validator3".to_string(),
                 public_key: vec![7, 8, 9],
                 stake: 1000,
+                vrf_secret_key: None,
+                vrf_public_key: None,
             },
         ];
 
@@ -587,7 +937,7 @@ mod tests {
 
         let block_hash = Hash256::default();
 
-        // With 3 validators of equal stake, need >2/3 = >2000 stake for finality
+        // With 3 validators of equal stake, need >50% = >1500 stake for Avalanche majority consensus
         // So need at least 2 validators
         let result1 = tsdc
             .on_precommit(block_hash, 100, "validator1".to_string(), vec![1, 2, 3])

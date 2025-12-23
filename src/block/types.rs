@@ -1,3 +1,4 @@
+use crate::crypto::{ECVRFOutput, ECVRFProof};
 use crate::types::{Hash256, Transaction};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,9 @@ pub struct BlockHeader {
     pub merkle_root: Hash256,
     pub timestamp: i64,
     pub block_reward: u64,
+    pub leader: String,
+    pub vrf_output: Option<ECVRFOutput>,
+    pub vrf_proof: Option<ECVRFProof>,
 }
 
 impl Block {

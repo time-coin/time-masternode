@@ -231,16 +231,16 @@ impl StateSyncManager {
             }
         }
 
-        // Check if expected hash has 2/3+ consensus
+        // Check if expected hash has Avalanche majority consensus (>50%)
         let total_votes: u32 = hash_votes.values().sum();
         if total_votes == 0 {
             return Err("No responses from peers".to_string());
         }
 
         let expected_votes = hash_votes.get(&expected_hash).copied().unwrap_or(0);
-        let consensus_threshold = (total_votes * 2) / 3 + 1;
+        let consensus_threshold = total_votes.div_ceil(2); // Pure Avalanche: >50%
 
-        if expected_votes >= consensus_threshold {
+        if expected_votes > consensus_threshold {
             info!(
                 "✅ Block {} hash consensus verified: {}/{}",
                 height, expected_votes, total_votes

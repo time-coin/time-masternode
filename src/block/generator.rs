@@ -116,6 +116,9 @@ impl DeterministicBlockGenerator {
             merkle_root,
             timestamp,
             block_reward: total_reward,
+            leader: String::new(),
+            vrf_output: None,
+            vrf_proof: None,
         };
 
         Block {

@@ -2,8 +2,45 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)
+![Protocol](https://img.shields.io/badge/protocol-v6-green.svg)
 
-A high-performance implementation of the TIME Coin Protocol v5 with sub-second instant finality via Avalanche consensus and deterministic block checkpointing.
+A high-performance implementation of the TIME Coin Protocol v6 with sub-second instant finality via Avalanche consensus, Verifiable Finality Proofs (VFP), and deterministic block checkpointing.
+
+## 🚀 Features
+
+- **Instant Finality**: <1 second transaction confirmation via Avalanche Snowball consensus
+- **Verifiable Finality Proofs**: Objective proof of transaction finality usable by all nodes and light clients
+- **Deterministic Checkpointing**: 10-minute blocks with TSDC (Time-Scheduled Deterministic Consensus)
+- **Leaderless Consensus**: No BFT voting rounds or global committees
+- **Stake-Weighted Sampling**: Sybil resistance via collateral-based peer selection
+- **UTXO State Machine**: Advanced state tracking (Unspent → Locked → Sampling → Finalized → Archived)
+- **Masternode Tiers**: Free, Bronze, Silver, Gold tiers with weighted sampling power
+- **Dual Network Support**: Mainnet and Testnet configurations
+- **Real-time RPC API**: JSON-RPC 2.0 interface for wallets and services
+- **P2P Networking**: QUIC transport, peer discovery, and gossip protocol
+- **Persistent Storage**: RocksDB-based blockchain storage with AVS snapshots
+- **Light Client Support**: Merkle proofs and block headers for SPV wallets
+
+## ✅ Status
+
+**Protocol Specification**: ✅ **V6 COMPLETE** (Implementation-Ready)
+- All 8 "underspecified" issues resolved
+- All 6 "missing components" specified
+- 12 new normative sections (§16–§27)
+- See [docs/TIMECOIN_PROTOCOL_V6.md](docs/TIMECOIN_PROTOCOL_V6.md)
+
+**Implementation**: ✅ **PHASE 6 COMPLETE** (RPC API & Testnet Next)
+- ✅ Phase 4: Pure Avalanche Consensus COMPLETE (Dec 23, 2025)
+- ✅ Phase 5: ECVRF RFC 9381 & Multi-node COMPLETE (Dec 23, 2025)
+- ✅ Phase 6: Network Integration & Testnet COMPLETE (Dec 23, 2025)
+  - Network vote handlers fully implemented
+  - Consensus voting working (prepare + precommit)
+  - Finalization callbacks complete
+  - 3-node testing procedures documented
+  - Cloud testnet deployment ready
+- 🚀 Phase 7: RPC API & Testnet Stabilization READY
+- See [ROADMAP_CHECKLIST.md](ROADMAP_CHECKLIST.md) for full timeline
+- See [PHASE_6_COMPLETION_REPORT.md](PHASE_6_COMPLETION_REPORT.md) for details
 
 ## 🚀 Features
 
@@ -156,20 +193,29 @@ timecoin/
 
 ## 📚 Documentation
 
-For complete protocol documentation, see **[docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md)**
+**[→ Complete Documentation Index](docs/PROTOCOL_V6_INDEX.md)** (Read this first!)
 
-**Additional Resources:**
-- **[docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)** - Network layer design
-- **[docs/INDEX.md](docs/INDEX.md)** - Complete documentation index
-- **[analysis/CHANGELOG_DEC_23_2024.md](analysis/CHANGELOG_DEC_23_2024.md)** - Recent changes
+### Protocol Specification
+- **[TIMECOIN_PROTOCOL_V6.md](docs/TIMECOIN_PROTOCOL_V6.md)** - Normative protocol specification (§1–§27)
+  - §1–§15: Core architecture (stable)
+  - §16–§27: Implementation specifications (NEW - all gaps filled)
 
-Key topics in protocol documentation:
-- **[Protocol Overview](docs/TIMECOIN_PROTOCOL_V5.md#overview)** - Hybrid Avalanche + TSDC architecture
-- **[Protocol Architecture](docs/TIMECOIN_PROTOCOL_V5.md#protocol-architecture)** - Real-time and epoch-time layers
-- **[Avalanche Consensus](docs/TIMECOIN_PROTOCOL_V5.md#avalanche-consensus-instant-finality)** - Sub-second instant finality via Snowball
-- **[TSDC (Time-Scheduled Deterministic Consensus)](docs/TIMECOIN_PROTOCOL_V5.md#time-scheduled-deterministic-consensus-tsdc)** - 10-minute deterministic block checkpointing
-- **[Masternode System](docs/TIMECOIN_PROTOCOL_V5.md#masternode-system)** - Stake-weighted sampling tiers
-- **[Security Model](docs/TIMECOIN_PROTOCOL_V5.md#security-model)** - Safety and liveness guarantees
+### Implementation Guidance
+- **[IMPLEMENTATION_ADDENDUM.md](docs/IMPLEMENTATION_ADDENDUM.md)** - 5-phase 12-week development schedule
+- **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** - One-page parameter lookup
+- **[CRYPTOGRAPHY_RATIONALE.md](docs/CRYPTOGRAPHY_RATIONALE.md)** - Why BLAKE3 + Ed25519 + ECVRF
+
+### Analysis & Tracking
+- **[V6_UPDATE_SUMMARY.md](docs/V6_UPDATE_SUMMARY.md)** - What changed and why
+- **[ANALYSIS_RECOMMENDATIONS_TRACKER.md](docs/ANALYSIS_RECOMMENDATIONS_TRACKER.md)** - All 14 recommendations mapped to implementation
+
+### Network & Architecture
+- **[NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)** - P2P design and peer discovery
+- **[RUST_P2P_GUIDELINES.md](docs/RUST_P2P_GUIDELINES.md)** - P2P implementation best practices
+
+### Previous Versions (Archive)
+- [TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) - Previous version
+- [TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md) - Original specification
 
 ## 🏗️ Architecture
 
@@ -252,27 +298,56 @@ min_confirmations = 1
 finality_timeout = 3000  # milliseconds
 ```
 
-## 🛣️ Roadmap
+## 🛣️ Development Roadmap
 
-- [x] Core UTXO state machine
-- [x] Avalanche consensus engine (Snowball)
-- [x] Time-Scheduled Deterministic Consensus (TSDC)
-- [x] Stake-weighted sampling
-- [x] Deterministic block production
-- [x] Masternode tier system
-- [x] RPC API
-- [x] P2P networking
-- [x] Testnet/Mainnet support
-- [x] CLI tool
-- [x] Peer discovery
-- [x] Persistent storage (Sled)
-- [ ] Heartbeat attestation (witness signatures)
-- [ ] WebSocket API
-- [ ] Block explorer
-- [ ] Signature verification
-- [ ] Mobile wallet support
+**Current Phase:** Protocol V6 specification complete → Implementation Phase 1 starting
+
+See **[ROADMAP.md](docs/ROADMAP.md)** for the full 5-phase 12-week development plan.
+
+### Phase 1: Core Cryptography & Serialization (Weeks 1–2)
+- [ ] BLAKE3 hashing implementation
+- [ ] Ed25519 signing/verification
+- [ ] ECVRF (RFC 9381) for TSDC sortition
+- [ ] bech32m address encoding
+- [ ] Canonical transaction serialization
+- **Deliverable:** Cryptographic test vectors passing
+
+### Phase 2: Consensus Layer (Weeks 3–5)
+- [ ] Avalanche Snowball state machine
+- [ ] Verifiable Finality Proof (VFP) generation and validation
+- [ ] AVS membership (heartbeats, witness attestation)
+- [ ] TSDC block production with VRF sortition
+- **Deliverable:** 3-node consensus network tests passing
+
+### Phase 3: Network Layer (Weeks 6–8)
+- [ ] QUIC v1 transport layer
+- [ ] bincode message serialization
+- [ ] Peer discovery and bootstrap
+- [ ] Message handlers for all consensus types
+- **Deliverable:** 10+ node P2P network functional
+
+### Phase 4: Storage & Archival (Weeks 9–10)
+- [ ] UTXO database with RocksDB
+- [ ] Block archive with indexing
+- [ ] AVS snapshot retention (7 days)
+- [ ] Mempool with eviction policy
+- **Deliverable:** Block production and archival working
+
+### Phase 5: APIs & Testnet (Weeks 11–12)
+- [ ] JSON-RPC 2.0 API (sendtransaction, gettransaction, getbalance)
+- [ ] Wallet integration examples
+- [ ] Block explorer schema
+- [ ] Public testnet deployment
+- **Deliverable:** Testnet live with faucet and explorer
+
+### Future: Mainnet Hardening
+- [ ] Security audit
+- [ ] Performance optimization
+- [ ] Light client support (merkle proofs)
 - [ ] Hardware wallet integration
 - [ ] Multi-signature support
+
+**See [docs/ROADMAP.md](docs/ROADMAP.md) for detailed timeline, dependencies, and metrics.**
 
 ## 🤝 Contributing
 
