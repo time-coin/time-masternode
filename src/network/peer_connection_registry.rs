@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::BufWriter;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::oneshot;
 use tokio::sync::RwLock;
@@ -48,8 +48,8 @@ pub struct PeerConnectionRegistry {
     // Metrics (atomic, no locks)
     inbound_count: AtomicUsize,
     outbound_count: AtomicUsize,
-    // Map of peer IP to their TCP writer
-    peer_writers: Arc<RwLock<HashMap<String, PeerWriter>>>,
+    // Map of peer IP to their TCP writer (wrapped in Arc<Mutex<>> for safe mutable access)
+    peer_writers: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<PeerWriter>>>>>,
     // Pending responses for request/response pattern
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
 }
@@ -226,7 +226,7 @@ impl PeerConnectionRegistry {
 
     pub async fn register_peer(&self, peer_ip: String, writer: PeerWriter) {
         let mut writers = self.peer_writers.write().await;
-        writers.insert(peer_ip.clone(), writer);
+        writers.insert(peer_ip.clone(), Arc::new(tokio::sync::Mutex::new(writer)));
         debug!("✅ Registered peer connection: {}", peer_ip);
     }
 
@@ -268,31 +268,38 @@ impl PeerConnectionRegistry {
         writers.keys().cloned().collect()
     }
 
-    /// Send a message to a specific peer (optimized, minimal logging)
-    pub async fn send_to_peer(
-        &self,
-        peer_ip: &str,
-        _message: NetworkMessage,
-    ) -> Result<(), String> {
+    /// Send a message to a specific peer
+    pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String> {
         // Extract IP only (remove port if present)
         let ip_only = extract_ip(peer_ip);
 
         let writers = self.peer_writers.read().await;
 
-        // Just verify the peer exists in our writers map
-        if !writers.contains_key(ip_only) {
+        if let Some(writer_arc) = writers.get(ip_only) {
+            let mut writer = writer_arc.lock().await;
+
+            let msg_json = serde_json::to_string(&message)
+                .map_err(|e| format!("Failed to serialize message: {}", e))?;
+
+            writer
+                .write_all(format!("{}\n", msg_json).as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write message to {}: {}", ip_only, e))?;
+
+            writer
+                .flush()
+                .await
+                .map_err(|e| format!("Failed to flush to {}: {}", ip_only, e))?;
+
+            Ok(())
+        } else {
             warn!(
                 "❌ Peer {} not found in registry (available: {:?})",
                 ip_only,
                 writers.keys().collect::<Vec<_>>()
             );
-            return Err(format!("Peer {} not connected", ip_only));
+            Err(format!("Peer {} not connected", ip_only))
         }
-
-        // For now, just return success if peer exists
-        // Actual message sending would be implemented differently
-        // (would need mutable access to writer, which conflicts with current design)
-        Ok(())
     }
 
     /// Send a message to a peer and wait for a response
