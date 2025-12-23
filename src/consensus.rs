@@ -305,6 +305,14 @@ pub struct AvalancheConsensus {
     /// Validator list with weight info for stake-weighted sampling
     validators: Arc<RwLock<Vec<ValidatorInfo>>>,
 
+    /// AVS (Active Validator Set) snapshots per slot for finality vote verification
+    /// slot_index -> AVSSnapshot
+    avs_snapshots: DashMap<u64, AVSSnapshot>,
+
+    /// VFP (Verifiable Finality Proof) vote accumulator
+    /// txid -> accumulated votes
+    vfp_votes: DashMap<Hash256, Vec<FinalityVote>>,
+
     /// Metrics
     rounds_executed: AtomicUsize,
     txs_finalized: AtomicUsize,
@@ -330,6 +338,8 @@ impl AvalancheConsensus {
             active_rounds: DashMap::new(),
             finalized_txs: DashMap::new(),
             validators: Arc::new(RwLock::new(Vec::new())),
+            avs_snapshots: DashMap::new(),
+            vfp_votes: DashMap::new(),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
         })
@@ -595,6 +605,135 @@ impl AvalancheConsensus {
     /// Get finalization preference
     pub fn get_finalized_preference(&self, txid: &Hash256) -> Option<Preference> {
         self.finalized_txs.get(txid).map(|p| *p)
+    }
+
+    // ========================================================================
+    // AVS SNAPSHOT MANAGEMENT (Per Protocol §8.4)
+    // ========================================================================
+
+    /// Create an AVS snapshot for the current slot
+    /// Captures the active validator set with their weights for finality vote verification
+    pub fn create_avs_snapshot(&self, slot_index: u64) -> AVSSnapshot {
+        let validators = self.validators.read();
+        let snapshot_validators = validators
+            .iter()
+            .map(|v| (v.address.clone(), v.weight as u64))
+            .collect();
+
+        let snapshot = AVSSnapshot::new(slot_index, snapshot_validators);
+        self.avs_snapshots.insert(slot_index, snapshot.clone());
+
+        // Cleanup old snapshots (retain 100 slots per protocol §8.4)
+        const ASS_SNAPSHOT_RETENTION: u64 = 100;
+        if slot_index > ASS_SNAPSHOT_RETENTION {
+            let old_slot = slot_index - ASS_SNAPSHOT_RETENTION;
+            self.avs_snapshots.remove(&old_slot);
+        }
+
+        snapshot
+    }
+
+    /// Get AVS snapshot for a specific slot
+    pub fn get_avs_snapshot(&self, slot_index: u64) -> Option<AVSSnapshot> {
+        self.avs_snapshots.get(&slot_index).map(|s| s.clone())
+    }
+
+    // ========================================================================
+    // FINALITY VOTE ACCUMULATION (Per Protocol §8.5)
+    // ========================================================================
+
+    /// Accumulate a finality vote for VFP assembly
+    pub fn accumulate_finality_vote(&self, vote: FinalityVote) -> Result<(), String> {
+        self.vfp_votes
+            .entry(vote.txid)
+            .or_insert_with(Vec::new)
+            .push(vote);
+        Ok(())
+    }
+
+    /// Get accumulated votes for a transaction
+    pub fn get_accumulated_votes(&self, txid: &Hash256) -> Vec<FinalityVote> {
+        self.vfp_votes
+            .get(txid)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Check if transaction meets VFP finality threshold
+    /// Returns Ok(true) if votes >= 67% of AVS weight
+    pub fn check_vfp_finality(
+        &self,
+        txid: &Hash256,
+        snapshot: &AVSSnapshot,
+    ) -> Result<bool, String> {
+        let votes = self.get_accumulated_votes(txid);
+
+        if votes.is_empty() {
+            return Ok(false);
+        }
+
+        // Calculate total weight of valid votes
+        let mut total_weight = 0u64;
+        let mut seen_voters = std::collections::HashSet::new();
+
+        for vote in &votes {
+            // Voter must be in snapshot
+            if !snapshot.contains_validator(&vote.voter_mn_id) {
+                continue; // Skip votes from non-AVS validators
+            }
+
+            // Voter can only vote once
+            if seen_voters.contains(&vote.voter_mn_id) {
+                return Err("Duplicate voter in VFP".to_string());
+            }
+            seen_voters.insert(vote.voter_mn_id.clone());
+
+            if let Some(weight) = snapshot.get_validator_weight(&vote.voter_mn_id) {
+                total_weight += weight;
+            }
+        }
+
+        // Check threshold: 67% of total weight
+        let threshold = snapshot.voting_threshold();
+        Ok(total_weight >= threshold)
+    }
+
+    /// Clear accumulated votes for a transaction after finality
+    pub fn clear_vfp_votes(&self, txid: &Hash256) {
+        self.vfp_votes.remove(txid);
+    }
+
+    // ========================================================================
+    // FINALITY VOTE GENERATION (Per Protocol §8.5)
+    // ========================================================================
+
+    /// Generate a finality vote for a transaction if this validator is AVS-active
+    /// Called when this validator responds with "Valid" during query round
+    pub fn generate_finality_vote(
+        &self,
+        txid: Hash256,
+        slot_index: u64,
+        voter_mn_id: String,
+        voter_weight: u64,
+        snapshot: &AVSSnapshot,
+    ) -> Option<FinalityVote> {
+        // Only generate vote if voter is in the AVS snapshot for this slot
+        if !snapshot.contains_validator(&voter_mn_id) {
+            return None;
+        }
+
+        // Create the finality vote
+        let vote = FinalityVote {
+            chain_id: 1, // TODO: Make configurable
+            txid,
+            tx_hash_commitment: txid, // TODO: Hash the actual tx bytes
+            slot_index,
+            voter_mn_id,
+            voter_weight,
+            signature: vec![], // TODO: Sign with validator's key
+        };
+
+        Some(vote)
     }
 
     /// Get metrics

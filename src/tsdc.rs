@@ -378,9 +378,7 @@ impl TSCDConsensus {
                     other => other,
                 });
 
-        best
-            .map(|(b, _)| b.clone())
-            .ok_or(TSCDError::BlockNotFound)
+        best.map(|(b, _)| b.clone()).ok_or(TSCDError::BlockNotFound)
     }
 
     /// Get the highest finalized block height
@@ -402,14 +400,14 @@ impl TSCDConsensus {
     pub async fn on_slot_timeout(&self, slot: u64) -> Result<(), TSCDError> {
         let mut states = self.slot_states.write().await;
         states.entry(slot).or_insert_with(|| SlotState {
-                    slot,
-                    timestamp: self.slot_timestamp(slot),
-                    leader_vrf: None,
-                    block: None,
-                    finality_proof: None,
-                    is_finalized: false,
-                    precommits_received: HashMap::new(),
-                });
+            slot,
+            timestamp: self.slot_timestamp(slot),
+            leader_vrf: None,
+            block: None,
+            finality_proof: None,
+            is_finalized: false,
+            precommits_received: HashMap::new(),
+        });
         Ok(())
     }
 

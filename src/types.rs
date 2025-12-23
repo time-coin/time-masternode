@@ -279,3 +279,48 @@ impl VerifiableFinality {
         Ok(total_weight)
     }
 }
+
+/// Active Validator Set snapshot for a slot
+/// Per protocol §8.4: Captures the set of validators at each slot_index
+/// Used for verifying finality votes and their weights
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AVSSnapshot {
+    pub slot_index: u64,
+    pub validators: Vec<(String, u64)>, // (mn_id, weight)
+    pub total_weight: u64,
+    pub timestamp: u64,
+}
+
+impl AVSSnapshot {
+    /// Create a new AVS snapshot
+    pub fn new(slot_index: u64, validators: Vec<(String, u64)>) -> Self {
+        let total_weight = validators.iter().map(|(_, w)| w).sum();
+        Self {
+            slot_index,
+            validators,
+            total_weight,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        }
+    }
+
+    /// Check if a validator is in this snapshot
+    pub fn contains_validator(&self, mn_id: &str) -> bool {
+        self.validators.iter().any(|(id, _)| id == mn_id)
+    }
+
+    /// Get validator weight if present
+    pub fn get_validator_weight(&self, mn_id: &str) -> Option<u64> {
+        self.validators
+            .iter()
+            .find(|(id, _)| id == mn_id)
+            .map(|(_, w)| *w)
+    }
+
+    /// Calculate voting threshold (67% of total weight)
+    pub fn voting_threshold(&self) -> u64 {
+        (self.total_weight * 67) / 100
+    }
+}

@@ -118,6 +118,10 @@ pub enum NetworkMessage {
     FinalityVoteResponse {
         vote: crate::types::FinalityVote,
     },
+    // Finality vote broadcast - for disseminating votes to all peers
+    FinalityVoteBroadcast {
+        vote: crate::types::FinalityVote,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -193,6 +197,7 @@ impl NetworkMessage {
             NetworkMessage::TransactionVoteResponse { .. } => "TransactionVoteResponse",
             NetworkMessage::FinalityVoteRequest { .. } => "FinalityVoteRequest",
             NetworkMessage::FinalityVoteResponse { .. } => "FinalityVoteResponse",
+            NetworkMessage::FinalityVoteBroadcast { .. } => "FinalityVoteBroadcast",
         }
     }
 
