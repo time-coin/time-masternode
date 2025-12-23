@@ -684,6 +684,10 @@ async fn handle_peer(
                                     if let Err(e) = masternode_registry.receive_heartbeat_broadcast(heartbeat.clone()).await {
                                         tracing::warn!("Failed to process heartbeat: {}", e);
                                     }
+
+                                    // Re-broadcast to other peers (gossip propagation)
+                                    let msg = NetworkMessage::HeartbeatBroadcast(heartbeat.clone());
+                                    let _ = masternode_registry.broadcast_message(msg).await;
                                 }
                                 NetworkMessage::HeartbeatAttestation(attestation) => {
                                     tracing::debug!("✍️ Received heartbeat attestation from {}",
@@ -693,6 +697,10 @@ async fn handle_peer(
                                     if let Err(e) = masternode_registry.receive_attestation_broadcast(attestation.clone()).await {
                                         tracing::warn!("Failed to process attestation: {}", e);
                                     }
+
+                                    // Re-broadcast to other peers (gossip propagation)
+                                    let msg = NetworkMessage::HeartbeatAttestation(attestation.clone());
+                                    let _ = masternode_registry.broadcast_message(msg).await;
                                 }
                                 // Health Check Messages
                                 NetworkMessage::Ping { nonce, timestamp: _ } => {

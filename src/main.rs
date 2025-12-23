@@ -477,8 +477,9 @@ async fn main() {
                                     "💓 Created signed heartbeat seq {}",
                                     heartbeat.sequence_number
                                 );
-                                // Broadcast to network
-                                registry_clone.broadcast_heartbeat(heartbeat).await;
+                                // Broadcast directly through peer connections (not registry channel)
+                                let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
+                                peer_connection_registry_clone.broadcast(msg).await;
                             }
                             Err(e) => {
                                 tracing::warn!("❌ Failed to create attestable heartbeat: {}", e);
