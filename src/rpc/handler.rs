@@ -2,7 +2,7 @@ use super::server::{RpcError, RpcRequest, RpcResponse};
 use crate::consensus::ConsensusEngine;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
-use crate::types::Transaction;
+use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use serde_json::{json, Value};
@@ -332,7 +332,7 @@ impl RpcHandler {
     }
 
     async fn send_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let _hex_tx = params
+        let hex_tx = params
             .first()
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
@@ -340,12 +340,62 @@ impl RpcHandler {
                 message: "Invalid params: expected transaction hex".to_string(),
             })?;
 
-        // TODO: Decode and process transaction
-        Ok(json!("txid_placeholder"))
+        // Decode hex transaction
+        let tx_bytes = hex::decode(hex_tx).map_err(|_| RpcError {
+            code: -22,
+            message: "TX decode failed".to_string(),
+        })?;
+
+        // Deserialize transaction
+        let tx: Transaction = bincode::deserialize(&tx_bytes).map_err(|_| RpcError {
+            code: -22,
+            message: "TX deserialization failed".to_string(),
+        })?;
+
+        let txid = tx.txid();
+
+        // Validate transaction basic format
+        if tx.inputs.is_empty() || tx.outputs.is_empty() {
+            return Err(RpcError {
+                code: -26,
+                message: "TX missing inputs or outputs".to_string(),
+            });
+        }
+
+        // Verify all outputs have valid amounts
+        for output in &tx.outputs {
+            if output.value == 0 {
+                return Err(RpcError {
+                    code: -26,
+                    message: "TX output value cannot be zero".to_string(),
+                });
+            }
+        }
+
+        // Add to mempool
+        {
+            let mut mempool = self.mempool.write().await;
+            mempool.insert(txid, tx.clone());
+        }
+
+        // Process transaction through consensus
+        // Start Avalanche consensus to finalize this transaction
+        tokio::spawn({
+            let consensus = self.consensus.clone();
+            let tx_for_consensus = tx.clone();
+            async move {
+                // Initiate Avalanche consensus for transaction
+                if let Err(e) = consensus.add_transaction(tx_for_consensus).await {
+                    tracing::error!("Failed to process transaction through consensus: {}", e);
+                }
+            }
+        });
+
+        Ok(json!(hex::encode(txid)))
     }
 
     async fn create_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let _inputs = params
+        let inputs = params
             .first()
             .and_then(|v| v.as_array())
             .ok_or_else(|| RpcError {
@@ -353,7 +403,7 @@ impl RpcHandler {
                 message: "Invalid params: expected inputs array".to_string(),
             })?;
 
-        let _outputs = params
+        let outputs = params
             .get(1)
             .and_then(|v| v.as_object())
             .ok_or_else(|| RpcError {
@@ -361,8 +411,95 @@ impl RpcHandler {
                 message: "Invalid params: expected outputs object".to_string(),
             })?;
 
-        // TODO: Create transaction
-        Ok(json!("raw_transaction_hex_placeholder"))
+        // Parse inputs into TxInputs
+        let mut tx_inputs = Vec::new();
+        for input in inputs {
+            let input_obj = input.as_object().ok_or_else(|| RpcError {
+                code: -8,
+                message: "Invalid input format".to_string(),
+            })?;
+
+            let txid_str = input_obj
+                .get("txid")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| RpcError {
+                    code: -8,
+                    message: "Missing txid in input".to_string(),
+                })?;
+
+            let vout = input_obj
+                .get("vout")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| RpcError {
+                    code: -8,
+                    message: "Missing vout in input".to_string(),
+                })? as u32;
+
+            let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+                code: -8,
+                message: "Invalid txid hex format".to_string(),
+            })?;
+
+            if txid_bytes.len() != 32 {
+                return Err(RpcError {
+                    code: -8,
+                    message: "Invalid txid length".to_string(),
+                });
+            }
+
+            let mut txid_array = [0u8; 32];
+            txid_array.copy_from_slice(&txid_bytes);
+
+            tx_inputs.push(TxInput {
+                previous_output: OutPoint {
+                    txid: txid_array,
+                    vout,
+                },
+                script_sig: vec![],
+                sequence: 0xffffffff,
+            });
+        }
+
+        // Parse outputs into TxOutputs
+        let mut tx_outputs = Vec::new();
+        for (address, amount_val) in outputs.iter() {
+            let amount = amount_val.as_f64().ok_or_else(|| RpcError {
+                code: -8,
+                message: "Invalid amount value".to_string(),
+            })? * 100_000_000.0; // Convert to satoshis
+
+            if amount <= 0.0 || amount.is_nan() {
+                return Err(RpcError {
+                    code: -8,
+                    message: "Invalid amount".to_string(),
+                });
+            }
+
+            tx_outputs.push(TxOutput {
+                value: amount as u64,
+                script_pubkey: address.as_bytes().to_vec(),
+            });
+        }
+
+        // Create transaction
+        let tx = Transaction {
+            version: 1,
+            inputs: tx_inputs,
+            outputs: tx_outputs,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            lock_time: 0,
+        };
+
+        // Serialize and return hex
+        let tx_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
+            code: -32603,
+            message: "Failed to serialize transaction".to_string(),
+        })?;
+
+        Ok(json!(hex::encode(tx_bytes)))
     }
 
     async fn get_balance(&self, params: &[Value]) -> Result<Value, RpcError> {

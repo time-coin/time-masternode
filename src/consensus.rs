@@ -1067,6 +1067,11 @@ impl ConsensusEngine {
         self.get_masternodes().iter().cloned().collect()
     }
 
+    /// Submit a transaction to the consensus engine (called from RPC)
+    pub async fn add_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
+        self.submit_transaction(tx).await
+    }
+
     #[allow(dead_code)]
     pub async fn generate_deterministic_block(&self, height: u64, _timestamp: i64) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
