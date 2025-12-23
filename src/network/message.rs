@@ -110,6 +110,14 @@ pub enum NetworkMessage {
         txid: Hash256,
         preference: String, // "Accept" or "Reject"
     },
+    // Verifiable Finality Proofs (VFP) - Per Protocol §8
+    FinalityVoteRequest {
+        txid: Hash256,
+        slot_index: u64,
+    },
+    FinalityVoteResponse {
+        vote: crate::types::FinalityVote,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -183,6 +191,8 @@ impl NetworkMessage {
             NetworkMessage::BlockRangeResponse(_) => "BlockRangeResponse",
             NetworkMessage::TransactionVoteRequest { .. } => "TransactionVoteRequest",
             NetworkMessage::TransactionVoteResponse { .. } => "TransactionVoteResponse",
+            NetworkMessage::FinalityVoteRequest { .. } => "FinalityVoteRequest",
+            NetworkMessage::FinalityVoteResponse { .. } => "FinalityVoteResponse",
         }
     }
 
@@ -217,6 +227,8 @@ impl NetworkMessage {
                 | NetworkMessage::BlockRangeResponse(_)
                 | NetworkMessage::Pong { .. }
                 | NetworkMessage::BlockResponse(_)
+                | NetworkMessage::TransactionVoteResponse { .. }
+                | NetworkMessage::FinalityVoteResponse { .. }
         )
     }
 

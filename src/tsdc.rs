@@ -121,6 +121,16 @@ pub struct SlotState {
     pub precommits_received: HashMap<String, Vec<u8>>, // validator_id -> signature
 }
 
+/// Checkpoint for finalized transactions
+#[derive(Clone, Debug)]
+pub struct TransactionCheckpoint {
+    pub checkpoint_number: u64,
+    pub height: u64,
+    pub timestamp: u64,
+    pub finalized_transaction_count: usize,
+    pub slot_range: (u64, u64), // (first_slot, last_slot)
+}
+
 /// TSDC consensus engine
 #[allow(dead_code)]
 pub struct TSCDConsensus {
@@ -134,6 +144,10 @@ pub struct TSCDConsensus {
     finalized_height: Arc<AtomicU64>,
     /// Local validator identity (if this node is a validator)
     local_validator: Arc<RwLock<Option<TSCDValidator>>>,
+    /// Checkpoints of finalized transactions (slot-based)
+    checkpoints: Arc<RwLock<Vec<TransactionCheckpoint>>>,
+    /// Last checkpoint slot
+    last_checkpoint_slot: Arc<AtomicU64>,
 }
 
 impl TSCDConsensus {
@@ -146,6 +160,8 @@ impl TSCDConsensus {
             chain_head: Arc::new(RwLock::new(None)),
             finalized_height: Arc::new(AtomicU64::new(0)),
             local_validator: Arc::new(RwLock::new(None)),
+            checkpoints: Arc::new(RwLock::new(Vec::new())),
+            last_checkpoint_slot: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -421,6 +437,46 @@ impl TSCDConsensus {
     pub async fn get_finality_proof(&self, height: u64) -> Option<FinalityProof> {
         let states = self.slot_states.read().await;
         states.get(&height).and_then(|s| s.finality_proof.clone())
+    }
+
+    /// Create a checkpoint of finalized transactions
+    /// This periodically bundles finalized Avalanche transactions for deterministic confirmation
+    pub async fn create_checkpoint(
+        &self,
+        slot: u64,
+        finalized_tx_count: usize,
+    ) -> TransactionCheckpoint {
+        let current_height = self.finalized_height.load(AtomicOrdering::Relaxed);
+        let last_checkpoint = self.last_checkpoint_slot.load(AtomicOrdering::Relaxed);
+        let checkpoint_number = (slot / 6) as u64; // One checkpoint per ~60 minutes (6 slots * 10 min)
+
+        let checkpoint = TransactionCheckpoint {
+            checkpoint_number,
+            height: current_height,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            finalized_transaction_count: finalized_tx_count,
+            slot_range: (last_checkpoint, slot),
+        };
+
+        // Store checkpoint
+        self.checkpoints.write().await.push(checkpoint.clone());
+        self.last_checkpoint_slot
+            .store(slot, AtomicOrdering::Relaxed);
+
+        checkpoint
+    }
+
+    /// Get all checkpoints
+    pub async fn get_checkpoints(&self) -> Vec<TransactionCheckpoint> {
+        self.checkpoints.read().await.clone()
+    }
+
+    /// Get latest checkpoint
+    pub async fn get_latest_checkpoint(&self) -> Option<TransactionCheckpoint> {
+        self.checkpoints.read().await.last().cloned()
     }
 }
 

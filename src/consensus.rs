@@ -8,6 +8,7 @@
 //! - Stake-weighted validator sampling
 
 use crate::block::types::Block;
+use crate::finality_proof::FinalityProofManager;
 use crate::network::message::NetworkMessage;
 use crate::state_notifier::StateNotifier;
 use crate::transaction_pool::TransactionPool;
@@ -631,6 +632,7 @@ pub struct ConsensusEngine {
     pub broadcast_callback: BroadcastCallback,
     pub state_notifier: Arc<StateNotifier>,
     pub avalanche: Arc<AvalancheConsensus>,
+    pub finality_proof_mgr: Arc<FinalityProofManager>,
 }
 
 impl ConsensusEngine {
@@ -647,6 +649,7 @@ impl ConsensusEngine {
             broadcast_callback: Arc::new(TokioRwLock::new(None)),
             state_notifier: Arc::new(StateNotifier::new()),
             avalanche: Arc::new(avalanche),
+            finality_proof_mgr: Arc::new(FinalityProofManager::new(1)), // chain_id = 1 for mainnet
         }
     }
 

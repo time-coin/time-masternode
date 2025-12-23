@@ -1,8 +1,9 @@
-use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::{Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub type Hash256 = [u8; 32];
+pub type Signature = [u8; 64];
 
 // Constants
 #[allow(dead_code)]
@@ -157,5 +158,124 @@ impl MasternodeTier {
             MasternodeTier::Silver => 100, // 100x weight
             MasternodeTier::Gold => 1000,  // 1000x weight
         }
+    }
+}
+
+// ============================================================================
+// VERIFIABLE FINALITY PROOFS (VFP) - Per Protocol §8
+// ============================================================================
+
+/// A finality vote signed by a masternode
+/// Per protocol: FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, voter_mn_id, voter_weight, signature }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FinalityVote {
+    pub chain_id: u32,
+    pub txid: Hash256,
+    pub tx_hash_commitment: Hash256, // H(canonical_tx_bytes)
+    pub slot_index: u64,
+    pub voter_mn_id: String,
+    pub voter_weight: u64,
+    pub signature: Vec<u8>, // Ed25519 signature
+}
+
+impl FinalityVote {
+    /// Verify the finality vote signature
+    pub fn verify(&self, pubkey: &VerifyingKey) -> Result<(), Box<dyn std::error::Error>> {
+        // Reconstruct the signed message
+        let msg = self.signing_message();
+        // Verify the signature
+        pubkey.verify(
+            &msg,
+            &ed25519_dalek::Signature::from_slice(&self.signature)?,
+        )?;
+        Ok(())
+    }
+
+    /// Get the message that was signed
+    fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&self.chain_id.to_le_bytes());
+        msg.extend_from_slice(&self.txid);
+        msg.extend_from_slice(&self.tx_hash_commitment);
+        msg.extend_from_slice(&self.slot_index.to_le_bytes());
+        msg.extend_from_slice(self.voter_mn_id.as_bytes());
+        msg.extend_from_slice(&self.voter_weight.to_le_bytes());
+        msg
+    }
+}
+
+/// Verifiable Finality Proof for a transaction
+/// Per protocol §8.2: VFP(X) = { tx, slot_index, votes[] }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifiableFinality {
+    pub tx: Transaction,
+    pub slot_index: u64,
+    pub votes: Vec<FinalityVote>,
+}
+
+impl VerifiableFinality {
+    /// Validate the VFP according to protocol rules
+    /// Returns the total weight of valid votes
+    pub fn validate(
+        &self,
+        chain_id: u32,
+        avs_snapshot: &[(String, u64, VerifyingKey)], // (mn_id, weight, pubkey)
+    ) -> Result<u64, String> {
+        // Rule 1: All signatures verify
+        let mut total_weight = 0u64;
+        let mut seen_voters = std::collections::HashSet::new();
+
+        for vote in &self.votes {
+            // Must match chain_id
+            if vote.chain_id != chain_id {
+                return Err("Chain ID mismatch".to_string());
+            }
+
+            // Must match txid
+            if vote.txid != self.tx.txid() {
+                return Err("Transaction ID mismatch".to_string());
+            }
+
+            // Must match tx_hash_commitment
+            let commitment: Hash256 =
+                Sha256::digest(bincode::serialize(&self.tx).map_err(|e| e.to_string())?)
+                    .as_slice()
+                    .try_into()
+                    .unwrap();
+            if vote.tx_hash_commitment != commitment {
+                return Err("Transaction hash commitment mismatch".to_string());
+            }
+
+            // Must match slot_index
+            if vote.slot_index != self.slot_index {
+                return Err("Slot index mismatch".to_string());
+            }
+
+            // Voter must be distinct
+            if seen_voters.contains(&vote.voter_mn_id) {
+                return Err("Duplicate voter".to_string());
+            }
+            seen_voters.insert(vote.voter_mn_id.clone());
+
+            // Voter must be in AVS snapshot
+            let voter_info = avs_snapshot
+                .iter()
+                .find(|(id, _, _)| id == &vote.voter_mn_id)
+                .ok_or_else(|| format!("Voter {} not in AVS snapshot", vote.voter_mn_id))?;
+
+            // Verify signature
+            voter_info
+                .2
+                .verify(
+                    vote.signing_message().as_slice(),
+                    &ed25519_dalek::Signature::from_slice(&vote.signature)
+                        .map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?;
+
+            total_weight += voter_info.1;
+        }
+
+        Ok(total_weight)
     }
 }

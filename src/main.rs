@@ -8,6 +8,7 @@ mod blockchain;
 mod config;
 mod consensus;
 mod error;
+mod finality_proof;
 mod heartbeat_attestation;
 mod masternode_registry;
 mod network;
