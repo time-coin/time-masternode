@@ -1102,7 +1102,50 @@ impl ConsensusEngine {
                 // Wait for votes to arrive (votes are submitted via network server handler)
                 tokio::time::sleep(Duration::from_millis(500)).await;
 
-                // Get consensus from Avalanche on what we've received so far
+                // Tally votes from this round
+                // Get the active round for this transaction
+                if let Some(round_entry) = consensus.active_rounds.get(&txid) {
+                    let round_lock = round_entry.value();
+                    let round = round_lock.read();
+                    // Get consensus from collected votes (Accept vs Reject tally)
+                    if let Some((vote_preference, vote_count)) = round.get_consensus() {
+                        tracing::debug!(
+                            "Round {}: Tally result - {} votes for {:?}",
+                            round_num,
+                            vote_count,
+                            vote_preference
+                        );
+
+                        drop(round); // Release read lock before acquiring write lock
+
+                        // Update Snowball state with vote result
+                        if let Some(tx_state) = consensus.tx_state.get(&txid) {
+                            let mut snowball = tx_state.value().write();
+                            let old_pref = snowball.snowflake.preference;
+
+                            // Update preference and confidence based on votes
+                            snowball.update(
+                                vote_preference,
+                                consensus.config.finality_confidence as u32,
+                            );
+
+                            tracing::info!(
+                                "Round {}: TX {:?} preference {} -> {} ({} votes, confidence: {})",
+                                round_num,
+                                hex::encode(txid),
+                                old_pref,
+                                vote_preference,
+                                vote_count,
+                                snowball.snowflake.confidence
+                            );
+                        }
+                    } else {
+                        tracing::debug!("Round {}: No consensus yet (not enough votes)", round_num);
+                        drop(round);
+                    }
+                }
+
+                // Check finalization after vote tally
                 if let Some((preference, _, _, is_finalized)) = consensus.get_tx_state(&txid) {
                     if is_finalized && preference == Preference::Accept {
                         tracing::info!(
