@@ -441,7 +441,7 @@ impl TSCDConsensus {
     ) -> TransactionCheckpoint {
         let current_height = self.finalized_height.load(AtomicOrdering::Relaxed);
         let last_checkpoint = self.last_checkpoint_slot.load(AtomicOrdering::Relaxed);
-        let checkpoint_number = (slot / 6); // One checkpoint per ~60 minutes (6 slots * 10 min)
+        let checkpoint_number = slot / 6; // One checkpoint per ~60 minutes (6 slots * 10 min)
 
         let checkpoint = TransactionCheckpoint {
             checkpoint_number,

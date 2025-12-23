@@ -241,7 +241,7 @@ impl PeerConnectionRegistry {
 
     pub async fn get_peer_writer(
         &self,
-        peer_ip: &str,
+        _peer_ip: &str,
     ) -> Option<Arc<tokio::sync::Mutex<PeerWriter>>> {
         // peer_writers stores PeerWriter directly, not wrapped in Arc
         // Since we can't clone the writer (it contains TCP state), return None

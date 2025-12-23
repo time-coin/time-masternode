@@ -1,6 +1,5 @@
 /// Peer discovery service for finding peers from external sources
 /// Currently uses bootstrap peers as fallback
-
 pub struct PeerDiscovery {
     discovery_url: String,
 }
