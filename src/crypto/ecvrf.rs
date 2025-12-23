@@ -30,7 +30,7 @@ impl ECVRFOutput {
     }
 
     /// Convert to hex string
-    pub fn to_hex(&self) -> String {
+    pub fn to_hex(self) -> String {
         hex::encode(self.bytes)
     }
 }
@@ -46,7 +46,7 @@ impl Serialize for ECVRFProof {
     where
         S: serde::Serializer,
     {
-        hex::encode(&self.bytes).serialize(serializer)
+        hex::encode(self.bytes).serialize(serializer)
     }
 }
 
@@ -78,6 +78,7 @@ impl ECVRFProof {
 
 /// ECVRF-Edwards25519-SHA512-TAI implementation
 /// Based on RFC 9381 but simplified for TimeCoin
+#[allow(clippy::upper_case_acronyms)]
 pub struct ECVRF;
 
 impl ECVRF {
@@ -143,7 +144,7 @@ impl ECVRF {
     pub fn proof_to_hash(proof: &ECVRFProof) -> ECVRFOutput {
         let mut hasher = Sha512::new();
         hasher.update(b"ECVRF-proof-to-hash");
-        hasher.update(&proof.bytes);
+        hasher.update(proof.bytes);
         let hash = hasher.finalize();
 
         let mut output_bytes = [0u8; 32];

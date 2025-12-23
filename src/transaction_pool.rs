@@ -101,6 +101,7 @@ impl TransactionPool {
     }
 
     /// Reject a transaction (atomic)
+    #[allow(dead_code)]
     pub fn reject_transaction(&self, txid: Hash256, reason: String) {
         if let Some((_, entry)) = self.pending.remove(&txid) {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
@@ -148,6 +149,7 @@ impl TransactionPool {
     }
 
     /// Check if transaction is finalized
+    #[allow(dead_code)]
     pub fn is_finalized(&self, txid: &Hash256) -> bool {
         self.finalized.contains_key(txid)
     }

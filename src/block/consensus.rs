@@ -26,7 +26,7 @@ impl AvalancheBlockConsensus {
 
         // Avalanche: need >50% of peers to agree (pure majority)
         let sample_size = self.masternode_peers.len();
-        let majority_threshold = (sample_size + 1) / 2;
+        let majority_threshold = sample_size.div_ceil(2);
 
         if matches > majority_threshold {
             let _ = self

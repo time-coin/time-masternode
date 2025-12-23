@@ -372,6 +372,7 @@ impl PeerConnectionRegistry {
     }
 
     /// Get a snapshot of connected peer IPs (for stats/monitoring)
+    #[allow(dead_code)]
     pub async fn get_connected_peers_list(&self) -> Vec<String> {
         self.connections
             .iter()
@@ -380,12 +381,14 @@ impl PeerConnectionRegistry {
     }
 
     /// Get statistics about pending responses (for monitoring)
+    #[allow(dead_code)]
     pub async fn pending_response_count(&self) -> usize {
         let pending = self.pending_responses.read().await;
         pending.values().map(|senders| senders.len()).sum()
     }
 
     /// Send multiple messages to a peer in a batch (more efficient than individual sends)
+    #[allow(dead_code)]
     pub async fn send_batch_to_peer(
         &self,
         peer_ip: &str,
@@ -405,6 +408,7 @@ impl PeerConnectionRegistry {
     }
 
     /// Broadcast multiple messages to all connected peers efficiently
+    #[allow(dead_code)]
     pub async fn broadcast_batch(&self, _messages: &[NetworkMessage]) {
         // Batch broadcasting is handled by the network server
         // This is a placeholder for the refactored architecture
@@ -413,6 +417,7 @@ impl PeerConnectionRegistry {
 
     /// Selective gossip: send to random subset of peers to reduce bandwidth
     /// Default fan-out: 20 peers (configurable)
+    #[allow(dead_code)]
     pub async fn gossip_selective(
         &self,
         message: NetworkMessage,
@@ -424,6 +429,7 @@ impl PeerConnectionRegistry {
 
     /// Selective gossip with configurable fan-out
     /// Returns number of peers message was sent to
+    #[allow(dead_code)]
     pub async fn gossip_selective_with_config(
         &self,
         _message: NetworkMessage,

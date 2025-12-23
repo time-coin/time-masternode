@@ -152,6 +152,7 @@ pub struct TSCDConsensus {
 }
 
 impl TSCDConsensus {
+    #[allow(dead_code)]
     /// Create new TSDC consensus engine
     pub fn new(config: TSCDConfig) -> Self {
         Self {
@@ -243,6 +244,7 @@ impl TSCDConsensus {
     }
 
     /// Validate a PREPARE message (block proposal from leader)
+    #[allow(dead_code)]
     pub async fn validate_prepare(&self, block: &Block) -> Result<(), TSCDError> {
         let slot = block.header.height; // Use height as slot for now
         let expected_timestamp = self.slot_timestamp(slot);

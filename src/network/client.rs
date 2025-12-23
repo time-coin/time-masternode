@@ -24,6 +24,7 @@ pub struct NetworkClient {
 }
 
 impl NetworkClient {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         peer_manager: Arc<PeerManager>,
         masternode_registry: Arc<MasternodeRegistry>,

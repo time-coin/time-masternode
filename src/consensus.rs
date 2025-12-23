@@ -312,7 +312,7 @@ impl PrepareVoteAccumulator {
     pub fn add_vote(&self, block_hash: Hash256, voter_id: String, weight: u64) {
         self.votes
             .entry(block_hash)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((voter_id, weight));
     }
 
@@ -361,7 +361,7 @@ impl PrecommitVoteAccumulator {
     pub fn add_vote(&self, block_hash: Hash256, voter_id: String, weight: u64) {
         self.votes
             .entry(block_hash)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push((voter_id, weight));
     }
 
@@ -606,12 +606,13 @@ impl AvalancheConsensus {
         let timeout = Duration::from_millis(self.config.query_timeout_ms);
         let start = Instant::now();
         loop {
-            let rd = round.read();
-            if rd.is_complete(timeout) {
-                drop(rd);
-                break;
+            {
+                let rd = round.read();
+                if rd.is_complete(timeout) {
+                    drop(rd);
+                    break;
+                }
             }
-            drop(rd);
 
             if start.elapsed() > timeout {
                 break;
@@ -759,10 +760,7 @@ impl AvalancheConsensus {
 
     /// Accumulate a finality vote for VFP assembly
     pub fn accumulate_finality_vote(&self, vote: FinalityVote) -> Result<(), String> {
-        self.vfp_votes
-            .entry(vote.txid)
-            .or_insert_with(Vec::new)
-            .push(vote);
+        self.vfp_votes.entry(vote.txid).or_default().push(vote);
         Ok(())
     }
 
