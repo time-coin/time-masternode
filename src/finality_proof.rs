@@ -42,7 +42,7 @@ impl FinalityProofManager {
         }
 
         // Add vote to list
-        self.votes.entry(txid).or_insert_with(Vec::new).push(vote);
+        self.votes.entry(txid).or_default().push(vote);
 
         false // Caller will check threshold separately
     }
@@ -53,7 +53,7 @@ impl FinalityProofManager {
         if let Some(votes_entry) = self.votes.get(&txid) {
             let total_weight: u64 = votes_entry.iter().map(|v| v.voter_weight).sum();
 
-            let threshold = (total_avs_weight * 67 + 99) / 100; // Round up
+            let threshold = (total_avs_weight * 67).div_ceil(100); // Round up
             if total_weight >= threshold {
                 return Some(total_weight);
             }

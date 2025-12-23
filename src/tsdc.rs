@@ -8,7 +8,7 @@
 /// - Slot-based block production (every 10 minutes = 600 seconds)
 /// - Fork choice rule (prefer finalized blocks)
 /// - Backup leader mechanism (5-second fallback)
-use crate::block::types::{Block, BlockHeader};
+use crate::block::types::Block;
 use crate::types::Hash256;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -225,14 +225,14 @@ impl TSCDConsensus {
         let mut best_validator = validators[0].clone();
         let mut best_hash = {
             let mut h = Sha256::new();
-            h.update(&vrf_input);
+            h.update(vrf_input);
             h.update(&best_validator.id);
             h.finalize()
         };
 
         for validator in &validators[1..] {
             let mut h = Sha256::new();
-            h.update(&vrf_input);
+            h.update(vrf_input);
             h.update(&validator.id);
             let hash = h.finalize();
 
@@ -312,7 +312,7 @@ impl TSCDConsensus {
         let threshold = (total_stake as f64 * self.config.finality_threshold) as u64;
 
         let mut signed_stake = 0u64;
-        for (validator_id, _sig) in &state.precommits_received {
+        for validator_id in state.precommits_received.keys() {
             if let Some(validator) = validators.iter().find(|v| &v.id == validator_id) {
                 signed_stake += validator.stake;
             }
@@ -378,9 +378,9 @@ impl TSCDConsensus {
                     other => other,
                 });
 
-        Ok(best
+        best
             .map(|(b, _)| b.clone())
-            .ok_or(TSCDError::BlockNotFound)?)
+            .ok_or(TSCDError::BlockNotFound)
     }
 
     /// Get the highest finalized block height
@@ -401,10 +401,7 @@ impl TSCDConsensus {
     /// Handle a missed slot (leader didn't produce block)
     pub async fn on_slot_timeout(&self, slot: u64) -> Result<(), TSCDError> {
         let mut states = self.slot_states.write().await;
-        if !states.contains_key(&slot) {
-            states.insert(
-                slot,
-                SlotState {
+        states.entry(slot).or_insert_with(|| SlotState {
                     slot,
                     timestamp: self.slot_timestamp(slot),
                     leader_vrf: None,
@@ -412,9 +409,7 @@ impl TSCDConsensus {
                     finality_proof: None,
                     is_finalized: false,
                     precommits_received: HashMap::new(),
-                },
-            );
-        }
+                });
         Ok(())
     }
 
@@ -448,7 +443,7 @@ impl TSCDConsensus {
     ) -> TransactionCheckpoint {
         let current_height = self.finalized_height.load(AtomicOrdering::Relaxed);
         let last_checkpoint = self.last_checkpoint_slot.load(AtomicOrdering::Relaxed);
-        let checkpoint_number = (slot / 6) as u64; // One checkpoint per ~60 minutes (6 slots * 10 min)
+        let checkpoint_number = (slot / 6); // One checkpoint per ~60 minutes (6 slots * 10 min)
 
         let checkpoint = TransactionCheckpoint {
             checkpoint_number,
