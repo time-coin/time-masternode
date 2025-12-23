@@ -1,6 +1,5 @@
-use crate::bft_consensus::BFTConsensus;
+use crate::avalanche_consensus::AvalancheConsensus;
 use crate::blockchain::Blockchain;
-use crate::consensus::ConsensusEngine;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
@@ -17,7 +16,7 @@ use std::sync::Arc;
 pub struct AppContext {
     pub config: crate::config::Config,
     pub blockchain: Arc<Blockchain>,
-    pub consensus_engine: Arc<ConsensusEngine>,
+    pub avalanche_consensus: Arc<AvalancheConsensus>,
     pub registry: Arc<MasternodeRegistry>,
     pub peer_manager: Arc<PeerManager>,
     pub utxo_manager: Arc<UTXOStateManager>,
@@ -27,7 +26,6 @@ pub struct AppContext {
     pub peer_state: Arc<PeerStateManager>,
     pub wallet: WalletManager,
     pub masternode_info: Option<Masternode>,
-    pub bft_consensus: Option<Arc<BFTConsensus>>,
 }
 
 impl AppContext {

@@ -109,25 +109,6 @@ pub enum NetworkMessage {
         end_height: u64,
     },
     BlockRangeResponse(Vec<Block>),
-    // BFT Consensus for Block Generation
-    BlockProposal {
-        block: Block,
-        proposer: String,   // Masternode address
-        signature: Vec<u8>, // Proposer's signature
-        round: u64,         // Consensus round number
-    },
-    BlockVote {
-        block_hash: [u8; 32],
-        height: u64,
-        voter: String,      // Masternode address
-        signature: Vec<u8>, // Voter's signature
-        approve: bool,      // true = approve, false = reject
-    },
-    BlockCommit {
-        block_hash: [u8; 32],
-        height: u64,
-        signatures: Vec<(String, Vec<u8>)>, // (masternode_address, signature)
-    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -202,9 +183,6 @@ impl NetworkMessage {
             NetworkMessage::ConsensusQueryResponse { .. } => "ConsensusQueryResponse",
             NetworkMessage::GetBlockRange { .. } => "GetBlockRange",
             NetworkMessage::BlockRangeResponse(_) => "BlockRangeResponse",
-            NetworkMessage::BlockProposal { .. } => "BlockProposal",
-            NetworkMessage::BlockVote { .. } => "BlockVote",
-            NetworkMessage::BlockCommit { .. } => "BlockCommit",
         }
     }
 
@@ -214,10 +192,7 @@ impl NetworkMessage {
     pub fn requires_ack(&self) -> bool {
         matches!(
             self,
-            NetworkMessage::Handshake { .. }
-                | NetworkMessage::BlockProposal { .. }
-                | NetworkMessage::BlockCommit { .. }
-                | NetworkMessage::TransactionFinalized { .. }
+            NetworkMessage::Handshake { .. } | NetworkMessage::TransactionFinalized { .. }
         )
     }
 
@@ -251,10 +226,7 @@ impl NetworkMessage {
     pub fn is_high_priority(&self) -> bool {
         matches!(
             self,
-            NetworkMessage::Ping { .. }
-                | NetworkMessage::Pong { .. }
-                | NetworkMessage::BlockProposal { .. }
-                | NetworkMessage::BlockCommit { .. }
+            NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. }
         )
     }
 }

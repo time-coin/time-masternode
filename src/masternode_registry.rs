@@ -532,7 +532,7 @@ impl MasternodeRegistry {
         }
     }
 
-    /// Broadcast any network message (used by BFT consensus)
+    /// Broadcast any network message (used by consensus protocols)
     pub async fn broadcast_message(&self, msg: crate::network::message::NetworkMessage) {
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
             match tx.send(msg) {

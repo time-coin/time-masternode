@@ -2,7 +2,8 @@ mod address;
 mod app_builder;
 mod app_context;
 mod app_utils;
-mod bft_consensus;
+mod avalanche_consensus;
+mod avalanche_handler;
 mod block;
 mod blockchain;
 mod config;
@@ -19,12 +20,13 @@ mod state_notifier;
 mod storage;
 mod time_sync;
 mod transaction_pool;
+mod tsdc;
 mod types;
 mod utxo_manager;
 mod vdf;
 mod wallet;
 
-use bft_consensus::BFTConsensus;
+use avalanche_consensus::AvalancheConsensus;
 use blockchain::Blockchain;
 use chrono::Timelike;
 use clap::Parser;
@@ -314,57 +316,9 @@ async fn main() {
 
     println!("✓ Ready to process transactions\n");
 
-    // Initialize consensus engine
+    // Initialize ConsensusEngine
     let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
-
-    // Set identity if we're a masternode
-    if let Some(ref mn) = masternode_info {
-        if let Err(e) =
-            consensus_engine.set_identity(mn.address.clone(), wallet.signing_key().clone())
-        {
-            tracing::error!("Failed to set consensus identity: {}", e);
-        } else {
-            tracing::info!(
-                "✓ Consensus engine identity set for masternode: {}",
-                mn.address
-            );
-        }
-    }
-
-    // Set up broadcast callback for consensus engine
-    let consensus_registry = registry.clone();
-    consensus_engine
-        .set_broadcast_callback(move |msg| {
-            let registry = consensus_registry.clone();
-            tokio::spawn(async move {
-                registry.broadcast_message(msg).await;
-            });
-        })
-        .await;
-
-    // Start background task to sync masternodes from registry to consensus engine
-    let consensus_sync = consensus_engine.clone();
-    let registry_sync = registry.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-
-            // Get current masternodes from registry
-            let masternode_infos = registry_sync.get_all().await;
-            let masternodes: Vec<Masternode> = masternode_infos
-                .into_iter()
-                .map(|info| info.masternode)
-                .collect();
-
-            // Update consensus engine with latest masternode list
-            consensus_sync.update_masternodes(masternodes.clone());
-            tracing::debug!(
-                "✅ Updated consensus engine with {} masternodes",
-                masternodes.len()
-            );
-        }
-    });
+    tracing::info!("✓ Consensus engine initialized");
 
     // Initialize blockchain
     let blockchain = Arc::new(Blockchain::new(
@@ -373,37 +327,6 @@ async fn main() {
         registry.clone(),
         network_type,
     ));
-
-    // Set peer manager for fork consensus verification
-    blockchain.set_peer_manager(peer_manager.clone()).await;
-
-    // Initialize BFT consensus if running as masternode
-    let bft_consensus = if let Some(ref mn) = masternode_info {
-        let bft = Arc::new(BFTConsensus::new(mn.address.clone()));
-
-        // Set up BFT to broadcast messages through registry
-        let bft_registry = registry.clone();
-        if let Err(e) = bft.set_broadcast_callback(move |msg| {
-            let registry = bft_registry.clone();
-            tokio::spawn(async move {
-                // Broadcast through peer manager
-                registry.broadcast_message(msg).await;
-            });
-        }) {
-            tracing::error!("Failed to set BFT broadcast callback: {}", e);
-        }
-
-        // Link BFT to blockchain for validation
-        bft.set_blockchain(blockchain.clone());
-
-        // Link blockchain to BFT
-        blockchain.set_bft_consensus(bft.clone()).await;
-
-        tracing::info!("✓ BFT consensus initialized for masternode");
-        Some(bft)
-    } else {
-        None
-    };
 
     println!("✓ Blockchain initialized");
     println!();
@@ -476,17 +399,16 @@ async fn main() {
                     .set_local_identity(mn.address.clone(), signing_key.clone())
                     .await;
 
-                // Set signing key for BFT consensus
-                if let Some(ref bft) = bft_consensus {
-                    if let Err(e) = bft.set_signing_key(signing_key.clone()) {
-                        tracing::error!("Failed to set BFT signing key: {}", e);
-                    } else {
-                        tracing::info!("✓ BFT consensus signing key configured");
-                    }
+                // Set signing key for consensus engine
+                if let Err(e) =
+                    consensus_engine.set_identity(mn.address.clone(), signing_key.clone())
+                {
+                    eprintln!("⚠️ Failed to set consensus identity: {}", e);
                 }
 
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Heartbeat attestation identity configured");
+                tracing::info!("✓ Consensus engine identity configured");
 
                 // Broadcast masternode announcement to the network so peers discover us
                 let announcement = NetworkMessage::MasternodeAnnouncement {
@@ -570,8 +492,8 @@ async fn main() {
             return;
         }
 
-        if let Err(e) = blockchain_init.catchup_blocks().await {
-            tracing::error!("❌ Block catchup failed: {}", e);
+        if let Err(e) = blockchain_init.sync_from_peers().await {
+            tracing::warn!("⚠️  Block sync from peers: {}", e);
         }
 
         // Block production is handled by the timer task below
@@ -698,12 +620,12 @@ async fn main() {
                             masternodes.len()
                         );
 
-                        match block_blockchain.catchup_blocks().await {
+                        match block_blockchain.sync_from_peers().await {
                             Ok(()) => {
-                                tracing::info!("✅ Catchup complete");
+                                tracing::info!("✅ Sync complete");
                             }
                             Err(e) => {
-                                tracing::error!("❌ Failed to catchup blocks: {}", e);
+                                tracing::warn!("⚠️  Sync from peers: {}", e);
                                 continue;
                             }
                         }
@@ -787,36 +709,6 @@ async fn main() {
     });
     shutdown_manager.register_task(block_production_handle);
 
-    // Start BFT committed block processor (every 5 seconds)
-    if bft_consensus.is_some() {
-        let bft_blockchain = blockchain.clone();
-        let shutdown_token_clone = shutdown_token.clone();
-        let bft_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
-            loop {
-                tokio::select! {
-                    _ = shutdown_token_clone.cancelled() => {
-                        tracing::debug!("🛑 BFT block processor task shutting down gracefully");
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        // Process any BFT-committed blocks
-                        match bft_blockchain.process_bft_committed_blocks().await {
-                            Ok(count) if count > 0 => {
-                                tracing::info!("✅ Processed {} BFT-committed block(s)", count);
-                            }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::error!("❌ Failed to process BFT-committed blocks: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        shutdown_manager.register_task(bft_handle);
-    }
-
     // Start network server
 
     println!("🌐 Starting P2P network server...");
@@ -861,13 +753,13 @@ async fn main() {
     });
     shutdown_manager.register_task(rpc_handle);
 
-    // Periodic status report - logs at :05, :15, :25, :35, :45, :55 (midway between block times)
+    // Periodic status report - logs every 5 minutes at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
     let shutdown_token_clone = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
         loop {
-            // Wait until next 5-minute mark (:05, :15, :25, :35, :45, :55)
+            // Wait until next 5-minute mark (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55)
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -875,18 +767,18 @@ async fn main() {
             let minute = (now / 60) % 60;
             let second = now % 60;
 
-            // Calculate seconds until next 5-minute mark (at :05, :15, :25, :35, :45, :55)
-            let target_minute = ((minute / 10) * 10) + 5;
-            let next_target = if minute < target_minute {
-                target_minute
+            // Calculate seconds until next 5-minute mark
+            let next_5min_mark = ((minute / 5) + 1) * 5;
+            let target_minute = if next_5min_mark >= 60 {
+                0
             } else {
-                ((minute / 10) * 10) + 15
+                next_5min_mark
             };
 
-            let minutes_until = if next_target > minute {
-                next_target - minute
+            let minutes_until = if target_minute > minute {
+                target_minute - minute
             } else {
-                60 - minute + next_target
+                60 - minute + target_minute
             };
 
             let seconds_until = (minutes_until * 60) - second;
@@ -938,8 +830,8 @@ async fn main() {
             println!("║  Storage:    {:<40} ║", config.storage.backend);
             println!("║  P2P Port:   {:<40} ║", p2p_addr);
             println!("║  RPC Port:   {:<40} ║", rpc_addr);
-            println!("║  Consensus:  BFT (2/3 quorum)                         ║");
-            println!("║  Finality:   Instant (<3 seconds)                     ║");
+            println!("║  Consensus:  TSDC + Avalanche Hybrid                   ║");
+            println!("║  Finality:   Instant (<10 seconds)                     ║");
             println!("╚═══════════════════════════════════════════════════════╝");
             println!("\nPress Ctrl+C to stop\n");
 

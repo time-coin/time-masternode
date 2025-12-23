@@ -126,9 +126,9 @@ impl RpcHandler {
             "verificationprogress": 1.0,
             "chainwork": format!("{:064x}", height),
             "pruned": false,
-            "consensus": "BFT",
+            "consensus": "TSDC + Avalanche",
             "instant_finality": true,
-            "finality_time": "<3 seconds"
+            "finality_time": "<10 seconds"
         }))
     }
 
@@ -498,7 +498,7 @@ impl RpcHandler {
         let mn_count = masternodes.len() as u32;
         let quorum = (2 * mn_count).div_ceil(3);
         Ok(json!({
-            "type": "BFT",
+            "type": "TSDC + Avalanche",
             "masternodes": mn_count,
             "quorum": quorum
         }))
@@ -809,7 +809,7 @@ impl RpcHandler {
                 "txid": txid,
                 "finalized": true,
                 "confirmations": confirmations,
-                "finality_type": "bft"
+                "finality_type": "avalanche"
             }));
         }
 
@@ -873,7 +873,7 @@ impl RpcHandler {
                     "txid": txid,
                     "finalized": true,
                     "confirmations": confirmations,
-                    "finality_type": "bft",
+                    "finality_type": "avalanche",
                     "wait_time_ms": start_time.elapsed().as_millis()
                 }));
             }

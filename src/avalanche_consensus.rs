@@ -1,0 +1,616 @@
+use crate::block::types::Block;
+use crate::types::{Hash256, Transaction};
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use rand::seq::SliceRandom;
+use rand::thread_rng;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use thiserror::Error;
+
+/// Avalanche consensus errors
+#[derive(Error, Debug)]
+pub enum AvalancheError {
+    #[error("Transaction not found")]
+    TransactionNotFound,
+
+    #[error("Invalid preference: {0}")]
+    InvalidPreference(String),
+
+    #[error("Insufficient confidence: got {got}, need {threshold}")]
+    InsufficientConfidence { got: usize, threshold: usize },
+
+    #[error("Query failed: {0}")]
+    QueryFailed(String),
+
+    #[error("Chit acquisition failed")]
+    ChitAcquisitionFailed,
+
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+}
+
+/// Configuration for Avalanche consensus
+#[derive(Debug, Clone)]
+pub struct AvalancheConfig {
+    /// Number of validators to query per round (k parameter)
+    pub sample_size: usize,
+    /// Number of consecutive preference confirms needed for finality (beta)
+    pub finality_confidence: usize,
+    /// Timeout for query responses (milliseconds)
+    pub query_timeout_ms: u64,
+    /// Maximum rounds before giving up
+    pub max_rounds: usize,
+}
+
+impl Default for AvalancheConfig {
+    fn default() -> Self {
+        Self {
+            sample_size: 20,         // Query 20 validators per round (k)
+            finality_confidence: 15, // 15 consecutive confirms for finality (beta)
+            query_timeout_ms: 2000,  // 2 second timeout
+            max_rounds: 100,
+        }
+    }
+}
+
+/// Preference tracking for a transaction
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preference {
+    Accept,
+    Reject,
+}
+
+impl std::fmt::Display for Preference {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Preference::Accept => write!(f, "Accept"),
+            Preference::Reject => write!(f, "Reject"),
+        }
+    }
+}
+
+/// Snowflake protocol state - improved with dynamic k adjustment
+#[derive(Debug, Clone)]
+pub struct Snowflake {
+    pub preference: Preference,
+    pub confidence: u32,
+    pub k: usize,                        // Current sample size (dynamic)
+    pub suspicion: HashMap<String, f64>, // Trust scores for validators
+    pub last_updated: Instant,
+}
+
+impl Snowflake {
+    pub fn new(initial_preference: Preference, validators: &[String]) -> Self {
+        let mut suspicion = HashMap::new();
+        for validator in validators {
+            suspicion.insert(validator.clone(), 1.0); // Start with full trust
+        }
+
+        Self {
+            preference: initial_preference,
+            confidence: 0,
+            k: 20, // Default sample size
+            suspicion,
+            last_updated: Instant::now(),
+        }
+    }
+
+    /// Update preference with dynamic k adjustment
+    /// When preference matches: increase confidence, decrease k
+    /// When preference changes: reset confidence, increase k
+    pub fn update(&mut self, new_preference: Preference, _beta: u32) {
+        if new_preference == self.preference {
+            self.confidence += 1;
+            // Decrease k dynamically when confident
+            if self.k > 2 {
+                self.k -= 1;
+            }
+        } else {
+            // Preference flipped - reset confidence and increase k
+            self.preference = new_preference;
+            self.confidence = 1;
+            self.k += 1;
+        }
+        self.last_updated = Instant::now();
+    }
+
+    /// Check if finalized (high confidence)
+    pub fn is_finalized(&self, threshold: u32) -> bool {
+        self.confidence >= threshold
+    }
+
+    /// Update validator suspicion scores based on their vote
+    pub fn update_suspicion(&mut self, voter: &str, voted_preference: Preference) {
+        if voted_preference == self.preference {
+            // Increase trust if they voted with us
+            if let Some(score) = self.suspicion.get_mut(voter) {
+                *score = (*score + 1.0).min(1.0); // Cap at 1.0
+            }
+        } else {
+            // Decrease trust if they voted against us
+            if let Some(score) = self.suspicion.get_mut(voter) {
+                *score = (*score - 0.1).max(0.0); // Floor at 0.0
+            }
+        }
+    }
+}
+
+/// Snowball protocol state - uses Snowflake but adds finalization tracking
+#[derive(Debug, Clone)]
+pub struct Snowball {
+    pub snowflake: Snowflake,
+    pub last_finalized: Option<Preference>,
+}
+
+impl Snowball {
+    pub fn new(initial_preference: Preference, validators: &[String]) -> Self {
+        Self {
+            snowflake: Snowflake::new(initial_preference, validators),
+            last_finalized: None,
+        }
+    }
+
+    /// Update based on query results
+    pub fn update(&mut self, new_preference: Preference, beta: u32) {
+        self.snowflake.update(new_preference, beta);
+    }
+
+    /// Record finalization
+    pub fn finalize(&mut self) {
+        self.last_finalized = Some(self.snowflake.preference);
+    }
+
+    /// Check if finalized
+    pub fn is_finalized(&self, threshold: u32) -> bool {
+        self.snowflake.is_finalized(threshold)
+    }
+}
+
+/// Vote result from a single validator
+#[derive(Debug, Clone)]
+pub struct Vote {
+    pub voter_id: String,
+    pub preference: Preference,
+    pub timestamp: Instant,
+}
+
+/// Query round tracking - improved for better consensus detection
+#[derive(Debug)]
+pub struct QueryRound {
+    pub round_number: usize,
+    pub txid: Hash256,
+    pub sampled_validators: Vec<String>,
+    pub votes_received: DashMap<String, Vote>,
+    pub started_at: Instant,
+}
+
+impl QueryRound {
+    pub fn new(round_number: usize, txid: Hash256, sampled_validators: Vec<String>) -> Self {
+        Self {
+            round_number,
+            txid,
+            sampled_validators,
+            votes_received: DashMap::new(),
+            started_at: Instant::now(),
+        }
+    }
+
+    /// Check if round is complete (all responses or timeout)
+    pub fn is_complete(&self, timeout: Duration) -> bool {
+        let elapsed = self.started_at.elapsed();
+        elapsed > timeout || self.votes_received.len() >= self.sampled_validators.len()
+    }
+
+    /// Get consensus from collected votes - improved majority detection
+    pub fn get_consensus(&self) -> Option<(Preference, usize)> {
+        let mut accept_count = 0;
+        let mut reject_count = 0;
+
+        for vote in self.votes_received.iter() {
+            match vote.value().preference {
+                Preference::Accept => accept_count += 1,
+                Preference::Reject => reject_count += 1,
+            }
+        }
+
+        let total = accept_count + reject_count;
+        if total == 0 {
+            return None;
+        }
+
+        // Strict majority: must have more than half the votes
+        if accept_count > reject_count {
+            Some((Preference::Accept, accept_count))
+        } else if reject_count > accept_count {
+            Some((Preference::Reject, reject_count))
+        } else {
+            None // Tie - no consensus
+        }
+    }
+}
+
+/// Core Avalanche consensus engine - upgraded with dynamic k adjustment
+pub struct AvalancheConsensus {
+    config: AvalancheConfig,
+
+    /// Transaction state tracking (txid -> Snowball)
+    tx_state: DashMap<Hash256, Arc<RwLock<Snowball>>>,
+
+    /// Active query rounds
+    active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>,
+
+    /// Finalized transactions
+    finalized_txs: DashMap<Hash256, Preference>,
+
+    /// Validator list for sampling
+    validators: Arc<RwLock<Vec<String>>>,
+
+    /// Metrics
+    rounds_executed: AtomicUsize,
+    txs_finalized: AtomicUsize,
+}
+
+impl AvalancheConsensus {
+    pub fn new(config: AvalancheConfig) -> Result<Self, AvalancheError> {
+        // Validate config
+        if config.sample_size == 0 {
+            return Err(AvalancheError::ConfigError(
+                "sample_size must be > 0".to_string(),
+            ));
+        }
+        if config.finality_confidence == 0 {
+            return Err(AvalancheError::ConfigError(
+                "finality_confidence must be > 0".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            config,
+            tx_state: DashMap::new(),
+            active_rounds: DashMap::new(),
+            finalized_txs: DashMap::new(),
+            validators: Arc::new(RwLock::new(Vec::new())),
+            rounds_executed: AtomicUsize::new(0),
+            txs_finalized: AtomicUsize::new(0),
+        })
+    }
+
+    /// Update the list of active validators
+    pub fn update_validators(&self, validators: Vec<String>) {
+        let mut v = self.validators.write();
+        *v = validators;
+    }
+
+    /// Get current validators
+    pub fn get_validators(&self) -> Vec<String> {
+        self.validators.read().clone()
+    }
+
+    /// Sample validators randomly with shuffle (improved randomness)
+    fn sample_validators(&self, validators: &[String], sample_size: usize) -> Vec<String> {
+        if validators.is_empty() {
+            return Vec::new();
+        }
+
+        let mut rng = thread_rng();
+        let mut shuffled: Vec<String> = validators.to_vec();
+        shuffled.shuffle(&mut rng);
+
+        shuffled
+            .into_iter()
+            .take(sample_size.min(validators.len()))
+            .collect()
+    }
+
+    /// Initiate consensus on a transaction
+    /// Returns true if consensus process started
+    pub fn initiate_consensus(&self, txid: Hash256, initial_preference: Preference) -> bool {
+        if self.finalized_txs.contains_key(&txid) {
+            return false; // Already finalized
+        }
+
+        let validators = self.get_validators();
+        self.tx_state.entry(txid).or_insert_with(|| {
+            Arc::new(RwLock::new(Snowball::new(initial_preference, &validators)))
+        });
+
+        true
+    }
+
+    /// Submit a vote for a transaction from a validator
+    pub fn submit_vote(&self, txid: Hash256, voter_id: String, preference: Preference) {
+        let vote = Vote {
+            voter_id: voter_id.clone(),
+            preference,
+            timestamp: Instant::now(),
+        };
+
+        // If there's an active round, record the vote
+        if let Some(round) = self.active_rounds.get(&txid) {
+            round
+                .value()
+                .read()
+                .votes_received
+                .insert(voter_id.clone(), vote);
+
+            // Update validator suspicion scores in snowball
+            if let Some(state) = self.tx_state.get(&txid) {
+                let mut snowball = state.value().write();
+                snowball.snowflake.update_suspicion(&voter_id, preference);
+            }
+        }
+    }
+
+    /// Execute a single query round for a transaction
+    pub async fn execute_query_round(&self, txid: Hash256) -> Result<(), AvalancheError> {
+        // Get or create transaction state
+        let tx_state = self
+            .tx_state
+            .get(&txid)
+            .ok_or(AvalancheError::TransactionNotFound)?;
+
+        let validators = self.get_validators();
+        if validators.is_empty() {
+            return Err(AvalancheError::QueryFailed(
+                "No validators available".to_string(),
+            ));
+        }
+
+        // Get current k from snowball (dynamic sample size)
+        let current_k = {
+            let snowball = tx_state.value().read();
+            snowball.snowflake.k
+        };
+
+        // Sample validators based on current k
+        let sampled = self.sample_validators(&validators, current_k);
+
+        // Create query round
+        let round_number = self.rounds_executed.fetch_add(1, Ordering::Relaxed);
+        let round = Arc::new(RwLock::new(QueryRound::new(round_number, txid, sampled)));
+
+        self.active_rounds.insert(txid, round.clone());
+
+        // Wait for responses or timeout
+        let timeout = Duration::from_millis(self.config.query_timeout_ms);
+        let start = Instant::now();
+        loop {
+            let rd = round.read();
+            if rd.is_complete(timeout) {
+                drop(rd);
+                break;
+            }
+            drop(rd);
+
+            if start.elapsed() > timeout {
+                break;
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Process results
+        let consensus = {
+            let rd = round.read();
+            rd.get_consensus()
+        };
+
+        if let Some((preference, count)) = consensus {
+            // Update transaction state
+            {
+                let mut state = tx_state.value().write();
+                let old_pref = state.snowflake.preference;
+
+                // Update transaction state with new preference and dynamic k adjustment
+                state.update(preference, self.config.finality_confidence as u32);
+
+                tracing::debug!(
+                    "Round {}: TX {:?} preference {} -> {} ({} votes, confidence: {}, k: {})",
+                    round_number,
+                    hex::encode(txid),
+                    old_pref,
+                    preference,
+                    count,
+                    state.snowflake.confidence,
+                    state.snowflake.k
+                );
+
+                // Check for finalization using beta (finality_confidence)
+                if state.is_finalized(self.config.finality_confidence as u32) {
+                    self.finalized_txs.insert(txid, preference);
+                    self.txs_finalized.fetch_add(1, Ordering::Relaxed);
+                    state.finalize();
+                    tracing::info!(
+                        "✅ TX {:?} finalized with preference: {} (confidence: {})",
+                        hex::encode(txid),
+                        preference,
+                        state.snowflake.confidence
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("No consensus in round {}", round_number);
+        }
+
+        self.active_rounds.remove(&txid);
+        Ok(())
+    }
+
+    /// Run consensus to completion for a transaction
+    pub async fn run_consensus(&self, txid: Hash256) -> Result<Preference, AvalancheError> {
+        // Check if already finalized
+        if let Some(pref) = self.finalized_txs.get(&txid) {
+            return Ok(*pref);
+        }
+
+        // Initialize if not already
+        self.initiate_consensus(txid, Preference::Accept);
+
+        // Run rounds until finalized
+        for _ in 0..self.config.max_rounds {
+            self.execute_query_round(txid).await?;
+
+            if let Some(pref) = self.finalized_txs.get(&txid) {
+                return Ok(*pref);
+            }
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        Err(AvalancheError::InsufficientConfidence {
+            got: self
+                .tx_state
+                .get(&txid)
+                .map(|s| s.read().snowflake.confidence as usize)
+                .unwrap_or(0),
+            threshold: self.config.finality_confidence,
+        })
+    }
+
+    /// Get current state of a transaction
+    pub fn get_tx_state(&self, txid: &Hash256) -> Option<(Preference, usize, usize, bool)> {
+        self.tx_state.get(txid).map(|state| {
+            let s = state.read();
+            (
+                s.snowflake.preference,
+                s.snowflake.confidence as usize,
+                s.snowflake.k,
+                self.finalized_txs.contains_key(txid),
+            )
+        })
+    }
+
+    /// Check if transaction is finalized
+    pub fn is_finalized(&self, txid: &Hash256) -> bool {
+        self.finalized_txs.contains_key(txid)
+    }
+
+    /// Get finalization preference
+    pub fn get_finalized_preference(&self, txid: &Hash256) -> Option<Preference> {
+        self.finalized_txs.get(txid).map(|p| *p)
+    }
+
+    /// Get metrics
+    pub fn get_metrics(&self) -> AvalancheMetrics {
+        AvalancheMetrics {
+            rounds_executed: self.rounds_executed.load(Ordering::Relaxed),
+            txs_finalized: self.txs_finalized.load(Ordering::Relaxed),
+            active_rounds: self.active_rounds.len(),
+            tracked_txs: self.tx_state.len(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AvalancheMetrics {
+    pub rounds_executed: usize,
+    pub txs_finalized: usize,
+    pub active_rounds: usize,
+    pub tracked_txs: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_txid(byte: u8) -> Hash256 {
+        [byte; 32]
+    }
+
+    #[test]
+    fn test_avalanche_init() {
+        let config = AvalancheConfig::default();
+        let av = AvalancheConsensus::new(config).unwrap();
+        assert_eq!(av.get_validators().len(), 0);
+    }
+
+    #[test]
+    fn test_validator_management() {
+        let config = AvalancheConfig::default();
+        let av = AvalancheConsensus::new(config).unwrap();
+
+        let validators = vec!["v1".to_string(), "v2".to_string(), "v3".to_string()];
+        av.update_validators(validators.clone());
+
+        assert_eq!(av.get_validators(), validators);
+    }
+
+    #[test]
+    fn test_initiate_consensus() {
+        let config = AvalancheConfig::default();
+        let av = AvalancheConsensus::new(config).unwrap();
+        let txid = test_txid(1);
+
+        assert!(av.initiate_consensus(txid, Preference::Accept));
+        assert!(!av.initiate_consensus(txid, Preference::Accept)); // Already initiated
+
+        let (pref, confidence, finalized) = av.get_tx_state(&txid).unwrap();
+        assert_eq!(pref, Preference::Accept);
+        assert_eq!(confidence, 0);
+        assert!(!finalized);
+    }
+
+    #[test]
+    fn test_vote_submission() {
+        let config = AvalancheConfig::default();
+        let av = AvalancheConsensus::new(config).unwrap();
+        let txid = test_txid(1);
+
+        av.initiate_consensus(txid, Preference::Accept);
+        av.submit_vote(txid, "v1".to_string(), Preference::Accept);
+
+        // Votes recorded but not processed until round completes
+    }
+
+    #[test]
+    fn test_snowflake() {
+        let mut sf = Snowflake::new(Preference::Accept);
+        assert_eq!(sf.preference, Preference::Accept);
+        assert_eq!(sf.confidence_counter, 0);
+
+        sf.update(Preference::Accept);
+        assert_eq!(sf.confidence_counter, 1);
+
+        sf.update(Preference::Accept);
+        assert_eq!(sf.confidence_counter, 2);
+
+        sf.update(Preference::Reject);
+        assert_eq!(sf.preference, Preference::Reject);
+        assert_eq!(sf.confidence_counter, 1);
+    }
+
+    #[test]
+    fn test_query_round_consensus() {
+        let round = QueryRound::new(0, test_txid(1), vec!["v1".to_string()]);
+
+        round.votes_received.insert(
+            "v1".to_string(),
+            Vote {
+                voter_id: "v1".to_string(),
+                preference: Preference::Accept,
+                timestamp: Instant::now(),
+            },
+        );
+
+        let consensus = round.get_consensus();
+        assert_eq!(consensus, Some((Preference::Accept, 1)));
+    }
+
+    #[tokio::test]
+    async fn test_invalid_config() {
+        let config = AvalancheConfig {
+            sample_size: 0,
+            ..Default::default()
+        };
+        assert!(AvalancheConsensus::new(config).is_err());
+
+        let config = AvalancheConfig {
+            finality_confidence: 0,
+            ..Default::default()
+        };
+        assert!(AvalancheConsensus::new(config).is_err());
+    }
+}

@@ -727,20 +727,6 @@ async fn handle_peer(
                                         tracing::warn!("Failed to process attestation: {}", e);
                                     }
                                 }
-                                // BFT Consensus Messages
-                                NetworkMessage::BlockProposal { .. } |
-                                NetworkMessage::BlockVote { .. } |
-                                NetworkMessage::BlockCommit { .. } => {
-                                    // Handle BFT message through blockchain
-                                    if let Err(e) = blockchain.handle_bft_message(msg.clone()).await {
-                                        tracing::warn!("Failed to handle BFT message: {}", e);
-                                    }
-
-                                    // Gossip BFT messages to other peers
-                                    if let Err(e) = broadcast_tx.send(msg.clone()) {
-                                        tracing::debug!("Failed to gossip BFT message: {}", e);
-                                    }
-                                }
                                 // Health Check Messages
                                 NetworkMessage::Ping { nonce, timestamp: _ } => {
                                     // Respond to ping with pong

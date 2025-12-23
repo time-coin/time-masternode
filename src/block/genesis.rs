@@ -87,7 +87,7 @@ impl GenesisBlock {
             "network": network_str,
             "version": 2,
             "message": format!(
-                "TIME Coin {} Genesis Block - Instant BFT Consensus",
+                "TIME Coin {} Genesis Block - TSDC + Avalanche Consensus",
                 if matches!(network, NetworkType::Mainnet) { "Mainnet" } else { "Testnet" }
             ),
             "block": {
