@@ -8,7 +8,7 @@
 /// - Slot-based block production (every 10 minutes = 600 seconds)
 /// - Fork choice rule (prefer finalized blocks)
 /// - Backup leader mechanism (5-second fallback)
-use crate::block::types::Block;
+use crate::block::types::{Block, BlockHeader};
 use crate::types::Hash256;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -237,7 +237,7 @@ impl TSCDConsensus {
         }
 
         // Verify leader is correct
-        let leader = self.select_leader(slot).await?;
+        let _leader = self.select_leader(slot).await?;
         let chain_head = self.chain_head.read().await;
 
         match chain_head.as_ref() {
