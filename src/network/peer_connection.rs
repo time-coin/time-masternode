@@ -406,6 +406,222 @@ impl PeerConnection {
         Ok(())
     }
 
+    /// Run the unified message loop with masternode registry integration
+    pub async fn run_message_loop_with_registry_and_masternode(
+        mut self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+    ) -> Result<(), String> {
+        let mut ping_interval = interval(Self::PING_INTERVAL);
+        let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
+        let mut buffer = String::new();
+
+        info!(
+            "🔄 [{:?}] Starting message loop for {} (port: {})",
+            self.direction, self.peer_ip, self.remote_port
+        );
+
+        // Send initial handshake (required by protocol)
+        let handshake = NetworkMessage::Handshake {
+            magic: *b"TIME",
+            protocol_version: 1,
+            network: "mainnet".to_string(),
+        };
+
+        if let Err(e) = self.send_message(&handshake).await {
+            error!(
+                "❌ [{:?}] Failed to send handshake to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        info!(
+            "🤝 [{:?}] Sent handshake to {}",
+            self.direction, self.peer_ip
+        );
+
+        // Send initial ping
+        if let Err(e) = self.send_ping().await {
+            error!(
+                "❌ [{:?}] Failed to send initial ping to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        loop {
+            tokio::select! {
+                // Receive messages from peer
+                result = self.reader.read_line(&mut buffer) => {
+                    match result {
+                        Ok(0) => {
+                            info!("🔌 [{:?}] Connection to {} closed by peer (EOF)",
+                                  self.direction, self.peer_ip);
+                            break;
+                        }
+                        Ok(_) => {
+                            if let Err(e) = self.handle_message_with_masternode_registry(&buffer, &peer_registry, &masternode_registry).await {
+                                warn!("⚠️ [{:?}] Error handling message from {}: {}",
+                                      self.direction, self.peer_ip, e);
+                            }
+                            buffer.clear();
+                        }
+                        Err(e) => {
+                            error!("❌ [{:?}] Error reading from {}: {}",
+                                   self.direction, self.peer_ip, e);
+                            break;
+                        }
+                    }
+                }
+
+                // Send periodic pings
+                _ = ping_interval.tick() => {
+                    if let Err(e) = self.send_ping().await {
+                        error!("❌ [{:?}] Failed to send ping to {}: {}",
+                               self.direction, self.peer_ip, e);
+                        break;
+                    }
+                }
+
+                // Check for timeout
+                _ = timeout_check.tick() => {
+                    if self.should_disconnect().await {
+                        error!("❌ [{:?}] Disconnecting {} due to timeout",
+                               self.direction, self.peer_ip);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!(
+            "🔌 [{:?}] Message loop ended for {}",
+            self.direction, self.peer_ip
+        );
+        Ok(())
+    }
+
+    /// Handle a single message with masternode registry for registration
+    async fn handle_message_with_masternode_registry(
+        &self,
+        line: &str,
+        _peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        masternode_registry: &Arc<crate::masternode_registry::MasternodeRegistry>,
+    ) -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+
+        let message: NetworkMessage =
+            serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
+
+        match &message {
+            NetworkMessage::Ping { nonce, timestamp } => {
+                self.handle_ping(*nonce, *timestamp).await?;
+            }
+            NetworkMessage::Pong { nonce, timestamp } => {
+                self.handle_pong(*nonce, *timestamp).await?;
+            }
+            NetworkMessage::MasternodeAnnouncement {
+                address,
+                reward_address,
+                tier,
+                public_key,
+            } => {
+                // Register masternode from announcement
+                let masternode = crate::types::Masternode {
+                    address: address.clone(),
+                    wallet_address: reward_address.clone(),
+                    tier: tier.clone(),
+                    public_key: *public_key,
+                    collateral: 0,
+                    registered_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                if let Err(e) = masternode_registry
+                    .register(masternode, reward_address.clone())
+                    .await
+                {
+                    warn!(
+                        "⚠️ [{:?}] Failed to register masternode {} from announcement: {:?}",
+                        self.direction, address, e
+                    );
+                } else {
+                    info!(
+                        "✅ [{:?}] Registered masternode {} from announcement",
+                        self.direction, address
+                    );
+                }
+            }
+            NetworkMessage::MasternodesResponse(masternodes) => {
+                // Register all masternodes from response
+                info!(
+                    "📥 [{:?}] Processing MasternodesResponse from {} with {} masternode(s)",
+                    self.direction,
+                    self.peer_ip,
+                    masternodes.len()
+                );
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let mut registered = 0;
+                for mn_data in masternodes {
+                    let masternode = crate::types::Masternode {
+                        address: mn_data.address.clone(),
+                        wallet_address: mn_data.reward_address.clone(),
+                        tier: mn_data.tier.clone(),
+                        public_key: mn_data.public_key,
+                        collateral: 0,
+                        registered_at: now,
+                    };
+
+                    if masternode_registry
+                        .register(masternode, mn_data.reward_address.clone())
+                        .await
+                        .is_ok()
+                    {
+                        registered += 1;
+                    }
+                }
+
+                if registered > 0 {
+                    info!(
+                        "✅ [{:?}] Registered {} masternode(s) from response",
+                        self.direction, registered
+                    );
+                }
+            }
+            NetworkMessage::GetMasternodes => {
+                debug!(
+                    "📥 [{:?}] Received GetMasternodes request from {}",
+                    self.direction, self.peer_ip
+                );
+            }
+            _ => {
+                debug!(
+                    "📨 [{:?}] Received message from {} (type: {})",
+                    self.direction,
+                    self.peer_ip,
+                    match &message {
+                        NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
+                        NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+                        NetworkMessage::Handshake { .. } => "Handshake",
+                        _ => "Other",
+                    }
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Handle a single message with peer registry for master node discovery
     async fn handle_message_with_registry(
         &self,
