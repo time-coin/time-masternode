@@ -2,7 +2,6 @@ mod address;
 mod app_builder;
 mod app_context;
 mod app_utils;
-mod avalanche_consensus;
 mod avalanche_handler;
 mod block;
 mod blockchain;

@@ -1,5 +1,5 @@
-use crate::avalanche_consensus::AvalancheConsensus;
 use crate::blockchain::Blockchain;
+use crate::consensus::AvalancheConsensus;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;

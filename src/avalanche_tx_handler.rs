@@ -1,6 +1,6 @@
 /// Avalanche-based transaction finality handler
 /// Replaces BFT voting with Avalanche consensus protocol
-use crate::avalanche_consensus::{AvalancheConsensus, Preference};
+use crate::consensus::{AvalancheConsensus, Preference};
 use crate::transaction_pool::TransactionPool;
 use crate::types::{Hash256, Transaction, UTXO, OutPoint, UTXOState};
 use crate::utxo_manager::UTXOStateManager;
