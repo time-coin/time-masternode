@@ -709,6 +709,49 @@ async fn handle_peer(
                                     // Inbound connections don't send pings, just log if we receive a pong
                                     tracing::debug!("📥 [INBOUND] Received pong from {} (nonce: {})", peer.addr, nonce);
                                 }
+                                NetworkMessage::TransactionVoteRequest { txid } => {
+                                    // Peer is requesting our vote on a transaction
+                                    tracing::debug!("📥 Vote request from {} for TX {:?}", peer.addr, hex::encode(txid));
+
+                                    // Get our preference (Accept/Reject) for this transaction
+                                    let preference = if consensus.tx_pool.is_pending(txid) || consensus.tx_pool.get_pending(txid).is_some() {
+                                        // We have this transaction pending/finalized
+                                        "Accept".to_string()
+                                    } else {
+                                        // We don't have this transaction
+                                        "Reject".to_string()
+                                    };
+
+                                    // Send our vote
+                                    let vote_response = NetworkMessage::TransactionVoteResponse {
+                                        txid: *txid,
+                                        preference,
+                                    };
+                                    let _ = peer_registry.send_to_peer(&ip_str, vote_response).await;
+                                }
+                                NetworkMessage::TransactionVoteResponse { txid, preference } => {
+                                    // Received a vote from a peer
+                                    tracing::debug!("📥 Vote from {} for TX {:?}: {}", peer.addr, hex::encode(txid), preference);
+
+                                    // Update our Avalanche consensus with this vote
+                                    // Convert preference string to Preference enum
+                                    let pref = match preference.as_str() {
+                                        "Accept" => crate::consensus::Preference::Accept,
+                                        "Reject" => crate::consensus::Preference::Reject,
+                                        _ => {
+                                            tracing::warn!("Invalid preference: {}", preference);
+                                            // Skip processing this invalid vote
+                                            line.clear();
+                                            continue;
+                                        }
+                                    };
+
+                                    // Submit vote to Avalanche consensus
+                                    // The consensus engine will update Snowball state
+                                    consensus.avalanche.submit_vote(*txid, peer.addr.clone(), pref);
+
+                                    tracing::debug!("✅ Vote recorded for TX {:?}", hex::encode(txid));
+                                }
                                 _ => {}
                             }
                         } else {

@@ -102,6 +102,14 @@ pub enum NetworkMessage {
         end_height: u64,
     },
     BlockRangeResponse(Vec<Block>),
+    // Avalanche consensus voting
+    TransactionVoteRequest {
+        txid: Hash256,
+    },
+    TransactionVoteResponse {
+        txid: Hash256,
+        preference: String, // "Accept" or "Reject"
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -173,6 +181,8 @@ impl NetworkMessage {
             NetworkMessage::ConsensusQueryResponse { .. } => "ConsensusQueryResponse",
             NetworkMessage::GetBlockRange { .. } => "GetBlockRange",
             NetworkMessage::BlockRangeResponse(_) => "BlockRangeResponse",
+            NetworkMessage::TransactionVoteRequest { .. } => "TransactionVoteRequest",
+            NetworkMessage::TransactionVoteResponse { .. } => "TransactionVoteResponse",
         }
     }
 
