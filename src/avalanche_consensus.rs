@@ -1,5 +1,4 @@
-use crate::block::types::Block;
-use crate::types::{Hash256, Transaction};
+use crate::types::Hash256;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;

@@ -1,5 +1,5 @@
 use crate::block::types::Block;
-use crate::types::{Hash256, MasternodeTier, OutPoint, Transaction, UTXOState, Vote, UTXO};
+use crate::types::{Hash256, MasternodeTier, OutPoint, Transaction, UTXOState, UTXO};
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
@@ -23,15 +23,8 @@ pub enum NetworkMessage {
         message_type: String,
     },
     TransactionBroadcast(Transaction),
-    TransactionVoteRequest([u8; 32]),
-    TransactionVote(Vote),
     TransactionFinalized {
         txid: [u8; 32],
-        votes: u32,
-    },
-    TransactionRejected {
-        txid: [u8; 32],
-        reason: String,
     },
     UTXOStateQuery(Vec<OutPoint>),
     UTXOStateResponse(Vec<(OutPoint, UTXOState)>),
@@ -148,10 +141,7 @@ impl NetworkMessage {
             NetworkMessage::Handshake { .. } => "Handshake",
             NetworkMessage::Ack { .. } => "Ack",
             NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
-            NetworkMessage::TransactionVoteRequest(_) => "TransactionVoteRequest",
-            NetworkMessage::TransactionVote(_) => "TransactionVote",
             NetworkMessage::TransactionFinalized { .. } => "TransactionFinalized",
-            NetworkMessage::TransactionRejected { .. } => "TransactionRejected",
             NetworkMessage::UTXOStateQuery(_) => "UTXOStateQuery",
             NetworkMessage::UTXOStateResponse(_) => "UTXOStateResponse",
             NetworkMessage::UTXOStateNotification(_) => "UTXOStateNotification",

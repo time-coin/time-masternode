@@ -3,7 +3,6 @@ use crate::masternode_registry::MasternodeRegistry;
 use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
-use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;

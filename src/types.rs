@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -146,13 +146,4 @@ impl MasternodeTier {
             MasternodeTier::Gold => 0.98,   // 98% minimum
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Vote {
-    pub txid: Hash256,
-    pub voter: String,
-    pub approve: bool,
-    pub timestamp: i64,
-    pub signature: Signature,
 }

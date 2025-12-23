@@ -465,7 +465,6 @@ impl PeerConnection {
                     self.peer_ip,
                     match &message {
                         NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
-                        NetworkMessage::TransactionVote(_) => "TransactionVote",
                         NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
                         NetworkMessage::Handshake { .. } => "Handshake",
                         _ => "Other",
@@ -597,7 +596,6 @@ impl PeerConnection {
                     self.peer_ip,
                     match &message {
                         NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
-                        NetworkMessage::TransactionVote(_) => "TransactionVote",
                         NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
                         NetworkMessage::MasternodeAnnouncement { .. } => "MasternodeAnnouncement",
                         NetworkMessage::Handshake { .. } => "Handshake",

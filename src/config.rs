@@ -152,9 +152,7 @@ pub struct StorageConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusConfig {
-    pub voting_timeout_ms: u64,
     pub min_masternodes: u32,
-    pub quorum_percentage: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,11 +238,7 @@ impl Config {
                 data_dir: "".to_string(), // Will be auto-configured
                 cache_size_mb: 256,
             },
-            consensus: ConsensusConfig {
-                voting_timeout_ms: 3000,
-                min_masternodes: 3,
-                quorum_percentage: 67,
-            },
+            consensus: ConsensusConfig { min_masternodes: 3 },
             block: BlockConfig {
                 block_time_seconds: 600, // 10 minutes
                 max_block_size_kb: 1024,

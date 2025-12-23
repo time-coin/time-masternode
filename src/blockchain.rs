@@ -7,7 +7,6 @@ use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::RwLock;

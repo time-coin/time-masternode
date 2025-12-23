@@ -26,7 +26,6 @@ mod utxo_manager;
 mod vdf;
 mod wallet;
 
-use avalanche_consensus::AvalancheConsensus;
 use blockchain::Blockchain;
 use chrono::Timelike;
 use clap::Parser;
