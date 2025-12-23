@@ -64,6 +64,8 @@ The compiled binaries will be in `target/release/`:
 ./target/release/timed
 ```
 
+For complete deployment guide, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
+
 ### Run as a Masternode
 
 Edit `config.toml`:
