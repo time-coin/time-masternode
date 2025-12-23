@@ -72,6 +72,7 @@ impl UTXOStateManager {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
         self.storage.remove_utxo(outpoint).await?;
         self.utxo_states.remove(outpoint);
@@ -301,6 +302,7 @@ impl UTXOStateManager {
     }
 
     /// Calculate hash of entire UTXO set for state comparison
+    #[allow(dead_code)]
     pub async fn calculate_utxo_set_hash(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 

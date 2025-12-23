@@ -243,13 +243,11 @@ impl PeerConnectionRegistry {
         &self,
         peer_ip: &str,
     ) -> Option<Arc<tokio::sync::Mutex<PeerWriter>>> {
-        let writers = self.peer_writers.read().await;
-        writers.get(peer_ip).map(|_| {
-            Arc::new(tokio::sync::Mutex::new(BufWriter::new(
-                // This is a placeholder - in actual implementation we'd clone the writer
-                panic!("Cannot clone TCP writer"),
-            )))
-        })
+        // peer_writers stores PeerWriter directly, not wrapped in Arc
+        // Since we can't clone the writer (it contains TCP state), return None
+        // This is a placeholder - actual implementation would use Arc<Mutex<>> from the start
+        let _writers = self.peer_writers.read().await;
+        None
     }
 
     pub async fn register_response_handler(&self, peer_ip: &str, tx: ResponseSender) {

@@ -149,6 +149,7 @@ impl MasternodeTier {
 
     /// Sampling weight for Avalanche consensus
     /// Used for stake-weighted sampling: P(sample node_i) = Weight_i / Total_Weight
+    #[allow(dead_code)]
     pub fn sampling_weight(&self) -> usize {
         match self {
             MasternodeTier::Free => 1,     // 1x weight

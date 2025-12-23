@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 
 /// Errors for Avalanche consensus
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum AvalancheError {
     #[error("Consensus error: {0}")]
     ConsensusError(String),
@@ -27,6 +28,7 @@ pub enum AvalancheError {
 }
 
 /// Bridge between Avalanche consensus and TimeCoin transaction handling
+#[allow(dead_code)]
 pub struct AvalancheHandler {
     consensus: Arc<AvalancheConsensus>,
     utxo_manager: Arc<UTXOStateManager>,
@@ -37,6 +39,7 @@ pub struct AvalancheHandler {
 
 /// Event indicating a transaction has achieved finality
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FinalityEvent {
     pub txid: Hash256,
     pub preference: Preference,
@@ -278,6 +281,7 @@ impl AvalancheHandler {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AvalancheMetrics {
     pub inner: crate::consensus::AvalancheMetrics,
     pub pending_transactions: usize,
@@ -285,6 +289,7 @@ pub struct AvalancheMetrics {
 }
 
 /// Background task runner for continuous consensus rounds
+#[allow(dead_code)]
 pub async fn run_avalanche_loop(
     handler: Arc<AvalancheHandler>,
     mut finality_rx: mpsc::UnboundedReceiver<FinalityEvent>,

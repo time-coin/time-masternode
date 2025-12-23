@@ -17,7 +17,9 @@ const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 
 // Security limits
 const MAX_BLOCK_SIZE: usize = 2_000_000; // 2MB per block
+#[allow(dead_code)]
 const MAX_REORG_DEPTH: u64 = 1_000; // Maximum blocks to reorg
+#[allow(dead_code)]
 const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
 // P2P sync configuration
@@ -25,8 +27,10 @@ const PEER_SYNC_TIMEOUT_SECS: u64 = 120;
 const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
 
 /// Global lock to prevent duplicate concurrent block production
+#[allow(dead_code)]
 static BLOCK_PRODUCTION_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
 
+#[allow(dead_code)]
 fn get_block_production_lock() -> &'static TokioMutex<()> {
     BLOCK_PRODUCTION_LOCK.get_or_init(|| TokioMutex::new(()))
 }
@@ -71,6 +75,7 @@ impl Blockchain {
     }
 
     /// Set peer manager for block requests
+    #[allow(dead_code)]
     pub async fn set_peer_manager(&self, peer_manager: Arc<crate::peer_manager::PeerManager>) {
         *self.peer_manager.write().await = Some(peer_manager);
     }
@@ -362,11 +367,13 @@ impl Blockchain {
     }
 
     /// Check if currently syncing
+    #[allow(dead_code)]
     pub async fn is_syncing(&self) -> bool {
         *self.is_syncing.read().await
     }
 
     /// Set syncing state
+    #[allow(dead_code)]
     pub async fn set_syncing(&self, syncing: bool) {
         *self.is_syncing.write().await = syncing;
     }

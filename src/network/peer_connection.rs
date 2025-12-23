@@ -625,7 +625,7 @@ pub struct PeerStateManager {
 /// Active connection state for a peer
 #[derive(Clone)]
 #[allow(dead_code)]
-struct PeerConnectionState {
+pub struct PeerConnectionState {
     /// Peer's IP address (unique identifier)
     pub ip: String,
 

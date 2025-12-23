@@ -58,7 +58,6 @@ impl NetworkClient {
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
         let attestation_system = self.attestation_system.clone();
-        let peer_connection_registry = self.peer_connection_registry.clone();
         let peer_registry = self.peer_connection_registry.clone();
         let _peer_state = self.peer_state.clone();
         let connection_manager = self.connection_manager.clone();

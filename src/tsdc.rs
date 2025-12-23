@@ -21,6 +21,7 @@ use tokio::sync::RwLock;
 
 /// TSDC errors
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum TSCDError {
     #[error("Block validation failed: {0}")]
     ValidationFailed(String),
@@ -46,6 +47,7 @@ pub enum TSCDError {
 
 /// Configuration for TSDC
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TSCDConfig {
     /// Slot duration in seconds (default: 600 = 10 minutes)
     pub slot_duration_secs: u64,
@@ -67,6 +69,7 @@ impl Default for TSCDConfig {
 
 /// A validator/masternode in the TSDC system
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct TSCDValidator {
     pub id: String,
     pub public_key: Vec<u8>,
@@ -75,6 +78,7 @@ pub struct TSCDValidator {
 
 /// State of a finalized block
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct FinalityProof {
     pub block_hash: Hash256,
     pub height: u64,
@@ -85,6 +89,7 @@ pub struct FinalityProof {
 
 /// VRF output for leader selection
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct VRFOutput {
     pub proof: Vec<u8>,
     pub output_bytes: [u8; 32],
@@ -105,6 +110,7 @@ impl Ord for VRFOutput {
 
 /// Represents the state of a single slot
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct SlotState {
     pub slot: u64,
     pub timestamp: u64,
@@ -116,6 +122,7 @@ pub struct SlotState {
 }
 
 /// TSDC consensus engine
+#[allow(dead_code)]
 pub struct TSCDConsensus {
     config: TSCDConfig,
     validators: Arc<RwLock<Vec<TSCDValidator>>>,

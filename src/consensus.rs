@@ -49,6 +49,7 @@ struct NodeIdentity {
 
 /// Avalanche consensus errors
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum AvalancheError {
     #[error("Transaction not found")]
     TransactionNotFound,
@@ -100,6 +101,7 @@ impl Default for AvalancheConfig {
 
 /// Preference tracking for a transaction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Preference {
     Accept,
     Reject,
@@ -123,6 +125,7 @@ pub struct ValidatorInfo {
 
 /// Vote result from a single validator with weight
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Vote {
     pub voter_id: String,
     pub preference: Preference,
@@ -132,6 +135,7 @@ pub struct Vote {
 
 /// Snowflake protocol state - improved with dynamic k adjustment
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Snowflake {
     pub preference: Preference,
     pub confidence: u32,
@@ -198,6 +202,7 @@ impl Snowflake {
 
 /// Snowball protocol state - uses Snowflake but adds finalization tracking
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Snowball {
     pub snowflake: Snowflake,
     pub last_finalized: Option<Preference>,
@@ -229,6 +234,7 @@ impl Snowball {
 
 /// Query round tracking - improved for better consensus detection
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct QueryRound {
     pub round_number: usize,
     pub txid: Hash256,
@@ -601,6 +607,7 @@ impl AvalancheConsensus {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AvalancheMetrics {
     pub rounds_executed: usize,
     pub txs_finalized: usize,
