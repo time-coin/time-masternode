@@ -486,14 +486,18 @@ async fn handle_peer(
                                         start, end, peer.addr, our_height
                                     );
                                     let mut blocks = Vec::new();
-                                    for h in *start..=(*end).min(*start + 100) {
-                                        if let Ok(block) = blockchain.get_block_by_height(h).await {
-                                            blocks.push(block);
+                                    // Send blocks we have: cap at our_height, requested end, and batch limit of 100
+                                    let effective_end = (*end).min(*start + 100).min(our_height);
+                                    if *start <= our_height {
+                                        for h in *start..=effective_end {
+                                            if let Ok(block) = blockchain.get_block_by_height(h).await {
+                                                blocks.push(block);
+                                            }
                                         }
                                     }
                                     tracing::info!(
-                                        "📤 [Inbound] Sending {} blocks to {} (requested {}-{})",
-                                        blocks.len(), peer.addr, start, end
+                                        "📤 [Inbound] Sending {} blocks to {} (requested {}-{}, effective {}-{})",
+                                        blocks.len(), peer.addr, start, end, start, effective_end
                                     );
                                     let reply = NetworkMessage::BlocksResponse(blocks);
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
