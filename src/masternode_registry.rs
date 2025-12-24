@@ -569,6 +569,47 @@ impl MasternodeRegistry {
             info.last_heartbeat = now;
             info.is_active = true;
             tracing::debug!("💓 Updated last_heartbeat for masternode {}", mn_address);
+        } else {
+            // Masternode not in registry - register it from heartbeat
+            // This ensures masternodes are discovered even if we missed their announcement
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            // Use the masternode address as the reward address (best guess from heartbeat)
+            let reward_address = format!("TIME{}", &mn_address.replace('.', ""));
+
+            let info = MasternodeInfo {
+                masternode: crate::types::Masternode {
+                    address: mn_address.clone(),
+                    wallet_address: reward_address.clone(),
+                    collateral: 0,                            // Unknown from heartbeat
+                    tier: crate::types::MasternodeTier::Free, // Assume free tier
+                    public_key: heartbeat.masternode_pubkey,
+                    registered_at: now,
+                },
+                reward_address,
+                last_heartbeat: now,
+                uptime_start: now,
+                total_uptime: 0,
+                is_active: true,
+            };
+
+            let total = masternodes.len() + 1;
+            masternodes.insert(mn_address.clone(), info.clone());
+
+            // Persist to disk
+            let key = format!("masternode:{}", mn_address);
+            if let Ok(value) = bincode::serialize(&info) {
+                let _ = self.db.insert(key.as_bytes(), value);
+            }
+
+            tracing::info!(
+                "✅ Discovered masternode {} from heartbeat (total: {})",
+                mn_address,
+                total
+            );
         }
 
         Ok(())
