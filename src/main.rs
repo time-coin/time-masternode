@@ -594,10 +594,28 @@ async fn main() {
     // Initialize genesis and catchup in background
     let blockchain_init = blockchain.clone();
     let blockchain_server = blockchain_init.clone();
+    let peer_registry_for_sync = peer_connection_registry.clone();
     tokio::spawn(async move {
         if let Err(e) = blockchain_init.initialize_genesis().await {
             tracing::error!("❌ Genesis initialization failed: {}", e);
             return;
+        }
+
+        // Wait for peer connections to establish before initial sync
+        // The network client starts in parallel and needs time to connect
+        let mut wait_seconds = 0u64;
+        let max_wait = 30u64; // Wait up to 30 seconds for peers
+        while wait_seconds < max_wait {
+            let connected = peer_registry_for_sync.get_connected_peers().await.len();
+            if connected > 0 {
+                tracing::info!("✓ {} peer(s) connected, starting initial sync", connected);
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            wait_seconds += 2;
+            if wait_seconds % 10 == 0 {
+                tracing::debug!("⏳ Waiting for peer connections... ({}s)", wait_seconds);
+            }
         }
 
         if let Err(e) = blockchain_init.sync_from_peers().await {

@@ -203,12 +203,24 @@ impl Blockchain {
         );
 
         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
-            // Request blocks from multiple peers
-            if let Some(peers) = self.peer_manager.read().await.as_ref() {
-                let peer_list = peers.get_all_peers().await;
-                for peer in peer_list.iter().take(5) {
+            // Get actually connected peers from the registry, not just known peers
+            let connected_peers = peer_registry.get_connected_peers().await;
+
+            if connected_peers.is_empty() {
+                tracing::warn!("⚠️  No connected peers to sync from");
+            } else {
+                tracing::info!(
+                    "📡 Requesting blocks from {} connected peer(s)",
+                    connected_peers.len()
+                );
+
+                // Request blocks from connected peers
+                for peer in connected_peers.iter().take(5) {
                     let req = NetworkMessage::GetBlocks(current + 1, expected);
-                    let _ = peer_registry.send_to_peer(peer, req).await;
+                    match peer_registry.send_to_peer(peer, req).await {
+                        Ok(_) => tracing::debug!("📤 Sent GetBlocks request to {}", peer),
+                        Err(e) => tracing::debug!("❌ Failed to send GetBlocks to {}: {}", peer, e),
+                    }
                 }
             }
 
@@ -223,6 +235,17 @@ impl Blockchain {
                 if now_height >= expected {
                     tracing::info!("✓ Sync complete at height {}", now_height);
                     return Ok(());
+                }
+
+                // Log progress periodically
+                let elapsed = start.elapsed().as_secs();
+                if elapsed > 0 && elapsed % 30 == 0 {
+                    tracing::info!(
+                        "⏳ Still syncing... height {} / {} ({}s elapsed)",
+                        now_height,
+                        expected,
+                        elapsed
+                    );
                 }
             }
         }
