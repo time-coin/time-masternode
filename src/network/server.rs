@@ -739,20 +739,20 @@ async fn handle_peer(
                                         nonce: *nonce,
                                         timestamp: chrono::Utc::now().timestamp(),
                                     };
-                                    tracing::info!("📨 [INBOUND] Received ping from {} (nonce: {})", peer.addr, nonce);
+                                    tracing::info!("📨 [Inbound] Received ping from {} (nonce: {})", peer.addr, nonce);
 
                                     match peer_registry.send_to_peer(&ip_str, pong_msg).await {
                                         Ok(()) => {
-                                            tracing::info!("✅ [INBOUND] Sent pong to {} (nonce: {})", peer.addr, nonce);
+                                            tracing::info!("✅ [Inbound] Sent pong to {} (nonce: {})", peer.addr, nonce);
                                         }
                                         Err(e) => {
-                                            tracing::warn!("❌ [INBOUND] Failed to send pong to {}: {}", peer.addr, e);
+                                            tracing::warn!("❌ [Inbound] Failed to send pong to {}: {}", peer.addr, e);
                                         }
                                     }
                                 }
                                 NetworkMessage::Pong { nonce, timestamp: _ } => {
                                     // Inbound connections don't send pings, just log if we receive a pong
-                                    tracing::debug!("📥 [INBOUND] Received pong from {} (nonce: {})", peer.addr, nonce);
+                                    tracing::debug!("📥 [Inbound] Received pong from {} (nonce: {})", peer.addr, nonce);
                                 }
                                 NetworkMessage::TransactionVoteRequest { txid } => {
                                     // Peer is requesting our vote on a transaction

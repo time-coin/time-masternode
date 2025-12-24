@@ -165,7 +165,7 @@ impl PeerConnection {
 
         let peer_ip = peer_addr.ip().to_string();
 
-        info!("🔗 [INBOUND] Accepted connection from {}", peer_addr);
+        info!("🔗 [Inbound] Accepted connection from {}", peer_addr);
 
         let (read_half, write_half) = stream.into_split();
 
