@@ -50,6 +50,3 @@ impl AvalancheBlockConsensus {
         }
     }
 }
-
-// Keep old name for backward compatibility
-pub type DeterministicConsensus = AvalancheBlockConsensus;

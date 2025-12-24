@@ -1,3 +1,11 @@
+//! Rate limiting for P2P message processing.
+//!
+//! Note: This module is implemented but not yet wired into the server.
+//! TODO: Integrate with server.rs to limit message rates per peer.
+//! See analysis/DEAD_CODE_ACTION_PLAN.md Phase 2 for integration steps.
+
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 

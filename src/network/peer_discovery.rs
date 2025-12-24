@@ -1,50 +1,97 @@
+//! Peer discovery service for finding peers from external sources.
+//!
+//! Fetches peer IPs from the time-coin.io API:
+//! - Testnet: https://time-coin.io/api/testnet/peers
+//! - Mainnet: https://time-coin.io/api/peers
+//!
+//! The API returns IP addresses without ports. The default port is
+//! determined by the network type (24100 for testnet, 24000 for mainnet).
+
+use crate::network_type::NetworkType;
+
 /// Peer discovery service for finding peers from external sources
-/// Currently uses bootstrap peers as fallback
 pub struct PeerDiscovery {
-    #[allow(dead_code)]
     discovery_url: String,
+    default_port: u16,
 }
 
 impl PeerDiscovery {
-    /// Create a new peer discovery service
-    pub fn new(discovery_url: String) -> Self {
-        Self { discovery_url }
+    /// Create a new peer discovery service with network-specific settings
+    pub fn new(discovery_url: String, network_type: NetworkType) -> Self {
+        Self {
+            discovery_url,
+            default_port: network_type.default_p2p_port(),
+        }
     }
 
     /// Fetch peers from the discovery service with fallback to bootstrap peers
     ///
-    /// In a production system, this would:
-    /// 1. Make an HTTP request to the discovery_url
-    /// 2. Parse the response
-    /// 3. Fall back to bootstrap peers if the request fails
-    ///
-    /// For now, we just return the bootstrap peers directly.
+    /// 1. Tries to fetch from the discovery API
+    /// 2. Falls back to bootstrap peers if the request fails
+    /// 3. Returns peers with network-appropriate default port for IPs without ports
     pub async fn fetch_peers_with_fallback(
         &self,
         fallback_peers: Vec<String>,
     ) -> Vec<DiscoveredPeer> {
-        // Convert bootstrap peer addresses to DiscoveredPeer format
-        fallback_peers
+        // Try to fetch from API
+        match self.fetch_from_api().await {
+            Ok(peers) if !peers.is_empty() => peers,
+            Ok(_) => {
+                tracing::debug!("API returned empty list, using fallback peers");
+                self.parse_peer_list(fallback_peers)
+            }
+            Err(e) => {
+                tracing::debug!("API fetch failed: {}, using fallback peers", e);
+                self.parse_peer_list(fallback_peers)
+            }
+        }
+    }
+
+    /// Fetch peers from the discovery API
+    async fn fetch_from_api(&self) -> Result<Vec<DiscoveredPeer>, String> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        let response = client
+            .get(&self.discovery_url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let peer_list: Vec<String> = response.json().await.map_err(|e| e.to_string())?;
+
+        Ok(self.parse_peer_list(peer_list))
+    }
+
+    /// Parse a list of peer addresses (IP or IP:port format)
+    fn parse_peer_list(&self, peers: Vec<String>) -> Vec<DiscoveredPeer> {
+        peers
             .into_iter()
             .filter_map(|peer_str| {
-                // Parse "address:port" format
-                let parts: Vec<&str> = peer_str.split(':').collect();
-                if parts.len() == 2 {
-                    if let Ok(port) = parts[1].parse::<u16>() {
-                        Some(DiscoveredPeer {
-                            address: parts[0].to_string(),
-                            port,
-                        })
-                    } else {
-                        None
-                    }
-                } else {
-                    // If no port specified, use default P2P port
-                    Some(DiscoveredPeer {
-                        address: peer_str,
-                        port: 24100, // Default testnet P2P port
-                    })
+                let peer_str = peer_str.trim();
+                if peer_str.is_empty() {
+                    return None;
                 }
+
+                // Check if it has a port (contains ':' and last part is numeric)
+                if let Some(colon_pos) = peer_str.rfind(':') {
+                    let potential_port = &peer_str[colon_pos + 1..];
+                    if let Ok(port) = potential_port.parse::<u16>() {
+                        // Has valid port
+                        return Some(DiscoveredPeer {
+                            address: peer_str[..colon_pos].to_string(),
+                            port,
+                        });
+                    }
+                }
+
+                // No port or invalid port - use network default port
+                Some(DiscoveredPeer {
+                    address: peer_str.to_string(),
+                    port: self.default_port,
+                })
             })
             .collect()
     }

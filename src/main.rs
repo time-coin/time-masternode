@@ -285,7 +285,11 @@ async fn main() {
             .map_err(|e| format!("Failed to open peer database: {}", e))
             .unwrap(),
     );
-    let peer_manager = Arc::new(PeerManager::new(peer_db, config.network.clone()));
+    let peer_manager = Arc::new(PeerManager::new(
+        peer_db,
+        config.network.clone(),
+        network_type,
+    ));
 
     // Initialize masternode registry
     let registry_db_path = format!("{}/registry", config.storage.data_dir);
@@ -665,16 +669,17 @@ async fn main() {
 
     // Peer discovery
     if config.network.enable_peer_discovery {
-        println!("🔍 Discovering peers from time-coin.io...");
-        let discovery = network::peer_discovery::PeerDiscovery::new(
-            "https://time-coin.io/api/peers".to_string(),
-        );
+        let discovery_url = network_type.peer_discovery_url();
+        println!("🔍 Discovering peers from {}...", discovery_url);
+        let discovery =
+            network::peer_discovery::PeerDiscovery::new(discovery_url.to_string(), network_type);
 
         let fallback_peers = config.network.bootstrap_peers.clone();
         let discovered_peers = discovery.fetch_peers_with_fallback(fallback_peers).await;
 
         println!("  ✅ Loaded {} peer(s)", discovered_peers.len());
         for peer in discovered_peers.iter().take(3) {
+            // Display IP with port (port comes from network type default)
             println!("     • {}:{}", peer.address, peer.port);
         }
         if discovered_peers.len() > 3 {

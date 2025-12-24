@@ -95,6 +95,12 @@ impl UtxoStorage for InMemoryUtxoStorage {
     }
 }
 
+/// Sled-based UTXO storage backend.
+///
+/// Note: This is an alternative to InMemoryUtxoStorage for persistent storage.
+/// Currently unused because UTXO storage is handled via the main sled database
+/// in blockchain.rs. This could be used for a dedicated UTXO database.
+#[allow(dead_code)]
 pub struct SledUtxoStorage {
     db: sled::Db,
 }

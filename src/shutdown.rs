@@ -1,3 +1,9 @@
+//! Shutdown manager for graceful application termination.
+//!
+//! Note: This module appears as "dead code" in library checks because it's
+//! only used by the binary (main.rs). The ShutdownManager is instantiated
+//! and used in main() for coordinating graceful shutdown of all tasks.
+
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 

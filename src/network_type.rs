@@ -50,6 +50,14 @@ impl NetworkType {
             NetworkType::Testnet => "TTIME",
         }
     }
+
+    /// Get the peer discovery API URL for this network
+    pub fn peer_discovery_url(&self) -> &str {
+        match self {
+            NetworkType::Mainnet => "https://time-coin.io/api/peers",
+            NetworkType::Testnet => "https://time-coin.io/api/testnet/peers",
+        }
+    }
 }
 
 impl std::fmt::Display for NetworkType {

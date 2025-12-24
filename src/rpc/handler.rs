@@ -1,3 +1,9 @@
+//! RPC handler for the alternative TCP-based RPC server.
+//!
+//! See server.rs for details on why this module is currently unused.
+
+#![allow(dead_code)]
+
 use super::server::{RpcError, RpcRequest, RpcResponse};
 use crate::consensus::ConsensusEngine;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;

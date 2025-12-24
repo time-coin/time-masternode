@@ -1,3 +1,16 @@
+//! Alternative RPC server implementation using raw TCP.
+//!
+//! Note: This module is currently unused - the application uses an axum-based
+//! HTTP RPC server implemented directly in main.rs. This implementation is kept
+//! as an alternative option for scenarios where a simpler TCP-based JSON-RPC
+//! server might be preferred over HTTP.
+//!
+//! To use this instead of the axum server:
+//! 1. Create RpcServer with dependencies
+//! 2. Call server.run() instead of the axum router
+
+#![allow(dead_code)]
+
 use super::handler::RpcHandler;
 use crate::consensus::ConsensusEngine;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;

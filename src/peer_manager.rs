@@ -1,4 +1,5 @@
 use crate::config::NetworkConfig;
+use crate::network_type::NetworkType;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -6,7 +7,6 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
-const PEER_DISCOVERY_URL: &str = "https://time-coin.io/api/peers";
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
 const PEER_REFRESH_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
@@ -41,15 +41,21 @@ pub struct PeerManager {
     peer_info: Arc<RwLock<Vec<PeerInfo>>>,
     db: Arc<sled::Db>,
     network_config: NetworkConfig,
+    network_type: NetworkType,
 }
 
 impl PeerManager {
-    pub fn new(db: Arc<sled::Db>, network_config: NetworkConfig) -> Self {
+    pub fn new(
+        db: Arc<sled::Db>,
+        network_config: NetworkConfig,
+        network_type: NetworkType,
+    ) -> Self {
         Self {
             peers: Arc::new(RwLock::new(HashSet::new())),
             peer_info: Arc::new(RwLock::new(Vec::new())),
             db,
             network_config,
+            network_type,
         }
     }
 
@@ -85,20 +91,23 @@ impl PeerManager {
         Ok(())
     }
 
-    /// Discover peers from central server
+    /// Discover peers from central server (uses network-specific endpoint)
     async fn discover_peers_from_server(&self) -> Result<(), String> {
-        info!("🔍 Discovering peers from {}", PEER_DISCOVERY_URL);
+        let discovery_url = self.network_type.peer_discovery_url();
+        info!("🔍 Discovering peers from {}", discovery_url);
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| e.to_string())?;
 
-        match client.get(PEER_DISCOVERY_URL).send().await {
+        match client.get(discovery_url).send().await {
             Ok(response) => {
                 if let Ok(peer_list) = response.json::<Vec<String>>().await {
                     let mut added = 0;
                     for peer_addr in peer_list {
+                        // API now returns IPs without ports, add to candidates as-is
+                        // The connection logic will add the appropriate port based on network type
                         if self.add_peer_candidate(peer_addr.clone()).await {
                             added += 1;
                         }
@@ -535,6 +544,7 @@ impl PeerManager {
             peer_info: self.peer_info.clone(),
             db: self.db.clone(),
             network_config: self.network_config.clone(),
+            network_type: self.network_type,
         })
     }
 }
@@ -546,6 +556,7 @@ impl Clone for PeerManager {
             peer_info: self.peer_info.clone(),
             db: self.db.clone(),
             network_config: self.network_config.clone(),
+            network_type: self.network_type,
         }
     }
 }

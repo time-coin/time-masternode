@@ -1,3 +1,16 @@
+//! Message deduplication using Bloom filters.
+//!
+//! Note: This module provides memory-efficient deduplication but is currently
+//! unused. The current implementation uses HashSet-based deduplication which
+//! is simpler but uses more memory for large numbers of messages.
+//!
+//! Consider integrating this for:
+//! - High-throughput message processing
+//! - Memory-constrained environments
+//! - When deduplicating millions of messages
+
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
