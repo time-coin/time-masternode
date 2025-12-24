@@ -359,10 +359,51 @@ impl PeerConnectionRegistry {
     }
 
     /// Broadcast a message to all connected peers (pre-serializes for efficiency)
-    pub async fn broadcast(&self, _message: NetworkMessage) {
-        // Broadcasting is handled by the network server
-        // This is a placeholder for the refactored architecture
-        debug!("📡 Broadcast called (message routing handled by server)");
+    pub async fn broadcast(&self, message: NetworkMessage) {
+        let writers = self.peer_writers.read().await;
+
+        if writers.is_empty() {
+            debug!("📡 Broadcast: no peers connected");
+            return;
+        }
+
+        // Pre-serialize the message once for efficiency
+        let msg_json = match serde_json::to_string(&message) {
+            Ok(json) => format!("{}\n", json),
+            Err(e) => {
+                warn!("❌ Failed to serialize broadcast message: {}", e);
+                return;
+            }
+        };
+        let msg_bytes = msg_json.as_bytes();
+
+        let mut send_count = 0;
+        let mut fail_count = 0;
+
+        for (peer_ip, writer_arc) in writers.iter() {
+            let mut writer = writer_arc.lock().await;
+
+            if let Err(e) = writer.write_all(msg_bytes).await {
+                debug!("❌ Broadcast to {} failed: {}", peer_ip, e);
+                fail_count += 1;
+                continue;
+            }
+
+            if let Err(e) = writer.flush().await {
+                debug!("❌ Broadcast flush to {} failed: {}", peer_ip, e);
+                fail_count += 1;
+                continue;
+            }
+
+            send_count += 1;
+        }
+
+        if send_count > 0 || fail_count > 0 {
+            debug!(
+                "📡 Broadcast complete: {} sent, {} failed",
+                send_count, fail_count
+            );
+        }
     }
 
     /// Get list of connected peer IPs
