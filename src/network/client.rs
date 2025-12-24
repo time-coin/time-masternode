@@ -563,6 +563,9 @@ async fn maintain_peer_connection(
     // Get peer IP for later reference
     let peer_ip = peer_conn.peer_ip().to_string();
 
+    // Mark as connected in connection manager (transitions from Connecting -> Connected)
+    connection_manager.mark_connected(&peer_ip);
+
     // Run the message loop which handles ping/pong and routes other messages
     // Pass peer_registry and masternode_registry so it can register incoming masternodes
     let result = peer_conn
