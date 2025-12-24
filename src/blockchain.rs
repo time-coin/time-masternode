@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex as TokioMutex;
 use tokio::sync::RwLock;
 
-const BLOCK_TIME_SECONDS: i64 = 3600; // 1 hour
+const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
 const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 

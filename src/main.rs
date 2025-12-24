@@ -718,24 +718,108 @@ async fn main() {
                     // Determine what to do based on height comparison
                     if current_height < expected_height - 1 {
                         // More than 1 block behind - need catchup
+                        let blocks_behind = expected_height - current_height;
                         tracing::info!(
-                            "🧱 Catching up: height {} → {} at {} ({}:{}0) with {} eligible masternodes",
+                            "🧱 Catching up: height {} → {} ({} blocks behind) at {} ({}:{}0) with {} eligible masternodes",
                             current_height,
                             expected_height,
+                            blocks_behind,
                             timestamp,
                             now.hour(),
                             (now.minute() / 10),
                             masternodes.len()
                         );
 
+                        // First, try to sync from peers
                         match block_blockchain.sync_from_peers().await {
                             Ok(()) => {
                                 tracing::info!("✅ Sync complete");
+                                continue; // Synced successfully, check again next tick
                             }
                             Err(e) => {
-                                tracing::warn!("⚠️  Sync from peers: {}", e);
-                                continue;
+                                tracing::warn!("⚠️  Sync from peers failed: {} - will attempt catchup block production", e);
+                                // Fall through to catchup block production
                             }
+                        }
+
+                        // Sync failed - peers don't have blocks either (network-wide catchup)
+                        // Elect a leader to produce catchup blocks
+                        // Leader selection: deterministic based on current height + masternode list
+                        use sha2::{Digest, Sha256};
+                        let mut hasher = Sha256::new();
+                        hasher.update(b"catchup_leader");
+                        hasher.update(current_height.to_le_bytes());
+                        let leader_hash: [u8; 32] = hasher.finalize().into();
+
+                        let leader_index = {
+                            let mut val = 0u64;
+                            for (i, &byte) in leader_hash.iter().take(8).enumerate() {
+                                val |= (byte as u64) << (i * 8);
+                            }
+                            (val % masternodes.len() as u64) as usize
+                        };
+
+                        let selected_leader = &masternodes[leader_index];
+                        let is_leader = masternode_address
+                            .as_ref()
+                            .map(|addr| addr == &selected_leader.address)
+                            .unwrap_or(false);
+
+                        if is_leader {
+                            tracing::info!(
+                                "🎯 Elected as catchup leader - producing {} blocks to reach height {}",
+                                blocks_behind,
+                                expected_height
+                            );
+
+                            // Produce catchup blocks rapidly (no 10-minute wait between them)
+                            let mut catchup_produced = 0u64;
+                            for target_height in (current_height + 1)..=expected_height {
+                                match block_blockchain.produce_block().await {
+                                    Ok(block) => {
+                                        let block_height = block.header.height;
+
+                                        // Add block to our chain
+                                        if let Err(e) = block_blockchain.add_block(block.clone()).await {
+                                            tracing::error!("❌ Catchup block {} failed: {}", target_height, e);
+                                            break;
+                                        }
+
+                                        // Broadcast to peers
+                                        block_registry.broadcast_block(block).await;
+                                        catchup_produced += 1;
+
+                                        if catchup_produced % 10 == 0 || block_height == expected_height {
+                                            tracing::info!(
+                                                "📦 Catchup progress: {}/{} blocks (height: {})",
+                                                catchup_produced,
+                                                blocks_behind,
+                                                block_height
+                                            );
+                                        }
+
+                                        // Small delay to allow network propagation
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("❌ Failed to produce catchup block: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+
+                            tracing::info!(
+                                "✅ Catchup complete: produced {} blocks, height now: {}",
+                                catchup_produced,
+                                block_blockchain.get_height().await
+                            );
+                        } else {
+                            tracing::info!(
+                                "⏳ Waiting for catchup leader {} to produce blocks",
+                                selected_leader.address
+                            );
+                            // Wait a bit for leader to produce blocks, then retry sync
+                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                         }
                     } else if current_height == expected_height - 1 || current_height == expected_height {
                         // At expected height or one behind (normal) - determine if we should produce
