@@ -207,13 +207,26 @@ impl Blockchain {
                     connected_peers
                 );
 
-                // Request blocks from connected peers
+                // First, query each peer's height so we know what they can provide
                 for peer in connected_peers.iter().take(5) {
-                    let req = NetworkMessage::GetBlocks(current + 1, expected);
+                    // Send height query first
+                    let _ = peer_registry
+                        .send_to_peer(peer, NetworkMessage::GetBlockHeight)
+                        .await;
+                }
+
+                // Give peers a moment to respond with their heights
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                // Request blocks from connected peers - request in smaller batches
+                // and let the responder cap at their actual height
+                let batch_end = (current + 1 + 500).min(expected); // Request up to 500 blocks at a time
+                for peer in connected_peers.iter().take(5) {
+                    let req = NetworkMessage::GetBlocks(current + 1, batch_end);
                     tracing::info!(
                         "📤 Requesting blocks {}-{} from {}",
                         current + 1,
-                        expected,
+                        batch_end,
                         peer
                     );
                     match peer_registry.send_to_peer(peer, req).await {
