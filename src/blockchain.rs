@@ -115,13 +115,16 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Verify chain integrity, find missing blocks, and reset height to last valid block
+    /// Verify chain integrity, find missing blocks
     /// Returns a list of missing block heights that need to be downloaded
     pub async fn verify_chain_integrity(&self) -> Vec<u64> {
         let current_height = *self.current_height.read().await;
         let mut missing_blocks = Vec::new();
-        let mut last_valid_height: Option<u64> = None;
-        let mut first_corruption_height: Option<u64> = None;
+
+        if current_height == 0 {
+            // No blocks yet or just genesis - nothing to verify
+            return vec![];
+        }
 
         tracing::info!(
             "🔍 Verifying blockchain integrity (checking blocks 0-{})...",
@@ -131,29 +134,13 @@ impl Blockchain {
         // Check each block from genesis to current height
         for height in 0..=current_height {
             let key = format!("block_{}", height);
-            let is_valid = match self.storage.get(key.as_bytes()) {
-                Ok(Some(_)) => {
-                    // Block exists, verify it can be deserialized
-                    if self.get_block(height).is_ok() {
-                        true
-                    } else {
-                        tracing::warn!("⚠️  Block {} exists but is corrupted", height);
-                        false
-                    }
-                }
+            let exists = match self.storage.get(key.as_bytes()) {
+                Ok(Some(_)) => true,
                 Ok(None) => false,
-                Err(e) => {
-                    tracing::warn!("⚠️  Error checking block {}: {}", height, e);
-                    false
-                }
+                Err(_) => false,
             };
 
-            if is_valid {
-                last_valid_height = Some(height);
-            } else {
-                if first_corruption_height.is_none() {
-                    first_corruption_height = Some(height);
-                }
+            if !exists {
                 missing_blocks.push(height);
             }
         }
@@ -165,7 +152,7 @@ impl Blockchain {
             );
         } else {
             tracing::warn!(
-                "⚠️  Found {} missing/corrupted blocks in chain: {:?}",
+                "⚠️  Found {} missing blocks in chain: {:?}",
                 missing_blocks.len(),
                 if missing_blocks.len() <= 10 {
                     format!("{:?}", missing_blocks)
@@ -178,38 +165,6 @@ impl Blockchain {
                     )
                 }
             );
-
-            // Reset height to last valid block
-            if let Some(valid_height) = last_valid_height {
-                if valid_height < current_height {
-                    tracing::warn!(
-                        "🔄 Resetting chain height from {} to last valid block {}",
-                        current_height,
-                        valid_height
-                    );
-                    *self.current_height.write().await = valid_height;
-                    // Persist the new height
-                    if let Err(e) = self
-                        .storage
-                        .insert("current_height", &valid_height.to_le_bytes())
-                    {
-                        tracing::error!("Failed to persist height reset: {}", e);
-                    }
-                    // Clear corrupted blocks from storage
-                    self.clear_blocks_above(valid_height);
-                }
-            } else if first_corruption_height == Some(0) {
-                // No valid blocks at all - reset to pre-genesis state
-                tracing::warn!("🔄 No valid blocks found - resetting to genesis state");
-                *self.current_height.write().await = 0;
-                if let Err(e) = self.storage.insert("current_height", &0u64.to_le_bytes()) {
-                    tracing::error!("Failed to persist height reset: {}", e);
-                }
-                // Clear all block data
-                self.clear_all_blocks();
-                // Return empty - genesis will be created fresh
-                return vec![];
-            }
         }
 
         missing_blocks
