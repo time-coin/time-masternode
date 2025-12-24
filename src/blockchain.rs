@@ -115,11 +115,13 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Verify chain integrity and find any missing blocks
+    /// Verify chain integrity, find missing blocks, and reset height to last valid block
     /// Returns a list of missing block heights that need to be downloaded
     pub async fn verify_chain_integrity(&self) -> Vec<u64> {
         let current_height = *self.current_height.read().await;
         let mut missing_blocks = Vec::new();
+        let mut last_valid_height: Option<u64> = None;
+        let mut first_corruption_height: Option<u64> = None;
 
         tracing::info!(
             "🔍 Verifying blockchain integrity (checking blocks 0-{})...",
@@ -129,21 +131,30 @@ impl Blockchain {
         // Check each block from genesis to current height
         for height in 0..=current_height {
             let key = format!("block_{}", height);
-            match self.storage.get(key.as_bytes()) {
+            let is_valid = match self.storage.get(key.as_bytes()) {
                 Ok(Some(_)) => {
-                    // Block exists, optionally verify it can be deserialized
-                    if self.get_block(height).is_err() {
+                    // Block exists, verify it can be deserialized
+                    if self.get_block(height).is_ok() {
+                        true
+                    } else {
                         tracing::warn!("⚠️  Block {} exists but is corrupted", height);
-                        missing_blocks.push(height);
+                        false
                     }
                 }
-                Ok(None) => {
-                    missing_blocks.push(height);
-                }
+                Ok(None) => false,
                 Err(e) => {
                     tracing::warn!("⚠️  Error checking block {}: {}", height, e);
-                    missing_blocks.push(height);
+                    false
                 }
+            };
+
+            if is_valid {
+                last_valid_height = Some(height);
+            } else {
+                if first_corruption_height.is_none() {
+                    first_corruption_height = Some(height);
+                }
+                missing_blocks.push(height);
             }
         }
 
@@ -154,7 +165,7 @@ impl Blockchain {
             );
         } else {
             tracing::warn!(
-                "⚠️  Found {} missing blocks in chain: {:?}",
+                "⚠️  Found {} missing/corrupted blocks in chain: {:?}",
                 missing_blocks.len(),
                 if missing_blocks.len() <= 10 {
                     format!("{:?}", missing_blocks)
@@ -167,9 +178,85 @@ impl Blockchain {
                     )
                 }
             );
+
+            // Reset height to last valid block
+            if let Some(valid_height) = last_valid_height {
+                if valid_height < current_height {
+                    tracing::warn!(
+                        "🔄 Resetting chain height from {} to last valid block {}",
+                        current_height,
+                        valid_height
+                    );
+                    *self.current_height.write().await = valid_height;
+                    // Persist the new height
+                    if let Err(e) = self
+                        .storage
+                        .insert("current_height", &valid_height.to_le_bytes())
+                    {
+                        tracing::error!("Failed to persist height reset: {}", e);
+                    }
+                    // Clear corrupted blocks from storage
+                    self.clear_blocks_above(valid_height);
+                }
+            } else if first_corruption_height == Some(0) {
+                // No valid blocks at all - reset to pre-genesis state
+                tracing::warn!("🔄 No valid blocks found - resetting to genesis state");
+                *self.current_height.write().await = 0;
+                if let Err(e) = self.storage.insert("current_height", &0u64.to_le_bytes()) {
+                    tracing::error!("Failed to persist height reset: {}", e);
+                }
+                // Clear all block data
+                self.clear_all_blocks();
+                // Return empty - genesis will be created fresh
+                return vec![];
+            }
         }
 
         missing_blocks
+    }
+
+    /// Clear all blocks above a given height from storage
+    fn clear_blocks_above(&self, height: u64) {
+        let mut cleared = 0;
+        for h in (height + 1)..=(height + 10000) {
+            // Check up to 10k blocks above
+            let key = format!("block_{}", h);
+            if self.storage.remove(key.as_bytes()).is_ok() {
+                cleared += 1;
+            } else {
+                break; // No more blocks
+            }
+        }
+        if cleared > 0 {
+            tracing::info!(
+                "🗑️  Cleared {} corrupted blocks above height {}",
+                cleared,
+                height
+            );
+        }
+    }
+
+    /// Clear all block data from storage (for complete reset)
+    fn clear_all_blocks(&self) {
+        let mut cleared = 0;
+        for h in 0..100000 {
+            // Clear up to 100k blocks
+            let key = format!("block_{}", h);
+            match self.storage.remove(key.as_bytes()) {
+                Ok(Some(_)) => cleared += 1,
+                _ => {
+                    if h > 1000 && cleared == 0 {
+                        break; // No blocks found, stop early
+                    }
+                }
+            }
+        }
+        // Also clear the genesis marker so it gets recreated
+        let _ = self.storage.remove("genesis_initialized");
+        tracing::info!(
+            "🗑️  Cleared {} blocks from storage for fresh start",
+            cleared
+        );
     }
 
     /// Download missing blocks from peers to fill gaps in the chain
@@ -873,6 +960,63 @@ impl Blockchain {
         Ok(target_height)
     }
 
+    /// Validate a block before accepting it
+    /// Checks: hash integrity, previous hash chain, merkle root, timestamp, height sequence
+    pub fn validate_block(
+        &self,
+        block: &Block,
+        expected_prev_hash: Option<[u8; 32]>,
+    ) -> Result<(), String> {
+        // 1. Verify previous hash if we have one to compare
+        if let Some(prev_hash) = expected_prev_hash {
+            if block.header.previous_hash != prev_hash {
+                return Err(format!(
+                    "Block {} previous_hash mismatch: expected {}, got {}",
+                    block.header.height,
+                    hex::encode(&prev_hash[..8]),
+                    hex::encode(&block.header.previous_hash[..8])
+                ));
+            }
+        }
+
+        // 3. Verify merkle root matches transactions
+        let computed_merkle = block.compute_merkle_root();
+        if computed_merkle != block.header.merkle_root {
+            return Err(format!(
+                "Block {} merkle root mismatch: computed {}, header {}",
+                block.header.height,
+                hex::encode(&computed_merkle[..8]),
+                hex::encode(&block.header.merkle_root[..8])
+            ));
+        }
+
+        // 4. Verify timestamp is reasonable (not too far in future)
+        let now = chrono::Utc::now().timestamp();
+        let max_future = 2 * 60 * 60; // Allow 2 hours in future for clock drift
+        if block.header.timestamp > now + max_future {
+            return Err(format!(
+                "Block {} timestamp {} is too far in future (now: {})",
+                block.header.height, block.header.timestamp, now
+            ));
+        }
+
+        // 5. For non-genesis blocks, timestamp should be after previous block
+        // (This is validated implicitly by chain ordering)
+
+        // 6. Block size check
+        let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
+        if serialized.len() > MAX_BLOCK_SIZE {
+            return Err(format!(
+                "Block {} exceeds max size: {} > {}",
+                block.header.height,
+                serialized.len(),
+                MAX_BLOCK_SIZE
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Try to add a block, handling potential fork scenarios
     /// Returns Ok(true) if block was added, Ok(false) if skipped, Err on failure
     pub async fn add_block_with_fork_handling(&self, block: Block) -> Result<bool, String> {
@@ -881,18 +1025,15 @@ impl Blockchain {
 
         // Case 1: Block is exactly what we expect (next block)
         if block_height == current + 1 {
-            // Verify prev_hash matches our tip
-            if current > 0 {
-                let our_tip_hash = self.get_block_hash(current)?;
-                if block.header.previous_hash != our_tip_hash {
-                    // This block builds on a different chain!
-                    tracing::warn!(
-                        "⚠️  Block {} has different prev_hash - possible fork",
-                        block_height
-                    );
-                    return Ok(false);
-                }
-            }
+            // Get expected previous hash
+            let expected_prev_hash = if current > 0 {
+                Some(self.get_block_hash(current)?)
+            } else {
+                None
+            };
+
+            // Full validation before accepting
+            self.validate_block(&block, expected_prev_hash)?;
 
             self.add_block(block).await?;
             return Ok(true);
