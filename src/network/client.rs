@@ -94,18 +94,21 @@ impl NetworkClient {
             for mn in masternodes.iter().take(reserved_masternode_slots) {
                 let ip = mn.masternode.address.clone();
 
-                // CRITICAL FIX: Skip if this is our own IP
+                // Skip if this is our own IP
                 if let Some(ref local) = local_ip {
                     if ip == *local {
                         tracing::info!("⏭️  [PHASE1-MN] Skipping self-connection to {}", ip);
                         continue;
                     }
+                }
 
-                    // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
-                    if local.as_str() >= ip.as_str() {
-                        tracing::debug!("⏸️  [PHASE1-MN] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
-                        continue;
-                    }
+                // Use proper IP octet comparison for deterministic connection direction
+                if !peer_registry.should_connect_to(&ip) {
+                    tracing::debug!(
+                        "⏸️  [PHASE1-MN] Skipping outbound to {} (they should connect to us)",
+                        ip
+                    );
+                    continue;
                 }
 
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
@@ -203,18 +206,21 @@ impl NetworkClient {
                 let mut peer_tasks = Vec::new();
 
                 for ip in unique_peers.iter().take(available_slots) {
-                    // CRITICAL FIX: Skip if this is our own IP
+                    // Skip if this is our own IP
                     if let Some(ref local) = local_ip {
                         if ip == local {
                             tracing::info!("⏭️  [PHASE2-PEER] Skipping self-connection to {}", ip);
                             continue;
                         }
+                    }
 
-                        // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
-                        if local.as_str() >= ip.as_str() {
-                            tracing::debug!("⏸️  [PHASE2-PEER] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
-                            continue;
-                        }
+                    // Use proper IP octet comparison for deterministic connection direction
+                    if !peer_registry.should_connect_to(ip) {
+                        tracing::debug!(
+                            "⏸️  [PHASE2-PEER] Skipping outbound to {} (they should connect to us)",
+                            ip
+                        );
+                        continue;
                     }
 
                     // Skip if this is a masternode (already connected in Phase 1)
@@ -299,17 +305,17 @@ impl NetworkClient {
                 for mn in masternodes.iter().take(reserved_masternode_slots) {
                     let ip = &mn.masternode.address;
 
-                    // CRITICAL FIX: Skip if this is our own IP
+                    // Skip if this is our own IP
                     if let Some(ref local) = local_ip {
                         if ip == local {
                             continue;
                         }
+                    }
 
-                        // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
-                        if local.as_str() >= ip.as_str() {
-                            tracing::debug!("⏸️  [PHASE3-MN-PRIORITY] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
-                            continue;
-                        }
+                    // Use proper IP octet comparison for deterministic connection direction
+                    if !peer_registry.should_connect_to(ip) {
+                        tracing::debug!("⏸️  [PHASE3-MN-PRIORITY] Skipping outbound to {} (they should connect to us)", ip);
+                        continue;
                     }
 
                     if !connection_manager.is_connected(ip)
@@ -367,17 +373,17 @@ impl NetworkClient {
                     );
 
                     for ip in unique_peers.iter().take(available_slots) {
-                        // CRITICAL FIX: Skip if this is our own IP
+                        // Skip if this is our own IP
                         if let Some(ref local) = local_ip {
                             if ip == local {
                                 continue;
                             }
+                        }
 
-                            // CRITICAL FIX: Only connect if our IP < peer IP (deterministic direction)
-                            if local.as_str() >= ip.as_str() {
-                                tracing::debug!("⏸️  [PHASE3-PEER] Skipping outbound to {} (they should connect to us: {} >= {})", ip, local, ip);
-                                continue;
-                            }
+                        // Use proper IP octet comparison for deterministic connection direction
+                        if !peer_registry.should_connect_to(ip) {
+                            tracing::debug!("⏸️  [PHASE3-PEER] Skipping outbound to {} (they should connect to us)", ip);
+                            continue;
                         }
 
                         // Skip masternodes (they're handled above with priority)
