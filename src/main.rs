@@ -623,6 +623,12 @@ async fn main() {
             }
         }
 
+        // Verify chain integrity and download any missing blocks
+        // Masternodes must have the complete blockchain
+        if let Err(e) = blockchain_init.ensure_chain_complete().await {
+            tracing::warn!("⚠️  Chain integrity check: {}", e);
+        }
+
         if let Err(e) = blockchain_init.sync_from_peers().await {
             tracing::warn!("⚠️  Block sync from peers: {}", e);
         }

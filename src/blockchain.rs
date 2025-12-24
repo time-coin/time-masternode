@@ -115,6 +115,168 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Verify chain integrity and find any missing blocks
+    /// Returns a list of missing block heights that need to be downloaded
+    pub async fn verify_chain_integrity(&self) -> Vec<u64> {
+        let current_height = *self.current_height.read().await;
+        let mut missing_blocks = Vec::new();
+
+        tracing::info!(
+            "🔍 Verifying blockchain integrity (checking blocks 0-{})...",
+            current_height
+        );
+
+        // Check each block from genesis to current height
+        for height in 0..=current_height {
+            let key = format!("block_{}", height);
+            match self.storage.get(key.as_bytes()) {
+                Ok(Some(_)) => {
+                    // Block exists, optionally verify it can be deserialized
+                    if self.get_block(height).is_err() {
+                        tracing::warn!("⚠️  Block {} exists but is corrupted", height);
+                        missing_blocks.push(height);
+                    }
+                }
+                Ok(None) => {
+                    missing_blocks.push(height);
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️  Error checking block {}: {}", height, e);
+                    missing_blocks.push(height);
+                }
+            }
+        }
+
+        if missing_blocks.is_empty() {
+            tracing::info!(
+                "✅ Chain integrity verified: all {} blocks present",
+                current_height + 1
+            );
+        } else {
+            tracing::warn!(
+                "⚠️  Found {} missing blocks in chain: {:?}",
+                missing_blocks.len(),
+                if missing_blocks.len() <= 10 {
+                    format!("{:?}", missing_blocks)
+                } else {
+                    format!(
+                        "[{}, {}, ... {} more]",
+                        missing_blocks[0],
+                        missing_blocks[1],
+                        missing_blocks.len() - 2
+                    )
+                }
+            );
+        }
+
+        missing_blocks
+    }
+
+    /// Download missing blocks from peers to fill gaps in the chain
+    pub async fn fill_missing_blocks(&self, missing_heights: &[u64]) -> Result<usize, String> {
+        if missing_heights.is_empty() {
+            return Ok(0);
+        }
+
+        let peer_registry = self.peer_registry.read().await;
+        let Some(registry) = peer_registry.as_ref() else {
+            return Err("No peer registry available".to_string());
+        };
+
+        let connected_peers = registry.get_connected_peers().await;
+        if connected_peers.is_empty() {
+            return Err("No connected peers to download from".to_string());
+        }
+
+        tracing::info!(
+            "📥 Downloading {} missing blocks from {} peer(s)...",
+            missing_heights.len(),
+            connected_peers.len()
+        );
+
+        // Group missing heights into contiguous ranges for efficient requests
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        let mut iter = missing_heights.iter().peekable();
+
+        while let Some(&start) = iter.next() {
+            let mut end = start;
+            while let Some(&&next) = iter.peek() {
+                if next == end + 1 {
+                    end = next;
+                    iter.next();
+                } else {
+                    break;
+                }
+            }
+            ranges.push((start, end));
+        }
+
+        // Request each range from peers (round-robin across peers)
+        let mut requested = 0;
+        for (i, (start, end)) in ranges.iter().enumerate() {
+            let peer = &connected_peers[i % connected_peers.len()];
+            let req = NetworkMessage::GetBlocks(*start, *end);
+            tracing::info!(
+                "📤 Requesting missing blocks {}-{} from {}",
+                start,
+                end,
+                peer
+            );
+            if registry.send_to_peer(peer, req).await.is_ok() {
+                requested += (end - start + 1) as usize;
+            }
+        }
+
+        // Wait a bit for blocks to arrive
+        drop(peer_registry); // Release the lock before sleeping
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        Ok(requested)
+    }
+
+    /// Full chain verification and repair - call this at startup for masternodes
+    pub async fn ensure_chain_complete(&self) -> Result<(), String> {
+        let mut attempts = 0;
+        const MAX_ATTEMPTS: u32 = 5;
+
+        loop {
+            let missing = self.verify_chain_integrity().await;
+
+            if missing.is_empty() {
+                tracing::info!("✅ Blockchain is complete and verified");
+                return Ok(());
+            }
+
+            attempts += 1;
+            if attempts > MAX_ATTEMPTS {
+                return Err(format!(
+                    "Failed to download {} missing blocks after {} attempts",
+                    missing.len(),
+                    MAX_ATTEMPTS
+                ));
+            }
+
+            tracing::info!(
+                "🔄 Attempt {}/{}: downloading {} missing blocks...",
+                attempts,
+                MAX_ATTEMPTS,
+                missing.len()
+            );
+
+            match self.fill_missing_blocks(&missing).await {
+                Ok(requested) => {
+                    tracing::info!("📡 Requested {} blocks, waiting for response...", requested);
+                    // Give more time for blocks to arrive and be processed
+                    tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️  Failed to request missing blocks: {}", e);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+        }
+    }
+
     #[allow(dead_code)]
     async fn create_genesis_block(&self) -> Result<Block, String> {
         let masternodes = self.masternode_registry.list_active().await;
