@@ -330,8 +330,9 @@ async fn handle_peer(
                                             connection_manager.remove(&ip_str);
                                         }
 
-                                        // Mark this inbound connection
+                                        // Mark this inbound connection in both managers
                                         connection_manager.mark_inbound(&ip_str);
+                                        peer_registry.mark_inbound(&ip_str); // Also mark in peer registry for get_connected_peers()
 
                                         // Register writer in peer registry after successful handshake
                                         if let Some(w) = writer.take() {

@@ -64,6 +64,9 @@ fn extract_ip(addr: &str) -> &str {
     addr.split(':').next().unwrap_or(addr)
 }
 
+/// Type alias for shared writer that can be cloned and registered
+pub type SharedPeerWriter = Arc<tokio::sync::Mutex<PeerWriter>>;
+
 impl PeerConnectionRegistry {
     pub fn new() -> Self {
         Self {
@@ -236,7 +239,20 @@ impl PeerConnectionRegistry {
         debug!("✅ Registered peer connection: {}", peer_ip);
     }
 
+    /// Register an outbound peer with a shared writer (already wrapped in Arc<Mutex<>>)
+    pub async fn register_peer_shared(&self, peer_ip: String, writer: SharedPeerWriter) {
+        // Also mark as connected in the connections map for get_connected_peers()
+        self.mark_connecting(&peer_ip);
+
+        let mut writers = self.peer_writers.write().await;
+        writers.insert(peer_ip.clone(), writer);
+        debug!("✅ Registered outbound peer connection: {}", peer_ip);
+    }
+
     pub async fn unregister_peer(&self, peer_ip: &str) {
+        // Remove from connections map
+        self.mark_disconnected(peer_ip);
+
         let mut writers = self.peer_writers.write().await;
         writers.remove(peer_ip);
         debug!("🔌 Unregistered peer connection: {}", peer_ip);

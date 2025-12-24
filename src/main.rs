@@ -43,6 +43,7 @@ use network_type::NetworkType;
 use peer_manager::PeerManager;
 use rpc::server::RpcServer;
 use shutdown::ShutdownManager;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
@@ -687,7 +688,13 @@ async fn main() {
     let block_blockchain = blockchain.clone();
     let block_peer_registry = peer_connection_registry.clone();
     let shutdown_token_clone = shutdown_token.clone();
+
+    // Guard flag to prevent duplicate block production (P2P best practice #8)
+    let is_producing_block = Arc::new(AtomicBool::new(false));
+    let is_producing_block_clone = is_producing_block.clone();
+
     let block_production_handle = tokio::spawn(async move {
+        let is_producing = is_producing_block_clone;
         // Calculate time until next 10-minute boundary
         let now = chrono::Utc::now();
         let minute = now.minute();
@@ -800,6 +807,12 @@ async fn main() {
                             .unwrap_or(false);
 
                         if is_leader {
+                            // Acquire block production lock (P2P best practice #8)
+                            if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                                tracing::warn!("⚠️  Block production already in progress, skipping catchup");
+                                continue;
+                            }
+
                             tracing::info!(
                                 "🎯 Elected as catchup leader - producing {} blocks to reach height {}",
                                 blocks_behind,
@@ -842,6 +855,9 @@ async fn main() {
                                 }
                             }
 
+                            // Release block production lock
+                            is_producing.store(false, Ordering::SeqCst);
+
                             tracing::info!(
                                 "✅ Catchup complete: produced {} blocks, height now: {}",
                                 catchup_produced,
@@ -860,6 +876,12 @@ async fn main() {
 
                             // If height didn't change, leader failed - become fallback producer
                             if height_after == height_before {
+                                // Acquire block production lock (P2P best practice #8)
+                                if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                                    tracing::warn!("⚠️  Block production already in progress, skipping fallback catchup");
+                                    continue;
+                                }
+
                                 tracing::warn!(
                                     "⚠️  Catchup leader {} timeout - becoming fallback producer",
                                     selected_leader.address
@@ -898,6 +920,9 @@ async fn main() {
                                         }
                                     }
                                 }
+
+                                // Release block production lock
+                                is_producing.store(false, Ordering::SeqCst);
 
                                 tracing::info!(
                                     "✅ Fallback catchup complete: produced {} blocks, height now: {}",
@@ -948,6 +973,12 @@ async fn main() {
                             .unwrap_or(false);
 
                         if is_producer {
+                            // Acquire block production lock (P2P best practice #8)
+                            if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                                tracing::warn!("⚠️  Block production already in progress, skipping");
+                                continue;
+                            }
+
                             tracing::info!(
                                 "🎯 Selected as block producer for height {} at {} ({}:{}0)",
                                 current_height + 1,
@@ -969,6 +1000,7 @@ async fn main() {
                                     // Add block to our own chain first
                                     if let Err(e) = block_blockchain.add_block(block.clone()).await {
                                         tracing::error!("❌ Failed to add block to chain: {}", e);
+                                        is_producing.store(false, Ordering::SeqCst);
                                         continue;
                                     }
 
@@ -986,6 +1018,9 @@ async fn main() {
                                     tracing::error!("❌ Failed to produce block: {}", e);
                                 }
                             }
+
+                            // Release block production lock
+                            is_producing.store(false, Ordering::SeqCst);
                         } else {
                             tracing::debug!(
                                 "⏸️  Not selected for block {} (producer: {})",

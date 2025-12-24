@@ -200,6 +200,11 @@ impl PeerConnection {
         self.remote_port
     }
 
+    /// Get a clone of the shared writer for registration in peer registry
+    pub fn shared_writer(&self) -> Arc<Mutex<BufWriter<OwnedWriteHalf>>> {
+        self.writer.clone()
+    }
+
     /// Send a message to the peer
     async fn send_message(&self, message: &NetworkMessage) -> Result<(), String> {
         let mut writer = self.writer.lock().await;
@@ -328,6 +333,15 @@ impl PeerConnection {
             self.direction, self.peer_ip, self.remote_port
         );
 
+        // Register this outbound connection in the peer registry so sync can reach it
+        peer_registry
+            .register_peer_shared(self.peer_ip.clone(), self.shared_writer())
+            .await;
+        info!(
+            "📝 [{:?}] Registered {} in PeerConnectionRegistry for sync",
+            self.direction, self.peer_ip
+        );
+
         // Send initial handshake (required by protocol)
         let handshake = NetworkMessage::Handshake {
             magic: *b"TIME",
@@ -422,6 +436,15 @@ impl PeerConnection {
         info!(
             "🔄 [{:?}] Starting message loop for {} (port: {})",
             self.direction, self.peer_ip, self.remote_port
+        );
+
+        // Register this outbound connection in the peer registry so sync can reach it
+        peer_registry
+            .register_peer_shared(self.peer_ip.clone(), self.shared_writer())
+            .await;
+        info!(
+            "📝 [{:?}] Registered {} in PeerConnectionRegistry for sync",
+            self.direction, self.peer_ip
         );
 
         // Send initial handshake (required by protocol)
