@@ -675,6 +675,36 @@ async fn handle_peer(
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                     tracing::debug!("📤 Sent block range to {}", peer.addr);
                                 }
+                                NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
+                                    // Handle block sync response
+                                    let block_count = blocks.len();
+                                    if block_count == 0 {
+                                        tracing::debug!("📥 Received empty blocks response from {}", peer.addr);
+                                    } else {
+                                        let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
+                                        let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
+                                        tracing::info!("📥 Received {} blocks (height {}-{}) from {}",
+                                            block_count, start_height, end_height, peer.addr);
+
+                                        let mut added = 0;
+                                        let mut skipped = 0;
+                                        for block in blocks {
+                                            match blockchain.add_block(block.clone()).await {
+                                                Ok(()) => {
+                                                    added += 1;
+                                                }
+                                                Err(e) => {
+                                                    // Could be duplicate or invalid - log at debug level
+                                                    tracing::debug!("⏭️  Skipped block {}: {}", block.header.height, e);
+                                                    skipped += 1;
+                                                }
+                                            }
+                                        }
+                                        if added > 0 {
+                                            tracing::info!("✅ Synced {} blocks from {} (skipped {})", added, peer.addr, skipped);
+                                        }
+                                    }
+                                }
                                 // Heartbeat Messages
                                 NetworkMessage::HeartbeatBroadcast(heartbeat) => {
                                     tracing::debug!("💓 Received heartbeat from {} seq {}",
