@@ -80,9 +80,14 @@ impl NetworkClient {
 
             // PHASE 1: Connect to all active masternodes FIRST (priority) - PARALLEL
             let masternodes = masternode_registry.list_active().await;
+            let masternode_ips: Vec<&str> = masternodes
+                .iter()
+                .map(|m| m.masternode.address.as_str())
+                .collect();
             tracing::info!(
-                "🎯 Connecting to {} active masternode(s) with priority (parallel)...",
-                masternodes.len()
+                "🎯 Connecting to {} active masternode(s) with priority (parallel): {:?}",
+                masternodes.len(),
+                masternode_ips
             );
 
             const CONCURRENT_DIALS: usize = 10;
@@ -104,7 +109,7 @@ impl NetworkClient {
 
                 // Use proper IP octet comparison for deterministic connection direction
                 if !peer_registry.should_connect_to(&ip) {
-                    tracing::debug!(
+                    tracing::info!(
                         "⏸️  [PHASE1-MN] Skipping outbound to {} (they should connect to us)",
                         ip
                     );

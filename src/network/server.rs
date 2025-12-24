@@ -469,12 +469,21 @@ async fn handle_peer(
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetBlocks(start, end) => {
+                                    let our_height = blockchain.get_height().await;
+                                    tracing::info!(
+                                        "📥 [Inbound] Received GetBlocks({}-{}) from {} (our height: {})",
+                                        start, end, peer.addr, our_height
+                                    );
                                     let mut blocks = Vec::new();
                                     for h in *start..=(*end).min(start + 100) {
                                         if let Ok(block) = blockchain.get_block_by_height(h).await {
                                             blocks.push(block);
                                         }
                                     }
+                                    tracing::info!(
+                                        "📤 [Inbound] Sending {} blocks to {} (requested {}-{})",
+                                        blocks.len(), peer.addr, start, end
+                                    );
                                     let reply = NetworkMessage::BlocksResponse(blocks);
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
@@ -588,7 +597,7 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::MasternodesResponse(masternodes) => {
-                                    tracing::debug!("📥 Received MasternodesResponse from {} with {} masternode(s)", peer.addr, masternodes.len());
+                                    tracing::info!("📥 Received MasternodesResponse from {} with {} masternode(s)", peer.addr, masternodes.len());
                                     let mut registered = 0;
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)

@@ -202,16 +202,23 @@ impl Blockchain {
                 tracing::warn!("⚠️  No connected peers to sync from");
             } else {
                 tracing::info!(
-                    "📡 Requesting blocks from {} connected peer(s)",
-                    connected_peers.len()
+                    "📡 Requesting blocks from {} connected peer(s): {:?}",
+                    connected_peers.len(),
+                    connected_peers
                 );
 
                 // Request blocks from connected peers
                 for peer in connected_peers.iter().take(5) {
                     let req = NetworkMessage::GetBlocks(current + 1, expected);
+                    tracing::info!(
+                        "📤 Requesting blocks {}-{} from {}",
+                        current + 1,
+                        expected,
+                        peer
+                    );
                     match peer_registry.send_to_peer(peer, req).await {
-                        Ok(_) => tracing::debug!("📤 Sent GetBlocks request to {}", peer),
-                        Err(e) => tracing::debug!("❌ Failed to send GetBlocks to {}: {}", peer, e),
+                        Ok(_) => tracing::info!("✅ GetBlocks request sent to {}", peer),
+                        Err(e) => tracing::warn!("❌ Failed to send GetBlocks to {}: {}", peer, e),
                     }
                 }
             }
@@ -522,7 +529,11 @@ impl Blockchain {
         // CRITICAL: Flush to disk to prevent data loss on crash/restart
         // Without this, sled buffers writes and blocks can be lost
         self.storage.flush().map_err(|e| {
-            tracing::error!("❌ Failed to flush block {} to disk: {}", block.header.height, e);
+            tracing::error!(
+                "❌ Failed to flush block {} to disk: {}",
+                block.header.height,
+                e
+            );
             e.to_string()
         })?;
 
