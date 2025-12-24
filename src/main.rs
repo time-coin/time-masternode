@@ -815,11 +815,68 @@ async fn main() {
                             );
                         } else {
                             tracing::info!(
-                                "⏳ Waiting for catchup leader {} to produce blocks",
+                                "⏳ Waiting for catchup leader {} to produce blocks (30s timeout)",
                                 selected_leader.address
                             );
-                            // Wait a bit for leader to produce blocks, then retry sync
+
+                            // Wait for leader to produce blocks
+                            let height_before = block_blockchain.get_height().await;
                             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                            let height_after = block_blockchain.get_height().await;
+
+                            // If height didn't change, leader failed - become fallback producer
+                            if height_after == height_before {
+                                tracing::warn!(
+                                    "⚠️  Catchup leader {} timeout - becoming fallback producer",
+                                    selected_leader.address
+                                );
+
+                                // Produce catchup blocks ourselves
+                                let mut catchup_produced = 0u64;
+                                let current_height = block_blockchain.get_height().await;
+                                let expected_height = block_blockchain.calculate_expected_height();
+
+                                for _target_height in (current_height + 1)..=expected_height {
+                                    match block_blockchain.produce_block().await {
+                                        Ok(block) => {
+                                            let block_height = block.header.height;
+
+                                            if let Err(e) = block_blockchain.add_block(block.clone()).await {
+                                                tracing::error!("❌ Fallback catchup block {} failed: {}", block_height, e);
+                                                break;
+                                            }
+
+                                            block_registry.broadcast_block(block).await;
+                                            catchup_produced += 1;
+
+                                            if catchup_produced % 10 == 0 {
+                                                tracing::info!(
+                                                    "📦 Fallback catchup progress: {} blocks produced",
+                                                    catchup_produced
+                                                );
+                                            }
+
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("❌ Failed to produce fallback catchup block: {}", e);
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                tracing::info!(
+                                    "✅ Fallback catchup complete: produced {} blocks, height now: {}",
+                                    catchup_produced,
+                                    block_blockchain.get_height().await
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ Leader produced blocks, height: {} → {}",
+                                    height_before,
+                                    height_after
+                                );
+                            }
                         }
                     } else if current_height == expected_height - 1 || current_height == expected_height {
                         // At expected height or one behind (normal) - determine if we should produce
