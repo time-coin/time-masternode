@@ -1,3 +1,9 @@
+//! Storage backends for UTXO and blockchain data.
+//!
+//! Provides both in-memory and persistent (sled) storage options.
+//! The SledUtxoStorage is an alternative backend that's currently unused
+//! but available for future use if persistent UTXO storage is needed.
+
 use crate::block::types::Block;
 use crate::types::{OutPoint, UTXO};
 use std::collections::HashMap;

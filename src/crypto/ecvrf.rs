@@ -1,3 +1,12 @@
+//! ECVRF (Elliptic Curve Verifiable Random Function) implementation.
+//!
+//! This module implements RFC 9381-based VRF for cryptographic randomness.
+//! Currently used for block production leader selection. Some methods like
+//! `verify()` and `proof_to_hash()` are scaffolding for future use when
+//! receiving VRF proofs from other validators.
+
+#![allow(dead_code)]
+
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};

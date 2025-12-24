@@ -1,3 +1,10 @@
+//! Network type definitions for TIME Coin.
+//!
+//! Note: Some methods appear as "dead code" in library checks because they're
+//! only used by the binary (main.rs). These include:
+//! - `peer_discovery_url()` - used for network-specific API endpoint
+//! - `magic_bytes()`, `address_prefix()` - used for protocol identification
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Copy, PartialEq, Eq, Hash)]
@@ -7,6 +14,7 @@ pub enum NetworkType {
 }
 
 impl NetworkType {
+    #[allow(dead_code)]
     pub fn magic_bytes(&self) -> [u8; 4] {
         match self {
             NetworkType::Mainnet => [0xC0, 0x1D, 0x7E, 0x4D], // "COLD TIME"
@@ -21,6 +29,7 @@ impl NetworkType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn default_rpc_port(&self) -> u16 {
         match self {
             NetworkType::Mainnet => 24001,
@@ -44,6 +53,7 @@ impl NetworkType {
         }
     }
 
+    #[allow(dead_code)]
     pub fn address_prefix(&self) -> &str {
         match self {
             NetworkType::Mainnet => "TIME",
@@ -52,6 +62,7 @@ impl NetworkType {
     }
 
     /// Get the peer discovery API URL for this network
+    #[allow(dead_code)]
     pub fn peer_discovery_url(&self) -> &str {
         match self {
             NetworkType::Mainnet => "https://time-coin.io/api/peers",

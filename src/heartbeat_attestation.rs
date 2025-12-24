@@ -1,12 +1,17 @@
-// src/heartbeat_attestation.rs - Peer-verified heartbeat system
-//
-// This module implements cryptographic peer attestation for masternode heartbeats.
-// Key security properties:
-// 1. Heartbeats are signed by the sender (can't be forged)
-// 2. Multiple independent peers witness and attest to heartbeats
-// 3. Only heartbeats with sufficient witness attestations count toward uptime
-// 4. Prevents Sybil attacks: new nodes can't fake historical uptime
-// 5. Prevents collusion: witnesses are pseudo-randomly selected
+//! Peer-verified heartbeat attestation system.
+//!
+//! This module implements cryptographic peer attestation for masternode heartbeats.
+//! Key security properties:
+//! 1. Heartbeats are signed by the sender (can't be forged)
+//! 2. Multiple independent peers witness and attest to heartbeats
+//! 3. Only heartbeats with sufficient witness attestations count toward uptime
+//! 4. Prevents Sybil attacks: new nodes can't fake historical uptime
+//! 5. Prevents collusion: witnesses are pseudo-randomly selected
+//!
+//! Note: Some methods like `set_local_identity()` and `create_heartbeat()` are
+//! scaffolding for future integration. Currently heartbeats use a simpler path.
+
+#![allow(dead_code)]
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};

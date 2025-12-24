@@ -1,3 +1,11 @@
+//! Configuration management for TIME Coin daemon.
+//!
+//! Note: Some items appear as "dead code" in library checks because they're
+//! only used by the binary (main.rs). These include:
+//! - `get_data_dir()`, `get_network_data_dir()` - used for config path resolution
+//! - `NodeConfig::network_type()` - used to determine network type from config
+//! - `Config::load_from_file()`, etc. - used for config persistence
+
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -5,6 +13,7 @@ use std::path::PathBuf;
 use crate::network_type::NetworkType;
 
 /// Get the platform-specific data directory for TIME Coin
+#[allow(dead_code)]
 pub fn get_data_dir() -> PathBuf {
     if cfg!(windows) {
         // Windows: %APPDATA%\timecoin
@@ -20,6 +29,7 @@ pub fn get_data_dir() -> PathBuf {
 }
 
 /// Get the network-specific subdirectory (mainnet or testnet)
+#[allow(dead_code)]
 pub fn get_network_data_dir(network: &NetworkType) -> PathBuf {
     let base = get_data_dir();
     match network {
@@ -55,6 +65,7 @@ fn default_network() -> String {
 }
 
 impl NodeConfig {
+    #[allow(dead_code)]
     pub fn network_type(&self) -> NetworkType {
         match self.network.to_lowercase().as_str() {
             "mainnet" => NetworkType::Mainnet,
@@ -74,6 +85,7 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
+    #[allow(dead_code)]
     pub fn full_listen_address(&self, network_type: &NetworkType) -> String {
         if self.listen_address.contains(':') {
             self.listen_address.clone()
@@ -86,6 +98,7 @@ impl NetworkConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub fn full_external_address(&self, network_type: &NetworkType) -> String {
         if let Some(ref ext_addr) = self.external_address {
             if !ext_addr.is_empty() {
@@ -130,6 +143,7 @@ pub struct RpcConfig {
 }
 
 impl RpcConfig {
+    #[allow(dead_code)]
     pub fn full_listen_address(&self, network_type: &NetworkType) -> String {
         if self.listen_address.contains(':') {
             self.listen_address.clone()
@@ -207,12 +221,14 @@ pub struct MetricsConfig {
 }
 
 impl Config {
+    #[allow(dead_code)]
     pub fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = fs::read_to_string(path)?;
         let config: Config = toml::from_str(&contents)?;
         Ok(config)
     }
 
+    #[allow(dead_code)]
     pub fn default() -> Self {
         Self {
             node: NodeConfig {
@@ -271,6 +287,7 @@ impl Config {
         }
     }
 
+    #[allow(dead_code)]
     pub fn load_or_create(
         path: &str,
         network_type: &NetworkType,
@@ -306,6 +323,7 @@ impl Config {
         }
     }
 
+    #[allow(dead_code)]
     pub fn save_to_file(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
         let contents = toml::to_string_pretty(self)?;
         fs::write(path, contents)?;

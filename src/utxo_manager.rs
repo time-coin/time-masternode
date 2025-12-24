@@ -1,3 +1,8 @@
+//! UTXO (Unspent Transaction Output) state management.
+//!
+//! Manages the UTXO set for tracking spendable outputs. Provides locking
+//! mechanism for concurrent transaction processing.
+
 use crate::storage::UtxoStorage;
 use crate::types::*;
 use dashmap::DashMap;
@@ -42,6 +47,7 @@ impl UTXOStateManager {
         }
     }
 
+    #[allow(dead_code)]
     pub fn new_with_storage(storage: Arc<dyn UtxoStorage>) -> Self {
         Self {
             storage,

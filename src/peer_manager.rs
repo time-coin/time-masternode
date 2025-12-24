@@ -1,3 +1,9 @@
+//! Peer management for P2P network.
+//!
+//! Note: This module appears as "dead code" in library checks because it's
+//! only used by the binary (main.rs). The PeerManager is used for peer
+//! discovery, tracking, and reputation management.
+
 use crate::config::NetworkConfig;
 use crate::network_type::NetworkType;
 use serde::{Deserialize, Serialize};
@@ -7,14 +13,21 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
+#[allow(dead_code)]
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
+#[allow(dead_code)]
 const PEER_REFRESH_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// PHASE 2 PART 3: Peer Authentication & Rate Limiting Constants
+#[allow(dead_code)]
 const RATE_LIMIT_WINDOW_SECS: i64 = 60; // Rate limit window (1 minute)
+#[allow(dead_code)]
 const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per peer per minute
+#[allow(dead_code)]
 const MIN_MASTERNODE_STAKE: u64 = 1_000 * 100_000_000; // 1000 TIME in satoshis
+#[allow(dead_code)]
 const REPUTATION_THRESHOLD_BAN: i32 = -50; // Ban peers below this score
+#[allow(dead_code)]
 const REPUTATION_PENALTY_MISBEHAVIOR: i32 = -20; // Penalty for misbehaving peer
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +49,7 @@ pub struct PeerInfo {
     pub reputation_score: i32, // -100 to 100 (misbehavior tracking)
 }
 
+#[allow(dead_code)]
 pub struct PeerManager {
     peers: Arc<RwLock<HashSet<String>>>,
     peer_info: Arc<RwLock<Vec<PeerInfo>>>,
@@ -44,6 +58,7 @@ pub struct PeerManager {
     network_type: NetworkType,
 }
 
+#[allow(dead_code)]
 impl PeerManager {
     pub fn new(
         db: Arc<sled::Db>,

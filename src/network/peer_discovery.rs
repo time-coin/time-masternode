@@ -6,6 +6,11 @@
 //!
 //! The API returns IP addresses without ports. The default port is
 //! determined by the network type (24100 for testnet, 24000 for mainnet).
+//!
+//! Note: This module appears as "dead code" in library checks because it's
+//! only used by the binary (main.rs).
+
+#![allow(dead_code)]
 
 use crate::network_type::NetworkType;
 

@@ -1,3 +1,9 @@
+//! Network server for P2P communication.
+//!
+//! Note: This module appears as "dead code" in library checks because it's
+//! only used by the binary (main.rs). The NetworkServer is created and run
+//! in main() for handling all P2P network communication.
+
 use crate::block::types::Block;
 use crate::consensus::ConsensusEngine;
 use crate::network::blacklist::IPBlacklist;
@@ -17,6 +23,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
 
+#[allow(dead_code)]
 pub struct NetworkServer {
     pub listener: TcpListener,
     pub peers: Arc<RwLock<HashMap<String, PeerInfo>>>,
