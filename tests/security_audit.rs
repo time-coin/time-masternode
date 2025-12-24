@@ -13,7 +13,7 @@ use sha2::{Digest, Sha512};
 
 #[test]
 fn test_ecvrf_determinism() {
-    /// VRF MUST be deterministic: same input always produces same output
+    // VRF MUST be deterministic: same input always produces same output
     let secret_seed = [1u8; 32];
     let sk = SigningKey::from_bytes(&secret_seed);
     let input = b"test_deterministic_input";
@@ -37,7 +37,7 @@ fn test_ecvrf_determinism() {
 
 #[test]
 fn test_ecvrf_output_length() {
-    /// VRF output MUST be exactly 32 bytes
+    // VRF output MUST be exactly 32 bytes
     let secret_seed = [1u8; 32];
     let sk = SigningKey::from_bytes(&secret_seed);
     let input = b"test_output_length";
@@ -56,7 +56,7 @@ fn test_ecvrf_output_length() {
 
 #[test]
 fn test_ecvrf_proof_length() {
-    /// VRF proof MUST be exactly 80 bytes per RFC 9381
+    // VRF proof MUST be exactly 80 bytes per RFC 9381
     let secret_seed = [1u8; 32];
     let sk = SigningKey::from_bytes(&secret_seed);
     let input = b"test_proof_length";
@@ -88,7 +88,7 @@ fn test_ecvrf_proof_length() {
 
 #[test]
 fn test_different_secrets_different_outputs() {
-    /// Different secret keys MUST produce different outputs for same input
+    // Different secret keys MUST produce different outputs for same input
     let secret1 = [1u8; 32];
     let secret2 = [2u8; 32];
     let sk1 = SigningKey::from_bytes(&secret1);
@@ -115,7 +115,7 @@ fn test_different_secrets_different_outputs() {
 
 #[test]
 fn test_different_inputs_different_outputs() {
-    /// Different inputs MUST produce different outputs for same secret
+    // Different inputs MUST produce different outputs for same secret
     let secret = [1u8; 32];
     let sk = SigningKey::from_bytes(&secret);
     let input1 = b"input_one";
@@ -141,7 +141,7 @@ fn test_different_inputs_different_outputs() {
 
 #[test]
 fn test_ed25519_signature_verification() {
-    /// Ed25519 signatures must be verifiable
+    // Ed25519 signatures must be verifiable
     let secret = [1u8; 32];
     let sk = SigningKey::from_bytes(&secret);
     let pk = sk.verifying_key();
@@ -158,7 +158,7 @@ fn test_ed25519_signature_verification() {
 
 #[test]
 fn test_ed25519_signature_rejection() {
-    /// Ed25519 must reject invalid signatures
+    // Ed25519 must reject invalid signatures
     let secret = [1u8; 32];
     let sk = SigningKey::from_bytes(&secret);
     let pk = sk.verifying_key();
@@ -178,7 +178,7 @@ fn test_ed25519_signature_rejection() {
 
 #[test]
 fn test_ed25519_public_key_derivation() {
-    /// Public key derivation must be deterministic
+    // Public key derivation must be deterministic
     let secret = [1u8; 32];
     let sk1 = SigningKey::from_bytes(&secret);
     let pk1 = sk1.verifying_key();
@@ -195,7 +195,7 @@ fn test_ed25519_public_key_derivation() {
 
 #[test]
 fn test_blake3_determinism() {
-    /// BLAKE3 must be deterministic
+    // BLAKE3 must be deterministic
     let data = b"test data for hashing";
 
     let hash1 = blake3::hash(data);
@@ -210,7 +210,7 @@ fn test_blake3_determinism() {
 
 #[test]
 fn test_blake3_hash_length() {
-    /// BLAKE3 output must be exactly 32 bytes (256 bits)
+    // BLAKE3 output must be exactly 32 bytes (256 bits)
     let data = b"test data";
     let hash = blake3::hash(data);
 
@@ -223,7 +223,7 @@ fn test_blake3_hash_length() {
 
 #[test]
 fn test_blake3_different_inputs() {
-    /// Different inputs must produce different BLAKE3 hashes
+    // Different inputs must produce different BLAKE3 hashes
     let data1 = b"input one";
     let data2 = b"input two";
 
@@ -239,7 +239,7 @@ fn test_blake3_different_inputs() {
 
 #[test]
 fn test_blake3_bit_sensitivity() {
-    /// Changing a single bit must change the entire hash
+    // Changing a single bit must change the entire hash
     let data1 = b"test";
     let hash1 = blake3::hash(data1);
 
@@ -256,7 +256,7 @@ fn test_blake3_bit_sensitivity() {
 
 #[test]
 fn test_blake3_avalanche_effect() {
-    /// A small change in input should avalanche to large change in hash
+    // A small change in input should avalanche to large change in hash
     let data = b"The quick brown fox jumps over the lazy dog";
     let hash1 = blake3::hash(data);
 
@@ -280,7 +280,7 @@ fn test_blake3_avalanche_effect() {
 
 #[test]
 fn test_sha512_blake3_compatibility() {
-    /// Both hash functions should work correctly
+    // Both hash functions should work correctly
     let data = b"test compatibility";
 
     // SHA-512
@@ -296,14 +296,14 @@ fn test_sha512_blake3_compatibility() {
 
 #[test]
 fn test_key_derivation_path() {
-    /// Key derivation should be consistent
+    // Key derivation should be consistent
     let master_secret = [1u8; 32];
     let path = b"m/44'/0'/0'/0/0"; // BIP44-like path
 
     // Derive key using HKDF-like expansion
     let mut hasher = Sha512::new();
     hasher.update(b"TIMECOIN-KEY-DERIVATION");
-    hasher.update(&master_secret);
+    hasher.update(master_secret);
     hasher.update(path);
     let derived = hasher.finalize();
 
@@ -313,7 +313,7 @@ fn test_key_derivation_path() {
     // Derivation must be deterministic
     let mut hasher2 = Sha512::new();
     hasher2.update(b"TIMECOIN-KEY-DERIVATION");
-    hasher2.update(&master_secret);
+    hasher2.update(master_secret);
     hasher2.update(path);
     let derived2 = hasher2.finalize();
 
@@ -322,7 +322,7 @@ fn test_key_derivation_path() {
 
 #[test]
 fn test_nonce_generation() {
-    /// Nonces should be random and non-repeating
+    // Nonces should be random and non-repeating
     use std::collections::HashSet;
 
     let mut nonces = HashSet::new();
@@ -341,8 +341,8 @@ fn test_nonce_generation() {
 
 #[test]
 fn test_constant_time_comparison() {
-    /// Critical: signatures and hashes must use constant-time comparison
-    /// to prevent timing attacks
+    // Critical: signatures and hashes must use constant-time comparison
+    // to prevent timing attacks
     let hash1 = blake3::hash(b"test");
     let hash2 = blake3::hash(b"test");
     let hash3 = blake3::hash(b"other");
@@ -362,7 +362,7 @@ fn test_constant_time_comparison() {
 
 #[test]
 fn test_serialization_compatibility() {
-    /// Hashes and keys must serialize/deserialize correctly
+    // Hashes and keys must serialize/deserialize correctly
     let data = b"serialization test";
     let hash = blake3::hash(data);
 

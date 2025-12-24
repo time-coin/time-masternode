@@ -693,7 +693,7 @@ async fn main() {
     // Start block production timer (every 10 minutes)
     let block_registry = registry.clone();
     let block_blockchain = blockchain.clone();
-    let _block_peer_registry = peer_connection_registry.clone(); // May be used for future fork detection
+    let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let shutdown_token_clone = shutdown_token.clone();
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
@@ -866,8 +866,45 @@ async fn main() {
                             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                             let height_after = block_blockchain.get_height().await;
 
-                            // If height didn't change, leader failed - become fallback producer
+                            // If height didn't change, leader failed - try syncing from peers first
                             if height_after == height_before {
+                                let our_height = block_blockchain.get_height().await;
+                                let expected_height = block_blockchain.calculate_expected_height();
+                                
+                                // Before producing blocks locally, try to sync from connected peers
+                                let connected_peers = block_peer_registry.list_peers().await;
+                                if !connected_peers.is_empty() {
+                                    tracing::info!(
+                                        "🔄 Requesting blocks from {} connected peer(s) before fallback production",
+                                        connected_peers.len()
+                                    );
+                                    
+                                    // Request blocks from all connected peers
+                                    let get_blocks = NetworkMessage::GetBlocks(our_height + 1, expected_height);
+                                    for peer_ip in &connected_peers {
+                                        let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
+                                    }
+                                    
+                                    // Wait for blocks to arrive
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                                    
+                                    let new_height = block_blockchain.get_height().await;
+                                    if new_height > our_height {
+                                        tracing::info!(
+                                            "✅ Synced from peers, height: {} → {}",
+                                            our_height, new_height
+                                        );
+                                        // Check if we're caught up now
+                                        if new_height >= expected_height {
+                                            continue; // Fully synced, skip fallback production
+                                        }
+                                        // Partially synced, update our_height for next check
+                                        tracing::info!("📊 Partial sync, still {} blocks behind", expected_height - new_height);
+                                    } else {
+                                        tracing::warn!("⚠️ Peer sync didn't provide blocks, falling back to local production");
+                                    }
+                                }
+                                
                                 // Acquire block production lock (P2P best practice #8)
                                 if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                                     tracing::warn!("⚠️  Block production already in progress, skipping fallback catchup");
@@ -879,10 +916,9 @@ async fn main() {
                                     selected_leader.address
                                 );
 
-                                // Produce catchup blocks ourselves
+                                // Produce catchup blocks ourselves (only after sync attempt failed)
                                 let mut catchup_produced = 0u64;
                                 let current_height = block_blockchain.get_height().await;
-                                let expected_height = block_blockchain.calculate_expected_height();
 
                                 for _target_height in (current_height + 1)..=expected_height {
                                     match block_blockchain.produce_block().await {

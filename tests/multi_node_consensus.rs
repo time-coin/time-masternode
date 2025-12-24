@@ -1,11 +1,11 @@
-/// Phase 5: Multi-Node Consensus Testing
-/// Tests ECVRF-based leader selection and block finalization across multiple nodes
-///
-/// Success Criteria:
-/// - All 3 nodes reach consensus on same block
-/// - Block is proposed by ECVRF-selected leader
-/// - VRF output and proof are valid
-/// - Finality achieved after 20 consecutive rounds
+//! Phase 5: Multi-Node Consensus Testing
+//! Tests ECVRF-based leader selection and block finalization across multiple nodes
+//!
+//! Success Criteria:
+//! - All 3 nodes reach consensus on same block
+//! - Block is proposed by ECVRF-selected leader
+//! - VRF output and proof are valid
+//! - Finality achieved after 20 consecutive rounds
 
 #[cfg(test)]
 mod tests {
@@ -14,6 +14,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     /// Simulated in-memory network node
+    #[allow(dead_code)]
     struct TestNode {
         id: String,
         stake: u64,
@@ -50,13 +51,14 @@ mod tests {
             // For testing, we consider blocks finalized after 3+ votes from consensus
             self.blocks
                 .iter()
-                .filter(|b| self.votes.get(*b).map_or(false, |v| *v >= 2))
+                .filter(|b| self.votes.get(*b).is_some_and(|v| *v >= 2))
                 .cloned()
                 .collect()
         }
     }
 
     /// Simulated network with 3 nodes
+    #[allow(dead_code)]
     struct TestNetwork {
         nodes: HashMap<String, Arc<Mutex<TestNode>>>,
         current_slot: u64,
@@ -90,7 +92,7 @@ mod tests {
             let block_hash = format!("block_slot{}_leader{}", self.current_slot, leader_id);
 
             // All nodes receive and accept block
-            for (_, node_arc) in &self.nodes {
+            for node_arc in self.nodes.values() {
                 let mut node = node_arc.lock().unwrap();
                 node.add_block(block_hash.clone());
             }
@@ -101,7 +103,7 @@ mod tests {
         /// Simulate voting round
         fn voting_round(&mut self) {
             // Each node votes for the latest block
-            for (_, node_arc) in &self.nodes {
+            for node_arc in self.nodes.values() {
                 let mut node = node_arc.lock().unwrap();
                 if let Some(block) = node.get_latest_block() {
                     node.add_vote(block);
@@ -225,7 +227,7 @@ mod tests {
         // Allow variance of ±4
         for (node_id, count) in leader_count {
             assert!(
-                count >= 6 && count <= 14,
+                (6..=14).contains(&count),
                 "Node {} was leader {} times (expected ~10). Distribution unfair.",
                 node_id,
                 count

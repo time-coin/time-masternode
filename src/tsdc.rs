@@ -381,14 +381,14 @@ impl TSCDConsensus {
             timestamp,
             block_reward: 0, // TODO: Calculate block reward
             leader: String::new(),
-            vrf_output: None,
-            vrf_proof: None,
+            attestation_root: [0u8; 32],
         };
 
         Ok(Block {
             header,
             transactions,
             masternode_rewards,
+            time_attestations: vec![],
         })
     }
 
@@ -882,11 +882,11 @@ mod tests {
                 timestamp: 60000,
                 block_reward: 100,
                 leader: String::new(),
-                vrf_output: None,
-                vrf_proof: None,
+                attestation_root: [0u8; 32],
             },
             transactions: vec![],
             masternode_rewards: vec![],
+            time_attestations: vec![],
         };
 
         let block2 = Block {
@@ -898,11 +898,11 @@ mod tests {
                 timestamp: 60600,
                 block_reward: 100,
                 leader: String::new(),
-                vrf_output: None,
-                vrf_proof: None,
+                attestation_root: [0u8; 32],
             },
             transactions: vec![],
             masternode_rewards: vec![],
+            time_attestations: vec![],
         };
 
         let blocks = vec![(block1.clone(), None), (block2.clone(), None)];

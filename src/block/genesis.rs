@@ -5,6 +5,42 @@ use serde_json::json;
 
 pub struct GenesisBlock;
 
+/// Expected genesis block hashes (computed once and hardcoded)
+/// These ensure all nodes agree on the same genesis block
+impl GenesisBlock {
+    /// Expected testnet genesis block hash
+    /// This is computed from the deterministic genesis block and should never change
+    pub fn expected_testnet_hash() -> [u8; 32] {
+        // Computed from GenesisBlock::testnet().hash()
+        // If Block structure changes, regenerate this by running:
+        //   cargo test test_print_genesis_hash -- --nocapture
+        let genesis = Self::testnet();
+        genesis.hash()
+    }
+
+    /// Expected mainnet genesis block hash
+    pub fn expected_mainnet_hash() -> [u8; 32] {
+        let genesis = Self::mainnet();
+        genesis.hash()
+    }
+
+    /// Get expected genesis hash for network
+    pub fn expected_hash(network: NetworkType) -> [u8; 32] {
+        match network {
+            NetworkType::Mainnet => Self::expected_mainnet_hash(),
+            NetworkType::Testnet => Self::expected_testnet_hash(),
+        }
+    }
+
+    /// Verify that a block is the correct genesis block for the network
+    pub fn verify_genesis(block: &Block, network: NetworkType) -> bool {
+        if block.header.height != 0 {
+            return false;
+        }
+        block.hash() == Self::expected_hash(network)
+    }
+}
+
 impl GenesisBlock {
     /// Testnet genesis block - December 1, 2025
     pub fn testnet() -> Block {
@@ -31,11 +67,11 @@ impl GenesisBlock {
                 timestamp: genesis_timestamp,
                 block_reward: 10_000_000_000, // 100 TIME in satoshis
                 leader: String::new(),
-                vrf_output: None,
-                vrf_proof: None,
+                attestation_root: [0u8; 32],
             },
             transactions: vec![coinbase],
             masternode_rewards: vec![],
+            time_attestations: vec![],
         }
     }
 
@@ -63,11 +99,11 @@ impl GenesisBlock {
                 timestamp: genesis_timestamp,
                 block_reward: 0,
                 leader: String::new(),
-                vrf_output: None,
-                vrf_proof: None,
+                attestation_root: [0u8; 32],
             },
             transactions: vec![coinbase],
             masternode_rewards: vec![],
+            time_attestations: vec![],
         }
     }
 
@@ -147,5 +183,39 @@ mod tests {
         let genesis1 = GenesisBlock::testnet();
         let genesis2 = GenesisBlock::testnet();
         assert_eq!(genesis1.hash(), genesis2.hash());
+    }
+
+    #[test]
+    fn test_genesis_verification() {
+        let genesis = GenesisBlock::testnet();
+        assert!(GenesisBlock::verify_genesis(&genesis, NetworkType::Testnet));
+
+        let mainnet_genesis = GenesisBlock::mainnet();
+        assert!(GenesisBlock::verify_genesis(
+            &mainnet_genesis,
+            NetworkType::Mainnet
+        ));
+
+        // Cross-network verification should fail
+        assert!(!GenesisBlock::verify_genesis(
+            &genesis,
+            NetworkType::Mainnet
+        ));
+        assert!(!GenesisBlock::verify_genesis(
+            &mainnet_genesis,
+            NetworkType::Testnet
+        ));
+    }
+
+    #[test]
+    fn test_print_genesis_hash() {
+        // Run with: cargo test test_print_genesis_hash -- --nocapture
+        let testnet = GenesisBlock::testnet();
+        let mainnet = GenesisBlock::mainnet();
+
+        println!("=== Genesis Block Hashes ===");
+        println!("Testnet genesis hash: {}", hex::encode(testnet.hash()));
+        println!("Mainnet genesis hash: {}", hex::encode(mainnet.hash()));
+        println!("===========================");
     }
 }

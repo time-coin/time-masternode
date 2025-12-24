@@ -1,18 +1,18 @@
-/// Phase 5: Fork Resolution Testing
-/// Tests network partition recovery and fork resolution using VRF-based canonical chain selection
-///
-/// Success Criteria:
-/// - Network partition creates fork
-/// - Each partition continues consensus independently
-/// - On reconnection, minority adopts majority chain
-/// - No spurious reorganizations
+//! Phase 5: Fork Resolution Testing
+//! Tests network partition recovery and fork resolution using VRF-based canonical chain selection
+//!
+//! Success Criteria:
+//! - Network partition creates fork
+//! - Each partition continues consensus independently
+//! - On reconnection, minority adopts majority chain
+//! - No spurious reorganizations
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     /// Simulated network node with partition awareness
+    #[allow(dead_code)]
     struct PartitionTestNode {
         id: String,
         stake: u64,
@@ -38,6 +38,7 @@ mod tests {
             self.blocks.len()
         }
 
+        #[allow(dead_code)]
         fn get_latest_block(&self) -> Option<&str> {
             self.blocks.last().map(|s| s.as_str())
         }
@@ -215,7 +216,7 @@ mod tests {
             ("node_b".to_string(), 100),
             ("node_c".to_string(), 100),
         ];
-        let mut network = PartitionTestNetwork::new(validators);
+        let network = PartitionTestNetwork::new(validators);
 
         // Verify VRF score calculation
         let mut node_a = network.nodes[0].1.lock().unwrap();

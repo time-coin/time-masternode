@@ -11,6 +11,7 @@ use std::time::Instant;
 
 /// Mock transaction for throughput testing
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct StressTx {
     id: u64,
     timestamp: u64,
@@ -18,6 +19,7 @@ struct StressTx {
 
 /// Mock block for throughput testing
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct StressBlock {
     height: u64,
     txs: Vec<StressTx>,
@@ -57,8 +59,8 @@ impl ThroughputCounter {
 
 #[test]
 fn test_transaction_throughput_1000_per_second() {
-    /// Test: Process 1000 transactions per second
-    /// Target: 95%+ processed, <10s finality
+    // Test: Process 1000 transactions per second
+    // Target: 95%+ processed, <10s finality
     let counter = ThroughputCounter::new();
     let start = Instant::now();
     let duration_secs = 10u64;
@@ -67,7 +69,7 @@ fn test_transaction_throughput_1000_per_second() {
     let total_txs = 1000 * duration_secs;
 
     for i in 0..total_txs {
-        let tx = StressTx {
+        let _tx = StressTx {
             id: i,
             timestamp: (start.elapsed().as_millis() as u64),
         };
@@ -102,18 +104,18 @@ fn test_transaction_throughput_1000_per_second() {
 
 #[test]
 fn test_block_production_under_load() {
-    /// Test: Produce blocks with 1000 TXs each under sustained load
+    // Test: Produce blocks with 1000 TXs each under sustained load
     let start = Instant::now();
     let block_time_ms = 10000u64; // 10 seconds per block
 
     for block_num in 0..10 {
-        let block_time = (block_num * block_time_ms) as u64;
+        let block_time = block_num * block_time_ms;
 
         let block = StressBlock {
-            height: block_num as u64,
+            height: block_num,
             txs: (0..1000)
                 .map(|i| StressTx {
-                    id: block_num as u64 * 1000 + i as u64,
+                    id: block_num * 1000 + i as u64,
                     timestamp: block_time,
                 })
                 .collect(),
@@ -134,8 +136,7 @@ fn test_block_production_under_load() {
 
 #[test]
 fn test_consensus_latency_under_load() {
-    /// Test: Measure consensus finality latency during high throughput
-
+    // Test: Measure consensus finality latency during high throughput
     struct LatencySample {
         proposal_time_ms: u64,
         finality_time_ms: u64,
@@ -187,8 +188,7 @@ fn test_consensus_latency_under_load() {
 
 #[test]
 fn test_mempool_under_sustained_load() {
-    /// Test: Mempool stability with high TXs/sec
-
+    // Test: Mempool stability with high TXs/sec
     const MAX_MEMPOOL_SIZE: usize = 300_000; // 300k transactions
     const TXS_PER_SECOND: usize = 1000;
     const BLOCK_TX_CAPACITY: usize = 1000;
@@ -226,8 +226,7 @@ fn test_mempool_under_sustained_load() {
 
 #[test]
 fn test_byzantine_validator_under_load() {
-    /// Test: Network resilience with byzantine validators during stress
-
+    // Test: Network resilience with byzantine validators during stress
     struct NodeMetrics {
         honest_blocks_finalized: u64,
         byzantine_blocks_proposed: u64,
@@ -262,8 +261,7 @@ fn test_byzantine_validator_under_load() {
 
 #[test]
 fn test_reward_distribution_under_load() {
-    /// Test: Correct reward calculation under sustained finalization
-
+    // Test: Correct reward calculation under sustained finalization
     const BLOCKS_PER_PERIOD: u64 = 100;
     const TXS_PER_BLOCK: u64 = 1000;
     const BASE_REWARD_PER_BLOCK: u64 = 100;
@@ -298,8 +296,7 @@ fn test_reward_distribution_under_load() {
 
 #[test]
 fn test_network_message_throughput() {
-    /// Test: Network can handle vote/proposal message throughput
-
+    // Test: Network can handle vote/proposal message throughput
     const VALIDATORS: u64 = 100;
     const SAMPLE_SIZE: u64 = 30; // Each validator samples 30 others
     const MESSAGES_PER_SAMPLE: u64 = 2; // Proposal + vote
@@ -326,17 +323,17 @@ fn test_vrf_proof_verification_throughput() {
     // Verify 10,000 VRF proofs
     for i in 0..10_000 {
         let secret = [1u8; 32];
-        let sk = SigningKey::from_bytes(&secret);
+        let _sk = SigningKey::from_bytes(&secret);
 
         // Simulate VRF verification
         let mut hasher = Sha512::new();
         hasher.update(b"ECVRF");
-        hasher.update(&(i as u64).to_le_bytes());
+        hasher.update((i as u64).to_le_bytes());
         let _output = hasher.finalize();
     }
 
     let elapsed = start.elapsed();
-    let ops_per_sec = 10_000 as f64 / elapsed.as_secs_f64();
+    let ops_per_sec = 10_000_f64 / elapsed.as_secs_f64();
 
     // Should verify > 5k proofs per second (accounts for debug and release builds)
     assert!(
@@ -348,7 +345,7 @@ fn test_vrf_proof_verification_throughput() {
 
 #[test]
 fn test_finality_latency_tail_cases() {
-    /// Test: P99 finality latency under stress
+    // Test: P99 finality latency under stress
     let mut latencies = vec![];
 
     // Simulate 1000 blocks with varying confirmation times
@@ -376,8 +373,7 @@ fn test_finality_latency_tail_cases() {
 
 #[test]
 fn test_cpu_cache_efficiency() {
-    /// Test: Memory access patterns are cache-friendly under load
-
+    // Test: Memory access patterns are cache-friendly under load
     // Hot path: Block validation happens in tight loop
     const BLOCKS_TO_PROCESS: usize = 10_000;
     const TXS_PER_BLOCK: usize = 100;

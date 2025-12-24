@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 /// Mock structures for testing
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Validator {
     id: String,
     weight: u64,
@@ -35,12 +36,14 @@ impl BlockId {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum VotePreference {
     Block(BlockId),
     Abstain,
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct Vote {
     validator_id: String,
     block_id: BlockId,
@@ -49,6 +52,7 @@ struct Vote {
 
 /// Simple Avalanche consensus simulation
 #[derive(Clone)]
+#[allow(dead_code)]
 struct AvalancheConsensus {
     validators: Vec<Validator>,
     total_weight: u64,
@@ -77,6 +81,7 @@ impl AvalancheConsensus {
         self.votes.get(block_id).copied().unwrap_or(0) >= self.threshold()
     }
 
+    #[allow(dead_code)]
     fn get_votes(&self, block_id: &BlockId) -> u64 {
         self.votes.get(block_id).copied().unwrap_or(0)
     }
@@ -84,8 +89,8 @@ impl AvalancheConsensus {
 
 #[test]
 fn test_2_3_majority_threshold() {
-    /// With 3 equal validators (100 weight each), need 201/300 to finalize
-    /// 2/3 majority = 200/300, need +1 for strict majority
+    // With 3 equal validators (100 weight each), need 201/300 to finalize
+    // 2/3 majority = 200/300, need +1 for strict majority
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -100,7 +105,7 @@ fn test_2_3_majority_threshold() {
 
 #[test]
 fn test_single_validator_cannot_finalize() {
-    /// Even with weight 200 out of 300, single validator cannot finalize alone
+    // Even with weight 200 out of 300, single validator cannot finalize alone
     let validators = vec![Validator::new("attacker", 200), Validator::new("v2", 100)];
 
     let mut avalanche = AvalancheConsensus::new(validators);
@@ -112,7 +117,7 @@ fn test_single_validator_cannot_finalize() {
 
 #[test]
 fn test_2_3_majority_can_finalize() {
-    /// With 2/3 + 1 votes, block finalizes
+    // With 2/3 + 1 votes, block finalizes
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -136,10 +141,10 @@ fn test_2_3_majority_can_finalize() {
 
 #[test]
 fn test_network_partition_5_validators() {
-    /// With 5 validators split [2,3], only larger partition can finalize
-    /// Total: 500, threshold: 334
-    /// Left (2): 200 weight, cannot finalize
-    /// Right (3): 300 weight, cannot finalize (< 334)
+    // With 5 validators split [2,3], only larger partition can finalize
+    // Total: 500, threshold: 334
+    // Left (2): 200 weight, cannot finalize
+    // Right (3): 300 weight, cannot finalize (< 334)
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -166,7 +171,7 @@ fn test_network_partition_5_validators() {
 
 #[test]
 fn test_unequal_weights_attack() {
-    /// Attacker with 40% weight cannot force consensus with equal-weight honest nodes
+    // Attacker with 40% weight cannot force consensus with equal-weight honest nodes
     let validators = vec![
         Validator::new("attacker", 200),
         Validator::new("honest1", 200),
@@ -200,7 +205,7 @@ fn test_unequal_weights_attack() {
 
 #[test]
 fn test_byzantine_validator_cannot_block() {
-    /// Byzantine validator cannot prevent consensus by abstaining
+    // Byzantine validator cannot prevent consensus by abstaining
     let validators = vec![
         Validator::new("byzantine", 100),
         Validator::new("honest1", 100),
@@ -225,7 +230,7 @@ fn test_byzantine_validator_cannot_block() {
 
 #[test]
 fn test_quorum_with_unequal_stake() {
-    /// Test with realistic stake distribution
+    // Test with realistic stake distribution
     let validators = vec![
         Validator::new("pool1", 250),
         Validator::new("pool2", 200),
@@ -254,7 +259,7 @@ fn test_quorum_with_unequal_stake() {
 
 #[test]
 fn test_fork_detection() {
-    /// Two conflicting blocks cannot both finalize
+    // Two conflicting blocks cannot both finalize
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -276,7 +281,7 @@ fn test_fork_detection() {
 
 #[test]
 fn test_malicious_double_voting() {
-    /// Double voting on two blocks cannot both finalize
+    // Double voting on two blocks cannot both finalize
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -300,7 +305,7 @@ fn test_malicious_double_voting() {
 
 #[test]
 fn test_recovery_after_partition_heal() {
-    /// After partition heals, one chain must win
+    // After partition heals, one chain must win
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -327,7 +332,7 @@ fn test_recovery_after_partition_heal() {
 
 #[test]
 fn test_minimum_stake_for_consensus() {
-    /// Calculates minimum stake needed to finalize one block
+    // Calculates minimum stake needed to finalize one block
     let total_weight = 1000u64;
     let threshold = (total_weight * 2 / 3) + 1;
 
@@ -341,7 +346,7 @@ fn test_minimum_stake_for_consensus() {
 
 #[test]
 fn test_avalanche_consensus_properties() {
-    /// Verify fundamental consensus properties
+    // Verify fundamental consensus properties
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),
@@ -363,7 +368,7 @@ fn test_avalanche_consensus_properties() {
 
 #[test]
 fn test_incentive_compatibility() {
-    /// Honest validators have incentive to finalize quickly
+    // Honest validators have incentive to finalize quickly
     let validators = vec![
         Validator::new("v1", 100),
         Validator::new("v2", 100),

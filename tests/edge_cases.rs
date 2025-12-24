@@ -1,18 +1,18 @@
-/// Phase 5: Edge Cases & Stress Testing
-/// Tests unusual conditions: late blocks, duplicate votes, high load, clock skew
-///
-/// Success Criteria:
-/// - Late blocks accepted within grace period
-/// - Duplicate votes deduplicated  
-/// - High transaction load processed
-/// - Validator set changes handled
+//! Phase 5: Edge Cases & Stress Testing
+//! Tests unusual conditions: late blocks, duplicate votes, high load, clock skew
+//!
+//! Success Criteria:
+//! - Late blocks accepted within grace period
+//! - Duplicate votes deduplicated
+//! - High transaction load processed
+//! - Validator set changes handled
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::time::Duration;
 
     /// Test block with timing info
+    #[allow(dead_code)]
     struct TimedBlock {
         id: String,
         proposed_at: i64, // milliseconds
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn test_out_of_order_message_delivery() {
         // Messages arrive out of order
-        let messages = vec!["prepare_1", "precommit_1", "prepare_2"];
+        let messages = ["prepare_1", "precommit_1", "prepare_2"];
 
         // Typical out-of-order arrival
         let arrival_order = vec![2, 0, 1]; // precommit arrives before prepare
@@ -204,10 +204,10 @@ mod tests {
     #[test]
     fn test_clock_skew_tolerance() {
         // Node has clock skew of ±5 seconds
-        let reference_time_ms: i64 = 1000_000;
+        let reference_time_ms: i64 = 1_000_000;
         let max_clock_skew_ms: i64 = 5_000;
 
-        let node_a_time: i64 = 1005_000; // 5 seconds ahead
+        let node_a_time: i64 = 1_005_000; // 5 seconds ahead
         let node_b_time: i64 = 995_000; // 5 seconds behind
 
         let skew_a = (node_a_time - reference_time_ms).abs();
@@ -226,10 +226,10 @@ mod tests {
     #[test]
     fn test_excessive_clock_skew_detected() {
         // Node has clock skew of ±10 seconds (should be rejected)
-        let reference_time_ms: i64 = 1000_000;
+        let reference_time_ms: i64 = 1_000_000;
         let max_clock_skew_ms: i64 = 5_000;
 
-        let node_bad_time: i64 = 1010_000; // 10 seconds ahead
+        let node_bad_time: i64 = 1_010_000; // 10 seconds ahead
 
         let skew = (node_bad_time - reference_time_ms).abs();
         let should_reject = skew > max_clock_skew_ms;

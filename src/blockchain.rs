@@ -83,9 +83,28 @@ impl Blockchain {
 
     /// Initialize blockchain - load existing genesis or create it
     pub async fn initialize_genesis(&self) -> Result<(), String> {
+        use crate::block::genesis::GenesisBlock;
+
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
         if height > 0 {
+            // Verify the genesis block is correct
+            if let Ok(genesis) = self.get_block_by_height(0).await {
+                if !GenesisBlock::verify_genesis(&genesis, self.network_type) {
+                    let expected = hex::encode(GenesisBlock::expected_hash(self.network_type));
+                    let actual = hex::encode(genesis.hash());
+                    tracing::error!(
+                        "❌ Genesis block mismatch! Expected hash: {}, got: {}",
+                        expected,
+                        actual
+                    );
+                    tracing::error!("❌ This may indicate database corruption or network mismatch");
+                    tracing::warn!(
+                        "⚠️  Consider deleting the data directory and resyncing from peers"
+                    );
+                    // Don't fail - allow node to continue but warn loudly
+                }
+            }
             *self.current_height.write().await = height;
             tracing::info!("✓ Genesis block already exists (height: {})", height);
             return Ok(());
@@ -97,6 +116,18 @@ impl Blockchain {
             .contains_key("block_0".as_bytes())
             .map_err(|e| e.to_string())?
         {
+            // Verify it's the correct genesis
+            if let Ok(genesis) = self.get_block_by_height(0).await {
+                if !GenesisBlock::verify_genesis(&genesis, self.network_type) {
+                    let expected = hex::encode(GenesisBlock::expected_hash(self.network_type));
+                    let actual = hex::encode(genesis.hash());
+                    tracing::error!(
+                        "❌ Genesis block mismatch! Expected: {}, got: {}",
+                        expected,
+                        actual
+                    );
+                }
+            }
             *self.current_height.write().await = 0;
             tracing::info!("✓ Genesis block already exists");
             return Ok(());
@@ -104,14 +135,26 @@ impl Blockchain {
 
         // Create genesis block
         tracing::info!("📦 Creating genesis block...");
-        let genesis = crate::block::genesis::GenesisBlock::for_network(self.network_type);
+        let genesis = GenesisBlock::for_network(self.network_type);
+        let genesis_hash = hex::encode(genesis.hash());
+
+        // Verify the generated genesis matches expected
+        if !GenesisBlock::verify_genesis(&genesis, self.network_type) {
+            // This should never happen unless code changed
+            tracing::error!("❌ CRITICAL: Generated genesis doesn't match expected hash!");
+            tracing::error!("❌ This indicates a code change that broke genesis compatibility");
+            return Err("Genesis block generation failed - hash mismatch".to_string());
+        }
 
         // Save genesis block
         self.process_block_utxos(&genesis).await;
         self.save_block(&genesis)?;
         *self.current_height.write().await = 0;
 
-        tracing::info!("✅ Genesis block created (height: 0)");
+        tracing::info!(
+            "✅ Genesis block created (height: 0, hash: {})",
+            genesis_hash
+        );
         Ok(())
     }
 
@@ -349,11 +392,11 @@ impl Blockchain {
                 timestamp: self.genesis_timestamp(),
                 block_reward: BLOCK_REWARD_SATOSHIS,
                 leader: String::new(),
-                vrf_output: None,
-                vrf_proof: None,
+                attestation_root: [0u8; 32],
             },
             transactions: vec![coinbase],
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
+            time_attestations: vec![],
         };
 
         Ok(block)
@@ -557,7 +600,7 @@ impl Blockchain {
         let mut all_txs = vec![coinbase.clone()];
         all_txs.extend(finalized_txs);
 
-        let block = Block {
+        let mut block = Block {
             header: BlockHeader {
                 version: 1,
                 height: next_height,
@@ -566,12 +609,15 @@ impl Blockchain {
                 timestamp,
                 block_reward: total_reward,
                 leader: String::new(),
-                vrf_output: None,
-                vrf_proof: None,
+                attestation_root: [0u8; 32],
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
+            time_attestations: vec![],
         };
+
+        // Compute attestation root after attestations are set
+        block.header.attestation_root = block.compute_attestation_root();
 
         Ok(block)
     }

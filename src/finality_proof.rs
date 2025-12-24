@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn test_finality_threshold_calculation() {
-        let mgr = FinalityProofManager::new(1);
+        let _mgr = FinalityProofManager::new(1);
 
         // 100 total weight requires 67 minimum
         let threshold = (100 * 67 + 99) / 100;

@@ -117,14 +117,14 @@ impl DeterministicBlockGenerator {
             timestamp,
             block_reward: total_reward,
             leader: String::new(),
-            vrf_output: None,
-            vrf_proof: None,
+            attestation_root: [0u8; 32], // Will be set when attestations are added
         };
 
         Block {
             header,
             transactions: all_txs,
             masternode_rewards,
+            time_attestations: vec![], // Attestations added later
         }
     }
 
