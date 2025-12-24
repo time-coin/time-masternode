@@ -274,6 +274,8 @@ impl BlockStorage for SledBlockStorage {
             let value = bincode::serialize(&block)?;
             db.insert(key.as_bytes(), value)?;
             db.insert(b"tip_height", block.header.height.to_le_bytes().as_ref())?;
+            // CRITICAL: Flush to disk to prevent data loss
+            db.flush()?;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
         })
         .await

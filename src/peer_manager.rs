@@ -181,6 +181,8 @@ impl PeerManager {
         let key = peer_info.address.as_bytes();
         let value = bincode::serialize(peer_info).map_err(|e| e.to_string())?;
         tree.insert(key, value).map_err(|e| e.to_string())?;
+        // Flush to ensure peer data is persisted
+        self.db.flush().map_err(|e| e.to_string())?;
         Ok(())
     }
 

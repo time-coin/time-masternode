@@ -1556,17 +1556,17 @@ impl ConsensusEngine {
                     // Record finalization preference for reference
                     consensus.finalized_txs.insert(txid, preference);
                 } else {
-                    // Fallback: finalize with Accept preference even if not enough votes
-                    // This prevents transactions from getting stuck
-                    if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
-                        tracing::info!(
-                            "📦 TX {:?} finalized with fallback (max rounds reached, preference: {})",
-                            hex::encode(txid),
-                            preference
-                        );
-                    }
-                    // Record fallback finalization
-                    consensus.finalized_txs.insert(txid, preference);
+                    // Transaction did not achieve Avalanche consensus - reject it
+                    // This maintains instant finality guarantees: only properly voted
+                    // transactions can be finalized
+                    tx_pool.reject_transaction(txid, "Avalanche consensus not reached".to_string());
+                    consensus.finalized_txs.insert(txid, Preference::Reject);
+                    tracing::warn!(
+                        "❌ TX {:?} rejected: Avalanche consensus not reached after {} rounds (preference: {})",
+                        hex::encode(txid),
+                        max_rounds,
+                        preference
+                    );
                 }
             }
 

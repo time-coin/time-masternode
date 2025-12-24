@@ -527,6 +527,13 @@ impl Blockchain {
             .insert(height_key, height_bytes)
             .map_err(|e| e.to_string())?;
 
+        // CRITICAL: Flush to disk to prevent data loss on crash/restart
+        // Without this, sled buffers writes and blocks can be lost
+        self.storage.flush().map_err(|e| {
+            tracing::error!("❌ Failed to flush block {} to disk: {}", block.header.height, e);
+            e.to_string()
+        })?;
+
         Ok(())
     }
 
