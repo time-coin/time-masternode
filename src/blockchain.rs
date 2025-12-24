@@ -242,7 +242,34 @@ impl Blockchain {
     /// Produce a block for the current TSDC slot
     pub async fn produce_block(&self) -> Result<Block, String> {
         // Get previous block hash
-        let current_height = *self.current_height.read().await;
+        let mut current_height = *self.current_height.read().await;
+
+        // Verify the current height block actually exists
+        // If not, find the actual highest block
+        while current_height > 0 {
+            match self.get_block(current_height) {
+                Ok(_) => break, // Found a valid block
+                Err(_) => {
+                    tracing::warn!(
+                        "⚠️  Block {} not found in storage, checking lower height",
+                        current_height
+                    );
+                    current_height -= 1;
+                }
+            }
+        }
+
+        // Update stored height if we found a gap
+        let stored_height = *self.current_height.read().await;
+        if current_height != stored_height {
+            tracing::warn!(
+                "⚠️  Correcting chain height from {} to {}",
+                stored_height,
+                current_height
+            );
+            *self.current_height.write().await = current_height;
+        }
+
         let prev_hash = if current_height == 0 {
             [0u8; 32]
         } else {
