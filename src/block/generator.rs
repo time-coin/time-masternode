@@ -171,16 +171,6 @@ impl DeterministicBlockGenerator {
         }
     }
 
-    /// Calculate expected block height based on genesis time
-    pub fn calculate_expected_height() -> u64 {
-        const GENESIS_TIMESTAMP: i64 = 1767225600; // 2026-01-01T00:00:00Z
-        const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
-
-        let now = chrono::Utc::now().timestamp();
-        let elapsed = (now - GENESIS_TIMESTAMP).max(0);
-        (elapsed / BLOCK_TIME_SECONDS) as u64
-    }
-
     /// Validate block timestamp (not in future, aligned to 10-minute intervals)
     pub fn validate_block_time(timestamp: i64) -> Result<(), String> {
         let now = chrono::Utc::now().timestamp();

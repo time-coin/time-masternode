@@ -1,7 +1,4 @@
 mod address;
-mod app_builder;
-mod app_context;
-mod app_utils;
 mod avalanche;
 mod block;
 mod blockchain;

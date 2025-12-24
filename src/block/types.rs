@@ -30,13 +30,3 @@ impl Block {
         Sha256::digest(bytes).into()
     }
 }
-
-#[derive(Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct BlockConsensusResult {
-    pub success: bool,
-    pub local_block: Block,
-    pub matched_peers: usize,
-    pub total_peers: usize,
-    pub reconciled: Option<Block>,
-}

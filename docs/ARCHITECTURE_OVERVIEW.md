@@ -1,7 +1,7 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2025-12-23  
-**Version:** 2.0 (Avalanche Consensus + TSDC Checkpointing)
+**Last Updated:** 2025-12-24  
+**Version:** 2.1 (Code cleanup - removed unused modules)
 
 ---
 
@@ -254,14 +254,11 @@ Masternode C
 
 ---
 
-### 7. Main Application (`main.rs` + new modules)
+### 7. Main Application (`main.rs`)
 
 **Module Structure:**
 ```
 main.rs
-├── app_context.rs       - Shared application state
-├── app_builder.rs       - Initialization builder
-├── app_utils.rs         - Utility functions
 ├── error.rs             - Unified error types
 └── shutdown.rs          - Graceful shutdown management
 ```
@@ -545,5 +542,5 @@ pub enum AppError {
 
 ---
 
-**Last Updated:** 2025-12-22  
-**Architecture Version:** 1.0 (Stable)
+**Last Updated:** 2025-12-24  
+**Architecture Version:** 2.1 (Code cleanup)
