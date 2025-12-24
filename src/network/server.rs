@@ -46,14 +46,15 @@ pub struct NetworkServer {
     pub block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Cache blocks during voting
 }
 
+#[allow(dead_code)] // Used by binary, not visible to library check
 pub struct PeerInfo {
     pub addr: String,
-    #[allow(dead_code)]
     pub is_masternode: bool,
 }
 
 impl NetworkServer {
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Used by binary (main.rs)
     pub async fn new(
         bind_addr: &str,
         utxo_manager: Arc<UTXOStateManager>,
@@ -91,6 +92,7 @@ impl NetworkServer {
         })
     }
 
+    #[allow(dead_code)] // Used by binary (main.rs)
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
         // Spawn cleanup task for blacklist
         let blacklist_cleanup = self.blacklist.clone();
@@ -209,6 +211,7 @@ impl NetworkServer {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Called by NetworkServer::run which is used by binary
 async fn handle_peer(
     stream: TcpStream,
     peer: PeerInfo,
@@ -483,7 +486,7 @@ async fn handle_peer(
                                         start, end, peer.addr, our_height
                                     );
                                     let mut blocks = Vec::new();
-                                    for h in *start..=(*end).min(start + 100) {
+                                    for h in *start..=(*end).min(*start + 100) {
                                         if let Ok(block) = blockchain.get_block_by_height(h).await {
                                             blocks.push(block);
                                         }
