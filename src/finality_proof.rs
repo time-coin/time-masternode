@@ -1,6 +1,11 @@
-/// Verifiable Finality Proofs (VFP) Manager
-/// Implements protocol §8: Accumulation, validation, and tracking of finality votes
-/// Converts Avalanche's local acceptance into objectively verifiable global finality
+//! Verifiable Finality Proofs (VFP) Manager
+//! Implements protocol §8: Accumulation, validation, and tracking of finality votes
+//! Converts Avalanche's local acceptance into objectively verifiable global finality
+//!
+//! Note: Methods form the complete VFP protocol scaffolding for future integration.
+
+#![allow(dead_code)]
+
 use crate::types::{FinalityVote, Hash256, Transaction, VerifiableFinality};
 use dashmap::DashMap;
 use ed25519_dalek::VerifyingKey;

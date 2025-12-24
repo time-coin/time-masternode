@@ -1,5 +1,10 @@
-/// Avalanche consensus protocol implementation for TimeCoin
-/// Provides instant transaction finality with continuous voting
+//! Avalanche consensus protocol implementation for TimeCoin
+//! Provides instant transaction finality with continuous voting
+//!
+//! Note: This module provides the complete Avalanche protocol scaffolding.
+
+#![allow(dead_code)]
+
 use crate::consensus::{AvalancheConfig, AvalancheConsensus, Preference};
 use crate::masternode_registry::MasternodeRegistry;
 use crate::transaction_pool::TransactionPool;
@@ -12,7 +17,6 @@ use tokio::sync::mpsc;
 
 /// Errors for Avalanche consensus
 #[derive(Error, Debug)]
-#[allow(dead_code)]
 pub enum AvalancheError {
     #[error("Consensus error: {0}")]
     ConsensusError(String),

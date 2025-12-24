@@ -1,3 +1,7 @@
+//! Masternode registry and management
+
+#![allow(dead_code)]
+
 use crate::types::{Masternode, MasternodeTier};
 use crate::NetworkType;
 use sled::Db;

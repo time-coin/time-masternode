@@ -1,3 +1,9 @@
+//! Peer Connection Registry
+//! Manages active peer connections and message routing.
+//! Note: Some methods are scaffolding for future peer management features.
+
+#![allow(dead_code)]
+
 use crate::network::message::NetworkMessage;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;

@@ -1,3 +1,7 @@
+//! Core data types for TimeCoin blockchain
+
+#![allow(dead_code)]
+
 use ed25519_dalek::{Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -6,7 +10,6 @@ pub type Hash256 = [u8; 32];
 pub type Signature = [u8; 64];
 
 // Constants
-#[allow(dead_code)]
 pub const SATOSHIS_PER_TIME: u64 = 100_000_000; // 1 TIME = 10^8 satoshis
 
 // NetworkType is defined in network_type.rs module

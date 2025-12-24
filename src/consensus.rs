@@ -6,6 +6,10 @@
 //! - Snowflake/Snowball: Low-latency consensus primitives
 //! - Transaction validation and UTXO management
 //! - Stake-weighted validator sampling
+//!
+//! Note: Some methods are scaffolding for full consensus integration.
+
+#![allow(dead_code)]
 
 use crate::block::types::Block;
 use crate::finality_proof::FinalityProofManager;

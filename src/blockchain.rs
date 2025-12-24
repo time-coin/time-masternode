@@ -1,3 +1,7 @@
+//! Blockchain storage and management
+
+#![allow(dead_code)]
+
 use crate::block::types::{Block, BlockHeader};
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
@@ -7,8 +11,7 @@ use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, OnceLock};
-use tokio::sync::Mutex as TokioMutex;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
@@ -17,23 +20,12 @@ const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 
 // Security limits
 const MAX_BLOCK_SIZE: usize = 2_000_000; // 2MB per block
-#[allow(dead_code)]
 const MAX_REORG_DEPTH: u64 = 1_000; // Maximum blocks to reorg
-#[allow(dead_code)]
 const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
 // P2P sync configuration
 const PEER_SYNC_TIMEOUT_SECS: u64 = 120;
 const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
-
-/// Global lock to prevent duplicate concurrent block production
-#[allow(dead_code)]
-static BLOCK_PRODUCTION_LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
-
-#[allow(dead_code)]
-fn get_block_production_lock() -> &'static TokioMutex<()> {
-    BLOCK_PRODUCTION_LOCK.get_or_init(|| TokioMutex::new(()))
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]

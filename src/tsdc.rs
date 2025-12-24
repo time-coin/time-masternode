@@ -1,13 +1,18 @@
-/// Time-Scheduled Deterministic Consensus (TSDC) Protocol
-///
-/// TSDC provides deterministic leader election and block production on a fixed 10-minute schedule.
-/// It works in conjunction with Avalanche for transaction finality.
-///
-/// Key components:
-/// - VRF-based leader selection (deterministic via ECVRF)
-/// - Slot-based block production (every 10 minutes = 600 seconds)
-/// - Fork choice rule (prefer finalized blocks)
-/// - Backup leader mechanism (5-second fallback)
+//! Time-Scheduled Deterministic Consensus (TSDC) Protocol
+//!
+//! TSDC provides deterministic leader election and block production on a fixed 10-minute schedule.
+//! It works in conjunction with Avalanche for transaction finality.
+//!
+//! Key components:
+//! - VRF-based leader selection (deterministic via ECVRF)
+//! - Slot-based block production (every 10 minutes = 600 seconds)
+//! - Fork choice rule (prefer finalized blocks)
+//! - Backup leader mechanism (5-second fallback)
+//!
+//! Note: Many methods are currently unused but form the complete TSDC protocol scaffolding.
+
+#![allow(dead_code)]
+
 use crate::block::types::{Block, BlockHeader};
 use crate::crypto::ECVRF;
 use crate::types::Hash256;

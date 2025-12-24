@@ -1,3 +1,8 @@
+//! Peer Connection Management
+//! Handles individual peer connections and message routing.
+
+#![allow(dead_code)]
+
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -9,8 +14,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::network::message::NetworkMessage;
 
-// Allow dead code during refactor
-#[allow(dead_code)]
 /// Direction of connection establishment
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConnectionDirection {

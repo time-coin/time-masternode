@@ -1,3 +1,8 @@
+//! Time synchronization module for clock drift detection
+//! Note: NTP synchronization is scaffolding for production deployment
+
+#![allow(dead_code)]
+
 use chrono::Utc;
 use std::time::Duration;
 use tokio::time::sleep;

@@ -1,3 +1,8 @@
+//! Wallet management for key storage and transaction signing
+//! Note: Scaffolding for future wallet integration
+
+#![allow(dead_code)]
+
 use crate::address::Address;
 use crate::network_type::NetworkType;
 use ed25519_dalek::{SigningKey, VerifyingKey};
@@ -9,7 +14,6 @@ use std::path::Path;
 #[derive(Debug, thiserror::Error)]
 pub enum WalletError {
     #[error("Failed to create wallet: {0}")]
-    #[allow(dead_code)]
     CreationFailed(String),
     #[error("Failed to load wallet: {0}")]
     LoadFailed(String),

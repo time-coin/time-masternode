@@ -708,7 +708,7 @@ async fn handle_peer(
                                                     // Check if peer's chain is longer
                                                     if end_height > our_height {
                                                         // Find common ancestor by checking parent hashes
-                                                        let mut common_ancestor = start_height - 1;
+                                                        let common_ancestor = start_height - 1;
 
                                                         // Simple approach: rollback to before the fork
                                                         // and apply the new blocks

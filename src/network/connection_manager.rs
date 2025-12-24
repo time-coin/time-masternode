@@ -1,5 +1,8 @@
-/// Connection manager for tracking peer connection state
-/// Uses DashMap for lock-free concurrent access to connection states
+//! Connection manager for tracking peer connection state
+//! Uses DashMap for lock-free concurrent access to connection states
+
+#![allow(dead_code)]
+
 use dashmap::DashMap;
 use std::sync::Arc;
 

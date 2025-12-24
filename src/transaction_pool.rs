@@ -1,3 +1,8 @@
+//! Transaction mempool management
+//! Note: Some methods are scaffolding for advanced mempool features
+
+#![allow(dead_code)]
+
 use crate::types::*;
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,7 +11,6 @@ use thiserror::Error;
 
 const MAX_POOL_SIZE: usize = 10_000;
 const MAX_POOL_BYTES: usize = 300 * 1024 * 1024; // 300MB
-#[allow(dead_code)]
 const REJECT_CACHE_SIZE: usize = 1000;
 
 #[derive(Clone)]
