@@ -628,9 +628,9 @@ async fn handle_peer(
 
                                     tracing::info!("📥 Received block {} announcement from {}", block_height, peer.addr);
 
-                                    // Add block to our blockchain
-                                    match blockchain.add_block(block.clone()).await {
-                                        Ok(()) => {
+                                    // Add block to our blockchain with fork handling
+                                    match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                        Ok(true) => {
                                             tracing::info!("✅ Added block {} from {}", block_height, peer.addr);
 
                                             // GOSSIP: Relay to all other connected peers
@@ -643,6 +643,9 @@ async fn handle_peer(
                                                     tracing::warn!("Failed to gossip block: {}", e);
                                                 }
                                             }
+                                        }
+                                        Ok(false) => {
+                                            tracing::debug!("⏭️ Skipped block {} (already have or fork)", block_height);
                                         }
                                         Err(e) => {
                                             tracing::warn!("Failed to add announced block: {}", e);
@@ -683,19 +686,84 @@ async fn handle_peer(
                                     } else {
                                         let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
                                         let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
-                                        tracing::info!("📥 Received {} blocks (height {}-{}) from {}",
-                                            block_count, start_height, end_height, peer.addr);
+                                        let our_height = blockchain.get_height().await;
 
+                                        tracing::info!("📥 Received {} blocks (height {}-{}) from {} (our height: {})",
+                                            block_count, start_height, end_height, peer.addr, our_height);
+
+                                        // Check if this is from a different chain (fork detection)
+                                        if start_height <= our_height && start_height > 0 {
+                                            // Peer is sending blocks we might already have
+                                            // Check if the first block matches what we have
+                                            if let Ok(our_block) = blockchain.get_block_by_height(start_height).await {
+                                                let incoming_hash = blocks.first().unwrap().hash();
+                                                let our_hash = our_block.hash();
+
+                                                if incoming_hash != our_hash {
+                                                    tracing::warn!(
+                                                        "🔀 Fork detected at height {}: peer has different block",
+                                                        start_height
+                                                    );
+
+                                                    // Check if peer's chain is longer
+                                                    if end_height > our_height {
+                                                        // Find common ancestor by checking parent hashes
+                                                        let mut common_ancestor = start_height - 1;
+
+                                                        // Simple approach: rollback to before the fork
+                                                        // and apply the new blocks
+                                                        tracing::info!(
+                                                            "🔄 Peer has longer chain ({} vs {}), reorganizing from height {}",
+                                                            end_height, our_height, common_ancestor
+                                                        );
+
+                                                        // Verify we have the common ancestor
+                                                        if common_ancestor > 0 {
+                                                            if let Ok(first_block) = blocks.first().ok_or("no blocks") {
+                                                                if let Ok(our_prev) = blockchain.get_block_hash_at_height(common_ancestor).await.ok_or("no prev") {
+                                                                    if first_block.header.previous_hash == our_prev {
+                                                                        // Common ancestor confirmed, do reorg
+                                                                        match blockchain.reorganize_to_chain(common_ancestor, blocks.clone()).await {
+                                                                            Ok(()) => {
+                                                                                tracing::info!("✅ Chain reorganization successful");
+                                                                                continue;
+                                                                            }
+                                                                            Err(e) => {
+                                                                                tracing::error!("❌ Chain reorganization failed: {}", e);
+                                                                                continue;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        // Couldn't verify common ancestor, skip these blocks
+                                                        tracing::warn!("⚠️ Could not verify common ancestor, skipping fork");
+                                                        continue;
+                                                    } else {
+                                                        // Our chain is same length or longer, keep it
+                                                        tracing::info!("📊 Keeping our chain (same or longer)");
+                                                        continue;
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // Normal case: apply blocks sequentially
                                         let mut added = 0;
                                         let mut skipped = 0;
                                         for block in blocks {
-                                            match blockchain.add_block(block.clone()).await {
-                                                Ok(()) => {
+                                            match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                                Ok(true) => {
                                                     added += 1;
+                                                }
+                                                Ok(false) => {
+                                                    skipped += 1;
                                                 }
                                                 Err(e) => {
                                                     // Could be duplicate or invalid - log at debug level
-                                                    tracing::debug!("⏭️  Skipped block {}: {}", block.header.height, e);
+                                                    tracing::debug!("⏭️ Skipped block {}: {}", block.header.height, e);
                                                     skipped += 1;
                                                 }
                                             }

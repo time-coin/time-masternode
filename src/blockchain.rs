@@ -574,6 +574,258 @@ impl Blockchain {
             .map(|mn| (mn.masternode.address.clone(), per_masternode))
             .collect()
     }
+
+    // ===== Fork Detection and Reorganization =====
+
+    /// Detect if we're on a different chain than a peer by comparing block hashes
+    /// Returns Some(fork_height) if fork detected, None if chains match
+    pub async fn detect_fork(&self, peer_height: u64, peer_tip_hash: [u8; 32]) -> Option<u64> {
+        let our_height = *self.current_height.read().await;
+
+        // If peer has the same tip hash at a height we have, no fork
+        let check_height = our_height.min(peer_height);
+        if check_height == 0 {
+            return None;
+        }
+
+        // Check if our block at peer's height matches
+        if let Ok(our_hash) = self.get_block_hash(check_height) {
+            if our_hash == peer_tip_hash && check_height == peer_height {
+                return None; // Same chain
+            }
+        }
+
+        // We have a potential fork - find divergence point
+        Some(check_height)
+    }
+
+    /// Find the common ancestor between our chain and a peer's chain
+    /// peer_hashes: Vec of (height, hash) from peer, ordered by height descending
+    pub async fn find_common_ancestor(&self, peer_hashes: &[(u64, [u8; 32])]) -> Option<u64> {
+        for (height, peer_hash) in peer_hashes {
+            if *height == 0 {
+                return Some(0); // Genesis is always common
+            }
+
+            if let Ok(our_hash) = self.get_block_hash(*height) {
+                if our_hash == *peer_hash {
+                    return Some(*height);
+                }
+            }
+        }
+
+        // Check genesis
+        if let Ok(our_genesis) = self.get_block(0) {
+            if !peer_hashes.is_empty() {
+                // If we got here, chains diverge before the earliest peer hash
+                // Fall back to genesis
+                return Some(0);
+            }
+            let _ = our_genesis; // Genesis exists
+        }
+
+        None
+    }
+
+    /// Rollback the chain to a specific height
+    /// This removes all blocks above the target height
+    pub async fn rollback_to_height(&self, target_height: u64) -> Result<u64, String> {
+        let current = *self.current_height.read().await;
+
+        if target_height >= current {
+            return Ok(current); // Nothing to rollback
+        }
+
+        let blocks_to_remove = current - target_height;
+
+        // Safety check: don't allow massive rollbacks
+        if blocks_to_remove > MAX_REORG_DEPTH {
+            return Err(format!(
+                "Rollback too deep: {} blocks (max: {}). Manual intervention required.",
+                blocks_to_remove, MAX_REORG_DEPTH
+            ));
+        }
+
+        if blocks_to_remove > ALERT_REORG_DEPTH {
+            tracing::warn!(
+                "⚠️  LARGE REORG: Rolling back {} blocks (from {} to {})",
+                blocks_to_remove,
+                current,
+                target_height
+            );
+        }
+
+        tracing::info!(
+            "🔄 Rolling back chain from height {} to {}",
+            current,
+            target_height
+        );
+
+        // Remove blocks from storage (highest first)
+        for height in (target_height + 1..=current).rev() {
+            let key = format!("block_{}", height);
+            if let Err(e) = self.storage.remove(key.as_bytes()) {
+                tracing::warn!("Failed to remove block {}: {}", height, e);
+            }
+        }
+
+        // Update chain height
+        let height_key = "chain_height".as_bytes();
+        let height_bytes = bincode::serialize(&target_height).map_err(|e| e.to_string())?;
+        self.storage
+            .insert(height_key, height_bytes)
+            .map_err(|e| e.to_string())?;
+
+        // Update in-memory height
+        *self.current_height.write().await = target_height;
+
+        tracing::info!(
+            "✅ Rollback complete: removed {} blocks, now at height {}",
+            blocks_to_remove,
+            target_height
+        );
+
+        Ok(target_height)
+    }
+
+    /// Try to add a block, handling potential fork scenarios
+    /// Returns Ok(true) if block was added, Ok(false) if skipped, Err on failure
+    pub async fn add_block_with_fork_handling(&self, block: Block) -> Result<bool, String> {
+        let current = *self.current_height.read().await;
+        let block_height = block.header.height;
+
+        // Case 1: Block is exactly what we expect (next block)
+        if block_height == current + 1 {
+            // Verify prev_hash matches our tip
+            if current > 0 {
+                let our_tip_hash = self.get_block_hash(current)?;
+                if block.header.previous_hash != our_tip_hash {
+                    // This block builds on a different chain!
+                    tracing::warn!(
+                        "⚠️  Block {} has different prev_hash - possible fork",
+                        block_height
+                    );
+                    return Ok(false);
+                }
+            }
+
+            self.add_block(block).await?;
+            return Ok(true);
+        }
+
+        // Case 2: Block is in our past - could be from a longer chain
+        if block_height <= current {
+            // Check if we already have this exact block
+            if let Ok(existing) = self.get_block(block_height) {
+                if existing.hash() == block.hash() {
+                    return Ok(false); // Already have it
+                }
+
+                // Different block at same height - this is a fork!
+                tracing::warn!(
+                    "🔀 Fork detected at height {}: our hash {:?} vs incoming {:?}",
+                    block_height,
+                    hex::encode(&existing.hash()[..8]),
+                    hex::encode(&block.hash()[..8])
+                );
+
+                // We can't just accept this - need to compare chain work
+                // For now, we keep our chain (first-seen rule)
+                // A proper implementation would compare total chain work
+                return Ok(false);
+            }
+
+            // We don't have a block at this height - fill the gap
+            // This shouldn't normally happen if chain is consistent
+            tracing::warn!(
+                "⚠️  Received block {} but we're at height {} with gap",
+                block_height,
+                current
+            );
+            return Ok(false);
+        }
+
+        // Case 3: Block is too far in the future
+        if block_height > current + 1 {
+            tracing::debug!(
+                "⏳ Block {} is ahead of our height {} - need to sync first",
+                block_height,
+                current
+            );
+            return Ok(false);
+        }
+
+        Ok(false)
+    }
+
+    /// Check if we should accept a peer's chain over our own
+    /// Uses simple longest chain rule for now
+    pub async fn should_switch_to_chain(&self, peer_height: u64, _peer_tip_hash: [u8; 32]) -> bool {
+        let our_height = *self.current_height.read().await;
+
+        // Simple rule: switch if peer has more blocks
+        // TODO: Use total chain work instead of height
+        if peer_height > our_height {
+            tracing::info!(
+                "📊 Peer has longer chain: {} vs our {}",
+                peer_height,
+                our_height
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Perform a chain reorganization to adopt a peer's chain
+    /// 1. Find common ancestor
+    /// 2. Rollback to common ancestor
+    /// 3. Apply new blocks from peer
+    pub async fn reorganize_to_chain(
+        &self,
+        common_ancestor: u64,
+        new_blocks: Vec<Block>,
+    ) -> Result<(), String> {
+        let current = *self.current_height.read().await;
+
+        if new_blocks.is_empty() {
+            return Err("No blocks provided for reorganization".to_string());
+        }
+
+        let first_new = new_blocks.first().unwrap().header.height;
+        let last_new = new_blocks.last().unwrap().header.height;
+
+        tracing::info!(
+            "🔄 Reorganizing chain: rollback {} -> {}, then apply blocks {} -> {}",
+            current,
+            common_ancestor,
+            first_new,
+            last_new
+        );
+
+        // Step 1: Rollback to common ancestor
+        self.rollback_to_height(common_ancestor).await?;
+
+        // Step 2: Apply new blocks in order
+        for block in new_blocks {
+            if let Err(e) = self.add_block(block.clone()).await {
+                tracing::error!(
+                    "❌ Failed to apply block {} during reorg: {}",
+                    block.header.height,
+                    e
+                );
+                return Err(format!(
+                    "Reorg failed at block {}: {}",
+                    block.header.height, e
+                ));
+            }
+        }
+
+        let new_height = *self.current_height.read().await;
+        tracing::info!("✅ Reorganization complete: new height {}", new_height);
+
+        Ok(())
+    }
 }
 
 impl Clone for Blockchain {

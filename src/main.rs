@@ -685,6 +685,7 @@ async fn main() {
     // Start block production timer (every 10 minutes)
     let block_registry = registry.clone();
     let block_blockchain = blockchain.clone();
+    let block_peer_registry = peer_connection_registry.clone();
     let shutdown_token_clone = shutdown_token.clone();
     let block_production_handle = tokio::spawn(async move {
         // Calculate time until next 10-minute boundary
@@ -755,12 +756,27 @@ async fn main() {
                                 continue; // Synced successfully, check again next tick
                             }
                             Err(e) => {
-                                tracing::warn!("⚠️  Sync from peers failed: {} - will attempt catchup block production", e);
-                                // Fall through to catchup block production
+                                tracing::warn!("⚠️  Sync from peers failed: {}", e);
+
+                                // Check if we actually have connected peers with blocks
+                                // If peers exist but sync failed, we might be on a fork
+                                // Don't produce blocks - wait for manual resolution or retry
+                                let connected = block_peer_registry.get_connected_peers().await;
+                                if !connected.is_empty() {
+                                    tracing::warn!(
+                                        "⚠️  {} peer(s) connected but sync failed - NOT producing catchup blocks (possible fork)",
+                                        connected.len()
+                                    );
+                                    tracing::info!("💡 Will retry sync on next block period");
+                                    continue;
+                                }
+
+                                // No peers connected - this is a network-wide issue
+                                tracing::warn!("⚠️  No connected peers - attempting catchup block production");
                             }
                         }
 
-                        // Sync failed - peers don't have blocks either (network-wide catchup)
+                        // Sync failed AND no peers connected - network-wide catchup needed
                         // Elect a leader to produce catchup blocks
                         // Leader selection: deterministic based on current height + masternode list
                         use sha2::{Digest, Sha256};
