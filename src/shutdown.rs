@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Manages graceful shutdown of the application
+#[allow(dead_code)] // Used by binary (main.rs)
 pub struct ShutdownManager {
     /// Token to signal shutdown to all tasks
     cancel_token: CancellationToken,
@@ -15,6 +16,7 @@ pub struct ShutdownManager {
     task_handles: Vec<JoinHandle<()>>,
 }
 
+#[allow(dead_code)] // Used by binary (main.rs)
 impl ShutdownManager {
     pub fn new() -> Self {
         Self {

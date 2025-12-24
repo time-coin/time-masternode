@@ -111,6 +111,7 @@ pub struct SledUtxoStorage {
     db: sled::Db,
 }
 
+#[allow(dead_code)] // Used by binary (main.rs) for persistent storage option
 impl SledUtxoStorage {
     pub fn new(path: &str) -> Result<Self, StorageError> {
         use sysinfo::{MemoryRefreshKind, RefreshKind, System};
