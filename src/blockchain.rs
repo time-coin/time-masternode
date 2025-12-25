@@ -7,7 +7,8 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use crate::types::{Transaction, TxOutput};
+use crate::types::{OutPoint, Transaction, TxOutput, UTXO};
+use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -51,6 +52,7 @@ pub struct Blockchain {
     storage: sled::Db,
     consensus: Arc<ConsensusEngine>,
     masternode_registry: Arc<MasternodeRegistry>,
+    utxo_manager: Arc<UTXOStateManager>,
     current_height: Arc<RwLock<u64>>,
     network_type: NetworkType,
     is_syncing: Arc<RwLock<bool>>,
@@ -65,12 +67,14 @@ impl Blockchain {
         storage: sled::Db,
         consensus: Arc<ConsensusEngine>,
         masternode_registry: Arc<MasternodeRegistry>,
+        utxo_manager: Arc<UTXOStateManager>,
         network_type: NetworkType,
     ) -> Self {
         Self {
             storage,
             consensus,
             masternode_registry,
+            utxo_manager,
             current_height: Arc::new(RwLock::new(0)),
             network_type,
             is_syncing: Arc::new(RwLock::new(false)),
@@ -871,19 +875,79 @@ impl Blockchain {
     }
 
     async fn process_block_utxos(&self, block: &Block) {
+        let block_hash = block.hash();
+        let mut utxos_created = 0;
+
+        // Process transaction outputs
         for tx in &block.transactions {
             let txid = tx.txid();
-            for output in &tx.outputs {
-                // Process outputs as available UTXOs
-                // This is a simplified version - full implementation would track spent/unspent state
-                let _utxo = crate::types::UTXO {
-                    outpoint: crate::types::OutPoint { txid, vout: 0 },
+            for (vout, output) in tx.outputs.iter().enumerate() {
+                // Extract address from script_pubkey (which is just the address bytes in our format)
+                let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+
+                let utxo = UTXO {
+                    outpoint: OutPoint {
+                        txid,
+                        vout: vout as u32,
+                    },
                     value: output.value,
                     script_pubkey: output.script_pubkey.clone(),
-                    address: String::new(),
+                    address: address.clone(),
                 };
-                // Add to UTXO set via consensus engine
+
+                if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                    tracing::debug!(
+                        "Could not add UTXO for tx {} vout {}: {:?}",
+                        hex::encode(txid),
+                        vout,
+                        e
+                    );
+                } else {
+                    utxos_created += 1;
+                }
             }
+        }
+
+        // Process masternode rewards as UTXOs
+        // Each reward creates a spendable output for the masternode wallet
+        for (idx, (address, amount)) in block.masternode_rewards.iter().enumerate() {
+            // Create a synthetic outpoint using block hash + reward index
+            // This ensures uniqueness since each block has unique rewards
+            let mut reward_txid = block_hash;
+            // Mark this as a reward by setting first byte to 0xFF and embedding index
+            reward_txid[0] = 0xFF;
+            reward_txid[1] = (idx >> 8) as u8;
+            reward_txid[2] = idx as u8;
+
+            let utxo = UTXO {
+                outpoint: OutPoint {
+                    txid: reward_txid,
+                    vout: 0,
+                },
+                value: *amount,
+                script_pubkey: address.as_bytes().to_vec(),
+                address: address.clone(),
+            };
+
+            if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                tracing::debug!("Could not add reward UTXO for {}: {:?}", address, e);
+            } else {
+                utxos_created += 1;
+            }
+        }
+
+        if utxos_created > 0 {
+            tracing::info!(
+                "💰 Block {} created {} UTXOs ({} from txs, {} from rewards)",
+                block.header.height,
+                utxos_created,
+                block
+                    .transactions
+                    .iter()
+                    .map(|tx| tx.outputs.len())
+                    .sum::<usize>(),
+                block.masternode_rewards.len()
+            );
         }
     }
 
@@ -1433,6 +1497,7 @@ impl Clone for Blockchain {
             storage: self.storage.clone(),
             consensus: self.consensus.clone(),
             masternode_registry: self.masternode_registry.clone(),
+            utxo_manager: self.utxo_manager.clone(),
             current_height: self.current_height.clone(),
             network_type: self.network_type,
             is_syncing: self.is_syncing.clone(),

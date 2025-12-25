@@ -341,6 +341,7 @@ async fn main() {
         block_storage,
         consensus_engine.clone(),
         registry.clone(),
+        utxo_mgr.clone(),
         network_type,
     ));
 
@@ -810,10 +811,18 @@ async fn main() {
                         // Sync failed - all peers may also be behind
                         // Elect a leader to produce catchup blocks
                         // Leader selection: deterministic based on current height + masternode list
+                        // CRITICAL: Sort masternodes by IP to ensure all nodes pick the same leader
+                        let mut sorted_masternodes = masternodes.clone();
+                        sorted_masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+
                         use sha2::{Digest, Sha256};
                         let mut hasher = Sha256::new();
                         hasher.update(b"catchup_leader");
                         hasher.update(current_height.to_le_bytes());
+                        // Also include sorted masternode addresses in the hash for consistency
+                        for mn in &sorted_masternodes {
+                            hasher.update(mn.address.as_bytes());
+                        }
                         let leader_hash: [u8; 32] = hasher.finalize().into();
 
                         let leader_index = {
@@ -821,10 +830,16 @@ async fn main() {
                             for (i, &byte) in leader_hash.iter().take(8).enumerate() {
                                 val |= (byte as u64) << (i * 8);
                             }
-                            (val % masternodes.len() as u64) as usize
+                            (val % sorted_masternodes.len() as u64) as usize
                         };
 
-                        let selected_leader = &masternodes[leader_index];
+                        let selected_leader = &sorted_masternodes[leader_index];
+                        tracing::info!(
+                            "🗳️  Leader election: sorted {} masternodes, selected index {} = {}",
+                            sorted_masternodes.len(),
+                            leader_index,
+                            selected_leader.address
+                        );
                         let is_leader = masternode_address
                             .as_ref()
                             .map(|addr| addr == &selected_leader.address)
