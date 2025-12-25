@@ -95,80 +95,69 @@ impl Blockchain {
         self.network_type.genesis_timestamp()
     }
 
-    /// Initialize blockchain - load existing genesis or create it
+    /// Initialize blockchain - verify existing genesis or fail
+    /// Genesis block must be synced from peers - never auto-generated
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
+
+        // Get the canonical genesis for this network
+        let expected_hash = GenesisBlock::expected_hash(self.network_type);
 
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
         if height > 0 {
-            // Verify the genesis block is correct
+            // Verify the genesis block matches canonical
             if let Ok(genesis) = self.get_block_by_height(0).await {
-                if !GenesisBlock::verify_genesis(&genesis, self.network_type) {
-                    let expected = hex::encode(GenesisBlock::expected_hash(self.network_type));
+                if genesis.hash() != expected_hash {
+                    let expected = hex::encode(expected_hash);
                     let actual = hex::encode(genesis.hash());
                     tracing::error!(
-                        "❌ Genesis block mismatch! Expected hash: {}, got: {}",
-                        expected,
-                        actual
+                        "❌ FATAL: Local genesis block does not match network genesis!"
                     );
-                    tracing::error!("❌ This may indicate database corruption or network mismatch");
-                    tracing::warn!(
-                        "⚠️  Consider deleting the data directory and resyncing from peers"
+                    tracing::error!("❌ Expected: {}", expected);
+                    tracing::error!("❌ Got:      {}", actual);
+                    tracing::error!(
+                        "❌ Delete database directory and restart to sync correct chain"
                     );
-                    // Don't fail - allow node to continue but warn loudly
+                    return Err(format!(
+                        "Genesis mismatch - expected {}, got {}",
+                        expected, actual
+                    ));
                 }
             }
             *self.current_height.write().await = height;
-            tracing::info!("✓ Genesis block already exists (height: {})", height);
+            tracing::info!("✓ Genesis block verified (height: {})", height);
             return Ok(());
         }
 
-        // Also check if block 0 exists explicitly
+        // Check if block 0 exists explicitly
         if self
             .storage
             .contains_key("block_0".as_bytes())
             .map_err(|e| e.to_string())?
         {
-            // Verify it's the correct genesis
             if let Ok(genesis) = self.get_block_by_height(0).await {
-                if !GenesisBlock::verify_genesis(&genesis, self.network_type) {
-                    let expected = hex::encode(GenesisBlock::expected_hash(self.network_type));
+                if genesis.hash() != expected_hash {
+                    let expected = hex::encode(expected_hash);
                     let actual = hex::encode(genesis.hash());
                     tracing::error!(
-                        "❌ Genesis block mismatch! Expected: {}, got: {}",
+                        "❌ FATAL: Local genesis does not match network! Expected: {}, got: {}",
                         expected,
                         actual
                     );
+                    return Err(format!(
+                        "Genesis mismatch - expected {}, got {}",
+                        expected, actual
+                    ));
                 }
             }
             *self.current_height.write().await = 0;
-            tracing::info!("✓ Genesis block already exists");
+            tracing::info!("✓ Genesis block verified");
             return Ok(());
         }
 
-        // Create genesis block
-        tracing::info!("📦 Creating genesis block...");
-        let genesis = GenesisBlock::for_network(self.network_type);
-        let genesis_hash = hex::encode(genesis.hash());
-
-        // Verify the generated genesis matches expected
-        if !GenesisBlock::verify_genesis(&genesis, self.network_type) {
-            // This should never happen unless code changed
-            tracing::error!("❌ CRITICAL: Generated genesis doesn't match expected hash!");
-            tracing::error!("❌ This indicates a code change that broke genesis compatibility");
-            return Err("Genesis block generation failed - hash mismatch".to_string());
-        }
-
-        // Save genesis block
-        self.process_block_utxos(&genesis).await;
-        self.save_block(&genesis)?;
-        *self.current_height.write().await = 0;
-
-        tracing::info!(
-            "✅ Genesis block created (height: 0, hash: {})",
-            genesis_hash
-        );
+        // No genesis block - will need to sync from peers
+        tracing::info!("📦 No genesis block found - will sync from peers");
         Ok(())
     }
 
@@ -475,8 +464,8 @@ impl Blockchain {
             let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
 
             while current < expected && sync_start.elapsed() < max_sync_time {
-                // Request next batch of blocks
-                let batch_start = current + 1;
+                // Request next batch of blocks - start from 0 if we have nothing
+                let batch_start = if current == 0 { 0 } else { current + 1 };
                 let batch_end = (batch_start + 500).min(expected);
 
                 // Request from multiple peers in parallel
@@ -554,6 +543,22 @@ impl Blockchain {
 
     /// Produce a block for the current TSDC slot
     pub async fn produce_block(&self) -> Result<Block, String> {
+        use crate::block::genesis::GenesisBlock;
+
+        // Verify genesis block exists and is correct before producing any blocks
+        let genesis = self.get_block_by_height(0).await.map_err(|_| {
+            "Cannot produce blocks: no genesis block. Sync from peers first.".to_string()
+        })?;
+
+        let expected_hash = GenesisBlock::expected_hash(self.network_type);
+        if genesis.hash() != expected_hash {
+            return Err(format!(
+                "Cannot produce blocks: genesis mismatch. Expected {}, got {}",
+                hex::encode(expected_hash),
+                hex::encode(genesis.hash())
+            ));
+        }
+
         // Get previous block hash
         let mut current_height = *self.current_height.read().await;
 
@@ -583,11 +588,7 @@ impl Blockchain {
             *self.current_height.write().await = current_height;
         }
 
-        let prev_hash = if current_height == 0 {
-            [0u8; 32]
-        } else {
-            self.get_block_hash(current_height)?
-        };
+        let prev_hash = self.get_block_hash(current_height)?;
 
         let next_height = current_height + 1;
         let timestamp = self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);

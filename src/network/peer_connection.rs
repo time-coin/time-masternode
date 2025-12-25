@@ -690,10 +690,18 @@ impl PeerConnection {
                             Ok(true) => added += 1,
                             Ok(false) => skipped += 1,
                             Err(e) => {
-                                debug!(
-                                    "⏭️ [{:?}] Skipped block {}: {}",
-                                    self.direction, block.header.height, e
-                                );
+                                // Log first few errors at warn level to help debug sync issues
+                                if skipped < 3 {
+                                    warn!(
+                                        "⏭️ [{:?}] Skipped block {}: {}",
+                                        self.direction, block.header.height, e
+                                    );
+                                } else {
+                                    debug!(
+                                        "⏭️ [{:?}] Skipped block {}: {}",
+                                        self.direction, block.header.height, e
+                                    );
+                                }
                                 skipped += 1;
                             }
                         }
@@ -702,6 +710,11 @@ impl PeerConnection {
                         info!(
                             "✅ [{:?}] Synced {} blocks from {} (skipped {})",
                             self.direction, added, self.peer_ip, skipped
+                        );
+                    } else if skipped > 0 {
+                        warn!(
+                            "⚠️ [{:?}] All {} blocks skipped from {}",
+                            self.direction, skipped, self.peer_ip
                         );
                     }
                 }

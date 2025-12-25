@@ -5,31 +5,31 @@ use serde_json::json;
 
 pub struct GenesisBlock;
 
-/// Expected genesis block hashes (computed once and hardcoded)
-/// These ensure all nodes agree on the same genesis block
+/// Expected genesis block hashes - HARDCODED for network consensus
+/// These are the canonical genesis hashes that all nodes must agree on
 impl GenesisBlock {
-    /// Expected testnet genesis block hash
-    /// This is computed from the deterministic genesis block and should never change
-    pub fn expected_testnet_hash() -> [u8; 32] {
-        // Computed from GenesisBlock::testnet().hash()
-        // If Block structure changes, regenerate this by running:
-        //   cargo test test_print_genesis_hash -- --nocapture
-        let genesis = Self::testnet();
-        genesis.hash()
-    }
+    /// Testnet genesis block hash (from genesis.testnet.json)
+    /// This MUST match the hash in genesis.testnet.json
+    pub const TESTNET_GENESIS_HASH: &'static str =
+        "59f1b60c1bbf195d30b19c0ead4aab1c663c49ed56ff8ee7030e6a4a7a7415af";
 
-    /// Expected mainnet genesis block hash
-    pub fn expected_mainnet_hash() -> [u8; 32] {
-        let genesis = Self::mainnet();
-        genesis.hash()
-    }
+    /// Mainnet genesis block hash (from genesis.mainnet.json when created)
+    pub const MAINNET_GENESIS_HASH: &'static str =
+        "c2853890e1e84312724a4f2fc132b6c77a742550b5cabd1745e3e6437bd3fc2a";
 
-    /// Get expected genesis hash for network
+    /// Get expected genesis hash for network as bytes
     pub fn expected_hash(network: NetworkType) -> [u8; 32] {
-        match network {
-            NetworkType::Mainnet => Self::expected_mainnet_hash(),
-            NetworkType::Testnet => Self::expected_testnet_hash(),
+        let hex_str = match network {
+            NetworkType::Testnet => Self::TESTNET_GENESIS_HASH,
+            NetworkType::Mainnet => Self::MAINNET_GENESIS_HASH,
+        };
+        let mut hash = [0u8; 32];
+        if let Ok(bytes) = hex::decode(hex_str) {
+            if bytes.len() == 32 {
+                hash.copy_from_slice(&bytes);
+            }
         }
+        hash
     }
 
     /// Verify that a block is the correct genesis block for the network
@@ -38,6 +38,128 @@ impl GenesisBlock {
             return false;
         }
         block.hash() == Self::expected_hash(network)
+    }
+
+    /// Load genesis block from JSON file
+    pub fn load_from_file(path: &str) -> Result<Block, String> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read genesis file {}: {}", path, e))?;
+
+        let json: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse genesis JSON: {}", e))?;
+
+        let block_json = json
+            .get("block")
+            .ok_or("Missing 'block' field in genesis JSON")?;
+
+        Self::parse_block_json(block_json)
+    }
+
+    /// Parse a block from JSON value
+    fn parse_block_json(json: &serde_json::Value) -> Result<Block, String> {
+        let header = json.get("header").ok_or("Missing 'header' in block JSON")?;
+
+        let transactions = json
+            .get("transactions")
+            .and_then(|t| t.as_array())
+            .ok_or("Missing 'transactions' in block JSON")?;
+
+        let mut txs = Vec::new();
+        for tx_json in transactions {
+            txs.push(Self::parse_transaction_json(tx_json)?);
+        }
+
+        let previous_hash = Self::parse_hash(
+            header
+                .get("previous_hash")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        )?;
+
+        let attestation_root = Self::parse_hash(
+            header
+                .get("attestation_root")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
+        )?;
+
+        let merkle_root = if txs.is_empty() {
+            [0u8; 32]
+        } else {
+            txs[0].txid()
+        };
+
+        Ok(Block {
+            header: BlockHeader {
+                version: header.get("version").and_then(|v| v.as_u64()).unwrap_or(2) as u32,
+                height: header.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
+                previous_hash,
+                merkle_root,
+                timestamp: header
+                    .get("timestamp_unix")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0),
+                block_reward: header
+                    .get("block_reward")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0),
+                leader: header
+                    .get("leader")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                attestation_root,
+            },
+            transactions: txs,
+            masternode_rewards: vec![],
+            time_attestations: vec![],
+        })
+    }
+
+    fn parse_transaction_json(json: &serde_json::Value) -> Result<Transaction, String> {
+        let outputs = json
+            .get("outputs")
+            .and_then(|o| o.as_array())
+            .ok_or("Missing 'outputs' in transaction")?;
+
+        let mut tx_outputs = Vec::new();
+        for out in outputs {
+            let script_hex = out
+                .get("script_pubkey")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let script_pubkey =
+                hex::decode(script_hex).map_err(|e| format!("Invalid script_pubkey hex: {}", e))?;
+
+            tx_outputs.push(TxOutput {
+                value: out.get("value").and_then(|v| v.as_u64()).unwrap_or(0),
+                script_pubkey,
+            });
+        }
+
+        Ok(Transaction {
+            version: json.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
+            inputs: vec![],
+            outputs: tx_outputs,
+            lock_time: json.get("lock_time").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
+            timestamp: json.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
+        })
+    }
+
+    fn parse_hash(hex_str: &str) -> Result<[u8; 32], String> {
+        let mut hash = [0u8; 32];
+        if hex_str.is_empty()
+            || hex_str == "0000000000000000000000000000000000000000000000000000000000000000"
+        {
+            return Ok(hash);
+        }
+        let bytes =
+            hex::decode(hex_str).map_err(|e| format!("Invalid hash hex '{}': {}", hex_str, e))?;
+        if bytes.len() != 32 {
+            return Err(format!("Hash must be 32 bytes, got {}", bytes.len()));
+        }
+        hash.copy_from_slice(&bytes);
+        Ok(hash)
     }
 }
 
@@ -217,5 +339,24 @@ mod tests {
         println!("Testnet genesis hash: {}", hex::encode(testnet.hash()));
         println!("Mainnet genesis hash: {}", hex::encode(mainnet.hash()));
         println!("===========================");
+    }
+
+    #[test]
+    fn test_hardcoded_hash_matches_computed() {
+        // Verify hardcoded hash constants match computed genesis hashes
+        let testnet = GenesisBlock::testnet();
+        let mainnet = GenesisBlock::mainnet();
+
+        assert_eq!(
+            hex::encode(testnet.hash()),
+            GenesisBlock::TESTNET_GENESIS_HASH,
+            "Testnet genesis hash mismatch! Update TESTNET_GENESIS_HASH constant."
+        );
+
+        assert_eq!(
+            hex::encode(mainnet.hash()),
+            GenesisBlock::MAINNET_GENESIS_HASH,
+            "Mainnet genesis hash mismatch! Update MAINNET_GENESIS_HASH constant."
+        );
     }
 }

@@ -598,39 +598,55 @@ async fn main() {
         shutdown_manager.register_task(tsdc_handle);
     }
 
-    // Initialize genesis and catchup in background
+    // Initialize blockchain and sync from peers in background
     let blockchain_init = blockchain.clone();
     let blockchain_server = blockchain_init.clone();
     let peer_registry_for_sync = peer_connection_registry.clone();
     tokio::spawn(async move {
-        if let Err(e) = blockchain_init.initialize_genesis().await {
-            tracing::error!("❌ Genesis initialization failed: {}", e);
-            return;
-        }
-
-        // Wait for peer connections to establish before initial sync
-        // The network client starts in parallel and needs time to connect
+        // Wait for peer connections to establish first
+        // New nodes need peers to download the blockchain including genesis
         let mut wait_seconds = 0u64;
-        let max_wait = 30u64; // Wait up to 30 seconds for peers
+        let max_wait = 60u64; // Wait up to 60 seconds for peers
         while wait_seconds < max_wait {
             let connected = peer_registry_for_sync.get_connected_peers().await.len();
             if connected > 0 {
-                tracing::info!("✓ {} peer(s) connected, starting initial sync", connected);
+                tracing::info!(
+                    "✓ {} peer(s) connected, starting blockchain sync",
+                    connected
+                );
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
             wait_seconds += 2;
             if wait_seconds % 10 == 0 {
-                tracing::debug!("⏳ Waiting for peer connections... ({}s)", wait_seconds);
+                tracing::info!("⏳ Waiting for peer connections... ({}s)", wait_seconds);
             }
         }
 
+        // Check if we have genesis block
+        let has_genesis = blockchain_init.get_height().await > 0
+            || blockchain_init.get_block_by_height(0).await.is_ok();
+
+        if !has_genesis {
+            tracing::info!("📦 No genesis block found - syncing blockchain from peers...");
+            // Sync from peers - this will get genesis block (height 0) and subsequent blocks
+            if let Err(e) = blockchain_init.sync_from_peers().await {
+                tracing::warn!("⚠️  Initial sync from peers: {}", e);
+            }
+        }
+
+        // Now verify genesis is correct (if we have one)
+        if let Err(e) = blockchain_init.initialize_genesis().await {
+            tracing::error!("❌ Genesis verification failed: {}", e);
+            return;
+        }
+
         // Verify chain integrity and download any missing blocks
-        // Masternodes must have the complete blockchain
         if let Err(e) = blockchain_init.ensure_chain_complete().await {
             tracing::warn!("⚠️  Chain integrity check: {}", e);
         }
 
+        // Continue syncing if still behind
         if let Err(e) = blockchain_init.sync_from_peers().await {
             tracing::warn!("⚠️  Block sync from peers: {}", e);
         }
