@@ -404,6 +404,7 @@ impl TSCDConsensus {
             block_reward: 0, // TODO: Calculate block reward
             leader: String::new(),
             attestation_root: [0u8; 32],
+            masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
         };
 
         Ok(Block {
@@ -889,6 +890,7 @@ mod tests {
                 block_reward: 100,
                 leader: String::new(),
                 attestation_root: [0u8; 32],
+                masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
             },
             transactions: vec![],
             masternode_rewards: vec![],
@@ -905,6 +907,7 @@ mod tests {
                 block_reward: 100,
                 leader: String::new(),
                 attestation_root: [0u8; 32],
+                masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
             },
             transactions: vec![],
             masternode_rewards: vec![],

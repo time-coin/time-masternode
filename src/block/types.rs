@@ -49,6 +49,21 @@ pub struct Block {
     pub time_attestations: Vec<TimeAttestation>,
 }
 
+/// Masternode counts by tier at time of block production
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct MasternodeTierCounts {
+    pub free: u32,
+    pub bronze: u32,
+    pub silver: u32,
+    pub gold: u32,
+}
+
+impl MasternodeTierCounts {
+    pub fn total(&self) -> u32 {
+        self.free + self.bronze + self.silver + self.gold
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BlockHeader {
     pub version: u32,
@@ -61,6 +76,9 @@ pub struct BlockHeader {
     /// Root hash of the time attestations merkle tree
     #[serde(default)]
     pub attestation_root: Hash256,
+    /// Masternode counts by tier at time of block production
+    #[serde(default)]
+    pub masternode_tiers: MasternodeTierCounts,
 }
 
 impl Block {

@@ -118,6 +118,7 @@ impl DeterministicBlockGenerator {
             block_reward: total_reward,
             leader: String::new(),
             attestation_root: [0u8; 32], // Will be set when attestations are added
+            masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
         };
 
         Block {

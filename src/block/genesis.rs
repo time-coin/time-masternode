@@ -1,179 +1,106 @@
-use crate::block::types::{Block, BlockHeader};
+//! Genesis block generation and verification for TIME Coin.
+//!
+//! Genesis blocks are dynamically generated based on active masternodes,
+//! ensuring fair reward distribution from the start of the network.
+
+use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
 use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
 use serde_json::json;
 
 pub struct GenesisBlock;
 
-/// Expected genesis block hashes - HARDCODED for network consensus
-/// These are the canonical genesis hashes that all nodes must agree on
-impl GenesisBlock {
-    /// Testnet genesis block hash (from genesis.testnet.json)
-    /// This MUST match the hash in genesis.testnet.json
-    pub const TESTNET_GENESIS_HASH: &'static str =
-        "59f1b60c1bbf195d30b19c0ead4aab1c663c49ed56ff8ee7030e6a4a7a7415af";
+/// Masternode info for genesis block generation
+#[derive(Clone, Debug)]
+pub struct GenesisMasternode {
+    pub address: String,
+    pub tier: MasternodeTier,
+}
 
-    /// Mainnet genesis block hash (from genesis.mainnet.json when created)
-    pub const MAINNET_GENESIS_HASH: &'static str =
-        "c2853890e1e84312724a4f2fc132b6c77a742550b5cabd1745e3e6437bd3fc2a";
+#[derive(Clone, Debug, PartialEq)]
+pub enum MasternodeTier {
+    Free,
+    Bronze,
+    Silver,
+    Gold,
+}
 
-    /// Get expected genesis hash for network as bytes
-    pub fn expected_hash(network: NetworkType) -> [u8; 32] {
-        let hex_str = match network {
-            NetworkType::Testnet => Self::TESTNET_GENESIS_HASH,
-            NetworkType::Mainnet => Self::MAINNET_GENESIS_HASH,
-        };
-        let mut hash = [0u8; 32];
-        if let Ok(bytes) = hex::decode(hex_str) {
-            if bytes.len() == 32 {
-                hash.copy_from_slice(&bytes);
-            }
+impl MasternodeTier {
+    /// Get reward share multiplier for this tier
+    pub fn reward_multiplier(&self) -> u64 {
+        match self {
+            MasternodeTier::Free => 1,
+            MasternodeTier::Bronze => 2,
+            MasternodeTier::Silver => 4,
+            MasternodeTier::Gold => 8,
         }
-        hash
-    }
-
-    /// Verify that a block is the correct genesis block for the network
-    pub fn verify_genesis(block: &Block, network: NetworkType) -> bool {
-        if block.header.height != 0 {
-            return false;
-        }
-        block.hash() == Self::expected_hash(network)
-    }
-
-    /// Load genesis block from JSON file
-    pub fn load_from_file(path: &str) -> Result<Block, String> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("Failed to read genesis file {}: {}", path, e))?;
-
-        let json: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse genesis JSON: {}", e))?;
-
-        let block_json = json
-            .get("block")
-            .ok_or("Missing 'block' field in genesis JSON")?;
-
-        Self::parse_block_json(block_json)
-    }
-
-    /// Parse a block from JSON value
-    fn parse_block_json(json: &serde_json::Value) -> Result<Block, String> {
-        let header = json.get("header").ok_or("Missing 'header' in block JSON")?;
-
-        let transactions = json
-            .get("transactions")
-            .and_then(|t| t.as_array())
-            .ok_or("Missing 'transactions' in block JSON")?;
-
-        let mut txs = Vec::new();
-        for tx_json in transactions {
-            txs.push(Self::parse_transaction_json(tx_json)?);
-        }
-
-        let previous_hash = Self::parse_hash(
-            header
-                .get("previous_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-        )?;
-
-        let attestation_root = Self::parse_hash(
-            header
-                .get("attestation_root")
-                .and_then(|v| v.as_str())
-                .unwrap_or(""),
-        )?;
-
-        let merkle_root = if txs.is_empty() {
-            [0u8; 32]
-        } else {
-            txs[0].txid()
-        };
-
-        Ok(Block {
-            header: BlockHeader {
-                version: header.get("version").and_then(|v| v.as_u64()).unwrap_or(2) as u32,
-                height: header.get("height").and_then(|v| v.as_u64()).unwrap_or(0),
-                previous_hash,
-                merkle_root,
-                timestamp: header
-                    .get("timestamp_unix")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0),
-                block_reward: header
-                    .get("block_reward")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0),
-                leader: header
-                    .get("leader")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                attestation_root,
-            },
-            transactions: txs,
-            masternode_rewards: vec![],
-            time_attestations: vec![],
-        })
-    }
-
-    fn parse_transaction_json(json: &serde_json::Value) -> Result<Transaction, String> {
-        let outputs = json
-            .get("outputs")
-            .and_then(|o| o.as_array())
-            .ok_or("Missing 'outputs' in transaction")?;
-
-        let mut tx_outputs = Vec::new();
-        for out in outputs {
-            let script_hex = out
-                .get("script_pubkey")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let script_pubkey =
-                hex::decode(script_hex).map_err(|e| format!("Invalid script_pubkey hex: {}", e))?;
-
-            tx_outputs.push(TxOutput {
-                value: out.get("value").and_then(|v| v.as_u64()).unwrap_or(0),
-                script_pubkey,
-            });
-        }
-
-        Ok(Transaction {
-            version: json.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-            inputs: vec![],
-            outputs: tx_outputs,
-            lock_time: json.get("lock_time").and_then(|v| v.as_u64()).unwrap_or(0) as u32,
-            timestamp: json.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0),
-        })
-    }
-
-    fn parse_hash(hex_str: &str) -> Result<[u8; 32], String> {
-        let mut hash = [0u8; 32];
-        if hex_str.is_empty()
-            || hex_str == "0000000000000000000000000000000000000000000000000000000000000000"
-        {
-            return Ok(hash);
-        }
-        let bytes =
-            hex::decode(hex_str).map_err(|e| format!("Invalid hash hex '{}': {}", hex_str, e))?;
-        if bytes.len() != 32 {
-            return Err(format!("Hash must be 32 bytes, got {}", bytes.len()));
-        }
-        hash.copy_from_slice(&bytes);
-        Ok(hash)
     }
 }
 
+/// Genesis block verification and generation
 impl GenesisBlock {
-    /// Testnet genesis block - December 1, 2025
-    pub fn testnet() -> Block {
-        let genesis_timestamp = 1764547200; // 2025-12-01T00:00:00Z
+    /// Minimum masternodes required to generate genesis
+    pub const MIN_MASTERNODES_FOR_GENESIS: usize = 3;
 
-        // Coinbase transaction with genesis reward
+    /// Verify genesis block structure
+    pub fn verify_structure(block: &Block) -> Result<(), String> {
+        if block.header.height != 0 {
+            return Err("Genesis block must be height 0".to_string());
+        }
+        if block.header.previous_hash != [0u8; 32] {
+            return Err("Genesis block must have zero previous hash".to_string());
+        }
+        if block.transactions.is_empty() {
+            return Err("Genesis block must have coinbase transaction".to_string());
+        }
+
+        // Verify masternode rewards match tier counts
+        let tier_counts = &block.header.masternode_tiers;
+        let total_masternodes = tier_counts.total() as usize;
+
+        if block.masternode_rewards.len() != total_masternodes {
+            return Err(format!(
+                "Masternode rewards count {} doesn't match tier total {}",
+                block.masternode_rewards.len(),
+                total_masternodes
+            ));
+        }
+
+        // Verify reward distribution totals block reward
+        Self::verify_rewards(block)?;
+
+        Ok(())
+    }
+
+    /// Generate genesis block with active masternodes
+    pub fn generate_with_masternodes(
+        network: NetworkType,
+        masternodes: Vec<GenesisMasternode>,
+        leader: &str,
+    ) -> Block {
+        let genesis_timestamp = Self::genesis_timestamp(network);
+        let block_reward = Self::block_reward(network);
+
+        // Count masternodes by tier
+        let mut tier_counts = MasternodeTierCounts::default();
+        for mn in &masternodes {
+            match mn.tier {
+                MasternodeTier::Free => tier_counts.free += 1,
+                MasternodeTier::Bronze => tier_counts.bronze += 1,
+                MasternodeTier::Silver => tier_counts.silver += 1,
+                MasternodeTier::Gold => tier_counts.gold += 1,
+            }
+        }
+
+        // Calculate reward distribution
+        let masternode_rewards = Self::calculate_rewards(block_reward, &masternodes);
+
+        // Coinbase transaction
         let coinbase = Transaction {
             version: 1,
             inputs: vec![],
             outputs: vec![TxOutput {
-                value: 10_000_000_000, // 100 TIME in satoshis (100 * 10^8)
+                value: block_reward,
                 script_pubkey: b"genesis".to_vec(),
             }],
             lock_time: 0,
@@ -187,60 +114,88 @@ impl GenesisBlock {
                 previous_hash: [0u8; 32],
                 merkle_root: coinbase.txid(),
                 timestamp: genesis_timestamp,
-                block_reward: 10_000_000_000, // 100 TIME in satoshis
-                leader: String::new(),
+                block_reward,
+                leader: leader.to_string(),
                 attestation_root: [0u8; 32],
+                masternode_tiers: tier_counts,
             },
             transactions: vec![coinbase],
-            masternode_rewards: vec![],
+            masternode_rewards,
             time_attestations: vec![],
         }
     }
 
-    /// Mainnet genesis block - January 1, 2026
-    pub fn mainnet() -> Block {
-        let genesis_timestamp = 1767225600; // 2026-01-01T00:00:00Z
-
-        let coinbase = Transaction {
-            version: 1,
-            inputs: vec![],
-            outputs: vec![TxOutput {
-                value: 0, // No pre-mine on mainnet
-                script_pubkey: b"genesis".to_vec(),
-            }],
-            lock_time: 0,
-            timestamp: genesis_timestamp,
-        };
-
-        Block {
-            header: BlockHeader {
-                version: 2,
-                height: 0,
-                previous_hash: [0u8; 32],
-                merkle_root: coinbase.txid(),
-                timestamp: genesis_timestamp,
-                block_reward: 0,
-                leader: String::new(),
-                attestation_root: [0u8; 32],
-            },
-            transactions: vec![coinbase],
-            masternode_rewards: vec![],
-            time_attestations: vec![],
-        }
-    }
-
-    /// Get genesis block for the specified network
-    pub fn for_network(network: NetworkType) -> Block {
+    /// Get genesis timestamp for network
+    pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
-            NetworkType::Mainnet => Self::mainnet(),
-            NetworkType::Testnet => Self::testnet(),
+            NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z
+            NetworkType::Mainnet => 1767225600, // 2026-01-01T00:00:00Z
         }
     }
 
-    /// Export genesis block as JSON (for documentation)
+    /// Get block reward for network
+    pub fn block_reward(network: NetworkType) -> u64 {
+        match network {
+            NetworkType::Testnet => 10_000_000_000, // 100 TIME in satoshis
+            NetworkType::Mainnet => 10_000_000_000, // 100 TIME in satoshis
+        }
+    }
+
+    /// Calculate reward distribution based on masternode tiers
+    pub fn calculate_rewards(
+        total_reward: u64,
+        masternodes: &[GenesisMasternode],
+    ) -> Vec<(String, u64)> {
+        if masternodes.is_empty() {
+            return vec![];
+        }
+
+        // Calculate total weight
+        let total_weight: u64 = masternodes
+            .iter()
+            .map(|mn| mn.tier.reward_multiplier())
+            .sum();
+
+        if total_weight == 0 {
+            return vec![];
+        }
+
+        // Distribute rewards proportionally
+        let mut rewards = Vec::new();
+        let mut distributed = 0u64;
+
+        for (i, mn) in masternodes.iter().enumerate() {
+            let share = if i == masternodes.len() - 1 {
+                // Last masternode gets remainder to avoid rounding errors
+                total_reward - distributed
+            } else {
+                (total_reward * mn.tier.reward_multiplier()) / total_weight
+            };
+            rewards.push((mn.address.clone(), share));
+            distributed += share;
+        }
+
+        rewards
+    }
+
+    /// Verify reward distribution is correct
+    pub fn verify_rewards(block: &Block) -> Result<(), String> {
+        let total_reward = block.header.block_reward;
+        let distributed: u64 = block.masternode_rewards.iter().map(|(_, v)| v).sum();
+
+        if distributed != total_reward {
+            return Err(format!(
+                "Reward distribution {} doesn't match block reward {}",
+                distributed, total_reward
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Export genesis block as JSON
     #[allow(dead_code)]
-    pub fn export_json(network: NetworkType) -> String {
-        let block = Self::for_network(network);
+    pub fn export_json(block: &Block, network: NetworkType) -> String {
         let block_hash = block.hash();
         let network_str = match network {
             NetworkType::Mainnet => "mainnet",
@@ -256,14 +211,24 @@ impl GenesisBlock {
             ),
             "block": {
                 "header": {
-                    "block_number": block.header.height,
+                    "version": block.header.version,
+                    "height": block.header.height,
                     "timestamp": chrono::DateTime::from_timestamp(block.header.timestamp, 0)
                         .unwrap()
                         .format("%Y-%m-%dT%H:%M:%SZ")
                         .to_string(),
+                    "timestamp_unix": block.header.timestamp,
                     "previous_hash": hex::encode(block.header.previous_hash),
                     "merkle_root": hex::encode(block.header.merkle_root),
                     "block_reward": block.header.block_reward,
+                    "leader": block.header.leader,
+                    "attestation_root": hex::encode(block.header.attestation_root),
+                    "masternode_tiers": {
+                        "free": block.header.masternode_tiers.free,
+                        "bronze": block.header.masternode_tiers.bronze,
+                        "silver": block.header.masternode_tiers.silver,
+                        "gold": block.header.masternode_tiers.gold,
+                    }
                 },
                 "transactions": block.transactions.iter().map(|tx| {
                     json!({
@@ -272,12 +237,18 @@ impl GenesisBlock {
                         "inputs": tx.inputs,
                         "outputs": tx.outputs.iter().map(|o| {
                             json!({
-                                "amount": o.value,
+                                "value": o.value,
                                 "script_pubkey": hex::encode(&o.script_pubkey),
                             })
                         }).collect::<Vec<_>>(),
                         "lock_time": tx.lock_time,
                         "timestamp": tx.timestamp,
+                    })
+                }).collect::<Vec<_>>(),
+                "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
+                    json!({
+                        "address": addr,
+                        "amount": amount,
                     })
                 }).collect::<Vec<_>>(),
                 "hash": hex::encode(block_hash),
@@ -292,71 +263,115 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_genesis_block_testnet() {
-        let genesis = GenesisBlock::testnet();
+    fn test_genesis_with_masternodes() {
+        let masternodes = vec![
+            GenesisMasternode {
+                address: "TIME0abc123".to_string(),
+                tier: MasternodeTier::Free,
+            },
+            GenesisMasternode {
+                address: "TIME0def456".to_string(),
+                tier: MasternodeTier::Free,
+            },
+            GenesisMasternode {
+                address: "TIME0ghi789".to_string(),
+                tier: MasternodeTier::Free,
+            },
+        ];
+
+        let genesis = GenesisBlock::generate_with_masternodes(
+            NetworkType::Testnet,
+            masternodes,
+            "TIME0abc123",
+        );
+
         assert_eq!(genesis.header.height, 0);
         assert_eq!(genesis.header.previous_hash, [0u8; 32]);
-        assert_eq!(genesis.transactions.len(), 1);
-        assert_eq!(genesis.transactions[0].outputs[0].value, 10_000_000_000); // 100 TIME in satoshis
+        assert_eq!(genesis.header.masternode_tiers.free, 3);
+        assert_eq!(genesis.masternode_rewards.len(), 3);
+
+        // Verify reward distribution
+        let total: u64 = genesis.masternode_rewards.iter().map(|(_, v)| v).sum();
+        assert_eq!(total, genesis.header.block_reward);
     }
 
     #[test]
-    fn test_genesis_block_deterministic() {
-        let genesis1 = GenesisBlock::testnet();
-        let genesis2 = GenesisBlock::testnet();
+    fn test_genesis_deterministic() {
+        let masternodes = vec![GenesisMasternode {
+            address: "TIME0abc123".to_string(),
+            tier: MasternodeTier::Free,
+        }];
+
+        let genesis1 = GenesisBlock::generate_with_masternodes(
+            NetworkType::Testnet,
+            masternodes.clone(),
+            "TIME0abc123",
+        );
+        let genesis2 = GenesisBlock::generate_with_masternodes(
+            NetworkType::Testnet,
+            masternodes,
+            "TIME0abc123",
+        );
+
         assert_eq!(genesis1.hash(), genesis2.hash());
     }
 
     #[test]
     fn test_genesis_verification() {
-        let genesis = GenesisBlock::testnet();
-        assert!(GenesisBlock::verify_genesis(&genesis, NetworkType::Testnet));
+        let masternodes = vec![
+            GenesisMasternode {
+                address: "TIME0abc123".to_string(),
+                tier: MasternodeTier::Free,
+            },
+            GenesisMasternode {
+                address: "TIME0def456".to_string(),
+                tier: MasternodeTier::Bronze,
+            },
+        ];
 
-        let mainnet_genesis = GenesisBlock::mainnet();
-        assert!(GenesisBlock::verify_genesis(
-            &mainnet_genesis,
-            NetworkType::Mainnet
-        ));
+        let genesis = GenesisBlock::generate_with_masternodes(
+            NetworkType::Testnet,
+            masternodes,
+            "TIME0abc123",
+        );
 
-        // Cross-network verification should fail
-        assert!(!GenesisBlock::verify_genesis(
-            &genesis,
-            NetworkType::Mainnet
-        ));
-        assert!(!GenesisBlock::verify_genesis(
-            &mainnet_genesis,
-            NetworkType::Testnet
-        ));
+        assert!(GenesisBlock::verify_structure(&genesis).is_ok());
+        assert!(GenesisBlock::verify_rewards(&genesis).is_ok());
     }
 
     #[test]
-    fn test_print_genesis_hash() {
-        // Run with: cargo test test_print_genesis_hash -- --nocapture
-        let testnet = GenesisBlock::testnet();
-        let mainnet = GenesisBlock::mainnet();
+    fn test_tier_reward_distribution() {
+        // 1 Free (1x) + 1 Bronze (2x) = 3 total weight
+        // Free gets 1/3, Bronze gets 2/3
+        let masternodes = vec![
+            GenesisMasternode {
+                address: "TIME0free".to_string(),
+                tier: MasternodeTier::Free,
+            },
+            GenesisMasternode {
+                address: "TIME0bronze".to_string(),
+                tier: MasternodeTier::Bronze,
+            },
+        ];
 
-        println!("=== Genesis Block Hashes ===");
-        println!("Testnet genesis hash: {}", hex::encode(testnet.hash()));
-        println!("Mainnet genesis hash: {}", hex::encode(mainnet.hash()));
-        println!("===========================");
-    }
+        let genesis =
+            GenesisBlock::generate_with_masternodes(NetworkType::Testnet, masternodes, "TIME0free");
 
-    #[test]
-    fn test_hardcoded_hash_matches_computed() {
-        // Verify hardcoded hash constants match computed genesis hashes
-        let testnet = GenesisBlock::testnet();
-        let mainnet = GenesisBlock::mainnet();
+        let free_reward = genesis
+            .masternode_rewards
+            .iter()
+            .find(|(a, _)| a == "TIME0free")
+            .unwrap()
+            .1;
+        let bronze_reward = genesis
+            .masternode_rewards
+            .iter()
+            .find(|(a, _)| a == "TIME0bronze")
+            .unwrap()
+            .1;
 
-        assert_eq!(
-            hex::encode(testnet.hash()),
-            GenesisBlock::TESTNET_GENESIS_HASH,
-            "Testnet genesis hash mismatch! Update TESTNET_GENESIS_HASH constant."
-        );
-
-        assert_eq!(
-            hex::encode(mainnet.hash()),
-            GenesisBlock::MAINNET_GENESIS_HASH,
-            "Mainnet genesis hash mismatch! Update MAINNET_GENESIS_HASH constant."
-        );
+        // Bronze should get roughly 2x free's reward
+        assert!(bronze_reward > free_reward);
+        assert_eq!(free_reward + bronze_reward, genesis.header.block_reward);
     }
 }

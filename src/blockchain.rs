@@ -100,29 +100,14 @@ impl Blockchain {
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
 
-        // Get the canonical genesis for this network
-        let expected_hash = GenesisBlock::expected_hash(self.network_type);
-
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
         if height > 0 {
-            // Verify the genesis block matches canonical
+            // Verify the genesis block structure
             if let Ok(genesis) = self.get_block_by_height(0).await {
-                if genesis.hash() != expected_hash {
-                    let expected = hex::encode(expected_hash);
-                    let actual = hex::encode(genesis.hash());
-                    tracing::error!(
-                        "❌ FATAL: Local genesis block does not match network genesis!"
-                    );
-                    tracing::error!("❌ Expected: {}", expected);
-                    tracing::error!("❌ Got:      {}", actual);
-                    tracing::error!(
-                        "❌ Delete database directory and restart to sync correct chain"
-                    );
-                    return Err(format!(
-                        "Genesis mismatch - expected {}, got {}",
-                        expected, actual
-                    ));
+                if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+                    tracing::error!("❌ FATAL: Local genesis block is invalid: {}", e);
+                    return Err(format!("Genesis verification failed: {}", e));
                 }
             }
             *self.current_height.write().await = height;
@@ -137,18 +122,9 @@ impl Blockchain {
             .map_err(|e| e.to_string())?
         {
             if let Ok(genesis) = self.get_block_by_height(0).await {
-                if genesis.hash() != expected_hash {
-                    let expected = hex::encode(expected_hash);
-                    let actual = hex::encode(genesis.hash());
-                    tracing::error!(
-                        "❌ FATAL: Local genesis does not match network! Expected: {}, got: {}",
-                        expected,
-                        actual
-                    );
-                    return Err(format!(
-                        "Genesis mismatch - expected {}, got {}",
-                        expected, actual
-                    ));
+                if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+                    tracing::error!("❌ FATAL: Local genesis is invalid: {}", e);
+                    return Err(format!("Genesis verification failed: {}", e));
                 }
             }
             *self.current_height.write().await = 0;
@@ -396,6 +372,7 @@ impl Blockchain {
                 block_reward: BLOCK_REWARD_SATOSHIS,
                 leader: String::new(),
                 attestation_root: [0u8; 32],
+                masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
             },
             transactions: vec![coinbase],
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
@@ -555,13 +532,9 @@ impl Blockchain {
             "Cannot produce blocks: no genesis block. Sync from peers first.".to_string()
         })?;
 
-        let expected_hash = GenesisBlock::expected_hash(self.network_type);
-        if genesis.hash() != expected_hash {
-            return Err(format!(
-                "Cannot produce blocks: genesis mismatch. Expected {}, got {}",
-                hex::encode(expected_hash),
-                hex::encode(genesis.hash())
-            ));
+        // Verify genesis structure
+        if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+            return Err(format!("Cannot produce blocks: invalid genesis - {}", e));
         }
 
         // Get previous block hash
@@ -633,6 +606,17 @@ impl Blockchain {
             timestamp,
         };
 
+        // Count masternodes by tier
+        let mut tier_counts = crate::block::types::MasternodeTierCounts::default();
+        for mn in &masternodes {
+            match mn.masternode.tier {
+                crate::types::MasternodeTier::Free => tier_counts.free += 1,
+                crate::types::MasternodeTier::Bronze => tier_counts.bronze += 1,
+                crate::types::MasternodeTier::Silver => tier_counts.silver += 1,
+                crate::types::MasternodeTier::Gold => tier_counts.gold += 1,
+            }
+        }
+
         // Build transaction list: coinbase + finalized transactions
         let mut all_txs = vec![coinbase.clone()];
         all_txs.extend(finalized_txs);
@@ -647,6 +631,7 @@ impl Blockchain {
                 block_reward: total_reward,
                 leader: String::new(),
                 attestation_root: [0u8; 32],
+                masternode_tiers: tier_counts,
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
@@ -1095,19 +1080,15 @@ impl Blockchain {
                 }
             }
 
-            // Verify genesis matches expected hash from JSON
-            let expected_hash = GenesisBlock::expected_hash(self.network_type);
-            if block.hash() != expected_hash {
-                return Err(format!(
-                    "Genesis block hash mismatch: expected {}, got {}",
-                    hex::encode(expected_hash),
-                    hex::encode(block.hash())
-                ));
+            // Verify genesis structure
+            if let Err(e) = GenesisBlock::verify_structure(&block) {
+                return Err(format!("Invalid genesis block: {}", e));
             }
 
             tracing::info!(
-                "✅ Received valid genesis block: {}",
-                hex::encode(block.hash())
+                "✅ Received valid genesis block: {} (masternodes: {})",
+                hex::encode(block.hash()),
+                block.header.masternode_tiers.total()
             );
 
             // Save genesis block
