@@ -537,7 +537,7 @@ async fn maintain_peer_connection(
     port: u16,
     connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
-    _blockchain: Arc<Blockchain>,
+    blockchain: Arc<Blockchain>,
     _attestation_system: Arc<HeartbeatAttestationSystem>,
     _peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
@@ -555,11 +555,12 @@ async fn maintain_peer_connection(
     connection_manager.mark_connected(&peer_ip);
 
     // Run the message loop which handles ping/pong and routes other messages
-    // Pass peer_registry and masternode_registry so it can register incoming masternodes
+    // Pass peer_registry, masternode_registry, and blockchain so it can process block syncs
     let result = peer_conn
-        .run_message_loop_with_registry_and_masternode(
+        .run_message_loop_with_registry_masternode_and_blockchain(
             peer_registry.clone(),
             masternode_registry.clone(),
+            blockchain.clone(),
         )
         .await;
 

@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
+use crate::blockchain::Blockchain;
 use crate::network::message::NetworkMessage;
 
 /// Direction of connection establishment
@@ -525,6 +526,305 @@ impl PeerConnection {
             "🔌 [{:?}] Message loop ended for {}",
             self.direction, self.peer_ip
         );
+        Ok(())
+    }
+
+    /// Run the unified message loop with masternode registry AND blockchain integration
+    /// This is used for outbound connections that need to receive block sync responses
+    pub async fn run_message_loop_with_registry_masternode_and_blockchain(
+        mut self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+        blockchain: Arc<Blockchain>,
+    ) -> Result<(), String> {
+        let mut ping_interval = interval(Self::PING_INTERVAL);
+        let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
+        let mut buffer = String::new();
+
+        info!(
+            "🔄 [{:?}] Starting message loop for {} (port: {})",
+            self.direction, self.peer_ip, self.remote_port
+        );
+
+        // Register this outbound connection in the peer registry so sync can reach it
+        peer_registry
+            .register_peer_shared(self.peer_ip.clone(), self.shared_writer())
+            .await;
+        info!(
+            "📝 [{:?}] Registered {} in PeerConnectionRegistry for sync",
+            self.direction, self.peer_ip
+        );
+
+        // Send initial handshake (required by protocol)
+        let handshake = NetworkMessage::Handshake {
+            magic: *b"TIME",
+            protocol_version: 1,
+            network: "mainnet".to_string(),
+        };
+
+        if let Err(e) = self.send_message(&handshake).await {
+            error!(
+                "❌ [{:?}] Failed to send handshake to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        info!(
+            "🤝 [{:?}] Sent handshake to {}",
+            self.direction, self.peer_ip
+        );
+
+        // Send initial ping
+        if let Err(e) = self.send_ping().await {
+            error!(
+                "❌ [{:?}] Failed to send initial ping to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        loop {
+            tokio::select! {
+                // Receive messages from peer
+                result = self.reader.read_line(&mut buffer) => {
+                    match result {
+                        Ok(0) => {
+                            info!("🔌 [{:?}] Connection to {} closed by peer (EOF)",
+                                  self.direction, self.peer_ip);
+                            break;
+                        }
+                        Ok(_) => {
+                            if let Err(e) = self.handle_message_with_blockchain(&buffer, &peer_registry, &masternode_registry, &blockchain).await {
+                                warn!("⚠️ [{:?}] Error handling message from {}: {}",
+                                      self.direction, self.peer_ip, e);
+                            }
+                            buffer.clear();
+                        }
+                        Err(e) => {
+                            error!("❌ [{:?}] Error reading from {}: {}",
+                                   self.direction, self.peer_ip, e);
+                            break;
+                        }
+                    }
+                }
+
+                // Send periodic pings
+                _ = ping_interval.tick() => {
+                    if let Err(e) = self.send_ping().await {
+                        error!("❌ [{:?}] Failed to send ping to {}: {}",
+                               self.direction, self.peer_ip, e);
+                        break;
+                    }
+                }
+
+                // Check for timeout
+                _ = timeout_check.tick() => {
+                    if self.should_disconnect().await {
+                        error!("❌ [{:?}] Disconnecting {} due to timeout",
+                               self.direction, self.peer_ip);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!(
+            "🔌 [{:?}] Message loop ended for {}",
+            self.direction, self.peer_ip
+        );
+        Ok(())
+    }
+
+    /// Handle a single message with blockchain access for block sync
+    async fn handle_message_with_blockchain(
+        &self,
+        line: &str,
+        _peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        masternode_registry: &Arc<crate::masternode_registry::MasternodeRegistry>,
+        blockchain: &Arc<Blockchain>,
+    ) -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+
+        let message: NetworkMessage =
+            serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
+
+        match &message {
+            NetworkMessage::Ping { nonce, timestamp } => {
+                self.handle_ping(*nonce, *timestamp).await?;
+            }
+            NetworkMessage::Pong { nonce, timestamp } => {
+                self.handle_pong(*nonce, *timestamp).await?;
+            }
+            NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
+                // Handle block sync response - THIS IS THE KEY ADDITION
+                let block_count = blocks.len();
+                if block_count == 0 {
+                    debug!(
+                        "📥 [{:?}] Received empty blocks response from {}",
+                        self.direction, self.peer_ip
+                    );
+                } else {
+                    let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
+                    let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
+                    let our_height = blockchain.get_height().await;
+
+                    info!(
+                        "📥 [{:?}] Received {} blocks (height {}-{}) from {} (our height: {})",
+                        self.direction,
+                        block_count,
+                        start_height,
+                        end_height,
+                        self.peer_ip,
+                        our_height
+                    );
+
+                    // Apply blocks sequentially
+                    let mut added = 0;
+                    let mut skipped = 0;
+                    for block in blocks {
+                        match blockchain.add_block_with_fork_handling(block.clone()).await {
+                            Ok(true) => added += 1,
+                            Ok(false) => skipped += 1,
+                            Err(e) => {
+                                debug!(
+                                    "⏭️ [{:?}] Skipped block {}: {}",
+                                    self.direction, block.header.height, e
+                                );
+                                skipped += 1;
+                            }
+                        }
+                    }
+                    if added > 0 {
+                        info!(
+                            "✅ [{:?}] Synced {} blocks from {} (skipped {})",
+                            self.direction, added, self.peer_ip, skipped
+                        );
+                    }
+                }
+            }
+            NetworkMessage::BlockAnnouncement(block) => {
+                // Handle new block announcement
+                let block_height = block.header.height;
+                let our_height = blockchain.get_height().await;
+
+                info!(
+                    "📦 [{:?}] Received block announcement {} from {} (our height: {})",
+                    self.direction, block_height, self.peer_ip, our_height
+                );
+
+                match blockchain.add_block_with_fork_handling(block.clone()).await {
+                    Ok(true) => {
+                        info!(
+                            "✅ [{:?}] Added block {} from {}",
+                            self.direction, block_height, self.peer_ip
+                        );
+                    }
+                    Ok(false) => {
+                        debug!(
+                            "⏭️ [{:?}] Skipped block {} (already have or invalid)",
+                            self.direction, block_height
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            "⏭️ [{:?}] Skipped block {}: {}",
+                            self.direction, block_height, e
+                        );
+                    }
+                }
+            }
+            NetworkMessage::MasternodeAnnouncement {
+                address,
+                reward_address,
+                tier,
+                public_key,
+            } => {
+                // Register masternode from announcement
+                let masternode = crate::types::Masternode {
+                    address: address.clone(),
+                    wallet_address: reward_address.clone(),
+                    tier: tier.clone(),
+                    public_key: *public_key,
+                    collateral: 0,
+                    registered_at: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                };
+                if let Err(e) = masternode_registry
+                    .register(masternode, reward_address.clone())
+                    .await
+                {
+                    warn!(
+                        "⚠️ [{:?}] Failed to register masternode {} from announcement: {:?}",
+                        self.direction, address, e
+                    );
+                } else {
+                    info!(
+                        "✅ [{:?}] Registered masternode {} from announcement",
+                        self.direction, address
+                    );
+                }
+            }
+            NetworkMessage::MasternodesResponse(masternodes) => {
+                // Register all masternodes from response
+                info!(
+                    "📥 [{:?}] Processing MasternodesResponse from {} with {} masternode(s)",
+                    self.direction,
+                    self.peer_ip,
+                    masternodes.len()
+                );
+
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+
+                let mut registered = 0;
+                for mn_data in masternodes {
+                    let masternode = crate::types::Masternode {
+                        address: mn_data.address.clone(),
+                        wallet_address: mn_data.reward_address.clone(),
+                        tier: mn_data.tier.clone(),
+                        public_key: mn_data.public_key,
+                        collateral: 0,
+                        registered_at: now,
+                    };
+
+                    if masternode_registry
+                        .register(masternode, mn_data.reward_address.clone())
+                        .await
+                        .is_ok()
+                    {
+                        registered += 1;
+                    }
+                }
+
+                if registered > 0 {
+                    info!(
+                        "✅ [{:?}] Registered {} masternode(s) from response",
+                        self.direction, registered
+                    );
+                }
+            }
+            NetworkMessage::GetMasternodes => {
+                debug!(
+                    "📥 [{:?}] Received GetMasternodes request from {}",
+                    self.direction, self.peer_ip
+                );
+            }
+            _ => {
+                debug!(
+                    "📨 [{:?}] Received other message from {}",
+                    self.direction, self.peer_ip
+                );
+            }
+        }
+
         Ok(())
     }
 
