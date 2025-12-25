@@ -750,6 +750,35 @@ impl PeerConnection {
                     }
                 }
             }
+            NetworkMessage::BlockHeightResponse(peer_height) => {
+                // Handle peer's height response for fork detection
+                let our_height = blockchain.get_height().await;
+
+                if *peer_height > our_height + 1 {
+                    // Peer is ahead - we might need to sync
+                    info!(
+                        "📊 [{:?}] Peer {} has height {} (we have {}), triggering sync",
+                        self.direction, self.peer_ip, peer_height, our_height
+                    );
+
+                    // Request missing blocks
+                    let start = our_height.saturating_add(1);
+                    let end = std::cmp::min(start + 500, *peer_height);
+                    let get_blocks = NetworkMessage::GetBlocks(start, end);
+                    if let Err(e) = self.send_message(&get_blocks).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to request blocks from {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
+                } else if *peer_height < our_height.saturating_sub(10) {
+                    // Peer is significantly behind - might be on a fork
+                    debug!(
+                        "📊 [{:?}] Peer {} is behind: height {} vs our {}",
+                        self.direction, self.peer_ip, peer_height, our_height
+                    );
+                }
+            }
             NetworkMessage::MasternodeAnnouncement {
                 address,
                 reward_address,
