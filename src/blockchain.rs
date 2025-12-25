@@ -343,41 +343,46 @@ impl Blockchain {
 
     #[allow(dead_code)]
     async fn create_genesis_block(&self) -> Result<Block, String> {
-        let masternodes = self.masternode_registry.list_active().await;
-        let mut outputs = Vec::new();
-        let rewards = self.calculate_rewards_from_info(&masternodes);
+        use crate::block::genesis::{GenesisBlock, GenesisMasternode};
 
-        for (address, amount) in &rewards {
-            outputs.push(TxOutput {
-                value: *amount,
-                script_pubkey: address.as_bytes().to_vec(),
-            });
+        let masternodes_info = self.masternode_registry.list_active().await;
+
+        // Convert to GenesisMasternode format
+        let genesis_masternodes: Vec<GenesisMasternode> = masternodes_info
+            .iter()
+            .map(|mn| GenesisMasternode {
+                address: mn.masternode.wallet_address.clone(),
+                tier: mn.masternode.tier.clone(),
+            })
+            .collect();
+
+        // Check minimum masternodes
+        if genesis_masternodes.len() < GenesisBlock::MIN_MASTERNODES_FOR_GENESIS {
+            return Err(format!(
+                "Need {} masternodes to generate genesis, only {} active",
+                GenesisBlock::MIN_MASTERNODES_FOR_GENESIS,
+                genesis_masternodes.len()
+            ));
         }
 
-        let coinbase = Transaction {
-            version: 1,
-            inputs: vec![],
-            outputs,
-            lock_time: 0,
-            timestamp: self.genesis_timestamp(),
-        };
+        // Get leader (first masternode or self)
+        let leader = genesis_masternodes
+            .first()
+            .map(|mn| mn.address.clone())
+            .unwrap_or_else(|| "genesis".to_string());
 
-        let block = Block {
-            header: BlockHeader {
-                version: 1,
-                height: 0,
-                previous_hash: [0u8; 32],
-                merkle_root: coinbase.txid(),
-                timestamp: self.genesis_timestamp(),
-                block_reward: BLOCK_REWARD_SATOSHIS,
-                leader: String::new(),
-                attestation_root: [0u8; 32],
-                masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
-            },
-            transactions: vec![coinbase],
-            masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
-            time_attestations: vec![],
-        };
+        // Generate using the template system
+        let block = GenesisBlock::generate_with_masternodes(
+            self.network_type,
+            genesis_masternodes,
+            &leader,
+        );
+
+        tracing::info!(
+            "📦 Generated genesis block with {} masternodes, reward: {} satoshis",
+            masternodes_info.len(),
+            block.header.block_reward
+        );
 
         Ok(block)
     }

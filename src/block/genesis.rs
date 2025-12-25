@@ -7,7 +7,7 @@
 //! masternode tiers and rewards are set at runtime based on participants.
 
 use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
-use crate::types::{Transaction, TxOutput};
+use crate::types::{MasternodeTier, Transaction, TxOutput};
 use crate::NetworkType;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -57,26 +57,6 @@ pub struct MasternodeCountsTemplate {
 pub struct GenesisMasternode {
     pub address: String,
     pub tier: MasternodeTier,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum MasternodeTier {
-    Free,
-    Bronze,
-    Silver,
-    Gold,
-}
-
-impl MasternodeTier {
-    /// Get reward share multiplier for this tier
-    pub fn reward_multiplier(&self) -> u64 {
-        match self {
-            MasternodeTier::Free => 1,
-            MasternodeTier::Bronze => 2,
-            MasternodeTier::Silver => 4,
-            MasternodeTier::Gold => 8,
-        }
-    }
 }
 
 /// Genesis block verification and generation
@@ -278,11 +258,8 @@ impl GenesisBlock {
             return vec![];
         }
 
-        // Calculate total weight
-        let total_weight: u64 = masternodes
-            .iter()
-            .map(|mn| mn.tier.reward_multiplier())
-            .sum();
+        // Calculate total weight using tier's reward_weight
+        let total_weight: u64 = masternodes.iter().map(|mn| mn.tier.reward_weight()).sum();
 
         if total_weight == 0 {
             return vec![];
@@ -297,7 +274,7 @@ impl GenesisBlock {
                 // Last masternode gets remainder to avoid rounding errors
                 total_reward - distributed
             } else {
-                (total_reward * mn.tier.reward_multiplier()) / total_weight
+                (total_reward * mn.tier.reward_weight()) / total_weight
             };
             rewards.push((mn.address.clone(), share));
             distributed += share;
