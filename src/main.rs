@@ -215,8 +215,13 @@ async fn main() {
         }
         "sled" => {
             println!("✓ Using Sled persistent storage");
-            println!("  └─ Data directory: {}", config.storage.data_dir);
-            match storage::SledUtxoStorage::new(&config.storage.data_dir) {
+            let db_dir = format!("{}/db", config.storage.data_dir);
+            println!("  └─ Data directory: {}", db_dir);
+            // Create db directory if it doesn't exist
+            if let Err(e) = std::fs::create_dir_all(&db_dir) {
+                println!("  ⚠ Failed to create db directory: {}", e);
+            }
+            match storage::SledUtxoStorage::new(&db_dir) {
                 Ok(s) => Arc::new(s),
                 Err(e) => {
                     println!("  ⚠ Sled failed: {}", e);
@@ -257,7 +262,8 @@ async fn main() {
     let cache_size = calculate_cache_size();
 
     // Initialize block storage
-    let block_storage_path = format!("{}/blocks", config.storage.data_dir);
+    let db_dir = format!("{}/db", config.storage.data_dir);
+    let block_storage_path = format!("{}/blocks", db_dir);
     let block_storage = match sled::Config::new()
         .path(&block_storage_path)
         .cache_capacity(cache_size)
@@ -275,7 +281,7 @@ async fn main() {
     // Initialize peer manager
     let peer_db = Arc::new(
         sled::Config::new()
-            .path(format!("{}/peers", config.storage.data_dir))
+            .path(format!("{}/peers", db_dir))
             .cache_capacity(cache_size)
             .open()
             .map_err(|e| format!("Failed to open peer database: {}", e))
@@ -288,7 +294,7 @@ async fn main() {
     ));
 
     // Initialize masternode registry
-    let registry_db_path = format!("{}/registry", config.storage.data_dir);
+    let registry_db_path = format!("{}/registry", db_dir);
     let registry_db = Arc::new(
         match sled::Config::new()
             .path(&registry_db_path)
