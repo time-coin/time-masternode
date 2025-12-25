@@ -341,7 +341,6 @@ impl Blockchain {
         }
     }
 
-    #[allow(dead_code)]
     async fn create_genesis_block(&self) -> Result<Block, String> {
         use crate::block::genesis::{GenesisBlock, GenesisMasternode};
 
@@ -532,10 +531,28 @@ impl Blockchain {
     pub async fn produce_block(&self) -> Result<Block, String> {
         use crate::block::genesis::GenesisBlock;
 
-        // Verify genesis block exists and is correct before producing any blocks
-        let genesis = self.get_block_by_height(0).await.map_err(|_| {
-            "Cannot produce blocks: no genesis block. Sync from peers first.".to_string()
-        })?;
+        // Check if genesis block exists
+        let genesis_result = self.get_block_by_height(0).await;
+
+        if genesis_result.is_err() {
+            // No genesis block - try to create one if we have enough masternodes
+            tracing::info!("📦 No genesis block found - attempting to create one");
+
+            let genesis_block = self.create_genesis_block().await?;
+
+            // Add the genesis block to our chain
+            self.add_block(genesis_block.clone()).await?;
+
+            tracing::info!(
+                "✅ Genesis block created and added at height 0, hash: {:?}",
+                genesis_block.header.merkle_root
+            );
+
+            // Return the genesis block as the produced block
+            return Ok(genesis_block);
+        }
+
+        let genesis = genesis_result.unwrap();
 
         // Verify genesis structure
         if let Err(e) = GenesisBlock::verify_structure(&genesis) {
