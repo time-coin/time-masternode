@@ -136,6 +136,20 @@ pub enum NetworkMessage {
         voter_id: String,
         signature: Vec<u8>,
     },
+    // Chain comparison for fork detection
+    GetChainWork,
+    ChainWorkResponse {
+        height: u64,
+        tip_hash: [u8; 32],
+        cumulative_work: u128,
+    },
+    // Request chain work at specific height for fork resolution
+    GetChainWorkAt(u64),
+    ChainWorkAtResponse {
+        height: u64,
+        block_hash: [u8; 32],
+        cumulative_work: u128,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -215,6 +229,10 @@ impl NetworkMessage {
             NetworkMessage::TSCDBlockProposal { .. } => "TSCDBlockProposal",
             NetworkMessage::TSCDPrepareVote { .. } => "TSCDPrepareVote",
             NetworkMessage::TSCDPrecommitVote { .. } => "TSCDPrecommitVote",
+            NetworkMessage::GetChainWork => "GetChainWork",
+            NetworkMessage::ChainWorkResponse { .. } => "ChainWorkResponse",
+            NetworkMessage::GetChainWorkAt(_) => "GetChainWorkAt",
+            NetworkMessage::ChainWorkAtResponse { .. } => "ChainWorkAtResponse",
         }
     }
 
@@ -251,6 +269,8 @@ impl NetworkMessage {
                 | NetworkMessage::BlockResponse(_)
                 | NetworkMessage::TransactionVoteResponse { .. }
                 | NetworkMessage::FinalityVoteResponse { .. }
+                | NetworkMessage::ChainWorkResponse { .. }
+                | NetworkMessage::ChainWorkAtResponse { .. }
         )
     }
 

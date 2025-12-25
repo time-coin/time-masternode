@@ -95,11 +95,14 @@ impl ConnectionStateMachine {
             (Some(ConnectionState::Connected { .. }), ConnectionState::Reconnecting { .. }) => true,
             (Some(ConnectionState::Connected { .. }), ConnectionState::Disconnected) => true,
 
-            // From Reconnecting, can go to Connecting or Disconnected
+            // From Reconnecting, can go to Connecting, Disconnected, or another Reconnecting (for backoff increment)
             (Some(ConnectionState::Reconnecting { .. }), ConnectionState::Connecting { .. }) => {
                 true
             }
             (Some(ConnectionState::Reconnecting { .. }), ConnectionState::Disconnected) => true,
+            (Some(ConnectionState::Reconnecting { .. }), ConnectionState::Reconnecting { .. }) => {
+                true
+            }
 
             // Invalid transitions
             _ => false,

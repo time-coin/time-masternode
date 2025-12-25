@@ -480,6 +480,41 @@ impl PeerManager {
         }
     }
 
+    /// Get all peers including banned ones for critical sync operations
+    /// Banned peers can still provide valid block data for chain synchronization
+    /// This allows the network to recover from partitions where good peers got banned
+    #[allow(dead_code)]
+    pub async fn get_peers_for_sync(&self) -> Vec<String> {
+        self.peer_info
+            .read()
+            .await
+            .iter()
+            .map(|p| p.address.clone())
+            .collect()
+    }
+
+    /// Get peers with reputation above a threshold (for non-critical operations)
+    #[allow(dead_code)]
+    pub async fn get_trusted_peers(&self, min_reputation: i32) -> Vec<String> {
+        self.peer_info
+            .read()
+            .await
+            .iter()
+            .filter(|p| p.reputation_score >= min_reputation)
+            .map(|p| p.address.clone())
+            .collect()
+    }
+
+    /// Temporarily allow a banned peer for sync (emergency recovery)
+    /// This doesn't change their reputation, just allows sync messages
+    #[allow(dead_code)]
+    pub async fn is_allowed_for_sync(&self, peer_address: &str) -> bool {
+        // All known peers are allowed for sync, even banned ones
+        // The sync logic validates blocks cryptographically anyway
+        let peers = self.peers.read().await;
+        peers.contains(peer_address)
+    }
+
     /// Authenticate peer with combined checks:
     /// 1. Must be masternode (sufficient stake)
     /// 2. Must not exceed rate limits

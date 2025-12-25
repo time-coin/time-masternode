@@ -1029,6 +1029,63 @@ async fn handle_peer(
                                         }
                                     }
                                 }
+                                NetworkMessage::GetChainWork => {
+                                    // Respond with our chain work info
+                                    let height = blockchain.get_height().await;
+                                    let tip_hash = blockchain.get_block_hash_at_height(height).await.unwrap_or([0u8; 32]);
+                                    let cumulative_work = blockchain.get_cumulative_work().await;
+
+                                    let reply = NetworkMessage::ChainWorkResponse {
+                                        height,
+                                        tip_hash,
+                                        cumulative_work,
+                                    };
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
+                                    tracing::debug!("📤 Sent chain work response to {}: height={}, work={}", peer.addr, height, cumulative_work);
+                                }
+                                NetworkMessage::GetChainWorkAt(height) => {
+                                    // Respond with chain work at specific height
+                                    let block_hash = blockchain.get_block_hash_at_height(*height).await.unwrap_or([0u8; 32]);
+                                    let cumulative_work = blockchain.get_work_at_height(*height).await.unwrap_or(0);
+
+                                    let reply = NetworkMessage::ChainWorkAtResponse {
+                                        height: *height,
+                                        block_hash,
+                                        cumulative_work,
+                                    };
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
+                                    tracing::debug!("📤 Sent chain work at height {} to {}", height, peer.addr);
+                                }
+                                NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {
+                                    // Handle response - check if peer has more work and potentially trigger reorg
+                                    let our_height = blockchain.get_height().await;
+                                    let our_work = blockchain.get_cumulative_work().await;
+
+                                    if *cumulative_work > our_work {
+                                        tracing::info!(
+                                            "📊 Peer {} has more chain work: {} vs our {} (heights: {} vs {})",
+                                            peer.addr, cumulative_work, our_work, height, our_height
+                                        );
+
+                                        // Check for fork and request blocks if needed
+                                        if let Some(fork_height) = blockchain.detect_fork(*height, *tip_hash).await {
+                                            tracing::warn!(
+                                                "🔀 Fork detected at height {} with {}, requesting blocks",
+                                                fork_height, peer.addr
+                                            );
+
+                                            let request = NetworkMessage::GetBlockRange {
+                                                start_height: fork_height,
+                                                end_height: *height,
+                                            };
+                                            let _ = peer_registry.send_to_peer(&ip_str, request).await;
+                                        }
+                                    }
+                                }
+                                NetworkMessage::ChainWorkAtResponse { .. } => {
+                                    // Handle via response system - handled by request/response pattern
+                                    peer_registry.handle_response(&ip_str, msg).await;
+                                }
                                 _ => {}
                             }
                         } else {

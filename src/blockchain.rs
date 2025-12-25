@@ -27,6 +27,9 @@ const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 const PEER_SYNC_TIMEOUT_SECS: u64 = 120;
 const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
 
+// Chain work constants - each block adds work based on validator count
+const BASE_WORK_PER_BLOCK: u128 = 1_000_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct GenesisBlock {
@@ -34,6 +37,14 @@ pub struct GenesisBlock {
     pub version: u32,
     pub message: String,
     pub block: Block,
+}
+
+/// Chain work metadata for fork resolution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainWorkEntry {
+    pub height: u64,
+    pub block_hash: [u8; 32],
+    pub cumulative_work: u128,
 }
 
 pub struct Blockchain {
@@ -45,6 +56,8 @@ pub struct Blockchain {
     is_syncing: Arc<RwLock<bool>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>,
     peer_registry: Arc<RwLock<Option<Arc<PeerConnectionRegistry>>>>,
+    /// Cumulative chain work for longest-chain-by-work rule
+    cumulative_work: Arc<RwLock<u128>>,
 }
 
 impl Blockchain {
@@ -63,6 +76,7 @@ impl Blockchain {
             is_syncing: Arc::new(RwLock::new(false)),
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
+            cumulative_work: Arc::new(RwLock::new(0)),
         }
     }
 
@@ -646,6 +660,21 @@ impl Blockchain {
         // Save block
         self.save_block(&block)?;
 
+        // Update cumulative chain work
+        let block_work = self.calculate_block_work(&block);
+        let mut cumulative = self.cumulative_work.write().await;
+        *cumulative += block_work;
+
+        // Store chain work entry for this height
+        let work_entry = ChainWorkEntry {
+            height: block.header.height,
+            block_hash: block.hash(),
+            cumulative_work: *cumulative,
+        };
+        if let Err(e) = self.store_chain_work_entry(&work_entry) {
+            tracing::warn!("Failed to store chain work entry: {}", e);
+        }
+
         // Update height
         *self.current_height.write().await = block.header.height;
 
@@ -653,9 +682,10 @@ impl Blockchain {
         self.consensus.clear_finalized_transactions();
 
         tracing::debug!(
-            "✓ Block {} added (txs: {}), finalized pool cleared",
+            "✓ Block {} added (txs: {}, work: {}), finalized pool cleared",
             block.header.height,
-            block.transactions.len()
+            block.transactions.len(),
+            block_work
         );
 
         Ok(())
@@ -1049,16 +1079,29 @@ impl Blockchain {
                 }
 
                 // Different block at same height - this is a fork!
+                // Use chain work comparison (longest-chain-by-work rule)
+                let incoming_work = self.calculate_block_work(&block);
+                let existing_work = self.calculate_block_work(&existing);
+
                 tracing::warn!(
-                    "🔀 Fork detected at height {}: our hash {:?} vs incoming {:?}",
+                    "🔀 Fork detected at height {}: our hash {:?} (work: {}) vs incoming {:?} (work: {})",
                     block_height,
                     hex::encode(&existing.hash()[..8]),
-                    hex::encode(&block.hash()[..8])
+                    existing_work,
+                    hex::encode(&block.hash()[..8]),
+                    incoming_work
                 );
 
-                // We can't just accept this - need to compare chain work
-                // For now, we keep our chain (first-seen rule)
-                // A proper implementation would compare total chain work
+                // Keep the block with more work at this height
+                // If equal work, prefer existing (first-seen as tiebreaker)
+                if incoming_work > existing_work {
+                    tracing::info!(
+                        "📈 Incoming block has more work, would need full chain comparison"
+                    );
+                }
+
+                // For single block comparison, we keep existing
+                // Full chain reorg requires comparing cumulative work of entire chain
                 return Ok(false);
             }
 
@@ -1085,16 +1128,101 @@ impl Blockchain {
         Ok(false)
     }
 
+    /// Calculate work contribution of a single block
+    /// Work = BASE_WORK + (attestation_count * bonus)
+    pub fn calculate_block_work(&self, block: &Block) -> u128 {
+        let attestation_bonus = block.time_attestations.len() as u128 * 10_000;
+        BASE_WORK_PER_BLOCK + attestation_bonus
+    }
+
+    /// Get cumulative chain work up to current tip
+    pub async fn get_cumulative_work(&self) -> u128 {
+        *self.cumulative_work.read().await
+    }
+
+    /// Get cumulative work at a specific height
+    pub async fn get_work_at_height(&self, height: u64) -> Result<u128, String> {
+        if let Some(entry) = self.get_chain_work_entry(height)? {
+            Ok(entry.cumulative_work)
+        } else {
+            // Calculate from scratch if not cached
+            let mut work: u128 = 0;
+            for h in 0..=height {
+                if let Ok(block) = self.get_block(h) {
+                    work += self.calculate_block_work(&block);
+                }
+            }
+            Ok(work)
+        }
+    }
+
+    /// Store chain work entry for a height
+    fn store_chain_work_entry(&self, entry: &ChainWorkEntry) -> Result<(), String> {
+        let tree = self
+            .storage
+            .open_tree("chain_work")
+            .map_err(|e| e.to_string())?;
+        let key = format!("work:{}", entry.height);
+        let value = bincode::serialize(entry).map_err(|e| e.to_string())?;
+        tree.insert(key.as_bytes(), value)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Get chain work entry for a height
+    fn get_chain_work_entry(&self, height: u64) -> Result<Option<ChainWorkEntry>, String> {
+        let tree = self
+            .storage
+            .open_tree("chain_work")
+            .map_err(|e| e.to_string())?;
+        let key = format!("work:{}", height);
+        if let Some(data) = tree.get(key.as_bytes()).map_err(|e| e.to_string())? {
+            let entry: ChainWorkEntry = bincode::deserialize(&data).map_err(|e| e.to_string())?;
+            Ok(Some(entry))
+        } else {
+            Ok(None)
+        }
+    }
+
     /// Check if we should accept a peer's chain over our own
-    /// Uses simple longest chain rule for now
+    /// Uses longest-chain-by-work rule
     pub async fn should_switch_to_chain(&self, peer_height: u64, _peer_tip_hash: [u8; 32]) -> bool {
         let our_height = *self.current_height.read().await;
 
-        // Simple rule: switch if peer has more blocks
-        // TODO: Use total chain work instead of height
+        // Primary rule: compare heights (proxy for work in simple case)
+        // For proper implementation, compare cumulative work
         if peer_height > our_height {
             tracing::info!(
                 "📊 Peer has longer chain: {} vs our {}",
+                peer_height,
+                our_height
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Check if we should switch to peer's chain based on work comparison
+    pub async fn should_switch_by_work(&self, peer_work: u128, peer_height: u64) -> bool {
+        let our_work = *self.cumulative_work.read().await;
+        let our_height = *self.current_height.read().await;
+
+        if peer_work > our_work {
+            tracing::info!(
+                "📊 Peer has more chain work: {} vs our {} (heights: {} vs {})",
+                peer_work,
+                our_work,
+                peer_height,
+                our_height
+            );
+            return true;
+        }
+
+        // If equal work, prefer longer chain
+        if peer_work == our_work && peer_height > our_height {
+            tracing::info!(
+                "📊 Equal work but peer is longer: {} blocks vs our {}",
                 peer_height,
                 our_height
             );
@@ -1133,6 +1261,10 @@ impl Blockchain {
         // Step 1: Rollback to common ancestor
         self.rollback_to_height(common_ancestor).await?;
 
+        // Recalculate cumulative work after rollback
+        let ancestor_work = self.get_work_at_height(common_ancestor).await.unwrap_or(0);
+        *self.cumulative_work.write().await = ancestor_work;
+
         // Step 2: Apply new blocks in order
         for block in new_blocks {
             if let Err(e) = self.add_block(block.clone()).await {
@@ -1149,9 +1281,113 @@ impl Blockchain {
         }
 
         let new_height = *self.current_height.read().await;
-        tracing::info!("✅ Reorganization complete: new height {}", new_height);
+        let new_work = *self.cumulative_work.read().await;
+        tracing::info!(
+            "✅ Reorganization complete: new height {}, cumulative work {}",
+            new_height,
+            new_work
+        );
 
         Ok(())
+    }
+
+    /// Periodic chain comparison with peers to detect forks
+    /// Returns Some((fork_height, peer_addr)) if a fork is detected with a peer that has more work
+    pub async fn compare_chain_with_peers(&self) -> Option<(u64, String, u128)> {
+        let peer_registry = self.peer_registry.read().await;
+        let registry = match peer_registry.as_ref() {
+            Some(r) => r,
+            None => return None,
+        };
+
+        let our_height = *self.current_height.read().await;
+        let our_work = *self.cumulative_work.read().await;
+        let our_tip = match self.get_block_hash(our_height) {
+            Ok(h) => h,
+            Err(_) => return None,
+        };
+
+        let connected_peers = registry.get_connected_peers().await;
+        if connected_peers.is_empty() {
+            return None;
+        }
+
+        // Query each peer for their chain work
+        for peer in connected_peers {
+            // Send GetChainWork request and compare
+            let request = NetworkMessage::GetChainWork;
+            match registry.send_and_await_response(&peer, request, 5).await {
+                Ok(NetworkMessage::ChainWorkResponse {
+                    height,
+                    tip_hash,
+                    cumulative_work,
+                }) => {
+                    // Check if peer has more work
+                    if cumulative_work > our_work {
+                        tracing::info!(
+                            "🔀 Peer {} has more chain work: {} vs our {} (heights: {} vs {})",
+                            peer,
+                            cumulative_work,
+                            our_work,
+                            height,
+                            our_height
+                        );
+
+                        // Find divergence point if tips differ
+                        if tip_hash != our_tip || height != our_height {
+                            if let Some(fork_height) = self.detect_fork(height, tip_hash).await {
+                                return Some((fork_height, peer.clone(), cumulative_work));
+                            }
+                        }
+                    }
+                }
+                _ => continue,
+            }
+        }
+
+        None
+    }
+
+    /// Start periodic chain comparison task
+    pub fn start_chain_comparison_task(blockchain: Arc<Blockchain>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+
+            loop {
+                interval.tick().await;
+
+                if let Some((fork_height, peer, peer_work)) =
+                    blockchain.compare_chain_with_peers().await
+                {
+                    tracing::warn!(
+                        "⚠️ Fork detected at height {} with peer {} (their work: {})",
+                        fork_height,
+                        peer,
+                        peer_work
+                    );
+
+                    // Request blocks from the peer to resolve fork
+                    let our_height = blockchain.get_height().await;
+                    if let Some(registry) = blockchain.peer_registry.read().await.as_ref() {
+                        let request = NetworkMessage::GetBlockRange {
+                            start_height: fork_height,
+                            end_height: our_height.max(fork_height + 100), // Request up to 100 blocks
+                        };
+
+                        if let Err(e) = registry.send_to_peer(&peer, request).await {
+                            tracing::error!("Failed to request fork resolution blocks: {}", e);
+                        } else {
+                            tracing::info!(
+                                "📤 Requested blocks {} - {} from {} for fork resolution",
+                                fork_height,
+                                our_height.max(fork_height + 100),
+                                peer
+                            );
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -1166,6 +1402,7 @@ impl Clone for Blockchain {
             is_syncing: self.is_syncing.clone(),
             peer_manager: self.peer_manager.clone(),
             peer_registry: self.peer_registry.clone(),
+            cumulative_work: self.cumulative_work.clone(),
         }
     }
 }

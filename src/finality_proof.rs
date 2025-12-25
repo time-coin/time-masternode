@@ -139,12 +139,12 @@ mod tests {
     fn test_finality_threshold_calculation() {
         let _mgr = FinalityProofManager::new(1);
 
-        // 100 total weight requires 67 minimum
+        // 100 total weight requires 67 minimum (67% threshold with ceiling)
         let threshold = (100 * 67 + 99) / 100;
         assert_eq!(threshold, 67);
 
-        // 1000 total weight requires 670 minimum
+        // 1000 total weight: (67000 + 99) / 100 = 670
         let threshold = (1000 * 67 + 99) / 100;
-        assert_eq!(threshold, 671);
+        assert_eq!(threshold, 670);
     }
 }

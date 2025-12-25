@@ -870,7 +870,7 @@ async fn main() {
                             if height_after == height_before {
                                 let our_height = block_blockchain.get_height().await;
                                 let expected_height = block_blockchain.calculate_expected_height();
-                                
+
                                 // Before producing blocks locally, try to sync from connected peers
                                 let connected_peers = block_peer_registry.list_peers().await;
                                 if !connected_peers.is_empty() {
@@ -878,16 +878,16 @@ async fn main() {
                                         "🔄 Requesting blocks from {} connected peer(s) before fallback production",
                                         connected_peers.len()
                                     );
-                                    
+
                                     // Request blocks from all connected peers
                                     let get_blocks = NetworkMessage::GetBlocks(our_height + 1, expected_height);
                                     for peer_ip in &connected_peers {
                                         let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
                                     }
-                                    
+
                                     // Wait for blocks to arrive
                                     tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
-                                    
+
                                     let new_height = block_blockchain.get_height().await;
                                     if new_height > our_height {
                                         tracing::info!(
@@ -904,7 +904,7 @@ async fn main() {
                                         tracing::warn!("⚠️ Peer sync didn't provide blocks, falling back to local production");
                                     }
                                 }
-                                
+
                                 // Acquire block production lock (P2P best practice #8)
                                 if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                                     tracing::warn!("⚠️  Block production already in progress, skipping fallback catchup");

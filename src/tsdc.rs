@@ -429,9 +429,9 @@ impl TSCDConsensus {
         let best =
             candidates
                 .iter()
-                .max_by(|a, b| match b.0.header.height.cmp(&a.0.header.height) {
-                    Ordering::Equal => match b.0.header.timestamp.cmp(&a.0.header.timestamp) {
-                        Ordering::Equal => b.0.hash().cmp(&a.0.hash()),
+                .max_by(|a, b| match a.0.header.height.cmp(&b.0.header.height) {
+                    Ordering::Equal => match a.0.header.timestamp.cmp(&b.0.header.timestamp) {
+                        Ordering::Equal => a.0.hash().cmp(&b.0.hash()),
                         other => other,
                     },
                     other => other,
@@ -840,22 +840,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_leader_selection() {
+        use ed25519_dalek::SigningKey;
+
         let tsdc = TSCDConsensus::new(TSCDConfig::default());
+
+        // Create validators with VRF keys
+        let sk1 = SigningKey::from_bytes(&[1u8; 32]);
+        let sk2 = SigningKey::from_bytes(&[2u8; 32]);
 
         let validators = vec![
             TSCDValidator {
                 id: "validator1".to_string(),
-                public_key: vec![1, 2, 3],
+                public_key: sk1.verifying_key().to_bytes().to_vec(),
                 stake: 1000,
-                vrf_secret_key: None,
-                vrf_public_key: None,
+                vrf_secret_key: Some(sk1.clone()),
+                vrf_public_key: Some(sk1.verifying_key()),
             },
             TSCDValidator {
                 id: "validator2".to_string(),
-                public_key: vec![4, 5, 6],
+                public_key: sk2.verifying_key().to_bytes().to_vec(),
                 stake: 2000,
-                vrf_secret_key: None,
-                vrf_public_key: None,
+                vrf_secret_key: Some(sk2.clone()),
+                vrf_public_key: Some(sk2.verifying_key()),
             },
         ];
 
