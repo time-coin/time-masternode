@@ -439,7 +439,7 @@ impl Blockchain {
     ///
     /// NOTE: If peers don't have blocks, they'll be produced on TSDC schedule
     pub async fn sync_from_peers(&self) -> Result<(), String> {
-        let current = *self.current_height.read().await;
+        let mut current = *self.current_height.read().await;
         let expected = self.calculate_expected_height();
 
         if current >= expected {
@@ -461,61 +461,73 @@ impl Blockchain {
 
             if connected_peers.is_empty() {
                 tracing::warn!("⚠️  No connected peers to sync from");
-            } else {
-                tracing::info!(
-                    "📡 Requesting blocks from {} connected peer(s): {:?}",
-                    connected_peers.len(),
-                    connected_peers
-                );
+                return Err("No connected peers to sync from".to_string());
+            }
 
-                // First, query each peer's height so we know what they can provide
-                for peer in connected_peers.iter().take(5) {
-                    // Send height query first
-                    let _ = peer_registry
-                        .send_to_peer(peer, NetworkMessage::GetBlockHeight)
-                        .await;
-                }
+            tracing::info!(
+                "📡 Requesting blocks from {} connected peer(s): {:?}",
+                connected_peers.len(),
+                connected_peers
+            );
 
-                // Give peers a moment to respond with their heights
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Sync loop - keep requesting batches until caught up or timeout
+            let sync_start = std::time::Instant::now();
+            let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
 
-                // Request blocks from connected peers - request in smaller batches
-                // and let the responder cap at their actual height
-                let batch_end = (current + 1 + 500).min(expected); // Request up to 500 blocks at a time
-                for peer in connected_peers.iter().take(5) {
-                    let req = NetworkMessage::GetBlocks(current + 1, batch_end);
+            while current < expected && sync_start.elapsed() < max_sync_time {
+                // Request next batch of blocks
+                let batch_start = current + 1;
+                let batch_end = (batch_start + 500).min(expected);
+
+                // Request from multiple peers in parallel
+                for peer in connected_peers.iter().take(3) {
+                    let req = NetworkMessage::GetBlocks(batch_start, batch_end);
                     tracing::info!(
                         "📤 Requesting blocks {}-{} from {}",
-                        current + 1,
+                        batch_start,
                         batch_end,
                         peer
                     );
-                    match peer_registry.send_to_peer(peer, req).await {
-                        Ok(_) => tracing::info!("✅ GetBlocks request sent to {}", peer),
-                        Err(e) => tracing::warn!("❌ Failed to send GetBlocks to {}: {}", peer, e),
+                    if let Err(e) = peer_registry.send_to_peer(peer, req).await {
+                        tracing::warn!("❌ Failed to send GetBlocks to {}: {}", peer, e);
                     }
                 }
-            }
 
-            // Wait for blocks to arrive
-            let start = std::time::Instant::now();
-            while start.elapsed().as_secs() < PEER_SYNC_TIMEOUT_SECS {
-                tokio::time::sleep(std::time::Duration::from_secs(
-                    PEER_SYNC_CHECK_INTERVAL_SECS,
-                ))
-                .await;
-                let now_height = *self.current_height.read().await;
-                if now_height >= expected {
-                    tracing::info!("✓ Sync complete at height {}", now_height);
-                    return Ok(());
+                // Wait for blocks to arrive (with shorter timeout per batch)
+                let batch_start_time = std::time::Instant::now();
+                let batch_timeout = std::time::Duration::from_secs(15);
+                let mut last_height = current;
+
+                while batch_start_time.elapsed() < batch_timeout {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let now_height = *self.current_height.read().await;
+
+                    if now_height >= expected {
+                        tracing::info!("✓ Sync complete at height {}", now_height);
+                        return Ok(());
+                    }
+
+                    // Check if we made progress
+                    if now_height > last_height {
+                        tracing::debug!("📈 Progress: {} → {}", last_height, now_height);
+                        last_height = now_height;
+                    }
+
+                    // If we received all blocks in this batch, request next batch
+                    if now_height >= batch_end {
+                        break;
+                    }
                 }
 
+                // Update current height for next iteration
+                current = *self.current_height.read().await;
+
                 // Log progress periodically
-                let elapsed = start.elapsed().as_secs();
+                let elapsed = sync_start.elapsed().as_secs();
                 if elapsed > 0 && elapsed % 30 == 0 {
                     tracing::info!(
                         "⏳ Still syncing... height {} / {} ({}s elapsed)",
-                        now_height,
+                        current,
                         expected,
                         elapsed
                     );
@@ -524,6 +536,11 @@ impl Blockchain {
         }
 
         let final_height = *self.current_height.read().await;
+        if final_height >= expected {
+            tracing::info!("✓ Sync complete at height {}", final_height);
+            return Ok(());
+        }
+
         tracing::warn!(
             "⚠️  Sync timeout at height {} (target: {})",
             final_height,
