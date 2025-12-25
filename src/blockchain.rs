@@ -1318,8 +1318,6 @@ impl Blockchain {
             None => return None,
         };
 
-        let our_height = *self.current_height.read().await;
-
         let connected_peers = registry.get_connected_peers().await;
         if connected_peers.is_empty() {
             return None;
