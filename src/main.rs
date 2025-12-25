@@ -850,6 +850,13 @@ async fn main() {
                                     Ok(block) => {
                                         let block_height = block.header.height;
 
+                                        // Genesis block (height 0) is already added inside produce_block
+                                        if block_height == 0 {
+                                            tracing::info!("📦 Genesis block created, continuing to produce catchup blocks");
+                                            block_registry.broadcast_block(block).await;
+                                            continue;
+                                        }
+
                                         // Add block to our chain
                                         if let Err(e) = block_blockchain.add_block(block.clone()).await {
                                             tracing::error!("❌ Catchup block {} failed: {}", target_height, e);
@@ -956,6 +963,13 @@ async fn main() {
                                     match block_blockchain.produce_block().await {
                                         Ok(block) => {
                                             let block_height = block.header.height;
+
+                                            // Genesis block (height 0) is already added inside produce_block
+                                            if block_height == 0 {
+                                                tracing::info!("📦 Genesis block created, continuing to produce catchup blocks");
+                                                block_registry.broadcast_block(block).await;
+                                                continue;
+                                            }
 
                                             if let Err(e) = block_blockchain.add_block(block.clone()).await {
                                                 tracing::error!("❌ Fallback catchup block {} failed: {}", block_height, e);
