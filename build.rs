@@ -17,6 +17,7 @@ fn main() {
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
     println!("cargo:rustc-env=BUILD_DATE={}", build_date);
 
-    // Rerun if git HEAD changes
+    // Rerun if git HEAD changes or source files change
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=src/");
 }
