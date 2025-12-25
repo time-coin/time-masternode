@@ -464,8 +464,13 @@ impl Blockchain {
             let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
 
             while current < expected && sync_start.elapsed() < max_sync_time {
-                // Request next batch of blocks - start from 0 if we have nothing
-                let batch_start = if current == 0 { 0 } else { current + 1 };
+                // Request next batch of blocks
+                // If we don't have genesis, start from 0. Otherwise start from current + 1
+                let has_genesis = self
+                    .storage
+                    .contains_key("block_0".as_bytes())
+                    .unwrap_or(false);
+                let batch_start = if !has_genesis { 0 } else { current + 1 };
                 let batch_end = (batch_start + 500).min(expected);
 
                 // Request from multiple peers in parallel
@@ -1069,20 +1074,73 @@ impl Blockchain {
     /// Try to add a block, handling potential fork scenarios
     /// Returns Ok(true) if block was added, Ok(false) if skipped, Err on failure
     pub async fn add_block_with_fork_handling(&self, block: Block) -> Result<bool, String> {
-        let current = *self.current_height.read().await;
+        use crate::block::genesis::GenesisBlock;
+
         let block_height = block.header.height;
+
+        // Special case: Genesis block (height 0)
+        if block_height == 0 {
+            // Check if we already have genesis
+            if self
+                .storage
+                .contains_key("block_0".as_bytes())
+                .unwrap_or(false)
+            {
+                if let Ok(existing) = self.get_block(0) {
+                    if existing.hash() == block.hash() {
+                        return Ok(false); // Already have correct genesis
+                    }
+                    // Different genesis - reject
+                    return Err("Received different genesis block than what we have".to_string());
+                }
+            }
+
+            // Verify genesis matches expected hash from JSON
+            let expected_hash = GenesisBlock::expected_hash(self.network_type);
+            if block.hash() != expected_hash {
+                return Err(format!(
+                    "Genesis block hash mismatch: expected {}, got {}",
+                    hex::encode(expected_hash),
+                    hex::encode(block.hash())
+                ));
+            }
+
+            tracing::info!(
+                "✅ Received valid genesis block: {}",
+                hex::encode(block.hash())
+            );
+
+            // Save genesis block
+            self.process_block_utxos(&block).await;
+            self.save_block(&block)?;
+            // Genesis is height 0, current_height stays at 0
+
+            return Ok(true);
+        }
+
+        // For all non-genesis blocks, we need genesis to exist first
+        let has_genesis = self
+            .storage
+            .contains_key("block_0".as_bytes())
+            .unwrap_or(false);
+        if !has_genesis {
+            tracing::debug!(
+                "⏳ Cannot add block {} - waiting for genesis block first",
+                block_height
+            );
+            return Ok(false);
+        }
+
+        // Get current height (after genesis check)
+        let current = *self.current_height.read().await;
 
         // Case 1: Block is exactly what we expect (next block)
         if block_height == current + 1 {
             // Get expected previous hash
-            let expected_prev_hash = if current > 0 {
-                Some(self.get_block_hash(current)?)
-            } else {
-                None
-            };
+            let expected_prev_hash = self.get_block_hash(current)?;
 
             // Full validation before accepting
-            self.validate_block(&block, expected_prev_hash)?;
+            self.validate_block(&block, Some(expected_prev_hash))?;
 
             self.add_block(block).await?;
             return Ok(true);
