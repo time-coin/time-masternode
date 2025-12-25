@@ -19,6 +19,7 @@ use crate::network::peer_connection::{PeerConnection, PeerStateManager};
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::peer_manager::PeerManager;
 use crate::NetworkType;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
@@ -34,6 +35,7 @@ pub struct NetworkClient {
     max_peers: usize,
     reserved_masternode_slots: usize,
     local_ip: Option<String>,
+    blacklisted_peers: HashSet<String>,
 }
 
 impl NetworkClient {
@@ -49,6 +51,7 @@ impl NetworkClient {
         peer_state: Arc<PeerStateManager>,
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         local_ip: Option<String>,
+        blacklisted_peers: Vec<String>,
     ) -> Self {
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
 
@@ -64,6 +67,7 @@ impl NetworkClient {
             max_peers,
             reserved_masternode_slots,
             local_ip,
+            blacklisted_peers: blacklisted_peers.into_iter().collect(),
         }
     }
 
@@ -79,6 +83,7 @@ impl NetworkClient {
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;
         let local_ip = self.local_ip.clone();
+        let blacklisted_peers = self.blacklisted_peers.clone();
 
         tokio::spawn(async move {
             tracing::info!(
@@ -118,6 +123,12 @@ impl NetworkClient {
                         tracing::info!("⏭️  [PHASE1-MN] Skipping self-connection to {}", ip);
                         continue;
                     }
+                }
+
+                // Skip blacklisted peers
+                if blacklisted_peers.contains(&ip) {
+                    tracing::debug!("🚫 [PHASE1-MN] Skipping blacklisted peer: {}", ip);
+                    continue;
                 }
 
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
@@ -223,6 +234,12 @@ impl NetworkClient {
                         }
                     }
 
+                    // Skip blacklisted peers
+                    if blacklisted_peers.contains(ip) {
+                        tracing::debug!("🚫 [PHASE2-PEER] Skipping blacklisted peer: {}", ip);
+                        continue;
+                    }
+
                     // Skip if this is a masternode (already connected in Phase 1)
                     if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                         continue;
@@ -312,6 +329,11 @@ impl NetworkClient {
                         }
                     }
 
+                    // Skip blacklisted peers
+                    if blacklisted_peers.contains(ip) {
+                        continue;
+                    }
+
                     if !connection_manager.is_connected(ip)
                         && connection_manager.mark_connecting(ip)
                     {
@@ -372,6 +394,11 @@ impl NetworkClient {
                             if ip == local {
                                 continue;
                             }
+                        }
+
+                        // Skip blacklisted peers
+                        if blacklisted_peers.contains(ip) {
+                            continue;
                         }
 
                         // Skip masternodes (they're handled above with priority)

@@ -566,6 +566,11 @@ impl PeerManager {
         let mut removed = Vec::new();
 
         peer_info.retain(|info| {
+            // Don't remove peers we've never connected to (last_seen == 0)
+            // They're candidates we should try before marking as stale
+            if info.last_seen == 0 {
+                return true;
+            }
             // Remove if not seen in 7 days or 10+ failed connection attempts
             let is_stale = now - info.last_seen > 7 * 24 * 3600 || info.connection_attempts > 10;
             if is_stale {

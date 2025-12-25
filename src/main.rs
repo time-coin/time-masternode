@@ -392,6 +392,7 @@ async fn main() {
         peer_state.clone(),
         connection_manager.clone(),
         local_ip.clone(),
+        config.network.blacklisted_peers.clone(),
     );
     network_client.start().await;
 
