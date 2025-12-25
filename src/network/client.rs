@@ -120,15 +120,6 @@ impl NetworkClient {
                     }
                 }
 
-                // Use proper IP octet comparison for deterministic connection direction
-                if !peer_registry.should_connect_to(&ip) {
-                    tracing::info!(
-                        "⏸️  [PHASE1-MN] Skipping outbound to {} (they should connect to us)",
-                        ip
-                    );
-                    continue;
-                }
-
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
 
                 if connection_manager.is_connected(&ip) {
@@ -232,15 +223,6 @@ impl NetworkClient {
                         }
                     }
 
-                    // Use proper IP octet comparison for deterministic connection direction
-                    if !peer_registry.should_connect_to(ip) {
-                        tracing::debug!(
-                            "⏸️  [PHASE2-PEER] Skipping outbound to {} (they should connect to us)",
-                            ip
-                        );
-                        continue;
-                    }
-
                     // Skip if this is a masternode (already connected in Phase 1)
                     if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                         continue;
@@ -330,12 +312,6 @@ impl NetworkClient {
                         }
                     }
 
-                    // Use proper IP octet comparison for deterministic connection direction
-                    if !peer_registry.should_connect_to(ip) {
-                        tracing::debug!("⏸️  [PHASE3-MN-PRIORITY] Skipping outbound to {} (they should connect to us)", ip);
-                        continue;
-                    }
-
                     if !connection_manager.is_connected(ip)
                         && connection_manager.mark_connecting(ip)
                     {
@@ -396,12 +372,6 @@ impl NetworkClient {
                             if ip == local {
                                 continue;
                             }
-                        }
-
-                        // Use proper IP octet comparison for deterministic connection direction
-                        if !peer_registry.should_connect_to(ip) {
-                            tracing::debug!("⏸️  [PHASE3-PEER] Skipping outbound to {} (they should connect to us)", ip);
-                            continue;
                         }
 
                         // Skip masternodes (they're handled above with priority)
