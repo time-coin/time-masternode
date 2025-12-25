@@ -654,6 +654,10 @@ async fn main() {
             tracing::warn!("⚠️  Block sync from peers: {}", e);
         }
 
+        // Start periodic chain comparison for fork detection
+        Blockchain::start_chain_comparison_task(blockchain_init.clone());
+        tracing::info!("✓ Fork detection task started (checks every 5 minutes)");
+
         // Block production is handled by the timer task below
     });
 

@@ -1310,8 +1310,8 @@ impl Blockchain {
     }
 
     /// Periodic chain comparison with peers to detect forks
-    /// Returns Some((fork_height, peer_addr)) if a fork is detected with a peer that has more work
-    pub async fn compare_chain_with_peers(&self) -> Option<(u64, String, u128)> {
+    /// Requests block height from peers and compares
+    pub async fn compare_chain_with_peers(&self) -> Option<(u64, String)> {
         let peer_registry = self.peer_registry.read().await;
         let registry = match peer_registry.as_ref() {
             Some(r) => r,
@@ -1319,50 +1319,22 @@ impl Blockchain {
         };
 
         let our_height = *self.current_height.read().await;
-        let our_work = *self.cumulative_work.read().await;
-        let our_tip = match self.get_block_hash(our_height) {
-            Ok(h) => h,
-            Err(_) => return None,
-        };
 
         let connected_peers = registry.get_connected_peers().await;
         if connected_peers.is_empty() {
             return None;
         }
 
-        // Query each peer for their chain work
-        for peer in connected_peers {
-            // Send GetChainWork request and compare
-            let request = NetworkMessage::GetChainWork;
-            match registry.send_and_await_response(&peer, request, 5).await {
-                Ok(NetworkMessage::ChainWorkResponse {
-                    height,
-                    tip_hash,
-                    cumulative_work,
-                }) => {
-                    // Check if peer has more work
-                    if cumulative_work > our_work {
-                        tracing::info!(
-                            "🔀 Peer {} has more chain work: {} vs our {} (heights: {} vs {})",
-                            peer,
-                            cumulative_work,
-                            our_work,
-                            height,
-                            our_height
-                        );
-
-                        // Find divergence point if tips differ
-                        if tip_hash != our_tip || height != our_height {
-                            if let Some(fork_height) = self.detect_fork(height, tip_hash).await {
-                                return Some((fork_height, peer.clone(), cumulative_work));
-                            }
-                        }
-                    }
-                }
-                _ => continue,
+        // Request block heights from all peers
+        for peer in &connected_peers {
+            let request = NetworkMessage::GetBlockHeight;
+            if let Err(e) = registry.send_to_peer(peer, request).await {
+                tracing::debug!("Failed to send GetBlockHeight to {}: {}", peer, e);
             }
         }
 
+        // The actual fork detection happens when we receive BlockHeightResponse
+        // in the message handler, not here. This just triggers the queries.
         None
     }
 
@@ -1374,36 +1346,11 @@ impl Blockchain {
             loop {
                 interval.tick().await;
 
-                if let Some((fork_height, peer, peer_work)) =
-                    blockchain.compare_chain_with_peers().await
-                {
-                    tracing::warn!(
-                        "⚠️ Fork detected at height {} with peer {} (their work: {})",
-                        fork_height,
-                        peer,
-                        peer_work
-                    );
+                let our_height = blockchain.get_height().await;
+                tracing::debug!("🔍 Periodic chain check: our height = {}", our_height);
 
-                    // Request blocks from the peer to resolve fork
-                    let our_height = blockchain.get_height().await;
-                    if let Some(registry) = blockchain.peer_registry.read().await.as_ref() {
-                        let request = NetworkMessage::GetBlockRange {
-                            start_height: fork_height,
-                            end_height: our_height.max(fork_height + 100), // Request up to 100 blocks
-                        };
-
-                        if let Err(e) = registry.send_to_peer(&peer, request).await {
-                            tracing::error!("Failed to request fork resolution blocks: {}", e);
-                        } else {
-                            tracing::info!(
-                                "📤 Requested blocks {} - {} from {} for fork resolution",
-                                fork_height,
-                                our_height.max(fork_height + 100),
-                                peer
-                            );
-                        }
-                    }
-                }
+                // Query peers for their heights
+                blockchain.compare_chain_with_peers().await;
             }
         });
     }
