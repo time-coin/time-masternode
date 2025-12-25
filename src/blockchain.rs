@@ -670,7 +670,14 @@ impl Blockchain {
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
         // Validate block height is sequential
         let current = *self.current_height.read().await;
-        if block.header.height != current + 1 {
+
+        // Special case: genesis block (height 0) when chain is empty
+        let is_genesis = block.header.height == 0;
+        let chain_empty = current == 0 && self.get_block_by_height(0).await.is_err();
+
+        if is_genesis && chain_empty {
+            // Genesis block is allowed
+        } else if block.header.height != current + 1 {
             return Err(format!(
                 "Block height mismatch: expected {}, got {}",
                 current + 1,
