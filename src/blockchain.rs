@@ -938,7 +938,7 @@ impl Blockchain {
 
         if utxos_created > 0 {
             tracing::info!(
-                "💰 Block {} created {} UTXOs ({} from txs, {} from rewards)",
+                "💰 Block {} indexed {} UTXOs ({} from txs, {} from rewards)",
                 block.header.height,
                 utxos_created,
                 block
