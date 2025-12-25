@@ -1191,7 +1191,7 @@ async fn main() {
     });
     shutdown_manager.register_task(status_handle);
 
-    match NetworkServer::new(
+    match NetworkServer::new_with_blacklist(
         &p2p_addr,
         utxo_mgr.clone(),
         consensus_engine.clone(),
@@ -1202,6 +1202,7 @@ async fn main() {
         peer_connection_registry.clone(),
         peer_state.clone(),
         local_ip.clone(),
+        config.network.blacklisted_peers.clone(),
     )
     .await
     {

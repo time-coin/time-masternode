@@ -18,6 +18,8 @@ enable_upnp = false
 enable_peer_discovery = true
 # Seed nodes for peer discovery
 bootstrap_peers = []
+# IPs to permanently blacklist (will not connect to or accept connections from)
+blacklisted_peers = ["165.232.154.150", "178.128.199.144"]
 
 [rpc]
 # RPC API settings

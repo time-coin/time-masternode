@@ -6,6 +6,8 @@
 //! The genesis timestamp is fixed per network (from template), but
 //! masternode tiers and rewards are set at runtime based on participants.
 
+#![allow(dead_code)]
+
 use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
 use crate::types::{MasternodeTier, Transaction, TxOutput};
 use crate::NetworkType;
@@ -186,8 +188,11 @@ impl GenesisBlock {
         masternodes: Vec<GenesisMasternode>,
         leader: &str,
     ) -> Block {
-        let genesis_timestamp = Self::genesis_timestamp(network);
-        let block_reward = Self::block_reward(network);
+        // Load template to get timestamp and other settings
+        let template =
+            Self::load_template(network).unwrap_or_else(|_| Self::default_template(network));
+        let genesis_timestamp = template.block.header.timestamp_unix;
+        let block_reward = template.block.header.block_reward;
 
         // Count masternodes by tier
         let mut tier_counts = MasternodeTierCounts::default();

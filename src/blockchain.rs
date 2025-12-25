@@ -1090,6 +1090,11 @@ impl Blockchain {
                 return Err(format!("Invalid genesis block: {}", e));
             }
 
+            // Verify genesis timestamp matches network template
+            if let Err(e) = GenesisBlock::verify_timestamp(&block, self.network_type) {
+                return Err(format!("Invalid genesis timestamp: {}", e));
+            }
+
             tracing::info!(
                 "✅ Received valid genesis block: {} (masternodes: {})",
                 hex::encode(block.hash()),

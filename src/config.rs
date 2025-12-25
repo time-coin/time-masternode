@@ -82,6 +82,9 @@ pub struct NetworkConfig {
     pub enable_upnp: bool,
     pub enable_peer_discovery: bool,
     pub bootstrap_peers: Vec<String>,
+    /// IPs to permanently blacklist (will not connect to or accept connections from)
+    #[serde(default)]
+    pub blacklisted_peers: Vec<String>,
 }
 
 impl NetworkConfig {
@@ -243,6 +246,7 @@ impl Config {
                 enable_upnp: false,
                 enable_peer_discovery: true,
                 bootstrap_peers: vec![],
+                blacklisted_peers: vec![],
             },
             rpc: RpcConfig {
                 enabled: true,

@@ -67,8 +67,50 @@ impl NetworkServer {
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
     ) -> Result<Self, std::io::Error> {
+        Self::new_with_blacklist(
+            bind_addr,
+            utxo_manager,
+            consensus,
+            masternode_registry,
+            blockchain,
+            peer_manager,
+            connection_manager,
+            peer_registry,
+            peer_state,
+            local_ip,
+            vec![],
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Used by binary (main.rs)
+    pub async fn new_with_blacklist(
+        bind_addr: &str,
+        utxo_manager: Arc<UTXOStateManager>,
+        consensus: Arc<ConsensusEngine>,
+        masternode_registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+        blockchain: Arc<crate::blockchain::Blockchain>,
+        peer_manager: Arc<crate::peer_manager::PeerManager>,
+        connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        peer_state: Arc<PeerStateManager>,
+        local_ip: Option<String>,
+        blacklisted_peers: Vec<String>,
+    ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
+
+        // Initialize blacklist with configured IPs
+        let mut blacklist = IPBlacklist::new();
+        for peer in &blacklisted_peers {
+            if let Ok(ip) = peer.parse::<std::net::IpAddr>() {
+                blacklist.add_permanent_ban(ip, "Configured in blacklisted_peers");
+                tracing::info!("🚫 Blacklisted peer from config: {}", ip);
+            } else {
+                tracing::warn!("⚠️  Invalid IP in blacklisted_peers: {}", peer);
+            }
+        }
 
         Ok(Self {
             listener,
@@ -78,7 +120,7 @@ impl NetworkServer {
             utxo_manager,
             consensus,
             rate_limiter: Arc::new(RwLock::new(RateLimiter::new())),
-            blacklist: Arc::new(RwLock::new(IPBlacklist::new())),
+            blacklist: Arc::new(RwLock::new(blacklist)),
             masternode_registry: masternode_registry.clone(),
             blockchain,
             peer_manager,
