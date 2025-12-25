@@ -84,9 +84,3 @@ enable_tls = true
 enable_message_signing = true
 # Maximum age of signed messages (prevents replay attacks)
 message_max_age_seconds = 300  # 5 minutes
-
-[metrics]
-# Metrics and monitoring
-enabled = false
-prometheus_port = 9090
-

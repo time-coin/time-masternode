@@ -49,7 +49,6 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub masternode: MasternodeConfig,
     pub security: SecurityConfig,
-    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,12 +216,6 @@ fn default_message_max_age() -> i64 {
     300 // 5 minutes
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MetricsConfig {
-    pub enabled: bool,
-    pub prometheus_port: u16,
-}
-
 impl Config {
     #[allow(dead_code)]
     pub fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -283,10 +276,6 @@ impl Config {
                 enable_tls: true,
                 enable_message_signing: true,
                 message_max_age_seconds: 300,
-            },
-            metrics: MetricsConfig {
-                enabled: false,
-                prometheus_port: 9090,
             },
         }
     }
