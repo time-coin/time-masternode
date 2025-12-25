@@ -329,8 +329,11 @@ async fn main() {
     let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
     tracing::info!("✓ Consensus engine initialized");
 
-    // Initialize TSDC consensus engine
-    let tsdc_consensus = Arc::new(TSCDConsensus::new(Default::default()));
+    // Initialize TSDC consensus engine with masternode registry
+    let tsdc_consensus = Arc::new(TSCDConsensus::with_masternode_registry(
+        Default::default(),
+        registry.clone(),
+    ));
     tracing::info!("✓ TSDC consensus engine initialized");
 
     // Initialize blockchain
