@@ -2,13 +2,55 @@
 //!
 //! Genesis blocks are dynamically generated based on active masternodes,
 //! ensuring fair reward distribution from the start of the network.
+//!
+//! The genesis timestamp is fixed per network (from template), but
+//! masternode tiers and rewards are set at runtime based on participants.
 
 use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
 use crate::types::{Transaction, TxOutput};
 use crate::NetworkType;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub struct GenesisBlock;
+
+/// Genesis template loaded from JSON file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisTemplate {
+    pub network: String,
+    pub version: u32,
+    pub message: String,
+    pub block: GenesisBlockTemplate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisBlockTemplate {
+    pub header: GenesisHeaderTemplate,
+    pub transactions: Vec<serde_json::Value>,
+    pub masternode_rewards: Vec<serde_json::Value>,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisHeaderTemplate {
+    pub block_number: u64,
+    pub timestamp: String,
+    pub timestamp_unix: i64,
+    pub previous_hash: String,
+    pub merkle_root: String,
+    pub validator_signature: String,
+    pub validator_address: String,
+    pub masternode_counts: MasternodeCountsTemplate,
+    pub block_reward: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MasternodeCountsTemplate {
+    pub free: u32,
+    pub bronze: u32,
+    pub silver: u32,
+    pub gold: u32,
+}
 
 /// Masternode info for genesis block generation
 #[derive(Clone, Debug)]
@@ -42,6 +84,80 @@ impl GenesisBlock {
     /// Minimum masternodes required to generate genesis
     pub const MIN_MASTERNODES_FOR_GENESIS: usize = 3;
 
+    /// Load genesis template from JSON file
+    pub fn load_template(network: NetworkType) -> Result<GenesisTemplate, String> {
+        let filename = match network {
+            NetworkType::Testnet => "genesis.testnet.json",
+            NetworkType::Mainnet => "genesis.mainnet.json",
+        };
+
+        // Try current directory first, then common locations
+        let paths = [
+            filename.to_string(),
+            format!("./{}", filename),
+            format!("/etc/timecoin/{}", filename),
+            format!("~/.timecoin/{}", filename),
+        ];
+
+        for path in &paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                return serde_json::from_str(&content)
+                    .map_err(|e| format!("Failed to parse {}: {}", path, e));
+            }
+        }
+
+        // If no file found, return default template
+        Ok(Self::default_template(network))
+    }
+
+    /// Default template if JSON file not found
+    fn default_template(network: NetworkType) -> GenesisTemplate {
+        let (timestamp, timestamp_unix, message) = match network {
+            NetworkType::Testnet => (
+                "2025-12-01T00:00:00Z",
+                1764547200i64,
+                "TIME Coin Testnet Relaunch - December 1, 2025 - TSDC + Avalanche Consensus",
+            ),
+            NetworkType::Mainnet => (
+                "2026-01-01T00:00:00Z",
+                1767225600i64,
+                "TIME Coin Mainnet Launch - January 1, 2026 - TSDC + Avalanche Consensus",
+            ),
+        };
+
+        GenesisTemplate {
+            network: match network {
+                NetworkType::Testnet => "testnet".to_string(),
+                NetworkType::Mainnet => "mainnet".to_string(),
+            },
+            version: 2,
+            message: message.to_string(),
+            block: GenesisBlockTemplate {
+                header: GenesisHeaderTemplate {
+                    block_number: 0,
+                    timestamp: timestamp.to_string(),
+                    timestamp_unix,
+                    previous_hash:
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
+                    merkle_root: "dynamic".to_string(),
+                    validator_signature: "genesis".to_string(),
+                    validator_address: "genesis".to_string(),
+                    masternode_counts: MasternodeCountsTemplate {
+                        free: 0,
+                        bronze: 0,
+                        silver: 0,
+                        gold: 0,
+                    },
+                    block_reward: 10_000_000_000,
+                },
+                transactions: vec![],
+                masternode_rewards: vec![],
+                hash: "dynamic".to_string(),
+            },
+        }
+    }
+
     /// Verify genesis block structure
     pub fn verify_structure(block: &Block) -> Result<(), String> {
         if block.header.height != 0 {
@@ -69,6 +185,18 @@ impl GenesisBlock {
         // Verify reward distribution totals block reward
         Self::verify_rewards(block)?;
 
+        Ok(())
+    }
+
+    /// Verify genesis timestamp matches network template
+    pub fn verify_timestamp(block: &Block, network: NetworkType) -> Result<(), String> {
+        let expected_timestamp = Self::genesis_timestamp(network);
+        if block.header.timestamp != expected_timestamp {
+            return Err(format!(
+                "Genesis timestamp mismatch: expected {}, got {}",
+                expected_timestamp, block.header.timestamp
+            ));
+        }
         Ok(())
     }
 
