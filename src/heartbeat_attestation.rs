@@ -292,8 +292,8 @@ impl HeartbeatAttestationSystem {
                     let attestation =
                         WitnessAttestation::new(&heartbeat, local_addr.clone(), signing_key);
 
-                    debug!(
-                        "✓ Created witness attestation for {} seq {}",
+                    info!(
+                        "✍️ Created witness attestation for {} seq {}",
                         heartbeat.masternode_address, heartbeat.sequence_number
                     );
 

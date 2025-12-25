@@ -841,7 +841,7 @@ async fn handle_peer(
                                 }
                                 // Heartbeat Messages
                                 NetworkMessage::HeartbeatBroadcast(heartbeat) => {
-                                    tracing::debug!("💓 Received heartbeat from {} seq {}",
+                                    tracing::info!("💓 [Inbound] Received heartbeat from {} seq {}",
                                         heartbeat.masternode_address, heartbeat.sequence_number);
 
                                     // Process heartbeat through masternode registry
@@ -854,7 +854,7 @@ async fn handle_peer(
                                     let _ = masternode_registry.broadcast_message(msg).await;
                                 }
                                 NetworkMessage::HeartbeatAttestation(attestation) => {
-                                    tracing::debug!("✍️ Received heartbeat attestation from {}",
+                                    tracing::info!("✍️ [Inbound] Received witness attestation from {} for heartbeat",
                                         attestation.witness_address);
 
                                     // Process attestation through masternode registry

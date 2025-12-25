@@ -248,7 +248,7 @@ impl PeerConnection {
     /// Handle received ping
     async fn handle_ping(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
         info!(
-            "📨 [{:?}] RECEIVED PING from {} (nonce: {})",
+            "📨 [{:?}] Received ping from {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
 
@@ -257,7 +257,7 @@ impl PeerConnection {
             .await?;
 
         info!(
-            "✅ [{:?}] SENT PONG to {} (nonce: {})",
+            "✅ [{:?}] Sent pong to {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
 
@@ -267,7 +267,7 @@ impl PeerConnection {
     /// Handle received pong
     async fn handle_pong(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
         info!(
-            "📨 [{:?}] RECEIVED PONG from {} (nonce: {})",
+            "📨 [{:?}] Received pong from {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
 
