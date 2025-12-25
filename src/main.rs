@@ -1118,11 +1118,24 @@ async fn main() {
                             );
                         }
                     } else {
-                        tracing::warn!(
-                            "⚠️ Height {} ahead of expected {}, skipping block production",
-                            current_height,
-                            expected_height
-                        );
+                        // Height is ahead of expected - this can happen if:
+                        // 1. Clock skew caused blocks to be produced early
+                        // 2. We received blocks from a peer with clock skew
+                        // Just wait silently for time to catch up - only log once per minute
+                        static LAST_AHEAD_LOG: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                        let now_secs = chrono::Utc::now().timestamp();
+                        let last_log = LAST_AHEAD_LOG.load(Ordering::Relaxed);
+                        if now_secs - last_log >= 60 {
+                            LAST_AHEAD_LOG.store(now_secs, Ordering::Relaxed);
+                            let blocks_ahead = current_height.saturating_sub(expected_height);
+                            let wait_minutes = blocks_ahead * 10; // 10 minutes per block
+                            tracing::info!(
+                                "⏳ Chain height {} is {} blocks ahead of time, waiting ~{} minutes for time to catch up",
+                                current_height,
+                                blocks_ahead,
+                                wait_minutes
+                            );
+                        }
                     }
                 }
             }

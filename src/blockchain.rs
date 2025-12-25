@@ -1123,12 +1123,17 @@ impl Blockchain {
         }
 
         // 4. Verify timestamp is reasonable (not too far in future)
+        // Allow only 2 minutes in the future to prevent time-skew attacks
+        // This gives enough margin for network latency and minor clock drift
         let now = chrono::Utc::now().timestamp();
-        let max_future = 2 * 60 * 60; // Allow 2 hours in future for clock drift
+        let max_future = 2 * 60; // 2 minutes max future time
         if block.header.timestamp > now + max_future {
             return Err(format!(
-                "Block {} timestamp {} is too far in future (now: {})",
-                block.header.height, block.header.timestamp, now
+                "Block {} timestamp {} is too far in future (now: {}, max allowed: {})",
+                block.header.height,
+                block.header.timestamp,
+                now,
+                now + max_future
             ));
         }
 
