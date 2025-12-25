@@ -764,7 +764,9 @@ async fn main() {
 
                     // Get masternodes eligible for rewards (active for entire block period)
                     let eligible = block_registry.get_eligible_for_rewards().await;
-                    let masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _)| mn.clone()).collect();
+                    let mut masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _)| mn.clone()).collect();
+                    // Sort deterministically by address for consistent leader election across all nodes
+                    masternodes.sort_by(|a, b| a.address.cmp(&b.address));
 
                     // Require at least 3 masternodes for block production
                     if masternodes.len() < 3 {
