@@ -7,7 +7,7 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use crate::types::{OutPoint, Transaction, TxOutput, UTXO};
+use crate::types::{OutPoint, Transaction, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use chrono::Utc;
@@ -597,6 +597,20 @@ impl Blockchain {
         let next_height = current_height + 1;
         let timestamp = self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
+        // Prevent producing blocks too far in the future
+        // This prevents clock skew from creating invalid future blocks
+        let now = chrono::Utc::now().timestamp();
+        let max_future = 2 * 60; // 2 minutes max
+        if timestamp > now + max_future {
+            return Err(format!(
+                "Cannot produce block {} - timestamp {} is too far in future (now: {}, max: {})",
+                next_height,
+                timestamp,
+                now,
+                now + max_future
+            ));
+        }
+
         // Get active masternodes
         let masternodes = self.masternode_registry.list_active().await;
         if masternodes.is_empty() {
@@ -612,22 +626,15 @@ impl Blockchain {
         let total_reward = base_reward + total_fees;
         let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
 
-        let outputs = rewards
-            .iter()
-            .map(|(_, amount)| TxOutput {
-                value: *amount,
-                script_pubkey: b"masternode_reward".to_vec(),
-            })
-            .collect::<Vec<_>>();
-
-        if outputs.is_empty() {
-            return Err("No valid outputs for coinbase".to_string());
+        if rewards.is_empty() {
+            return Err("No valid masternode rewards".to_string());
         }
 
+        // Coinbase transaction marker (empty outputs - rewards are in masternode_rewards)
         let coinbase = Transaction {
             version: 1,
             inputs: vec![],
-            outputs,
+            outputs: vec![],
             lock_time: 0,
             timestamp,
         };
@@ -876,9 +883,10 @@ impl Blockchain {
 
     async fn process_block_utxos(&self, block: &Block) {
         let block_hash = block.hash();
-        let mut utxos_created = 0;
+        let mut tx_utxos_created = 0;
+        let mut reward_utxos_created = 0;
 
-        // Process transaction outputs
+        // Process transaction outputs (user transactions only, coinbase has empty outputs)
         for tx in &block.transactions {
             let txid = tx.txid();
             for (vout, output) in tx.outputs.iter().enumerate() {
@@ -903,7 +911,7 @@ impl Blockchain {
                         e
                     );
                 } else {
-                    utxos_created += 1;
+                    tx_utxos_created += 1;
                 }
             }
         }
@@ -932,22 +940,27 @@ impl Blockchain {
             if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
                 tracing::debug!("Could not add reward UTXO for {}: {:?}", address, e);
             } else {
-                utxos_created += 1;
+                reward_utxos_created += 1;
             }
         }
 
-        if utxos_created > 0 {
-            tracing::info!(
-                "💰 Block {} indexed {} UTXOs ({} from txs, {} from rewards)",
-                block.header.height,
-                utxos_created,
-                block
-                    .transactions
-                    .iter()
-                    .map(|tx| tx.outputs.len())
-                    .sum::<usize>(),
-                block.masternode_rewards.len()
-            );
+        let total_utxos = tx_utxos_created + reward_utxos_created;
+        if total_utxos > 0 {
+            if tx_utxos_created > 0 {
+                tracing::info!(
+                    "💰 Block {} indexed {} UTXOs ({} from txs, {} from rewards)",
+                    block.header.height,
+                    total_utxos,
+                    tx_utxos_created,
+                    reward_utxos_created
+                );
+            } else {
+                tracing::info!(
+                    "💰 Block {} indexed {} reward UTXOs",
+                    block.header.height,
+                    reward_utxos_created
+                );
+            }
         }
     }
 

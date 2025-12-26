@@ -1155,6 +1155,7 @@ async fn main() {
     let rpc_addr_clone = rpc_addr.clone();
     let rpc_network = network_type;
     let rpc_shutdown_token = shutdown_token.clone();
+    let rpc_attestation = attestation_system.clone();
 
     let rpc_handle = tokio::spawn(async move {
         match RpcServer::new(
@@ -1164,7 +1165,7 @@ async fn main() {
             rpc_network,
             rpc_registry,
             rpc_blockchain,
-            attestation_system.clone(),
+            rpc_attestation,
         )
         .await
         {
@@ -1248,6 +1249,7 @@ async fn main() {
         peer_state.clone(),
         local_ip.clone(),
         config.network.blacklisted_peers.clone(),
+        attestation_system.clone(),
     )
     .await
     {

@@ -1,5 +1,5 @@
 use crate::block::types::{Block, BlockHeader};
-use crate::types::{Hash256, Masternode, Transaction, TxOutput};
+use crate::types::{Hash256, Masternode, Transaction};
 use chrono::Timelike;
 use sha2::{Digest, Sha256};
 
@@ -79,8 +79,8 @@ impl DeterministicBlockGenerator {
         let masternode_pool = total_reward;
 
         // Distribute masternode rewards proportionally by weight
+        // Rewards are stored in masternode_rewards field and converted to UTXOs when block is processed
         let mut masternode_rewards = Vec::new();
-        let mut coinbase_outputs = Vec::new();
 
         if total_weight > 0 && !masternodes_sorted.is_empty() {
             for mn in &masternodes_sorted {
@@ -88,18 +88,15 @@ impl DeterministicBlockGenerator {
                 let reward = (masternode_pool * weight) / total_weight;
                 if reward > 0 {
                     masternode_rewards.push((mn.wallet_address.clone(), reward));
-                    coinbase_outputs.push(TxOutput {
-                        value: reward,
-                        script_pubkey: mn.wallet_address.as_bytes().to_vec(),
-                    });
                 }
             }
         }
 
+        // Coinbase transaction marker (empty outputs - rewards are in masternode_rewards)
         let coinbase_tx = Transaction {
             version: 1,
             inputs: vec![],
-            outputs: coinbase_outputs,
+            outputs: vec![],
             lock_time: 0,
             timestamp,
         };

@@ -9,8 +9,6 @@
       "timestamp_unix": 1764547200,
       "previous_hash": "0000000000000000000000000000000000000000000000000000000000000000",
       "merkle_root": "dynamic",
-      "validator_signature": "genesis",
-      "validator_address": "genesis",
       "masternode_counts": {
         "free": 0,
         "bronze": 0,

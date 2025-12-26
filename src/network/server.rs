@@ -44,6 +44,7 @@ pub struct NetworkServer {
     pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
     pub block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Cache blocks during voting
+    pub attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -66,6 +67,7 @@ impl NetworkServer {
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
+        attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     ) -> Result<Self, std::io::Error> {
         Self::new_with_blacklist(
             bind_addr,
@@ -79,6 +81,7 @@ impl NetworkServer {
             peer_state,
             local_ip,
             vec![],
+            attestation_system,
         )
         .await
     }
@@ -97,6 +100,7 @@ impl NetworkServer {
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
         blacklisted_peers: Vec<String>,
+        attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -131,6 +135,7 @@ impl NetworkServer {
             peer_state,
             local_ip,
             block_cache: Arc::new(DashMap::new()), // Phase 3E.1: Initialize block cache
+            attestation_system,
         })
     }
 
@@ -204,6 +209,7 @@ impl NetworkServer {
             let peer_reg = self.peer_registry.clone();
             let local_ip = self.local_ip.clone();
             let block_cache = self.block_cache.clone(); // Phase 3E.1: Clone block cache
+            let attestation_sys = self.attestation_system.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -226,6 +232,7 @@ impl NetworkServer {
                     peer_reg,
                     local_ip,
                     block_cache, // Phase 3E.1: Pass block cache
+                    attestation_sys,
                 )
                 .await;
             });
@@ -274,6 +281,7 @@ async fn handle_peer(
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     _local_ip: Option<String>,
     block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Block cache parameter
+    attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -849,6 +857,21 @@ async fn handle_peer(
                                         tracing::warn!("Failed to process heartbeat: {}", e);
                                     }
 
+                                    // Process through attestation system - creates witness attestation if we're a masternode
+                                    match attestation_system.receive_heartbeat(heartbeat.clone()).await {
+                                        Ok(Some(attestation)) => {
+                                            // We created a witness attestation - broadcast it
+                                            let attest_msg = NetworkMessage::HeartbeatAttestation(attestation);
+                                            let _ = masternode_registry.broadcast_message(attest_msg).await;
+                                        }
+                                        Ok(None) => {
+                                            // No attestation created (our own heartbeat or not a masternode)
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("Attestation not created: {}", e);
+                                        }
+                                    }
+
                                     // Re-broadcast to other peers (gossip propagation)
                                     let msg = NetworkMessage::HeartbeatBroadcast(heartbeat.clone());
                                     let _ = masternode_registry.broadcast_message(msg).await;
@@ -856,6 +879,11 @@ async fn handle_peer(
                                 NetworkMessage::HeartbeatAttestation(attestation) => {
                                     tracing::info!("✍️ [Inbound] Received witness attestation from {} for heartbeat",
                                         attestation.witness_address);
+
+                                    // Add attestation to the attestation system
+                                    if let Err(e) = attestation_system.add_attestation(attestation.clone()).await {
+                                        tracing::debug!("Failed to add attestation: {}", e);
+                                    }
 
                                     // Process attestation through masternode registry
                                     if let Err(e) = masternode_registry.receive_attestation_broadcast(attestation.clone()).await {

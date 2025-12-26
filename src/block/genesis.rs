@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
-use crate::types::{MasternodeTier, Transaction, TxOutput};
+use crate::types::{MasternodeTier, Transaction};
 use crate::NetworkType;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -40,8 +40,6 @@ pub struct GenesisHeaderTemplate {
     pub timestamp_unix: i64,
     pub previous_hash: String,
     pub merkle_root: String,
-    pub validator_signature: String,
-    pub validator_address: String,
     pub masternode_counts: MasternodeCountsTemplate,
     pub block_reward: u64,
 }
@@ -123,8 +121,6 @@ impl GenesisBlock {
                         "0000000000000000000000000000000000000000000000000000000000000000"
                             .to_string(),
                     merkle_root: "dynamic".to_string(),
-                    validator_signature: "genesis".to_string(),
-                    validator_address: "genesis".to_string(),
                     masternode_counts: MasternodeCountsTemplate {
                         free: 0,
                         bronze: 0,
@@ -208,14 +204,11 @@ impl GenesisBlock {
         // Calculate reward distribution
         let masternode_rewards = Self::calculate_rewards(block_reward, &masternodes);
 
-        // Coinbase transaction
+        // Coinbase transaction marker (empty outputs - rewards are in masternode_rewards)
         let coinbase = Transaction {
             version: 1,
             inputs: vec![],
-            outputs: vec![TxOutput {
-                value: block_reward,
-                script_pubkey: b"genesis".to_vec(),
-            }],
+            outputs: vec![],
             lock_time: 0,
             timestamp: genesis_timestamp,
         };
