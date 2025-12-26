@@ -1243,8 +1243,11 @@ impl Blockchain {
                     hex::encode(&expected_prev_hash[..8]),
                     hex::encode(&block.header.previous_hash[..8])
                 );
-                // Don't validate further, just skip and let sync handle reorg
-                return Ok(false);
+                // Return error to signal fork - caller needs to request earlier blocks
+                return Err(format!(
+                    "Fork detected: block {} doesn't build on our chain (prev_hash mismatch)",
+                    block_height
+                ));
             }
 
             // Full validation before accepting

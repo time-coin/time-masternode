@@ -12,6 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
+use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::network::message::NetworkMessage;
 
@@ -703,26 +704,64 @@ impl PeerConnection {
                                         end_height, our_height
                                     );
 
-                                    // Find common ancestor by going back
+                                    // Find common ancestor by checking backwards
                                     let mut common_ancestor = start_height.saturating_sub(1);
-                                    while common_ancestor > 0 {
-                                        if let Ok(_our_prev) = blockchain.get_block(common_ancestor)
+                                    let search_limit = common_ancestor.saturating_sub(100); // Don't go back more than 100 blocks
+
+                                    while common_ancestor > search_limit && common_ancestor > 0 {
+                                        if let Ok(our_block) = blockchain.get_block(common_ancestor)
                                         {
-                                            // Check if this block exists in the new chain
-                                            // For now, assume previous block is common ancestor
-                                            break;
+                                            // Check if any of the incoming blocks matches this height
+                                            let potential_match = blocks
+                                                .iter()
+                                                .find(|b| b.header.height == common_ancestor);
+                                            if let Some(peer_block) = potential_match {
+                                                if our_block.hash() == peer_block.hash() {
+                                                    // Found common ancestor!
+                                                    info!(
+                                                        "✅ Found common ancestor at height {}",
+                                                        common_ancestor
+                                                    );
+                                                    break;
+                                                }
+                                            }
                                         }
                                         common_ancestor = common_ancestor.saturating_sub(1);
                                     }
 
+                                    // Collect blocks after common ancestor
+                                    let reorg_blocks: Vec<Block> = blocks
+                                        .iter()
+                                        .filter(|b| b.header.height > common_ancestor)
+                                        .cloned()
+                                        .collect();
+
+                                    if reorg_blocks.is_empty() {
+                                        // Need to request more blocks from common ancestor
+                                        info!(
+                                            "📤 Requesting full chain from {} to {} for reorganization",
+                                            common_ancestor,
+                                            end_height
+                                        );
+                                        let msg = NetworkMessage::GetBlocks(
+                                            common_ancestor,
+                                            end_height + 100,
+                                        );
+                                        if let Err(e) = self.send_message(&msg).await {
+                                            warn!("Failed to request reorg chain: {}", e);
+                                        }
+                                        return Ok(());
+                                    }
+
+                                    // Perform reorganization
                                     info!(
-                                        "🔄 Reorganizing from height {} with {} new blocks",
+                                        "🔄 Reorganizing from height {} with {} blocks",
                                         common_ancestor,
-                                        blocks.len()
+                                        reorg_blocks.len()
                                     );
 
                                     match blockchain
-                                        .reorganize_to_chain(common_ancestor, blocks.clone())
+                                        .reorganize_to_chain(common_ancestor, reorg_blocks)
                                         .await
                                     {
                                         Ok(_) => {
@@ -744,30 +783,68 @@ impl PeerConnection {
                         }
                     }
 
-                    // Apply blocks sequentially (no fork detected)
+                    // Apply blocks sequentially (no fork detected in first block)
                     let mut added = 0;
                     let mut skipped = 0;
+                    let mut fork_detected_at = None;
+
                     for block in blocks {
                         match blockchain.add_block_with_fork_handling(block.clone()).await {
                             Ok(true) => added += 1,
                             Ok(false) => skipped += 1,
                             Err(e) => {
-                                // Log first few errors at warn level to help debug sync issues
-                                if skipped < 3 {
+                                // Check if this is a fork error
+                                if e.contains("Fork detected") {
+                                    fork_detected_at = Some(block.header.height);
                                     warn!(
-                                        "⏭️ [{:?}] Skipped block {}: {}",
+                                        "🔀 [{:?}] Fork detected at block {}: {}",
                                         self.direction, block.header.height, e
                                     );
                                 } else {
-                                    debug!(
-                                        "⏭️ [{:?}] Skipped block {}: {}",
-                                        self.direction, block.header.height, e
-                                    );
+                                    // Log other errors
+                                    if skipped < 3 {
+                                        warn!(
+                                            "⏭️ [{:?}] Skipped block {}: {}",
+                                            self.direction, block.header.height, e
+                                        );
+                                    } else {
+                                        debug!(
+                                            "⏭️ [{:?}] Skipped block {}: {}",
+                                            self.direction, block.header.height, e
+                                        );
+                                    }
                                 }
                                 skipped += 1;
                             }
                         }
                     }
+
+                    // If fork was detected, request earlier blocks to find common ancestor
+                    if let Some(fork_height) = fork_detected_at {
+                        warn!(
+                            "🔄 Fork detected at height {}, requesting earlier blocks to find common ancestor",
+                            fork_height
+                        );
+
+                        // Request blocks starting from 10 blocks before the fork
+                        let reorg_start = fork_height.saturating_sub(10);
+                        // Use end_height from the received blocks as peer height
+                        let peer_height = end_height;
+
+                        info!(
+                            "📤 Requesting blocks {}-{} from {} to resolve fork",
+                            reorg_start,
+                            peer_height + 100,
+                            self.peer_ip
+                        );
+
+                        let msg = NetworkMessage::GetBlocks(reorg_start, peer_height + 100);
+                        if let Err(e) = self.send_message(&msg).await {
+                            warn!("Failed to request reorg blocks: {}", e);
+                        }
+                        return Ok(());
+                    }
+
                     if added > 0 {
                         info!(
                             "✅ [{:?}] Synced {} blocks from {} (skipped {})",
