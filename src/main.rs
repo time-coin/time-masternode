@@ -348,6 +348,21 @@ async fn main() {
     println!("✓ Blockchain initialized");
     println!();
 
+    // Validate chain time on startup
+    match blockchain.validate_chain_time().await {
+        Ok(()) => {
+            tracing::info!("✅ Chain time validation passed");
+        }
+        Err(e) => {
+            tracing::error!("❌ Chain time validation failed: {}", e);
+            tracing::error!("❌ Network is ahead of schedule - this indicates a consensus bug");
+            tracing::error!(
+                "❌ Manual intervention required: see analysis/CATCHUP_CONSENSUS_FIX.md"
+            );
+            // Don't panic - allow node to participate in network but log the issue
+        }
+    }
+
     // Create shared peer connection registry for both client and server
     let peer_connection_registry = Arc::new(PeerConnectionRegistry::new());
 
@@ -887,9 +902,27 @@ async fn main() {
                                 expected_height
                             );
 
-                            // Produce catchup blocks rapidly (no 10-minute wait between them)
+                            // Produce catchup blocks with rate limiting
                             let mut catchup_produced = 0u64;
+                            let genesis_timestamp = block_blockchain.genesis_timestamp();
+
                             for target_height in (current_height + 1)..=expected_height {
+                                // CRITICAL: Enforce time-based schedule even in catch-up mode
+                                let expected_timestamp =
+                                    genesis_timestamp + (target_height as i64 * 600);
+                                let now = chrono::Utc::now().timestamp();
+
+                                if expected_timestamp > now {
+                                    // We've caught up to real time - stop producing
+                                    tracing::info!(
+                                        "⏰ Reached real-time at height {} (expected time: {}, now: {})",
+                                        target_height - 1,
+                                        expected_timestamp,
+                                        now
+                                    );
+                                    break;
+                                }
+
                                 match block_blockchain.produce_block().await {
                                     Ok(block) => {
                                         let block_height = block.header.height;
@@ -920,10 +953,15 @@ async fn main() {
                                             );
                                         }
 
-                                        // Small delay to allow network propagation
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                        // Network propagation delay - not too fast, not too slow
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                                     }
                                     Err(e) => {
+                                        // Check if error is due to timestamp in future
+                                        if e.contains("timestamp") && e.contains("future") {
+                                            tracing::info!("⏰ Catch-up stopped: reached real-time schedule");
+                                            break;
+                                        }
                                         tracing::error!("❌ Failed to produce catchup block: {}", e);
                                         break;
                                     }
@@ -1002,8 +1040,23 @@ async fn main() {
                                 // Produce catchup blocks ourselves (only after sync attempt failed)
                                 let mut catchup_produced = 0u64;
                                 let current_height = block_blockchain.get_height().await;
+                                let genesis_timestamp = block_blockchain.genesis_timestamp();
 
-                                for _target_height in (current_height + 1)..=expected_height {
+                                for target_height in (current_height + 1)..=expected_height {
+                                    // CRITICAL: Enforce time-based schedule even in fallback catch-up
+                                    let expected_timestamp =
+                                        genesis_timestamp + (target_height as i64 * 600);
+                                    let now = chrono::Utc::now().timestamp();
+
+                                    if expected_timestamp > now {
+                                        // We've caught up to real time - stop producing
+                                        tracing::info!(
+                                            "⏰ Fallback catch-up reached real-time at height {}",
+                                            target_height - 1
+                                        );
+                                        break;
+                                    }
+
                                     match block_blockchain.produce_block().await {
                                         Ok(block) => {
                                             let block_height = block.header.height;
@@ -1030,9 +1083,18 @@ async fn main() {
                                                 );
                                             }
 
-                                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                            // Network propagation delay
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(500))
+                                                .await;
                                         }
                                         Err(e) => {
+                                            // Check if error is due to timestamp in future
+                                            if e.contains("timestamp") && e.contains("future") {
+                                                tracing::info!(
+                                                    "⏰ Fallback catch-up stopped: reached real-time schedule"
+                                                );
+                                                break;
+                                            }
                                             tracing::error!("❌ Failed to produce fallback catchup block: {}", e);
                                             break;
                                         }
@@ -1091,6 +1153,13 @@ async fn main() {
                             .unwrap_or(false);
 
                         if is_producer {
+                            // Validate chain time before producing
+                            if let Err(e) = block_blockchain.validate_chain_time().await {
+                                tracing::warn!("⚠️  Chain time validation failed: {}", e);
+                                tracing::warn!("⚠️  Skipping block production until time catches up");
+                                continue;
+                            }
+
                             // Check if we have enough synced peers (minimum 2 peers = 3 nodes total including us)
                             let connected_peers = block_peer_registry.get_connected_peers().await;
                             if connected_peers.len() < 2 {

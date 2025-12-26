@@ -48,6 +48,9 @@ impl DeterministicBlockGenerator {
         let mut masternodes_sorted = masternodes;
         masternodes_sorted.sort_by(|a, b| a.address.cmp(&b.address));
 
+        // Phase 1.2: Enforce canonical transaction ordering for deterministic merkle roots
+        // All transactions MUST be sorted by txid to ensure all nodes compute identical merkle roots
+        // This prevents consensus failures from transaction ordering differences
         let mut txs_sorted = final_transactions;
         txs_sorted.sort_by_key(|a| a.txid());
 
@@ -198,5 +201,117 @@ impl DeterministicBlockGenerator {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{OutPoint, TxInput, TxOutput};
+
+    #[test]
+    fn test_transaction_ordering_determinism() {
+        // Phase 1.2: Verify blocks with same transactions produce same merkle root
+        // regardless of input order
+
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // Create test transactions with different content
+        let tx1 = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: OutPoint {
+                    txid: [1u8; 32],
+                    vout: 0,
+                },
+                script_sig: vec![1, 2, 3],
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![TxOutput {
+                value: 100,
+                script_pubkey: b"addr1".to_vec(),
+            }],
+            lock_time: 0,
+            timestamp,
+        };
+
+        let tx2 = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: OutPoint {
+                    txid: [2u8; 32],
+                    vout: 0,
+                },
+                script_sig: vec![4, 5, 6],
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![TxOutput {
+                value: 200,
+                script_pubkey: b"addr2".to_vec(),
+            }],
+            lock_time: 0,
+            timestamp,
+        };
+
+        let tx3 = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: OutPoint {
+                    txid: [3u8; 32],
+                    vout: 0,
+                },
+                script_sig: vec![7, 8, 9],
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![TxOutput {
+                value: 300,
+                script_pubkey: b"addr3".to_vec(),
+            }],
+            lock_time: 0,
+            timestamp,
+        };
+
+        // Create blocks with transactions in different orders
+        let block1 = DeterministicBlockGenerator::generate(
+            1,
+            [0u8; 32],
+            vec![tx1.clone(), tx2.clone(), tx3.clone()],
+            vec![],
+            100,
+        );
+
+        let block2 = DeterministicBlockGenerator::generate(
+            1,
+            [0u8; 32],
+            vec![tx3.clone(), tx1.clone(), tx2.clone()],
+            vec![],
+            100,
+        );
+
+        let block3 =
+            DeterministicBlockGenerator::generate(1, [0u8; 32], vec![tx2, tx3, tx1], vec![], 100);
+
+        // All blocks should have identical merkle roots
+        assert_eq!(
+            block1.header.merkle_root, block2.header.merkle_root,
+            "Blocks with same txs in different order should have same merkle root"
+        );
+        assert_eq!(
+            block2.header.merkle_root, block3.header.merkle_root,
+            "Blocks with same txs in different order should have same merkle root"
+        );
+    }
+
+    #[test]
+    fn test_empty_block_merkle_root() {
+        // Empty blocks (only coinbase) should have consistent merkle root
+        let block1 = DeterministicBlockGenerator::generate(1, [0u8; 32], vec![], vec![], 100);
+
+        let block2 = DeterministicBlockGenerator::generate(1, [0u8; 32], vec![], vec![], 100);
+
+        assert_eq!(
+            block1.header.merkle_root, block2.header.merkle_root,
+            "Empty blocks should have identical merkle roots"
+        );
     }
 }

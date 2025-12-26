@@ -19,8 +19,9 @@ const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
 const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME; // 100 TIME
 
-// Security limits
-const MAX_BLOCK_SIZE: usize = 2_000_000; // 2MB per block
+// Security limits (Phase 1)
+const MAX_BLOCK_SIZE: usize = 1_000_000; // 1MB per block (Phase 1.3)
+const TIMESTAMP_TOLERANCE_SECS: i64 = 900; // ±15 minutes (Phase 1.3)
 const MAX_REORG_DEPTH: u64 = 1_000; // Maximum blocks to reorg
 const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
@@ -95,7 +96,7 @@ impl Blockchain {
         *self.peer_registry.write().await = Some(peer_registry);
     }
 
-    fn genesis_timestamp(&self) -> i64 {
+    pub fn genesis_timestamp(&self) -> i64 {
         self.network_type.genesis_timestamp()
     }
 
@@ -598,13 +599,25 @@ impl Blockchain {
         let deterministic_timestamp =
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
-        // Use current time if deterministic timestamp is in the future
-        // This prevents "future block" errors during catch-up or after downtime
+        // CRITICAL: Always use deterministic timestamp to maintain consensus
+        // Verify we're not producing blocks too far ahead of schedule
         let now = chrono::Utc::now().timestamp();
-        let timestamp = std::cmp::min(deterministic_timestamp, now);
+        const MAX_FUTURE_BLOCKS: i64 = 2; // Allow max 2 blocks (20 minutes) ahead
 
-        // Ensure timestamp is still aligned to 10-minute intervals
-        let aligned_timestamp = (timestamp / BLOCK_TIME_SECONDS) * BLOCK_TIME_SECONDS;
+        let max_allowed_timestamp = now + (MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS);
+
+        if deterministic_timestamp > max_allowed_timestamp {
+            return Err(format!(
+                "Cannot produce block {}: timestamp {} is {} seconds in the future (max allowed: {})",
+                next_height,
+                deterministic_timestamp,
+                deterministic_timestamp - now,
+                MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS
+            ));
+        }
+
+        // Use deterministic timestamp (already aligned to 10-minute intervals)
+        let aligned_timestamp = deterministic_timestamp;
 
         // Get active masternodes
         let masternodes = self.masternode_registry.list_active().await;
@@ -1104,8 +1117,9 @@ impl Blockchain {
         Ok(target_height)
     }
 
-    /// Validate a block before accepting it
-    /// Checks: hash integrity, previous hash chain, merkle root, timestamp, height sequence
+    /// Validate a block before accepting it (Phase 1.3)
+    /// Checks: hash integrity, previous hash chain, merkle root, timestamp, height sequence,
+    /// duplicate transactions, and block size limits
     pub fn validate_block(
         &self,
         block: &Block,
@@ -1123,7 +1137,7 @@ impl Blockchain {
             }
         }
 
-        // 3. Verify merkle root matches transactions
+        // 2. Verify merkle root matches transactions
         let computed_merkle = block.compute_merkle_root();
         if computed_merkle != block.header.merkle_root {
             return Err(format!(
@@ -1134,29 +1148,43 @@ impl Blockchain {
             ));
         }
 
-        // 4. Verify timestamp is reasonable (not too far in future)
-        // Allow up to 10 minutes + 2 minutes grace period for deterministic scheduling
-        // Blocks are scheduled deterministically, so they may appear in advance
+        // 3. Verify timestamp is reasonable (Phase 1.3: strict ±15 minute tolerance)
         let now = chrono::Utc::now().timestamp();
-        let max_future = BLOCK_TIME_SECONDS + (2 * 60); // 10 minutes + 2 minute grace
-        if block.header.timestamp > now + max_future {
+
+        // Check not too far in future
+        if block.header.timestamp > now + TIMESTAMP_TOLERANCE_SECS {
             return Err(format!(
-                "Block {} timestamp {} is too far in future (now: {}, max allowed: {})",
-                block.header.height,
-                block.header.timestamp,
-                now,
-                now + max_future
+                "Block {} timestamp {} is too far in future (now: {}, tolerance: {}s)",
+                block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
             ));
         }
 
-        // 5. For non-genesis blocks, timestamp should be after previous block
-        // (This is validated implicitly by chain ordering)
+        // Check not too far in past (prevents timestamp manipulation attacks)
+        if block.header.timestamp < now - TIMESTAMP_TOLERANCE_SECS {
+            return Err(format!(
+                "Block {} timestamp {} is too far in past (now: {}, tolerance: {}s)",
+                block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
+            ));
+        }
 
-        // 6. Block size check
+        // 4. Check for duplicate transactions (Phase 1.3)
+        let mut seen_txids = std::collections::HashSet::new();
+        for tx in &block.transactions {
+            let txid = tx.txid();
+            if !seen_txids.insert(txid) {
+                return Err(format!(
+                    "Block {} contains duplicate transaction: {}",
+                    block.header.height,
+                    hex::encode(&txid[..8])
+                ));
+            }
+        }
+
+        // 5. Block size check (Phase 1.3: 1MB hard cap)
         let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
         if serialized.len() > MAX_BLOCK_SIZE {
             return Err(format!(
-                "Block {} exceeds max size: {} > {}",
+                "Block {} exceeds max size: {} > {} bytes",
                 block.header.height,
                 serialized.len(),
                 MAX_BLOCK_SIZE
@@ -1528,6 +1556,42 @@ impl Blockchain {
                 blockchain.compare_chain_with_peers().await;
             }
         });
+    }
+
+    /// Validate that our chain hasn't gotten ahead of the network time schedule
+    pub async fn validate_chain_time(&self) -> Result<(), String> {
+        let current_height = self.get_height().await;
+        let now = chrono::Utc::now().timestamp();
+
+        // Calculate what height we SHOULD be at based on time
+        let expected_height = self.get_expected_height(now);
+
+        // Allow a small buffer for network latency and clock skew
+        const MAX_BLOCKS_AHEAD: u64 = 2;
+
+        if current_height > expected_height + MAX_BLOCKS_AHEAD {
+            let blocks_ahead = current_height - expected_height;
+            let time_ahead_seconds = blocks_ahead * BLOCK_TIME_SECONDS as u64;
+
+            return Err(format!(
+                "Chain validation failed: height {} is {} blocks ({} minutes) ahead of schedule (expected: {})",
+                current_height,
+                blocks_ahead,
+                time_ahead_seconds / 60,
+                expected_height
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get the expected height based on current time
+    pub fn get_expected_height(&self, current_time: i64) -> u64 {
+        let genesis_time = self.genesis_timestamp();
+        if current_time < genesis_time {
+            return 0;
+        }
+        ((current_time - genesis_time) / BLOCK_TIME_SECONDS) as u64
     }
 }
 
