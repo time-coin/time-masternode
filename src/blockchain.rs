@@ -595,21 +595,16 @@ impl Blockchain {
         let prev_hash = self.get_block_hash(current_height)?;
 
         let next_height = current_height + 1;
-        let timestamp = self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
+        let deterministic_timestamp =
+            self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
-        // Prevent producing blocks too far in the future
-        // This prevents clock skew from creating invalid future blocks
+        // Use current time if deterministic timestamp is in the future
+        // This prevents "future block" errors during catch-up or after downtime
         let now = chrono::Utc::now().timestamp();
-        let max_future = 2 * 60; // 2 minutes max
-        if timestamp > now + max_future {
-            return Err(format!(
-                "Cannot produce block {} - timestamp {} is too far in future (now: {}, max: {})",
-                next_height,
-                timestamp,
-                now,
-                now + max_future
-            ));
-        }
+        let timestamp = std::cmp::min(deterministic_timestamp, now);
+
+        // Ensure timestamp is still aligned to 10-minute intervals
+        let aligned_timestamp = (timestamp / BLOCK_TIME_SECONDS) * BLOCK_TIME_SECONDS;
 
         // Get active masternodes
         let masternodes = self.masternode_registry.list_active().await;
@@ -639,7 +634,7 @@ impl Blockchain {
                 script_pubkey: b"BLOCK_REWARD".to_vec(), // Special marker for block reward
             }],
             lock_time: 0,
-            timestamp,
+            timestamp: aligned_timestamp,
         };
 
         // Reward distribution transaction spends coinbase and distributes to masternodes
@@ -661,7 +656,7 @@ impl Blockchain {
                 })
                 .collect(),
             lock_time: 0,
-            timestamp,
+            timestamp: aligned_timestamp,
         };
 
         // Count masternodes by tier
@@ -685,7 +680,7 @@ impl Blockchain {
                 height: next_height,
                 previous_hash: prev_hash,
                 merkle_root: coinbase.txid(),
-                timestamp,
+                timestamp: aligned_timestamp,
                 block_reward: total_reward,
                 leader: String::new(),
                 attestation_root: [0u8; 32],
@@ -1140,10 +1135,10 @@ impl Blockchain {
         }
 
         // 4. Verify timestamp is reasonable (not too far in future)
-        // Allow only 2 minutes in the future to prevent time-skew attacks
-        // This gives enough margin for network latency and minor clock drift
+        // Allow up to 10 minutes + 2 minutes grace period for deterministic scheduling
+        // Blocks are scheduled deterministically, so they may appear in advance
         let now = chrono::Utc::now().timestamp();
-        let max_future = 2 * 60; // 2 minutes max future time
+        let max_future = BLOCK_TIME_SECONDS + (2 * 60); // 10 minutes + 2 minute grace
         if block.header.timestamp > now + max_future {
             return Err(format!(
                 "Block {} timestamp {} is too far in future (now: {}, max allowed: {})",

@@ -240,9 +240,15 @@ impl TSCDConsensus {
         let mut hasher = Sha256::new();
         hasher.update(b"leader_selection");
         hasher.update(slot.to_le_bytes());
-        if let Some(block) = chain_head.as_ref() {
-            hasher.update(block.hash());
-        }
+
+        // Include chain head hash for determinism
+        let chain_hash = if let Some(block) = chain_head.as_ref() {
+            block.hash()
+        } else {
+            [0u8; 32]
+        };
+        hasher.update(chain_hash);
+
         let hash: [u8; 32] = hasher.finalize().into();
 
         // Convert hash to index
@@ -253,6 +259,16 @@ impl TSCDConsensus {
         let leader_index = (val % masternodes.len() as u64) as usize;
 
         let masternode = &masternodes[leader_index];
+
+        // Log leader selection details for debugging
+        tracing::debug!(
+            "Leader selection for slot {}: chain_head={}, leader_index={}/{}, selected={}",
+            slot,
+            hex::encode(&chain_hash[..8]),
+            leader_index,
+            masternodes.len(),
+            masternode.masternode.address
+        );
 
         // Convert Masternode to TSCDValidator
         Ok(TSCDValidator {

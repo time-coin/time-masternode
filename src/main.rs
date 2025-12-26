@@ -532,6 +532,9 @@ async fn main() {
             };
             tsdc_loop.set_local_validator(validator).await;
 
+            // Track last proposed slot to prevent duplicate proposals
+            let mut last_proposed_slot: Option<u64> = None;
+
             // Calculate time until next slot boundary
             let slot_duration = 600u64; // 10 minutes
             let now = std::time::SystemTime::now()
@@ -558,6 +561,12 @@ async fn main() {
                     _ = slot_interval.tick() => {
                         let current_slot = tsdc_loop.current_slot();
 
+                        // Skip if we already proposed for this slot
+                        if last_proposed_slot == Some(current_slot) {
+                            tracing::trace!("Already proposed for slot {}, skipping", current_slot);
+                            continue;
+                        }
+
                         // Try to become leader for this slot
                         match tsdc_loop.select_leader(current_slot).await {
                             Ok(leader) => {
@@ -579,6 +588,9 @@ async fn main() {
                                                 block.header.height,
                                                 block.transactions.len()
                                             );
+
+                                            // Mark this slot as proposed
+                                            last_proposed_slot = Some(current_slot);
 
                                             // Broadcast block proposal to all peers
                                             let proposal = NetworkMessage::TSCDBlockProposal { block };

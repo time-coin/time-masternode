@@ -578,8 +578,9 @@ async fn maintain_peer_connection(
     // Get peer IP for later reference
     let peer_ip = peer_conn.peer_ip().to_string();
 
-    // Mark as connected in connection manager (transitions from Connecting -> Connected)
+    // Mark as connected in both managers (transitions from Connecting -> Connected)
     connection_manager.mark_connected(&peer_ip);
+    peer_registry.mark_connecting(&peer_ip); // Also track in peer_registry for accurate counts
 
     // Run the message loop which handles ping/pong and routes other messages
     // Pass peer_registry, masternode_registry, and blockchain so it can process block syncs
@@ -591,8 +592,9 @@ async fn maintain_peer_connection(
         )
         .await;
 
-    // Clean up on disconnect
+    // Clean up on disconnect in both managers
     connection_manager.mark_disconnected(&peer_ip);
+    peer_registry.mark_inbound_disconnected(&peer_ip);
     peer_registry.unregister_peer(&peer_ip).await;
     tracing::debug!("🔌 Unregistered peer {}", peer_ip);
 
