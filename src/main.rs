@@ -571,6 +571,23 @@ async fn main() {
                         match tsdc_loop.select_leader(current_slot).await {
                             Ok(leader) => {
                                 if leader.id == mn_address_tsdc {
+                                    // Check if we have enough synced nodes before proposing
+                                    // Count connected peers (we're including ourselves implicitly)
+                                    let connected_count = peer_registry_tsdc.connected_count();
+                                    
+                                    // Require at least 3 nodes total (including ourselves) for consensus
+                                    let required_sync = 3;
+                                    let total_nodes = connected_count + 1; // +1 for ourselves
+                                    
+                                    if total_nodes < required_sync {
+                                        tracing::warn!(
+                                            "⚠️  Not enough synced peers for block proposal: {}/{} required",
+                                            total_nodes,
+                                            required_sync
+                                        );
+                                        continue;
+                                    }
+                                    
                                     tracing::info!("🎯 SELECTED AS LEADER for slot {}", current_slot);
 
                                     // Get finalized transactions from consensus engine

@@ -1375,7 +1375,7 @@ impl Blockchain {
     }
 
     /// Check if we should switch to peer's chain based on work comparison
-    pub async fn should_switch_by_work(&self, peer_work: u128, peer_height: u64) -> bool {
+    pub async fn should_switch_by_work(&self, peer_work: u128, peer_height: u64, peer_tip_hash: &[u8; 32]) -> bool {
         let our_work = *self.cumulative_work.read().await;
         let our_height = *self.current_height.read().await;
 
@@ -1398,6 +1398,22 @@ impl Blockchain {
                 our_height
             );
             return true;
+        }
+
+        // If equal work AND equal height, use deterministic tie-breaker: lexicographically smallest hash
+        if peer_work == our_work && peer_height == our_height {
+            if let Ok(our_tip) = self.get_block_by_height(our_height).await {
+                let our_hash = our_tip.hash();
+                // Compare hashes byte-by-byte - choose the smaller one
+                if peer_tip_hash < &our_hash {
+                    tracing::info!(
+                        "⚖️  Equal height {} and equal work {}, choosing chain with smaller hash",
+                        our_height,
+                        our_work
+                    );
+                    return true;
+                }
+            }
         }
 
         false

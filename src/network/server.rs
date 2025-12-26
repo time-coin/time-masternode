@@ -1197,14 +1197,13 @@ async fn handle_peer(
                                     tracing::debug!("📤 Sent chain work at height {} to {}", height, peer.addr);
                                 }
                                 NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {
-                                    // Handle response - check if peer has more work and potentially trigger reorg
+                                    // Handle response - check if peer has better chain and potentially trigger reorg
                                     let our_height = blockchain.get_height().await;
-                                    let our_work = blockchain.get_cumulative_work().await;
 
-                                    if *cumulative_work > our_work {
+                                    if blockchain.should_switch_by_work(*cumulative_work, *height, tip_hash).await {
                                         tracing::info!(
-                                            "📊 Peer {} has more chain work: {} vs our {} (heights: {} vs {})",
-                                            peer.addr, cumulative_work, our_work, height, our_height
+                                            "📊 Peer {} has better chain, requesting blocks",
+                                            peer.addr
                                         );
 
                                         // Check for fork and request blocks if needed
