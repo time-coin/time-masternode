@@ -7,7 +7,7 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use crate::types::{OutPoint, Transaction, UTXO};
+use crate::types::{OutPoint, Transaction, TxInput, TxOutput, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use chrono::Utc;
@@ -630,11 +630,36 @@ impl Blockchain {
             return Err("No valid masternode rewards".to_string());
         }
 
-        // Coinbase transaction marker (empty outputs - rewards are in masternode_rewards)
+        // Coinbase transaction creates the total block reward
         let coinbase = Transaction {
             version: 1,
             inputs: vec![],
-            outputs: vec![],
+            outputs: vec![TxOutput {
+                value: total_reward,
+                script_pubkey: b"BLOCK_REWARD".to_vec(), // Special marker for block reward
+            }],
+            lock_time: 0,
+            timestamp,
+        };
+
+        // Reward distribution transaction spends coinbase and distributes to masternodes
+        let reward_distribution = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: OutPoint {
+                    txid: coinbase.txid(),
+                    vout: 0,
+                },
+                script_sig: vec![],
+                sequence: 0xFFFFFFFF,
+            }],
+            outputs: rewards
+                .iter()
+                .map(|(address, amount)| TxOutput {
+                    value: *amount,
+                    script_pubkey: address.as_bytes().to_vec(),
+                })
+                .collect(),
             lock_time: 0,
             timestamp,
         };
@@ -650,8 +675,8 @@ impl Blockchain {
             }
         }
 
-        // Build transaction list: coinbase + finalized transactions
-        let mut all_txs = vec![coinbase.clone()];
+        // Build transaction list: coinbase + reward distribution + finalized transactions
+        let mut all_txs = vec![coinbase.clone(), reward_distribution];
         all_txs.extend(finalized_txs);
 
         let mut block = Block {
@@ -882,15 +907,31 @@ impl Blockchain {
     }
 
     async fn process_block_utxos(&self, block: &Block) {
-        let block_hash = block.hash();
-        let mut tx_utxos_created = 0;
-        let mut reward_utxos_created = 0;
+        let _block_hash = block.hash();
+        let mut utxos_created = 0;
+        let mut utxos_spent = 0;
 
-        // Process transaction outputs (user transactions only, coinbase has empty outputs)
+        // Process each transaction
         for tx in &block.transactions {
             let txid = tx.txid();
+
+            // Spend inputs (mark UTXOs as spent)
+            for input in &tx.inputs {
+                if let Err(e) = self.utxo_manager.spend_utxo(&input.previous_output).await {
+                    tracing::debug!(
+                        "Could not spend UTXO {}:{}: {:?}",
+                        hex::encode(input.previous_output.txid),
+                        input.previous_output.vout,
+                        e
+                    );
+                } else {
+                    utxos_spent += 1;
+                }
+            }
+
+            // Create outputs (add new UTXOs)
             for (vout, output) in tx.outputs.iter().enumerate() {
-                // Extract address from script_pubkey (which is just the address bytes in our format)
+                // Extract address from script_pubkey
                 let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
 
                 let utxo = UTXO {
@@ -911,56 +952,19 @@ impl Blockchain {
                         e
                     );
                 } else {
-                    tx_utxos_created += 1;
+                    utxos_created += 1;
                 }
             }
         }
 
-        // Process masternode rewards as UTXOs
-        // Each reward creates a spendable output for the masternode wallet
-        for (idx, (address, amount)) in block.masternode_rewards.iter().enumerate() {
-            // Create a synthetic outpoint using block hash + reward index
-            // This ensures uniqueness since each block has unique rewards
-            let mut reward_txid = block_hash;
-            // Mark this as a reward by setting first byte to 0xFF and embedding index
-            reward_txid[0] = 0xFF;
-            reward_txid[1] = (idx >> 8) as u8;
-            reward_txid[2] = idx as u8;
-
-            let utxo = UTXO {
-                outpoint: OutPoint {
-                    txid: reward_txid,
-                    vout: 0,
-                },
-                value: *amount,
-                script_pubkey: address.as_bytes().to_vec(),
-                address: address.clone(),
-            };
-
-            if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
-                tracing::debug!("Could not add reward UTXO for {}: {:?}", address, e);
-            } else {
-                reward_utxos_created += 1;
-            }
-        }
-
-        let total_utxos = tx_utxos_created + reward_utxos_created;
-        if total_utxos > 0 {
-            if tx_utxos_created > 0 {
-                tracing::info!(
-                    "💰 Block {} indexed {} UTXOs ({} from txs, {} from rewards)",
-                    block.header.height,
-                    total_utxos,
-                    tx_utxos_created,
-                    reward_utxos_created
-                );
-            } else {
-                tracing::info!(
-                    "💰 Block {} indexed {} reward UTXOs",
-                    block.header.height,
-                    reward_utxos_created
-                );
-            }
+        if utxos_created > 0 || utxos_spent > 0 {
+            tracing::info!(
+                "💰 Block {} indexed {} UTXOs ({} created, {} spent)",
+                block.header.height,
+                utxos_created,
+                utxos_created,
+                utxos_spent
+            );
         }
     }
 

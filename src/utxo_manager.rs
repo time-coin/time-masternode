@@ -85,6 +85,20 @@ impl UTXOStateManager {
         Ok(())
     }
 
+    /// Mark a UTXO as spent (used when processing blocks)
+    pub async fn spend_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
+        self.storage.remove_utxo(outpoint).await?;
+        self.utxo_states.insert(
+            outpoint.clone(),
+            UTXOState::SpentFinalized {
+                txid: [0u8; 32], // Block processing spend
+                finalized_at: Self::current_timestamp(),
+                votes: 0,
+            },
+        );
+        Ok(())
+    }
+
     /// Atomically lock a UTXO for a pending transaction
     pub fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
         use dashmap::mapref::entry::Entry;
