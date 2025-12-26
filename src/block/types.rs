@@ -97,13 +97,15 @@ impl Block {
             return [0u8; 32]; // Empty merkle root for no transactions
         }
 
-        // Hash each transaction
+        // Hash each transaction using canonical JSON serialization
+        // This ensures consistent hashing regardless of bincode vs JSON transmission
         let mut hashes: Vec<Hash256> = self
             .transactions
             .iter()
             .map(|tx| {
-                let bytes = bincode::serialize(tx).unwrap_or_default();
-                Sha256::digest(&bytes).into()
+                // Use serde_json with sorted keys for canonical representation
+                let json = serde_json::to_string(tx).unwrap_or_default();
+                Sha256::digest(json.as_bytes()).into()
             })
             .collect();
 

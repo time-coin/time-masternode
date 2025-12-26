@@ -1198,7 +1198,7 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {
                                     // Handle response - check if peer has better chain and potentially trigger reorg
-                                    let our_height = blockchain.get_height().await;
+                                    let _our_height = blockchain.get_height().await;
 
                                     if blockchain.should_switch_by_work(*cumulative_work, *height, tip_hash).await {
                                         tracing::info!(

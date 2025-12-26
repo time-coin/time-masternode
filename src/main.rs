@@ -574,11 +574,11 @@ async fn main() {
                                     // Check if we have enough synced nodes before proposing
                                     // Count connected peers (we're including ourselves implicitly)
                                     let connected_count = peer_registry_tsdc.connected_count();
-                                    
+
                                     // Require at least 3 nodes total (including ourselves) for consensus
                                     let required_sync = 3;
                                     let total_nodes = connected_count + 1; // +1 for ourselves
-                                    
+
                                     if total_nodes < required_sync {
                                         tracing::warn!(
                                             "⚠️  Not enough synced peers for block proposal: {}/{} required",
@@ -587,7 +587,7 @@ async fn main() {
                                         );
                                         continue;
                                     }
-                                    
+
                                     tracing::info!("🎯 SELECTED AS LEADER for slot {}", current_slot);
 
                                     // Get finalized transactions from consensus engine

@@ -1375,7 +1375,12 @@ impl Blockchain {
     }
 
     /// Check if we should switch to peer's chain based on work comparison
-    pub async fn should_switch_by_work(&self, peer_work: u128, peer_height: u64, peer_tip_hash: &[u8; 32]) -> bool {
+    pub async fn should_switch_by_work(
+        &self,
+        peer_work: u128,
+        peer_height: u64,
+        peer_tip_hash: &[u8; 32],
+    ) -> bool {
         let our_work = *self.cumulative_work.read().await;
         let our_height = *self.current_height.read().await;
 

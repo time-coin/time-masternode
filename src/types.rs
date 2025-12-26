@@ -53,8 +53,9 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn txid(&self) -> Hash256 {
-        let bytes = bincode::serialize(self).expect("Serialization should succeed");
-        Sha256::digest(bytes).into()
+        // Use JSON serialization for canonical, network-compatible hashing
+        let json = serde_json::to_string(self).expect("JSON serialization should succeed");
+        Sha256::digest(json.as_bytes()).into()
     }
 
     /// Calculate transaction fee (input sum - output sum)
