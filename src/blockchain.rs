@@ -1235,6 +1235,18 @@ impl Blockchain {
             // Get expected previous hash
             let expected_prev_hash = self.get_block_hash(current)?;
 
+            // Check if previous_hash matches
+            if block.header.previous_hash != expected_prev_hash {
+                tracing::warn!(
+                    "🔀 Fork detected: block {} previous_hash mismatch (expected {}, got {})",
+                    block_height,
+                    hex::encode(&expected_prev_hash[..8]),
+                    hex::encode(&block.header.previous_hash[..8])
+                );
+                // Don't validate further, just skip and let sync handle reorg
+                return Ok(false);
+            }
+
             // Full validation before accepting
             self.validate_block(&block, Some(expected_prev_hash))?;
 

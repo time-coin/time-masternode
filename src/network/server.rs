@@ -766,59 +766,105 @@ async fn handle_peer(
                                             block_count, start_height, end_height, peer.addr, our_height);
 
                                         // Check if this is from a different chain (fork detection)
-                                        if start_height <= our_height && start_height > 0 {
-                                            // Peer is sending blocks we might already have
-                                            // Check if the first block matches what we have
-                                            if let Ok(our_block) = blockchain.get_block_by_height(start_height).await {
-                                                let incoming_hash = blocks.first().unwrap().hash();
-                                                let our_hash = our_block.hash();
+                                        // Look at start_height or one before (for blocks immediately after our tip)
+                                        let check_height = if start_height == our_height + 1 && start_height > 0 {
+                                            start_height - 1  // Check the previous block
+                                        } else {
+                                            start_height
+                                        };
 
-                                                if incoming_hash != our_hash {
-                                                    tracing::warn!(
-                                                        "🔀 Fork detected at height {}: peer has different block",
-                                                        start_height
-                                                    );
+                                        if check_height <= our_height && check_height > 0 {
+                                            // Check if blocks connect to our chain or are from a fork
+                                            let fork_check_block = if check_height == start_height {
+                                                blocks.first()
+                                            } else {
+                                                // Need to check previous_hash of first block
+                                                blocks.first()
+                                            };
 
-                                                    // Check if peer's chain is longer
-                                                    if end_height > our_height {
-                                                        // Find common ancestor by checking parent hashes
-                                                        let common_ancestor = start_height - 1;
+                                            if let Some(check_block) = fork_check_block {
+                                                // If checking previous_hash (when start is our_height + 1)
+                                                if check_height < start_height {
+                                                    // Check if the previous_hash matches our chain tip
+                                                    if let Some(our_tip_hash) = blockchain.get_block_hash_at_height(check_height).await {
+                                                        if check_block.header.previous_hash != our_tip_hash {
+                                                            tracing::warn!(
+                                                                "🔀 Fork detected: block {} previous_hash doesn't match our block {}",
+                                                                start_height, check_height
+                                                            );
 
-                                                        // Simple approach: rollback to before the fork
-                                                        // and apply the new blocks
-                                                        tracing::info!(
-                                                            "🔄 Peer has longer chain ({} vs {}), reorganizing from height {}",
-                                                            end_height, our_height, common_ancestor
-                                                        );
+                                                            // Peer's chain doesn't build on ours - it's a fork
+                                                            if end_height > our_height {
+                                                                // Request earlier blocks to find common ancestor
+                                                                let search_start = check_height.saturating_sub(10);
+                                                                tracing::info!(
+                                                                    "🔄 Peer has longer chain ({} vs {}), requesting from height {} to find common ancestor",
+                                                                    end_height, our_height, search_start
+                                                                );
 
-                                                        // Verify we have the common ancestor
-                                                        if common_ancestor > 0 {
-                                                            if let Ok(first_block) = blocks.first().ok_or("no blocks") {
-                                                                if let Ok(our_prev) = blockchain.get_block_hash_at_height(common_ancestor).await.ok_or("no prev") {
-                                                                    if first_block.header.previous_hash == our_prev {
-                                                                        // Common ancestor confirmed, do reorg
-                                                                        match blockchain.reorganize_to_chain(common_ancestor, blocks.clone()).await {
-                                                                            Ok(()) => {
-                                                                                tracing::info!("✅ Chain reorganization successful");
-                                                                                continue;
-                                                                            }
-                                                                            Err(e) => {
-                                                                                tracing::error!("❌ Chain reorganization failed: {}", e);
-                                                                                continue;
+                                                                let msg = NetworkMessage::GetBlocks(search_start, end_height + 10);
+                                                                if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
+                                                                    tracing::warn!("Failed to request reorg blocks: {}", e);
+                                                                }
+                                                                continue;
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Peer is sending blocks we might already have
+                                                    // Check if the block matches what we have
+                                                    if let Ok(our_block) = blockchain.get_block_by_height(check_height).await {
+                                                        let incoming_hash = check_block.hash();
+                                                        let our_hash = our_block.hash();
+
+                                                        if incoming_hash != our_hash {
+                                                            tracing::warn!(
+                                                                "🔀 Fork detected at height {}: peer has different block",
+                                                                check_height
+                                                            );
+
+                                                            // Check if peer's chain is longer
+                                                            if end_height > our_height {
+                                                                // Find common ancestor by checking parent hashes
+                                                                let common_ancestor = check_height - 1;
+
+                                                                // Simple approach: rollback to before the fork
+                                                                // and apply the new blocks
+                                                                tracing::info!(
+                                                                    "🔄 Peer has longer chain ({} vs {}), reorganizing from height {}",
+                                                                    end_height, our_height, common_ancestor
+                                                                );
+
+                                                                // Verify we have the common ancestor
+                                                                if common_ancestor > 0 {
+                                                                    if let Some(first_block) = blocks.first() {
+                                                                        if let Some(our_prev) = blockchain.get_block_hash_at_height(common_ancestor).await {
+                                                                            if first_block.header.previous_hash == our_prev {
+                                                                                // Common ancestor confirmed, do reorg
+                                                                                match blockchain.reorganize_to_chain(common_ancestor, blocks.clone()).await {
+                                                                                    Ok(()) => {
+                                                                                        tracing::info!("✅ Chain reorganization successful");
+                                                                                        continue;
+                                                                                    }
+                                                                                    Err(e) => {
+                                                                                        tracing::error!("❌ Chain reorganization failed: {}", e);
+                                                                                        continue;
+                                                                                    }
+                                                                                }
                                                                             }
                                                                         }
                                                                     }
                                                                 }
+
+                                                                // Couldn't verify common ancestor, skip these blocks
+                                                                tracing::warn!("⚠️ Could not verify common ancestor, skipping fork");
+                                                                continue;
+                                                            } else {
+                                                                // Our chain is same length or longer, keep it
+                                                                tracing::info!("📊 Keeping our chain (same or longer)");
+                                                                continue;
                                                             }
                                                         }
-
-                                                        // Couldn't verify common ancestor, skip these blocks
-                                                        tracing::warn!("⚠️ Could not verify common ancestor, skipping fork");
-                                                        continue;
-                                                    } else {
-                                                        // Our chain is same length or longer, keep it
-                                                        tracing::info!("📊 Keeping our chain (same or longer)");
-                                                        continue;
                                                     }
                                                 }
                                             }
@@ -827,13 +873,18 @@ async fn handle_peer(
                                         // Normal case: apply blocks sequentially
                                         let mut added = 0;
                                         let mut skipped = 0;
-                                        for block in blocks {
+                                        let mut fork_detected = false;
+                                        for block in blocks.clone() {
                                             match blockchain.add_block_with_fork_handling(block.clone()).await {
                                                 Ok(true) => {
                                                     added += 1;
                                                 }
                                                 Ok(false) => {
                                                     skipped += 1;
+                                                    // If we're skipping a block that's ahead of us, might be a fork
+                                                    if block.header.height > blockchain.get_height().await {
+                                                        fork_detected = true;
+                                                    }
                                                 }
                                                 Err(e) => {
                                                     // Could be duplicate or invalid - log at debug level
@@ -844,6 +895,25 @@ async fn handle_peer(
                                         }
                                         if added > 0 {
                                             tracing::info!("✅ Synced {} blocks from {} (skipped {})", added, peer.addr, skipped);
+                                        } else if skipped > 0 && fork_detected {
+                                            // All blocks skipped and we're behind - likely on wrong fork
+                                            let our_height = blockchain.get_height().await;
+                                            tracing::warn!(
+                                                "⚠️ All {} blocks skipped from {} - potential fork at height {}",
+                                                skipped, peer.addr, our_height
+                                            );
+
+                                            // Request chain from earlier to find common ancestor
+                                            if our_height > 0 {
+                                                let reorg_start = our_height.saturating_sub(10);
+                                                tracing::info!("🔄 Requesting chain from height {} to resolve fork", reorg_start);
+
+                                                // Request earlier blocks to find common ancestor
+                                                let msg = NetworkMessage::GetBlocks(reorg_start, end_height + 100);
+                                                if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
+                                                    tracing::warn!("Failed to request reorg blocks: {}", e);
+                                                }
+                                            }
                                         }
                                     }
                                 }
