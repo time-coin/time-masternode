@@ -682,7 +682,59 @@ impl PeerConnection {
                         our_height
                     );
 
-                    // Apply blocks sequentially
+                    // Check if first block matches what we have (fork detection)
+                    if start_height > 0 && start_height <= our_height {
+                        if let Ok(our_block) = blockchain.get_block(start_height) {
+                            let incoming_hash = blocks[0].hash();
+                            let our_hash = our_block.hash();
+                            
+                            if incoming_hash != our_hash {
+                                warn!(
+                                    "🔀 Fork detected at height {}: our {} vs peer {}",
+                                    start_height,
+                                    hex::encode(&our_hash[..8]),
+                                    hex::encode(&incoming_hash[..8])
+                                );
+                                
+                                // Trigger reorg if peer has longer chain
+                                if end_height > our_height {
+                                    info!(
+                                        "📊 Peer has longer chain ({} > {}), initiating reorganization",
+                                        end_height, our_height
+                                    );
+                                    
+                                    // Find common ancestor by going back
+                                    let mut common_ancestor = start_height.saturating_sub(1);
+                                    while common_ancestor > 0 {
+                                        if let Ok(_our_prev) = blockchain.get_block(common_ancestor) {
+                                            // Check if this block exists in the new chain
+                                            // For now, assume previous block is common ancestor
+                                            break;
+                                        }
+                                        common_ancestor = common_ancestor.saturating_sub(1);
+                                    }
+                                    
+                                    info!(
+                                        "🔄 Reorganizing from height {} with {} new blocks",
+                                        common_ancestor,
+                                        blocks.len()
+                                    );
+                                    
+                                    match blockchain.reorganize_to_chain(common_ancestor, blocks.clone()).await {
+                                        Ok(_) => {
+                                            info!("✅ [{:?}] Chain reorganization successful", self.direction);
+                                        }
+                                        Err(e) => {
+                                            error!("❌ [{:?}] Chain reorganization failed: {}", self.direction, e);
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+                            }
+                        }
+                    }
+
+                    // Apply blocks sequentially (no fork detected)
                     let mut added = 0;
                     let mut skipped = 0;
                     for block in blocks {

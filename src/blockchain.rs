@@ -1263,29 +1263,16 @@ impl Blockchain {
                 }
 
                 // Different block at same height - this is a fork!
-                // Use chain work comparison (longest-chain-by-work rule)
-                let incoming_work = self.calculate_block_work(&block);
-                let existing_work = self.calculate_block_work(&existing);
-
                 tracing::warn!(
-                    "🔀 Fork detected at height {}: our hash {:?} (work: {}) vs incoming {:?} (work: {})",
+                    "🔀 Fork detected at height {}: our hash {} vs incoming {}",
                     block_height,
                     hex::encode(&existing.hash()[..8]),
-                    existing_work,
-                    hex::encode(&block.hash()[..8]),
-                    incoming_work
+                    hex::encode(&block.hash()[..8])
                 );
 
-                // Keep the block with more work at this height
-                // If equal work, prefer existing (first-seen as tiebreaker)
-                if incoming_work > existing_work {
-                    tracing::info!(
-                        "📈 Incoming block has more work, would need full chain comparison"
-                    );
-                }
-
-                // For single block comparison, we keep existing
-                // Full chain reorg requires comparing cumulative work of entire chain
+                // We detected a fork - need to fetch the competing chain
+                // and potentially reorganize
+                // For now, just reject and let sync handle it
                 return Ok(false);
             }
 
