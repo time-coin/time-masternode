@@ -1074,6 +1074,16 @@ async fn main() {
                             .unwrap_or(false);
 
                         if is_producer {
+                            // Check if we have enough synced peers (minimum 2 peers = 3 nodes total including us)
+                            let connected_peers = block_peer_registry.get_connected_peers().await;
+                            if connected_peers.len() < 2 {
+                                tracing::warn!(
+                                    "⚠️ Skipping block production: only {} connected peer(s) (minimum 2 required for 3-node sync)",
+                                    connected_peers.len()
+                                );
+                                continue;
+                            }
+
                             // Acquire block production lock (P2P best practice #8)
                             if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                                 tracing::warn!("⚠️  Block production already in progress, skipping");
