@@ -1167,6 +1167,22 @@ impl Blockchain {
             ));
         }
 
+        // Additional check: Verify timestamp aligns with blockchain timeline
+        // Expected time = genesis_time + (height * block_time)
+        // This prevents accepting entire chains that are too far ahead
+        let genesis_time = self.genesis_timestamp();
+        let expected_time = genesis_time + (block.header.height as i64 * BLOCK_TIME_SECONDS);
+        let time_drift = block.header.timestamp - expected_time;
+
+        // Allow some flexibility for network delays and clock drift, but reject if way ahead
+        const MAX_DRIFT_FROM_SCHEDULE: i64 = 3600; // 1 hour ahead of schedule is suspicious
+        if time_drift > MAX_DRIFT_FROM_SCHEDULE {
+            return Err(format!(
+                "Block {} timestamp {} is too far ahead of expected schedule (expected: {}, drift: {}s)",
+                block.header.height, block.header.timestamp, expected_time, time_drift
+            ));
+        }
+
         // 4. Check for duplicate transactions (Phase 1.3)
         let mut seen_txids = std::collections::HashSet::new();
         for tx in &block.transactions {
