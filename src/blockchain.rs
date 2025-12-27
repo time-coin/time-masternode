@@ -185,37 +185,14 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Now attempt to create if enough masternodes
+        // Genesis block creation is handled by main.rs with proper leader selection
+        // This function just waits for the right time, then main.rs will create it if we're the leader
         let masternodes = self.masternode_registry.list_active().await;
-        if masternodes.len() >= GenesisBlock::MIN_MASTERNODES_FOR_GENESIS {
-            tracing::info!(
-                "📦 Creating genesis block with {} masternodes from {} connected peers",
-                masternodes.len(),
-                connected_peers
-            );
-
-            match self.create_genesis_block().await {
-                Ok(genesis_block) => {
-                    // Add the genesis block to our chain
-                    self.add_block(genesis_block.clone()).await?;
-                    tracing::info!(
-                        "✅ Genesis block created and stored (hash: {})",
-                        hex::encode(genesis_block.hash())
-                    );
-                    *self.current_height.write().await = 0;
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!("⚠️  Could not create genesis block: {}", e);
-                }
-            }
-        } else {
-            tracing::info!(
-                "📦 No genesis block - need {} masternodes, have {} - will sync from peers",
-                GenesisBlock::MIN_MASTERNODES_FOR_GENESIS,
-                masternodes.len()
-            );
-        }
+        tracing::info!(
+            "📦 At 10-minute boundary with {} masternodes and {} peers - waiting for leader to create genesis",
+            masternodes.len(),
+            connected_peers
+        );
 
         Ok(())
     }
@@ -627,7 +604,7 @@ impl Blockchain {
         let genesis_result = self.get_block_by_height(0).await;
 
         if genesis_result.is_err() {
-            // No genesis block - check if we should create one
+            // No genesis block - must wait for leader to create it
             let now = Utc::now().timestamp();
             let genesis_time = self.genesis_timestamp();
 
@@ -638,20 +615,10 @@ impl Blockchain {
                 ));
             }
 
-            tracing::info!("📦 No genesis block found - attempting to create one");
-
-            let genesis_block = self.create_genesis_block().await?;
-
-            // Add the genesis block to our chain
-            self.add_block(genesis_block.clone()).await?;
-
-            tracing::info!(
-                "✅ Genesis block created and added at height 0, hash: {:?}",
-                genesis_block.header.merkle_root
+            return Err(
+                "Cannot produce blocks - no genesis block exists. Waiting for genesis leader to create it."
+                    .to_string(),
             );
-
-            // Return the genesis block as the produced block
-            return Ok(genesis_block);
         }
 
         let genesis = genesis_result.unwrap();
