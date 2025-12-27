@@ -824,30 +824,16 @@ impl PeerConnection {
                         }
                     }
 
-                    // If fork was detected, request earlier blocks to find common ancestor
+                    // If fork was detected, disconnect this peer - they're on a different chain
                     if let Some(fork_height) = fork_detected_at {
-                        warn!(
-                            "🔄 Fork detected at height {}, requesting earlier blocks to find common ancestor",
-                            fork_height
+                        error!(
+                            "🚫 [{:?}] Peer {} is on a fork (fork detected at height {}) - disconnecting",
+                            self.direction, self.peer_ip, fork_height
                         );
-
-                        // Request blocks starting from 10 blocks before the fork
-                        let reorg_start = fork_height.saturating_sub(10);
-                        // Use end_height from the received blocks as peer height
-                        let peer_height = end_height;
-
-                        info!(
-                            "📤 Requesting blocks {}-{} from {} to resolve fork",
-                            reorg_start,
-                            peer_height + 100,
-                            self.peer_ip
-                        );
-
-                        let msg = NetworkMessage::GetBlocks(reorg_start, peer_height + 100);
-                        if let Err(e) = self.send_message(&msg).await {
-                            warn!("Failed to request reorg blocks: {}", e);
-                        }
-                        return Ok(());
+                        return Err(format!(
+                            "Peer {} is on a fork - detected at height {}",
+                            self.peer_ip, fork_height
+                        ));
                     }
 
                     if added > 0 {
