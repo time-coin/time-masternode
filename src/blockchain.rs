@@ -100,8 +100,7 @@ impl Blockchain {
         self.network_type.genesis_timestamp()
     }
 
-    /// Initialize blockchain - verify existing genesis or fail
-    /// Genesis block must be synced from peers - never auto-generated
+    /// Initialize blockchain - verify existing genesis or create if enough masternodes
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
 
@@ -137,8 +136,37 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No genesis block - will need to sync from peers
-        tracing::info!("📦 No genesis block found - will sync from peers");
+        // No genesis block exists - attempt to create if enough masternodes
+        let masternodes = self.masternode_registry.list_active().await;
+        if masternodes.len() >= GenesisBlock::MIN_MASTERNODES_FOR_GENESIS {
+            tracing::info!(
+                "📦 No genesis block found - creating with {} active masternodes",
+                masternodes.len()
+            );
+
+            match self.create_genesis_block().await {
+                Ok(genesis_block) => {
+                    // Add the genesis block to our chain
+                    self.add_block(genesis_block.clone()).await?;
+                    tracing::info!(
+                        "✅ Genesis block created and stored (hash: {})",
+                        hex::encode(genesis_block.hash())
+                    );
+                    *self.current_height.write().await = 0;
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::warn!("⚠️  Could not create genesis block: {}", e);
+                }
+            }
+        } else {
+            tracing::info!(
+                "📦 No genesis block - need {} masternodes, have {} - will sync from peers",
+                GenesisBlock::MIN_MASTERNODES_FOR_GENESIS,
+                masternodes.len()
+            );
+        }
+
         Ok(())
     }
 
@@ -352,7 +380,7 @@ impl Blockchain {
         let masternodes_info = self.masternode_registry.list_active().await;
 
         // Convert to GenesisMasternode format
-        let genesis_masternodes: Vec<GenesisMasternode> = masternodes_info
+        let mut genesis_masternodes: Vec<GenesisMasternode> = masternodes_info
             .iter()
             .map(|mn| GenesisMasternode {
                 address: mn.masternode.wallet_address.clone(),
@@ -369,7 +397,10 @@ impl Blockchain {
             ));
         }
 
-        // Get leader (first masternode or self)
+        // IMPORTANT: Sort masternodes by address for deterministic genesis across all nodes
+        genesis_masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+
+        // Get leader (first masternode after sorting)
         let leader = genesis_masternodes
             .first()
             .map(|mn| mn.address.clone())
@@ -378,7 +409,7 @@ impl Blockchain {
         // Generate using the template system
         let block = GenesisBlock::generate_with_masternodes(
             self.network_type,
-            genesis_masternodes,
+            genesis_masternodes.clone(),
             &leader,
         );
 
@@ -386,6 +417,11 @@ impl Blockchain {
             "📦 Generated genesis block with {} masternodes, reward: {} satoshis",
             masternodes_info.len(),
             block.header.block_reward
+        );
+        tracing::info!(
+            "📦 Genesis block hash: {}, leader: {}",
+            hex::encode(block.hash()),
+            leader
         );
 
         Ok(block)

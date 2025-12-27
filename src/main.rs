@@ -651,6 +651,7 @@ async fn main() {
     let blockchain_init = blockchain.clone();
     let blockchain_server = blockchain_init.clone();
     let peer_registry_for_sync = peer_connection_registry.clone();
+    let registry_for_genesis = registry.clone();
     tokio::spawn(async move {
         // Wait for peer connections to establish first
         // New nodes need peers to download the blockchain including genesis
@@ -688,12 +689,26 @@ async fn main() {
                 && blockchain_init.get_block_by_height(0).await.is_err();
 
             if still_no_genesis {
-                tracing::info!("📦 Peers don't have genesis - attempting to create locally");
+                tracing::info!("📦 Peers don't have genesis - waiting for masternode sync");
+
+                // Wait a bit for masternodes to sync their announcements
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+                // Check masternode count
+                let active_masternodes = registry_for_genesis.list_active().await;
+                tracing::info!(
+                    "📦 {} active masternode(s) registered, minimum {} required for genesis",
+                    active_masternodes.len(),
+                    3
+                );
 
                 // Try to create genesis block if we have enough masternodes
                 match blockchain_init.create_genesis_block().await {
                     Ok(genesis_block) => {
-                        tracing::info!("📦 Generating genesis block with active masternodes");
+                        tracing::info!(
+                            "📦 Generating deterministic genesis block with {} masternodes",
+                            active_masternodes.len()
+                        );
 
                         // Add the genesis block to our chain
                         if let Err(e) = blockchain_init.add_block(genesis_block.clone()).await {
