@@ -1521,8 +1521,19 @@ impl Blockchain {
         let ancestor_work = self.get_work_at_height(common_ancestor).await.unwrap_or(0);
         *self.cumulative_work.write().await = ancestor_work;
 
-        // Step 2: Apply new blocks in order
-        for block in new_blocks {
+        // Step 2: Apply new blocks in order with corrected heights
+        for (index, mut block) in new_blocks.into_iter().enumerate() {
+            // Correct the block height to be sequential after common ancestor
+            let expected_height = common_ancestor + 1 + (index as u64);
+            if block.header.height != expected_height {
+                tracing::debug!(
+                    "🔧 Adjusting block height from {} to {} during reorg",
+                    block.header.height,
+                    expected_height
+                );
+                block.header.height = expected_height;
+            }
+
             if let Err(e) = self.add_block(block.clone()).await {
                 tracing::error!(
                     "❌ Failed to apply block {} during reorg: {}",

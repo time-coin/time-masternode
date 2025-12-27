@@ -864,10 +864,6 @@ impl PeerConnection {
 
                 if *block_height > our_height {
                     // We're behind, request the block
-                    info!(
-                        "📥 [{:?}] Requesting block {} from {} (we're at {})",
-                        self.direction, block_height, self.peer_ip, our_height
-                    );
                     let request = NetworkMessage::BlockRequest(*block_height);
                     if let Err(e) = self.send_message(&request).await {
                         warn!(
@@ -882,7 +878,7 @@ impl PeerConnection {
             }
             NetworkMessage::BlockRequest(block_height) => {
                 // Peer is requesting a specific block from us
-                debug!(
+                info!(
                     "📨 [{:?}] Received block request for height {} from {}",
                     self.direction, block_height, self.peer_ip
                 );
@@ -895,7 +891,7 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, e
                         );
                     } else {
-                        debug!(
+                        info!(
                             "✅ [{:?}] Sent block {} to {}",
                             self.direction, block_height, self.peer_ip
                         );
@@ -912,7 +908,7 @@ impl PeerConnection {
                 let block_height = block.header.height;
                 let our_height = blockchain.get_height().await;
 
-                debug!(
+                info!(
                     "📦 [{:?}] Received block {} from {} (our height: {})",
                     self.direction, block_height, self.peer_ip, our_height
                 );
@@ -925,15 +921,15 @@ impl PeerConnection {
                         );
                     }
                     Ok(false) => {
-                        debug!(
-                            "⏭️ [{:?}] Skipped block {} (already have or invalid)",
-                            self.direction, block_height
+                        warn!(
+                            "⏭️ [{:?}] Skipped block {} from {} (already have or invalid)",
+                            self.direction, block_height, self.peer_ip
                         );
                     }
                     Err(e) => {
-                        debug!(
-                            "⏭️ [{:?}] Skipped block {}: {}",
-                            self.direction, block_height, e
+                        warn!(
+                            "⏭️ [{:?}] Skipped block {} from {}: {}",
+                            self.direction, block_height, self.peer_ip, e
                         );
                     }
                 }
@@ -951,20 +947,20 @@ impl PeerConnection {
                 match blockchain.add_block_with_fork_handling(block.clone()).await {
                     Ok(true) => {
                         info!(
-                            "✅ [{:?}] Added block {} from {}",
+                            "✅ [{:?}] Added announced block {} from {}",
                             self.direction, block_height, self.peer_ip
                         );
                     }
                     Ok(false) => {
-                        debug!(
-                            "⏭️ [{:?}] Skipped block {} (already have or invalid)",
-                            self.direction, block_height
+                        warn!(
+                            "⏭️ [{:?}] Skipped announced block {} from {} (already have or invalid)",
+                            self.direction, block_height, self.peer_ip
                         );
                     }
                     Err(e) => {
-                        debug!(
-                            "⏭️ [{:?}] Skipped block {}: {}",
-                            self.direction, block_height, e
+                        warn!(
+                            "⏭️ [{:?}] Skipped announced block {} from {}: {}",
+                            self.direction, block_height, self.peer_ip, e
                         );
                     }
                 }
