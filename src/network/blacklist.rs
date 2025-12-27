@@ -1,10 +1,7 @@
 //! IP blacklisting for misbehaving peers.
 //!
-//! Note: This module is implemented but not yet wired into the server.
-//! TODO: Integrate with server.rs to block misbehaving IPs.
-//! See analysis/DEAD_CODE_ACTION_PLAN.md Phase 2 for integration steps.
-
-#![allow(dead_code)]
+//! Phase 2.2: DoS Protection - IP Blacklisting
+//! Tracks violations and automatically bans repeat offenders to prevent resource exhaustion.
 
 use std::collections::HashMap;
 use std::net::IpAddr;

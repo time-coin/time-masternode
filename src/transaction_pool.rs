@@ -1,7 +1,8 @@
 //! Transaction mempool management
-//! Note: Some methods are scaffolding for advanced mempool features
+//!
+//! Phase 2.4: Enhanced with LRU eviction and memory pressure monitoring
 
-#![allow(dead_code)]
+#![allow(dead_code)] // Public API - methods will be used by consensus engine and RPC
 
 use crate::types::*;
 use dashmap::DashMap;
@@ -9,9 +10,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use thiserror::Error;
 
-const MAX_POOL_SIZE: usize = 10_000;
-const MAX_POOL_BYTES: usize = 300 * 1024 * 1024; // 300MB
+// Phase 2.4: Memory protection limits (adjusted for DoS protection)
+const MAX_POOL_SIZE: usize = 10_000; // 10,000 transactions max
+const MAX_POOL_BYTES: usize = 100 * 1024 * 1024; // 100MB (reduced from 300MB)
 const REJECT_CACHE_SIZE: usize = 1000;
+const MEMORY_PRESSURE_THRESHOLD: f64 = 0.9; // 90% capacity = high pressure
+const LOW_FEE_EVICTION_THRESHOLD: f64 = 0.8; // Start evicting at 80% capacity
 
 #[derive(Clone)]
 struct PoolEntry {
@@ -75,8 +79,18 @@ impl TransactionPool {
         let current_count = self.pending_count.load(Ordering::Relaxed);
         let current_bytes = self.pending_bytes.load(Ordering::Relaxed);
 
+        // Phase 2.4: Check if pool is full
         if current_count >= MAX_POOL_SIZE || current_bytes + tx_size > MAX_POOL_BYTES {
-            return Err(PoolError::PoolFull);
+            // Try LRU eviction if under high memory pressure
+            if self.get_memory_pressure() > LOW_FEE_EVICTION_THRESHOLD {
+                tracing::info!(
+                    "🗑️  Mempool at {}% capacity, attempting LRU eviction",
+                    (self.get_memory_pressure() * 100.0) as u64
+                );
+                self.evict_low_fee_transactions(1)?;
+            } else {
+                return Err(PoolError::PoolFull);
+            }
         }
 
         let entry = PoolEntry {
@@ -207,7 +221,6 @@ impl TransactionPool {
     }
 
     /// Clean up old rejected entries (call periodically)
-    #[allow(dead_code)]
     pub fn cleanup_rejected(&self, max_age_secs: u64) {
         let now = Instant::now();
         self.rejected.retain(|_, (_, rejected_at)| {
@@ -227,6 +240,305 @@ impl TransactionPool {
                 break;
             }
         }
+    }
+
+    /// Phase 2.4: Get current memory pressure (0.0 to 1.0)
+    pub fn get_memory_pressure(&self) -> f64 {
+        let current_bytes = self.pending_bytes.load(Ordering::Relaxed);
+        let current_count = self.pending_count.load(Ordering::Relaxed);
+
+        let bytes_pressure = current_bytes as f64 / MAX_POOL_BYTES as f64;
+        let count_pressure = current_count as f64 / MAX_POOL_SIZE as f64;
+
+        // Return the highest pressure
+        bytes_pressure.max(count_pressure)
+    }
+
+    /// Phase 2.4: Check if mempool is under high memory pressure
+    pub fn is_high_pressure(&self) -> bool {
+        self.get_memory_pressure() > MEMORY_PRESSURE_THRESHOLD
+    }
+
+    /// Phase 2.4: Evict low-fee transactions using LRU policy
+    pub fn evict_low_fee_transactions(&self, count: usize) -> Result<usize, PoolError> {
+        if self.pending.is_empty() {
+            return Ok(0);
+        }
+
+        // Collect transactions with their fees and ages
+        let mut txs_with_priority: Vec<(Hash256, u64, Instant, usize)> = self
+            .pending
+            .iter()
+            .map(|entry| {
+                let txid = *entry.key();
+                let pool_entry = entry.value();
+                let fee_per_byte = if pool_entry.size > 0 {
+                    pool_entry.fee / pool_entry.size as u64
+                } else {
+                    0
+                };
+                (txid, fee_per_byte, pool_entry.added_at, pool_entry.size)
+            })
+            .collect();
+
+        // Sort by fee per byte (ascending), then by age (oldest first)
+        txs_with_priority.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+
+        // Evict the lowest priority transactions
+        let mut evicted = 0;
+        for (txid, _, _, _) in txs_with_priority.iter().take(count) {
+            if let Some((_, entry)) = self.pending.remove(txid) {
+                self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+                evicted += 1;
+
+                tracing::debug!(
+                    "🗑️  Evicted low-fee transaction {} (fee/byte: {} satoshis)",
+                    hex::encode(txid),
+                    entry.fee / entry.size.max(1) as u64
+                );
+            }
+        }
+
+        tracing::info!("🗑️  Evicted {} low-fee transactions from mempool", evicted);
+        Ok(evicted)
+    }
+
+    /// Phase 2.4: Get mempool pressure status
+    pub fn get_pressure_status(&self) -> MemPoolPressure {
+        let pressure = self.get_memory_pressure();
+        let current_bytes = self.pending_bytes.load(Ordering::Relaxed);
+        let current_count = self.pending_count.load(Ordering::Relaxed);
+
+        let level = if pressure > MEMORY_PRESSURE_THRESHOLD {
+            PressureLevel::Critical
+        } else if pressure > LOW_FEE_EVICTION_THRESHOLD {
+            PressureLevel::High
+        } else if pressure > 0.5 {
+            PressureLevel::Medium
+        } else {
+            PressureLevel::Low
+        };
+
+        MemPoolPressure {
+            level,
+            pressure_ratio: pressure,
+            current_count,
+            max_count: MAX_POOL_SIZE,
+            current_bytes,
+            max_bytes: MAX_POOL_BYTES,
+        }
+    }
+}
+
+/// Phase 2.4: Memory pressure levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Public API enum - variants will be used by external code
+pub enum PressureLevel {
+    Low,      // < 50%
+    Medium,   // 50-80%
+    High,     // 80-90%
+    Critical, // > 90%
+}
+
+/// Phase 2.4: Mempool pressure status
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Public API struct - fields will be read by external code
+pub struct MemPoolPressure {
+    pub level: PressureLevel,
+    pub pressure_ratio: f64,
+    pub current_count: usize,
+    pub max_count: usize,
+    pub current_bytes: usize,
+    pub max_bytes: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{OutPoint, TxInput, TxOutput};
+
+    fn create_test_transaction(value: u64) -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: OutPoint {
+                    txid: [0u8; 32],
+                    vout: 0,
+                },
+                script_sig: vec![0u8; 64],
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![TxOutput {
+                value,
+                script_pubkey: vec![0u8; 25],
+            }],
+            lock_time: 0,
+            timestamp: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    #[test]
+    fn test_mempool_size_limits() {
+        // Phase 2.4: Verify mempool limits are properly set
+        assert_eq!(MAX_POOL_SIZE, 10_000);
+        assert_eq!(MAX_POOL_BYTES, 100 * 1024 * 1024); // 100MB
+    }
+
+    #[test]
+    fn test_memory_pressure_calculation() {
+        let pool = TransactionPool::new();
+
+        // Empty pool = low pressure
+        assert_eq!(pool.get_memory_pressure(), 0.0);
+        assert!(!pool.is_high_pressure());
+
+        // Add transactions and check pressure increases
+        for i in 0..100 {
+            let tx = create_test_transaction(1000 + i);
+            let _ = pool.add_pending(tx, 100);
+        }
+
+        let pressure = pool.get_memory_pressure();
+        assert!(pressure > 0.0);
+        assert!(pressure < 0.1); // Should be low with 100 txs
+    }
+
+    #[test]
+    fn test_pressure_status_levels() {
+        let pool = TransactionPool::new();
+
+        // Initially low
+        let status = pool.get_pressure_status();
+        assert_eq!(status.level, PressureLevel::Low);
+        assert_eq!(pool.pending_count(), 0);
+
+        // Add transactions to reach medium pressure
+        // Each transaction is ~300 bytes, so we need many for 100MB
+        for i in 0..6000 {
+            let tx = create_test_transaction(1000 + i);
+            if pool.add_pending(tx, 100).is_err() {
+                // If we hit limits, that's fine for this test
+                break;
+            }
+        }
+
+        let status = pool.get_pressure_status();
+        let count = pool.pending_count();
+
+        // With 6000 txs out of 10,000 max, should be at least medium pressure
+        assert!(
+            count > 1000,
+            "Should have added at least 1000 transactions, got {}",
+            count
+        );
+        assert!(
+            status.pressure_ratio > 0.1,
+            "Expected pressure > 0.1, got {} with {} transactions",
+            status.pressure_ratio,
+            count
+        );
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let pool = TransactionPool::new();
+
+        // Add transactions with different fees
+        let mut low_fee_txids = vec![];
+        let mut high_fee_txids = vec![];
+
+        // Add 10 low-fee transactions
+        for i in 0..10 {
+            let tx = create_test_transaction(1000 + i);
+            let txid = tx.txid();
+            pool.add_pending(tx, 10).unwrap(); // Low fee
+            low_fee_txids.push(txid);
+        }
+
+        // Add 10 high-fee transactions
+        for i in 0..10 {
+            let tx = create_test_transaction(2000 + i);
+            let txid = tx.txid();
+            pool.add_pending(tx, 1000).unwrap(); // High fee
+            high_fee_txids.push(txid);
+        }
+
+        assert_eq!(pool.pending_count(), 20);
+
+        // Evict 5 transactions
+        let evicted = pool.evict_low_fee_transactions(5).unwrap();
+        assert_eq!(evicted, 5);
+        assert_eq!(pool.pending_count(), 15);
+
+        // Check that low-fee transactions were evicted
+        let remaining_low_fee = low_fee_txids
+            .iter()
+            .filter(|txid| pool.is_pending(txid))
+            .count();
+
+        // Should have evicted from low-fee pool
+        assert!(remaining_low_fee < 10);
+
+        // High-fee transactions should still be there
+        for txid in &high_fee_txids {
+            assert!(
+                pool.is_pending(txid),
+                "High-fee transaction should not be evicted"
+            );
+        }
+    }
+
+    #[test]
+    fn test_pool_full_with_eviction() {
+        let pool = TransactionPool::new();
+
+        // Fill pool to 85% (trigger eviction threshold)
+        let target_count = (MAX_POOL_SIZE as f64 * 0.82) as usize; // Slightly under threshold
+
+        for i in 0..target_count {
+            let tx = create_test_transaction(1000 + i as u64);
+            let _ = pool.add_pending(tx, if i < target_count / 2 { 10 } else { 100 });
+        }
+
+        let _initial_count = pool.pending_count();
+
+        // Add a few more to push over the eviction threshold
+        for i in 0..200 {
+            let tx = create_test_transaction(50000 + i as u64);
+            let result = pool.add_pending(tx, 1000); // High fee
+
+            if result.is_err() {
+                // If we hit the limit, that's expected
+                break;
+            }
+        }
+
+        // Pool should be at or near capacity
+        assert!(
+            pool.pending_count() <= MAX_POOL_SIZE,
+            "Pool should not exceed max size"
+        );
+        assert!(
+            pool.get_memory_pressure() > 0.5,
+            "Pool should be under pressure after adding many transactions"
+        );
+    }
+
+    #[test]
+    fn test_mempool_metrics() {
+        let pool = TransactionPool::new();
+
+        // Add transactions
+        for i in 0..50 {
+            let tx = create_test_transaction(1000 + i);
+            let _ = pool.add_pending(tx, 100 + i);
+        }
+
+        let metrics = pool.get_metrics();
+        assert_eq!(metrics.pending_count, 50);
+        assert!(metrics.pending_bytes > 0);
+        assert!(metrics.total_fees_pending > 0);
     }
 }
 

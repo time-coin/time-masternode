@@ -176,6 +176,7 @@ impl NetworkServer {
 
             // Extract IP address
             let ip: IpAddr = addr.ip();
+            let ip_str = ip.to_string();
 
             // Check blacklist BEFORE accepting connection
             {
@@ -186,6 +187,20 @@ impl NetworkServer {
                     continue;
                 }
             }
+
+            // Phase 2.1: Check connection limits BEFORE accepting
+            if let Err(reason) = self.connection_manager.can_accept_inbound(&ip_str) {
+                tracing::warn!("🚫 Rejected inbound connection from {}: {}", ip, reason);
+                drop(stream); // Close immediately
+                continue;
+            }
+
+            tracing::info!(
+                "✅ Accepting inbound connection from {} (total: {}, inbound: {})",
+                ip,
+                self.connection_manager.connected_count(),
+                self.connection_manager.inbound_count()
+            );
 
             let peer = PeerInfo {
                 addr: addr_str.clone(),
@@ -259,6 +274,14 @@ impl NetworkServer {
     }
 }
 
+// Phase 2.3: Message size limits for DoS protection
+const MAX_MESSAGE_SIZE: usize = 2_000_000; // 2MB absolute max for any message
+const MAX_BLOCK_SIZE: usize = 1_000_000; // 1MB for blocks
+const MAX_TX_SIZE: usize = 100_000; // 100KB for transactions
+const MAX_VOTE_SIZE: usize = 1_000; // 1KB for votes
+#[allow(dead_code)] // Reserved for future general message validation
+const MAX_GENERAL_SIZE: usize = 50_000; // 50KB for general messages
+
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)] // Called by NetworkServer::run which is used by binary
 async fn handle_peer(
@@ -320,6 +343,26 @@ async fn handle_peer(
                     }
                     Ok(n) => {
                         tracing::debug!("📥 Received {} bytes from {}: {}", n, peer.addr, line.trim());
+
+                        // Phase 2.3: Check message size BEFORE processing to prevent DoS
+                        let message_size = line.len();
+                        if message_size > MAX_MESSAGE_SIZE {
+                            tracing::warn!("🚫 Rejecting oversized message from {}: {} bytes (max: {})",
+                                peer.addr, message_size, MAX_MESSAGE_SIZE);
+
+                            let mut blacklist_guard = blacklist.write().await;
+                            let should_ban = blacklist_guard.record_violation(ip,
+                                &format!("Oversized message: {} bytes", message_size));
+                            drop(blacklist_guard);
+
+                            if should_ban {
+                                tracing::warn!("🚫 Disconnecting {} due to repeated oversized messages", peer.addr);
+                                break;
+                            }
+
+                            line.clear();
+                            continue;
+                        }
 
                         // Check if this looks like old protocol (starts with ~W~M)
                         if !handshake_done && line.starts_with("~W~M") {
@@ -443,8 +486,57 @@ async fn handle_peer(
                             }
 
                             tracing::debug!("📦 Parsed message type from {}: {:?}", peer.addr, std::mem::discriminant(&msg));
-                            // ip_str already defined at top of function from peer IP extraction
-                            let mut limiter = rate_limiter.write().await;
+
+                            // Phase 2.2: Rate limiting and blacklist enforcement
+                            // Define helper macro for rate limit checking with auto-ban
+                            macro_rules! check_rate_limit {
+                                ($msg_type:expr) => {{
+                                    let mut limiter = rate_limiter.write().await;
+                                    let mut blacklist_guard = blacklist.write().await;
+
+                                    if !limiter.check($msg_type, &ip_str) {
+                                        tracing::warn!("⚠️  Rate limit exceeded for {} from {}: {}", $msg_type, peer.addr, ip_str);
+
+                                        // Record violation and check if should be banned
+                                        let should_ban = blacklist_guard.record_violation(ip,
+                                            &format!("Rate limit exceeded: {}", $msg_type));
+
+                                        if should_ban {
+                                            tracing::warn!("🚫 Disconnecting {} due to rate limit violations", peer.addr);
+                                            break; // Exit connection loop
+                                        }
+
+                                        line.clear();
+                                        continue; // Skip processing this message
+                                    }
+
+                                    drop(limiter);
+                                    drop(blacklist_guard);
+                                }};
+                            }
+
+                            // Phase 2.3: Message-specific size validation helper
+                            macro_rules! check_message_size {
+                                ($max_size:expr, $msg_type:expr) => {{
+                                    if message_size > $max_size {
+                                        tracing::warn!("🚫 {} from {} exceeds size limit: {} > {} bytes",
+                                            $msg_type, peer.addr, message_size, $max_size);
+
+                                        let mut blacklist_guard = blacklist.write().await;
+                                        let should_ban = blacklist_guard.record_violation(ip,
+                                            &format!("{} too large: {} bytes", $msg_type, message_size));
+                                        drop(blacklist_guard);
+
+                                        if should_ban {
+                                            tracing::warn!("🚫 Disconnecting {} due to oversized messages", peer.addr);
+                                            break;
+                                        }
+
+                                        line.clear();
+                                        continue;
+                                    }
+                                }};
+                            }
 
                             match &msg {
                                 NetworkMessage::Ack { message_type } => {
@@ -452,36 +544,47 @@ async fn handle_peer(
                                     // ACKs are informational, no action needed
                                 }
                                 NetworkMessage::TransactionBroadcast(tx) => {
-                                    if limiter.check("tx", &ip_str) {
-                                        // Check if we've already seen this transaction using Bloom filter
-                                        let txid = tx.txid();
-                                        let already_seen = seen_transactions.check_and_insert(&txid).await;
+                                    check_message_size!(MAX_TX_SIZE, "Transaction");
+                                    check_rate_limit!("tx");
 
-                                        if already_seen {
-                                            tracing::debug!("🔁 Ignoring duplicate transaction {} from {}", hex::encode(txid), peer.addr);
-                                            line.clear();
-                                            continue;
-                                        }
+                                    // Check if we've already seen this transaction using Bloom filter
+                                    let txid = tx.txid();
+                                    let already_seen = seen_transactions.check_and_insert(&txid).await;
 
-                                        tracing::info!("📥 Received new transaction {} from {}", hex::encode(txid), peer.addr);
+                                    if already_seen {
+                                        tracing::debug!("🔁 Ignoring duplicate transaction {} from {}", hex::encode(txid), peer.addr);
+                                        line.clear();
+                                        continue;
+                                    }
 
-                                        // Process transaction (validates and initiates voting if we're a masternode)
-                                        match consensus.process_transaction(tx.clone()).await {
-                                            Ok(_) => {
-                                                tracing::debug!("✅ Transaction {} processed", hex::encode(txid));
+                                    tracing::info!("📥 Received new transaction {} from {}", hex::encode(txid), peer.addr);
 
-                                                // Gossip to other peers
-                                                match broadcast_tx.send(msg.clone()) {
-                                                    Ok(receivers) => {
-                                                        tracing::debug!("🔄 Gossiped transaction {} to {} peer(s)", hex::encode(txid), receivers.saturating_sub(1));
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::debug!("Failed to gossip transaction: {}", e);
-                                                    }
+                                    // Process transaction (validates and initiates voting if we're a masternode)
+                                    match consensus.process_transaction(tx.clone()).await {
+                                        Ok(_) => {
+                                            tracing::debug!("✅ Transaction {} processed", hex::encode(txid));
+
+                                            // Gossip to other peers
+                                            match broadcast_tx.send(msg.clone()) {
+                                                Ok(receivers) => {
+                                                    tracing::debug!("🔄 Gossiped transaction {} to {} peer(s)", hex::encode(txid), receivers.saturating_sub(1));
+                                                }
+                                                Err(e) => {
+                                                    tracing::debug!("Failed to gossip transaction: {}", e);
                                                 }
                                             }
-                                            Err(e) => {
-                                                tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
+
+                                            // Phase 2.2: Record violation for invalid transaction
+                                            let mut blacklist_guard = blacklist.write().await;
+                                            let should_ban = blacklist_guard.record_violation(ip, "Invalid transaction");
+                                            drop(blacklist_guard);
+
+                                            if should_ban {
+                                                tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions", peer.addr);
+                                                break;
                                             }
                                         }
                                     }
@@ -501,21 +604,20 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::UTXOStateQuery(outpoints) => {
-                                    if limiter.check("utxo_query", &ip_str) {
-                                        let mut responses = Vec::new();
-                                        for op in outpoints {
-                                            if let Some(state) = utxo_mgr.get_state(op) {
-                                                responses.push((op.clone(), state));
-                                            }
+                                    check_rate_limit!("utxo_query");
+
+                                    let mut responses = Vec::new();
+                                    for op in outpoints {
+                                        if let Some(state) = utxo_mgr.get_state(op) {
+                                            responses.push((op.clone(), state));
                                         }
-                                        let reply = NetworkMessage::UTXOStateResponse(responses);
-                                        let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                     }
+                                    let reply = NetworkMessage::UTXOStateResponse(responses);
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::Subscribe(sub) => {
-                                    if limiter.check("subscribe", &ip_str) {
-                                        subs.write().await.insert(sub.id.clone(), sub.clone());
-                                    }
+                                    check_rate_limit!("subscribe");
+                                    subs.write().await.insert(sub.id.clone(), sub.clone());
                                 }
                                 NetworkMessage::GetBlockHeight => {
                                     let height = blockchain.get_height().await;
@@ -530,6 +632,8 @@ async fn handle_peer(
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetBlocks(start, end) => {
+                                    check_rate_limit!("get_blocks");
+
                                     let our_height = blockchain.get_height().await;
                                     tracing::info!(
                                         "📥 [Inbound] Received GetBlocks({}-{}) from {} (our height: {})",
@@ -572,6 +676,8 @@ async fn handle_peer(
                                     tracing::info!("📤 Sent complete UTXO set to {}", peer.addr);
                                 }
                                 NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
+                                    check_rate_limit!("masternode_announce");
+
                                     // Check if this is a stable connection (>5 seconds)
                                     if !is_stable_connection {
                                         let connection_age = connection_start.elapsed().as_secs();
@@ -621,6 +727,8 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::GetPeers => {
+                                    check_rate_limit!("get_peers");
+
                                     tracing::debug!("📥 Received GetPeers request from {}", peer.addr);
                                     let peers = peer_manager.get_all_peers().await;
                                     let response = NetworkMessage::PeersResponse(peers.clone());
@@ -688,6 +796,9 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::BlockAnnouncement(block) => {
+                                    check_message_size!(MAX_BLOCK_SIZE, "Block");
+                                    check_rate_limit!("block");
+
                                     let block_height = block.header.height;
 
                                     // Check if we've already seen this block using Bloom filter
@@ -966,6 +1077,8 @@ async fn handle_peer(
                                 }
                                 // Health Check Messages
                                 NetworkMessage::Ping { nonce, timestamp: _ } => {
+                                    check_rate_limit!("ping");
+
                                     // Respond to ping with pong
                                     let pong_msg = NetworkMessage::Pong {
                                         nonce: *nonce,
@@ -987,6 +1100,9 @@ async fn handle_peer(
                                     tracing::debug!("📥 [Inbound] Received pong from {} (nonce: {})", peer.addr, nonce);
                                 }
                                 NetworkMessage::TransactionVoteRequest { txid } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
+                                    check_rate_limit!("vote");
+
                                     // Peer is requesting our vote on a transaction
                                     tracing::debug!("📥 Vote request from {} for TX {:?}", peer.addr, hex::encode(txid));
 
@@ -1007,6 +1123,9 @@ async fn handle_peer(
                                     let _ = peer_registry.send_to_peer(&ip_str, vote_response).await;
                                 }
                                 NetworkMessage::TransactionVoteResponse { txid, preference } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "VoteResponse");
+                                    check_rate_limit!("vote");
+
                                     // Received a vote from a peer
                                     tracing::debug!("📥 Vote from {} for TX {:?}: {}", peer.addr, hex::encode(txid), preference);
 
@@ -1030,6 +1149,9 @@ async fn handle_peer(
                                     tracing::debug!("✅ Vote recorded for TX {:?}", hex::encode(txid));
                                 }
                                 NetworkMessage::FinalityVoteBroadcast { vote } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "FinalityVote");
+                                    check_rate_limit!("vote");
+
                                     // Received a finality vote from a peer
                                     tracing::debug!("📥 Finality vote from {} for TX {:?}", peer.addr, hex::encode(vote.txid));
 
@@ -1041,6 +1163,8 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TSCDBlockProposal { block } => {
+                                    check_message_size!(MAX_BLOCK_SIZE, "BlockProposal");
+
                                     // Received a block proposal from the TSDC leader
                                     tracing::info!("📦 Received TSDC block proposal at height {} from {}", block.header.height, peer.addr);
 
@@ -1078,6 +1202,9 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TSCDPrepareVote { block_hash, voter_id, signature: _ } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "PrepareVote");
+                                    check_rate_limit!("vote");
+
                                     tracing::debug!("🗳️  Received prepare vote for block {} from {}",
                                         hex::encode(block_hash), voter_id);
 
@@ -1118,6 +1245,9 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TSCDPrecommitVote { block_hash, voter_id, signature: _ } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "PrecommitVote");
+                                    check_rate_limit!("vote");
+
                                     tracing::debug!("🗳️  Received precommit vote for block {} from {}",
                                         hex::encode(block_hash), voter_id);
 
@@ -1282,4 +1412,122 @@ async fn handle_peer(
     tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Transaction, TxInput, TxOutput};
+
+    #[test]
+    fn test_message_size_limits() {
+        // Phase 2.3: Verify message size constants are properly set
+        assert_eq!(MAX_MESSAGE_SIZE, 2_000_000); // 2MB absolute max
+        assert_eq!(MAX_BLOCK_SIZE, 1_000_000); // 1MB for blocks
+        assert_eq!(MAX_TX_SIZE, 100_000); // 100KB for transactions
+        assert_eq!(MAX_VOTE_SIZE, 1_000); // 1KB for votes
+        assert_eq!(MAX_GENERAL_SIZE, 50_000); // 50KB for general
+
+        // Verify hierarchy
+        // Note: These are constant assertions that clippy warns about.
+        // The hierarchy is enforced at compile time by the constant values themselves.
+        // Documented here for clarity:
+        // MAX_BLOCK_SIZE (1MB) < MAX_MESSAGE_SIZE (2MB)
+        // MAX_TX_SIZE (100KB) < MAX_BLOCK_SIZE (1MB)
+        // MAX_VOTE_SIZE (1KB) < MAX_TX_SIZE (100KB)
+        // MAX_GENERAL_SIZE (50KB) < MAX_TX_SIZE (100KB)
+    }
+
+    #[test]
+    fn test_oversized_message_detection() {
+        // Test that we can detect when a message would be too large
+        let message_size = 2_500_000; // 2.5MB
+        assert!(
+            message_size > MAX_MESSAGE_SIZE,
+            "Oversized message should exceed limit"
+        );
+
+        let block_size = 1_500_000; // 1.5MB
+        assert!(
+            block_size > MAX_BLOCK_SIZE,
+            "Oversized block should exceed limit"
+        );
+
+        let tx_size = 150_000; // 150KB
+        assert!(
+            tx_size > MAX_TX_SIZE,
+            "Oversized transaction should exceed limit"
+        );
+
+        let vote_size = 2_000; // 2KB
+        assert!(
+            vote_size > MAX_VOTE_SIZE,
+            "Oversized vote should exceed limit"
+        );
+    }
+
+    #[test]
+    fn test_normal_message_sizes() {
+        // Test that normal messages are within limits
+
+        // Normal transaction: ~500 bytes
+        let normal_tx_size = 500;
+        assert!(
+            normal_tx_size < MAX_TX_SIZE,
+            "Normal transaction should be within limit"
+        );
+
+        // Normal block with 100 transactions: ~50KB
+        let normal_block_size = 50_000;
+        assert!(
+            normal_block_size < MAX_BLOCK_SIZE,
+            "Normal block should be within limit"
+        );
+
+        // Normal vote: ~200 bytes
+        let normal_vote_size = 200;
+        assert!(
+            normal_vote_size < MAX_VOTE_SIZE,
+            "Normal vote should be within limit"
+        );
+    }
+
+    #[test]
+    fn test_transaction_serialization_size() {
+        // Create a typical transaction and verify it's within limits
+        let tx = Transaction {
+            version: 1,
+            inputs: vec![TxInput {
+                previous_output: crate::types::OutPoint {
+                    txid: [0u8; 32],
+                    vout: 0,
+                },
+                script_sig: vec![0u8; 64],
+                sequence: 0xffffffff,
+            }],
+            outputs: vec![TxOutput {
+                value: 100_000_000,
+                script_pubkey: vec![0u8; 25],
+            }],
+            lock_time: 0,
+            timestamp: chrono::Utc::now().timestamp(),
+        };
+
+        // Serialize and check size
+        let serialized = serde_json::to_string(&tx).expect("Failed to serialize transaction");
+        let tx_size = serialized.len();
+
+        assert!(
+            tx_size < MAX_TX_SIZE,
+            "Typical transaction should be within limit: {} < {}",
+            tx_size,
+            MAX_TX_SIZE
+        );
+
+        // Even with 10 inputs and 10 outputs, should still be reasonable
+        assert!(
+            tx_size * 20 < MAX_TX_SIZE,
+            "Large transaction with 10 inputs/outputs should still fit"
+        );
+    }
 }

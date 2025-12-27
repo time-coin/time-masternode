@@ -1,10 +1,7 @@
 //! Rate limiting for P2P message processing.
 //!
-//! Note: This module is implemented but not yet wired into the server.
-//! TODO: Integrate with server.rs to limit message rates per peer.
-//! See analysis/DEAD_CODE_ACTION_PLAN.md Phase 2 for integration steps.
-
-#![allow(dead_code)]
+//! Phase 2.2: DoS Protection - Message Rate Limiting
+//! Implements per-peer message rate limits to prevent resource exhaustion attacks.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -16,14 +13,24 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
+    /// Create new rate limiter with Phase 2.2 security limits
     pub fn new() -> Self {
         Self {
             limits: [
-                ("tx".to_string(), (Duration::from_secs(1), 1000)),
-                ("utxo_query".to_string(), (Duration::from_secs(1), 100)),
-                ("subscribe".to_string(), (Duration::from_secs(60), 10)),
-                ("vote".to_string(), (Duration::from_secs(1), 500)),
-                ("block".to_string(), (Duration::from_secs(1), 100)),
+                // Phase 2.2: Per-peer message limits (more restrictive for DoS protection)
+                ("tx".to_string(), (Duration::from_secs(1), 50)), // 50 tx/second
+                ("utxo_query".to_string(), (Duration::from_secs(1), 100)), // 100 queries/sec
+                ("subscribe".to_string(), (Duration::from_secs(60), 10)), // 10 subs/min
+                ("vote".to_string(), (Duration::from_secs(1), 100)), // 100 votes/sec
+                ("block".to_string(), (Duration::from_secs(1), 10)), // 10 blocks/sec
+                ("get_blocks".to_string(), (Duration::from_secs(10), 5)), // 5 GetBlocks/10sec
+                ("get_peers".to_string(), (Duration::from_secs(60), 5)), // 5 GetPeers/min
+                (
+                    "masternode_announce".to_string(),
+                    (Duration::from_secs(300), 1),
+                ), // 1 announcement/5min
+                ("ping".to_string(), (Duration::from_secs(10), 2)), // 2 pings/10sec
+                ("general".to_string(), (Duration::from_secs(1), 100)), // 100 general msgs/sec
             ]
             .into(),
             counters: HashMap::new(),
