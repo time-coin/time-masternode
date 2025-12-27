@@ -729,8 +729,13 @@ async fn main() {
                         // Use TSDC leader selection for genesis (slot 0)
                         let is_leader = match tsdc_for_genesis.select_leader(0).await {
                             Ok(leader) => {
-                                tracing::info!("👑 Genesis leader selected: {}", leader.id);
-                                wallet.address() == leader.id
+                                let my_address = wallet.address();
+                                tracing::info!(
+                                    "👑 Genesis leader selected: {} (my address: {})",
+                                    leader.id,
+                                    my_address
+                                );
+                                my_address == leader.id
                             }
                             Err(e) => {
                                 tracing::warn!("⚠️  Failed to select genesis leader: {}", e);
