@@ -648,6 +648,7 @@ async fn main() {
     let peer_registry_for_sync = peer_connection_registry.clone();
     let registry_for_genesis = registry.clone();
     let tsdc_for_genesis = tsdc_consensus.clone();
+    let local_ip_for_genesis = local_ip.clone();
     tokio::spawn(async move {
         // Wait for peer connections to establish first
         // New nodes need peers to download the blockchain including genesis
@@ -729,13 +730,13 @@ async fn main() {
                         // Use TSDC leader selection for genesis (slot 0)
                         let is_leader = match tsdc_for_genesis.select_leader(0).await {
                             Ok(leader) => {
-                                let my_address = wallet.address();
+                                let my_ip = local_ip_for_genesis.as_deref().unwrap_or("");
                                 tracing::info!(
-                                    "👑 Genesis leader selected: {} (my address: {})",
+                                    "👑 Genesis leader selected: {} (my IP: {})",
                                     leader.id,
-                                    my_address
+                                    my_ip
                                 );
-                                my_address == leader.id
+                                my_ip == leader.id
                             }
                             Err(e) => {
                                 tracing::warn!("⚠️  Failed to select genesis leader: {}", e);
