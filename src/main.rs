@@ -710,39 +710,49 @@ async fn main() {
                         tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
                     }
 
-                    // Check masternode count
-                    let active_masternodes = registry_for_genesis.list_active().await;
-                    tracing::info!(
-                        "📦 {} active masternode(s) registered, minimum {} required for genesis",
-                        active_masternodes.len(),
-                        3
-                    );
+                    // Check if genesis already exists
+                    let current_height = blockchain_init.get_height().await;
+                    if current_height > 0 {
+                        tracing::info!(
+                            "✓ Genesis block already exists at height 0, skipping creation"
+                        );
+                    } else {
+                        // Check masternode count
+                        let active_masternodes = registry_for_genesis.list_active().await;
+                        tracing::info!(
+                            "📦 {} active masternode(s) registered, minimum {} required for genesis",
+                            active_masternodes.len(),
+                            3
+                        );
 
-                    // Try to create genesis block if we have enough masternodes
-                    match blockchain_init.create_genesis_block().await {
-                        Ok(genesis_block) => {
-                            tracing::info!(
-                                "📦 Generating deterministic genesis block with {} masternodes",
-                                active_masternodes.len()
-                            );
-
-                            // Add the genesis block to our chain
-                            if let Err(e) = blockchain_init.add_block(genesis_block.clone()).await {
-                                tracing::error!("❌ Failed to add genesis block: {}", e);
-                            } else {
+                        // Try to create genesis block if we have enough masternodes
+                        match blockchain_init.create_genesis_block().await {
+                            Ok(genesis_block) => {
                                 tracing::info!(
-                                    "✅ Genesis block created at height 0, hash: {}",
-                                    hex::encode(genesis_block.hash())
+                                    "📦 Generating deterministic genesis block with {} masternodes",
+                                    active_masternodes.len()
                                 );
 
-                                // Broadcast genesis to peers
-                                peer_registry_for_sync
-                                    .broadcast(NetworkMessage::BlockAnnouncement(genesis_block))
-                                    .await;
+                                // Add the genesis block to our chain
+                                if let Err(e) =
+                                    blockchain_init.add_block(genesis_block.clone()).await
+                                {
+                                    tracing::error!("❌ Failed to add genesis block: {}", e);
+                                } else {
+                                    tracing::info!(
+                                        "✅ Genesis block created at height 0, hash: {}",
+                                        hex::encode(genesis_block.hash())
+                                    );
+
+                                    // Broadcast genesis to peers
+                                    peer_registry_for_sync
+                                        .broadcast(NetworkMessage::BlockAnnouncement(genesis_block))
+                                        .await;
+                                }
                             }
-                        }
-                        Err(e) => {
-                            tracing::warn!("⚠️  Cannot create genesis yet: {} - will retry during block production", e);
+                            Err(e) => {
+                                tracing::warn!("⚠️  Cannot create genesis yet: {} - will retry during block production", e);
+                            }
                         }
                     }
                 }
