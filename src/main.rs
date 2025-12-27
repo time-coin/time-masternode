@@ -699,6 +699,17 @@ async fn main() {
                         genesis_time - now
                     );
                 } else {
+                    // Wait for next 10-minute boundary (block production time)
+                    let seconds_in_period = (now % 600) as u64;
+                    if seconds_in_period < 595 {
+                        let wait_secs = 600 - seconds_in_period;
+                        tracing::info!(
+                            "⏳ Waiting {}s for next 10-minute boundary to create genesis (ensures all nodes sync)",
+                            wait_secs
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                    }
+
                     // Check masternode count
                     let active_masternodes = registry_for_genesis.list_active().await;
                     tracing::info!(
