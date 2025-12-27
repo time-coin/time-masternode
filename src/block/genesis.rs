@@ -250,7 +250,7 @@ impl GenesisBlock {
     /// Get genesis timestamp for network
     pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
-            NetworkType::Testnet => 1735327500, // 2025-12-27T18:35:00Z
+            NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z
             NetworkType::Mainnet => 1767225600, // 2026-01-01T00:00:00Z
         }
     }

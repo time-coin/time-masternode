@@ -149,20 +149,24 @@ impl Blockchain {
             return Ok(());
         }
 
-        // At or after genesis time - wait for peer discovery before creating genesis
-        // This ensures all nodes create the same genesis block with the same masternode set
-        let time_since_genesis = now - genesis_time;
-        const PEER_DISCOVERY_WAIT: i64 = 60; // Wait 60 seconds after genesis time for peer discovery
+        // At or after genesis time - wait until the next 10-minute block boundary
+        // This ensures all nodes create the same genesis block at the same time
+        let seconds_since_epoch = now % 600;
+        let seconds_until_boundary = if seconds_since_epoch == 0 {
+            0
+        } else {
+            600 - seconds_since_epoch
+        };
 
-        if time_since_genesis < PEER_DISCOVERY_WAIT {
+        if seconds_until_boundary > 0 {
             tracing::info!(
-                "📦 Waiting for peer discovery before genesis creation ({}s remaining)",
-                PEER_DISCOVERY_WAIT - time_since_genesis
+                "📦 Waiting for next 10-minute boundary before genesis creation ({}s remaining)",
+                seconds_until_boundary
             );
             return Ok(());
         }
 
-        // Check if we have enough connected peers
+        // We're at a 10-minute boundary - check if we have enough connected peers
         let connected_peers = if let Some(peer_registry) = self.peer_registry.read().await.as_ref()
         {
             peer_registry.get_connected_peers().await.len()
