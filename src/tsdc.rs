@@ -410,6 +410,9 @@ impl TSCDConsensus {
             .unwrap_or_default()
             .as_secs() as i64;
 
+        // Calculate total block reward from masternode rewards
+        let total_reward: u64 = masternode_rewards.iter().map(|(_, amount)| amount).sum();
+
         // Create block
         let header = BlockHeader {
             version: 1,
@@ -417,7 +420,7 @@ impl TSCDConsensus {
             previous_hash: parent_hash,
             merkle_root: Hash256::default(), // TODO: Compute merkle root from transactions
             timestamp,
-            block_reward: 0, // TODO: Calculate block reward
+            block_reward: total_reward,
             leader: String::new(),
             attestation_root: [0u8; 32],
             masternode_tiers: crate::block::types::MasternodeTierCounts::default(),

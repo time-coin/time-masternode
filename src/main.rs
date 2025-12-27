@@ -517,6 +517,7 @@ async fn main() {
         let tsdc_loop = tsdc_consensus.clone();
         let consensus_tsdc = consensus_engine.clone();
         let peer_registry_tsdc = peer_connection_registry.clone();
+        let masternode_registry_tsdc = registry.clone();
         let shutdown_token_tsdc = shutdown_token.clone();
         let mn_address_tsdc = mn.address.clone();
         let mn_tier = mn.tier.clone();
@@ -603,11 +604,34 @@ async fn main() {
                                     // Get finalized transactions from consensus engine
                                     let finalized_txs = consensus_tsdc.get_finalized_transactions_for_block();
 
+                                    // Calculate masternode rewards for all active masternodes
+                                    let active_masternodes = masternode_registry_tsdc.get_active_masternodes().await;
+                                    const BLOCK_REWARD_SATOSHIS: u64 = 100 * 100_000_000; // 100 TIME
+                                    let masternode_rewards: Vec<(String, u64)> = if !active_masternodes.is_empty() {
+                                        let per_masternode = BLOCK_REWARD_SATOSHIS / active_masternodes.len() as u64;
+                                        active_masternodes.iter()
+                                            .map(|mn| (mn.masternode.address.clone(), per_masternode))
+                                            .collect()
+                                    } else {
+                                        vec![]
+                                    };
+
+                                    tracing::info!(
+                                        "💰 Distributing {} TIME to {} masternodes ({} TIME each)",
+                                        BLOCK_REWARD_SATOSHIS as f64 / 100_000_000.0,
+                                        active_masternodes.len(),
+                                        if !active_masternodes.is_empty() {
+                                            (BLOCK_REWARD_SATOSHIS / active_masternodes.len() as u64) as f64 / 100_000_000.0
+                                        } else {
+                                            0.0
+                                        }
+                                    );
+
                                     // Propose block with finalized transactions
                                     match tsdc_loop.propose_block(
                                         mn_address_tsdc.clone(),
                                         finalized_txs.clone(),
-                                        vec![], // TODO: Add masternode rewards
+                                        masternode_rewards,
                                     ).await {
                                         Ok(block) => {
                                             tracing::info!(

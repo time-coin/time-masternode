@@ -4,13 +4,16 @@
 //! that works regardless of connection direction. Previously, message handling
 //! was duplicated between server.rs (inbound) and peer_connection.rs (outbound).
 
+use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
+use dashmap::DashMap;
 use std::sync::Arc;
-use tracing::{debug, info};
+use tokio::sync::broadcast;
+use tracing::{debug, info, warn};
 
 /// Direction of the network connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,8 @@ pub struct MessageContext {
     pub masternode_registry: Arc<MasternodeRegistry>,
     #[allow(dead_code)]
     pub consensus: Option<Arc<ConsensusEngine>>,
+    pub block_cache: Option<Arc<DashMap<[u8; 32], Block>>>,
+    pub broadcast_tx: Option<broadcast::Sender<NetworkMessage>>,
 }
 
 /// Unified message handler for all network messages
@@ -83,6 +88,36 @@ impl MessageHandler {
             NetworkMessage::MasternodesResponse(_) => {
                 // Handled by caller (no response needed)
                 Ok(None)
+            }
+            NetworkMessage::TSCDBlockProposal { block } => {
+                self.handle_tsdc_block_proposal(block.clone(), context)
+                    .await
+            }
+            NetworkMessage::TSCDPrepareVote {
+                block_hash,
+                voter_id,
+                signature,
+            } => {
+                self.handle_tsdc_prepare_vote(
+                    *block_hash,
+                    voter_id.clone(),
+                    signature.clone(),
+                    context,
+                )
+                .await
+            }
+            NetworkMessage::TSCDPrecommitVote {
+                block_hash,
+                voter_id,
+                signature,
+            } => {
+                self.handle_tsdc_precommit_vote(
+                    *block_hash,
+                    voter_id.clone(),
+                    signature.clone(),
+                    context,
+                )
+                .await
             }
             _ => {
                 debug!(
@@ -209,6 +244,261 @@ impl MessageHandler {
         );
 
         Ok(Some(NetworkMessage::MasternodesResponse(mn_data)))
+    }
+
+    /// Handle TSDC Block Proposal - cache and vote
+    async fn handle_tsdc_block_proposal(
+        &self,
+        block: Block,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📦 [{}] Received TSDC block proposal at height {} from {}",
+            self.direction, block.header.height, self.peer_ip
+        );
+
+        // Get consensus engine or return error
+        let consensus = context
+            .consensus
+            .as_ref()
+            .ok_or_else(|| "Consensus engine not available".to_string())?;
+
+        // Phase 3E.1: Cache the block
+        let block_hash = block.hash();
+        if let Some(cache) = &context.block_cache {
+            cache.insert(block_hash, block.clone());
+            debug!("💾 Cached block {} for voting", hex::encode(block_hash));
+        }
+
+        // Phase 3E.2: Look up validator weight from masternode registry
+        let validator_id = "validator_node".to_string();
+        let validator_weight = match context.masternode_registry.get(&validator_id).await {
+            Some(info) => info.masternode.collateral,
+            None => 1u64, // Default to 1 if not found
+        };
+
+        consensus
+            .avalanche
+            .generate_prepare_vote(block_hash, &validator_id, validator_weight);
+        info!(
+            "✅ [{}] Generated prepare vote for block {} at height {}",
+            self.direction,
+            hex::encode(block_hash),
+            block.header.height
+        );
+
+        // Broadcast prepare vote to all peers
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let sig_bytes = vec![]; // TODO: Phase 3E.4: Sign with validator key
+            let prepare_vote = NetworkMessage::TSCDPrepareVote {
+                block_hash,
+                voter_id: validator_id.clone(),
+                signature: sig_bytes,
+            };
+
+            match broadcast_tx.send(prepare_vote) {
+                Ok(receivers) => {
+                    info!(
+                        "📤 [{}] Broadcast prepare vote to {} peers",
+                        self.direction,
+                        receivers.saturating_sub(1)
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "[{}] Failed to broadcast prepare vote: {}",
+                        self.direction, e
+                    );
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle TSDC Prepare Vote - accumulate and check consensus
+    async fn handle_tsdc_prepare_vote(
+        &self,
+        block_hash: [u8; 32],
+        voter_id: String,
+        _signature: Vec<u8>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "🗳️  [{}] Received prepare vote for block {} from {}",
+            self.direction,
+            hex::encode(block_hash),
+            voter_id
+        );
+
+        // Get consensus engine or return error
+        let consensus = context
+            .consensus
+            .as_ref()
+            .ok_or_else(|| "Consensus engine not available".to_string())?;
+
+        // Phase 3E.2: Look up voter weight from masternode registry
+        let voter_weight = match context.masternode_registry.get(&voter_id).await {
+            Some(info) => info.masternode.collateral,
+            None => 1u64, // Default to 1 if not found
+        };
+
+        // Phase 3E.4: Verify vote signature (stub - TODO: implement Ed25519 verification)
+        // For now, we accept the vote; in production, verify the signature
+
+        consensus
+            .avalanche
+            .accumulate_prepare_vote(block_hash, voter_id.clone(), voter_weight);
+
+        // Check if prepare consensus reached (>50% majority Avalanche)
+        if consensus.avalanche.check_prepare_consensus(block_hash) {
+            info!(
+                "✅ [{}] Prepare consensus reached for block {}",
+                self.direction,
+                hex::encode(block_hash)
+            );
+
+            // Generate precommit vote with actual weight
+            let validator_id = "validator_node".to_string();
+            let validator_weight = match context.masternode_registry.get(&validator_id).await {
+                Some(info) => info.masternode.collateral,
+                None => 1u64,
+            };
+
+            consensus.avalanche.generate_precommit_vote(
+                block_hash,
+                &validator_id,
+                validator_weight,
+            );
+            info!(
+                "✅ [{}] Generated precommit vote for block {}",
+                self.direction,
+                hex::encode(block_hash)
+            );
+
+            // Broadcast precommit vote
+            if let Some(broadcast_tx) = &context.broadcast_tx {
+                let precommit_vote = NetworkMessage::TSCDPrecommitVote {
+                    block_hash,
+                    voter_id: validator_id,
+                    signature: vec![],
+                };
+
+                let _ = broadcast_tx.send(precommit_vote);
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle TSDC Precommit Vote - accumulate and finalize if consensus reached
+    async fn handle_tsdc_precommit_vote(
+        &self,
+        block_hash: [u8; 32],
+        voter_id: String,
+        _signature: Vec<u8>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "🗳️  [{}] Received precommit vote for block {} from {}",
+            self.direction,
+            hex::encode(block_hash),
+            voter_id
+        );
+
+        // Get consensus engine or return error
+        let consensus = context
+            .consensus
+            .as_ref()
+            .ok_or_else(|| "Consensus engine not available".to_string())?;
+
+        // Phase 3E.2: Look up voter weight from masternode registry
+        let voter_weight = match context.masternode_registry.get(&voter_id).await {
+            Some(info) => info.masternode.collateral,
+            None => 1u64, // Default to 1 if not found
+        };
+
+        // Phase 3E.4: Verify vote signature (stub)
+        // In production, verify Ed25519 signature here
+
+        consensus
+            .avalanche
+            .accumulate_precommit_vote(block_hash, voter_id.clone(), voter_weight);
+
+        // Check if precommit consensus reached (>50% majority Avalanche)
+        if consensus.avalanche.check_precommit_consensus(block_hash) {
+            info!(
+                "✅ [{}] Precommit consensus reached for block {}",
+                self.direction,
+                hex::encode(block_hash)
+            );
+
+            // Phase 3E.3: Finalization Callback
+            // 1. Retrieve the block from cache
+            if let Some(cache) = &context.block_cache {
+                if let Some((_, block)) = cache.remove(&block_hash) {
+                    // 2. Collect precommit signatures (TODO: implement signature collection)
+                    let _signatures: Vec<Vec<u8>> = vec![]; // TODO: Collect actual signatures
+
+                    // 3. Phase 3E.3: Call tsdc.finalize_block_complete()
+                    // Note: This would be called through a TSDC module instance
+                    // For now, emit finalization event
+                    info!(
+                        "🎉 [{}] Block {} finalized with consensus!",
+                        self.direction,
+                        hex::encode(block_hash)
+                    );
+                    info!(
+                        "📦 Block height: {}, txs: {}",
+                        block.header.height,
+                        block.transactions.len()
+                    );
+
+                    // 4. Emit finalization event
+                    // Calculate reward
+                    let height = block.header.height;
+                    let ln_height = if height == 0 {
+                        0.0
+                    } else {
+                        (height as f64).ln()
+                    };
+                    let block_subsidy = (100_000_000.0 * (1.0 + ln_height)) as u64;
+                    let tx_fees: u64 = block.transactions.iter().map(|tx| tx.fee_amount()).sum();
+                    let total_reward = block_subsidy + tx_fees;
+
+                    info!(
+                        "💰 [{}] Block {} rewards - subsidy: {}, fees: {}, total: {:.2} TIME",
+                        self.direction,
+                        height,
+                        block_subsidy / 100_000_000,
+                        tx_fees / 100_000_000,
+                        total_reward as f64 / 100_000_000.0
+                    );
+
+                    // Add block to blockchain
+                    if let Err(e) = context.blockchain.add_block(block).await {
+                        warn!(
+                            "[{}] Failed to add finalized block to blockchain: {}",
+                            self.direction, e
+                        );
+                    } else {
+                        info!(
+                            "✅ [{}] Added finalized block {} to blockchain",
+                            self.direction,
+                            hex::encode(block_hash)
+                        );
+                    }
+                } else {
+                    warn!(
+                        "⚠️  [{}] Block {} not found in cache for finalization",
+                        self.direction,
+                        hex::encode(block_hash)
+                    );
+                }
+            }
+        }
+
+        Ok(None)
     }
 }
 

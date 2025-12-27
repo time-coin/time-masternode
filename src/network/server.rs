@@ -670,6 +670,8 @@ async fn handle_peer(
                                         peer_registry: Arc::clone(&peer_registry),
                                         masternode_registry: Arc::clone(&masternode_registry),
                                         consensus: None, // Not needed for GetBlocks
+                                        block_cache: None,
+                                        broadcast_tx: None,
                                     };
 
                                     if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
@@ -764,6 +766,8 @@ async fn handle_peer(
                                         peer_registry: Arc::clone(&peer_registry),
                                         masternode_registry: Arc::clone(&masternode_registry),
                                         consensus: None, // Not needed for GetMasternodes
+                                        block_cache: None,
+                                        broadcast_tx: None,
                                     };
 
                                     if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
@@ -1272,141 +1276,22 @@ async fn handle_peer(
                                         tracing::debug!("✅ Finality vote recorded from {}", peer.addr);
                                     }
                                 }
-                                NetworkMessage::TSCDBlockProposal { block } => {
-                                    check_message_size!(MAX_BLOCK_SIZE, "BlockProposal");
-
-                                    // Received a block proposal from the TSDC leader
-                                    tracing::info!("📦 Received TSDC block proposal at height {} from {}", block.header.height, peer.addr);
-
-                                    // Phase 3E.1: Cache the block
-                                    let block_hash = block.hash();
-                                    block_cache.insert(block_hash, block.clone());
-                                    tracing::debug!("💾 Cached block {} for voting", hex::encode(block_hash));
-
-                                    // Phase 3E.2: Look up validator weight from masternode registry
-                                    let validator_id = "validator_node".to_string();
-                                    let validator_weight = match masternode_registry.get(&validator_id).await {
-                                        Some(info) => info.masternode.collateral,
-                                        None => 1u64, // Default to 1 if not found
+                                NetworkMessage::TSCDBlockProposal { .. }
+                                | NetworkMessage::TSCDPrepareVote { .. }
+                                | NetworkMessage::TSCDPrecommitVote { .. } => {
+                                    // Use unified message handler for TSDC messages
+                                    let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
+                                    let context = MessageContext {
+                                        blockchain: blockchain.clone(),
+                                        peer_registry: peer_registry.clone(),
+                                        masternode_registry: masternode_registry.clone(),
+                                        consensus: Some(consensus.clone()),
+                                        block_cache: Some(block_cache.clone()),
+                                        broadcast_tx: Some(broadcast_tx.clone()),
                                     };
 
-                                    consensus.avalanche.generate_prepare_vote(block_hash, &validator_id, validator_weight);
-                                    tracing::info!("✅ Generated prepare vote for block {} at height {}",
-                                        hex::encode(block_hash), block.header.height);
-
-                                    // Broadcast prepare vote to all peers
-                                    let sig_bytes = vec![]; // TODO: Phase 3E.4: Sign with validator key
-                                    let prepare_vote = NetworkMessage::TSCDPrepareVote {
-                                        block_hash,
-                                        voter_id: validator_id,
-                                        signature: sig_bytes,
-                                    };
-
-                                    match broadcast_tx.send(prepare_vote) {
-                                        Ok(receivers) => {
-                                            tracing::info!("📤 Broadcast prepare vote to {} peers", receivers.saturating_sub(1));
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Failed to broadcast prepare vote: {}", e);
-                                        }
-                                    }
-                                }
-                                NetworkMessage::TSCDPrepareVote { block_hash, voter_id, signature: _ } => {
-                                    check_message_size!(MAX_VOTE_SIZE, "PrepareVote");
-                                    check_rate_limit!("vote");
-
-                                    tracing::debug!("🗳️  Received prepare vote for block {} from {}",
-                                        hex::encode(block_hash), voter_id);
-
-                                    // Phase 3E.2: Look up voter weight from masternode registry
-                                    let voter_weight = match masternode_registry.get(voter_id).await {
-                                        Some(info) => info.masternode.collateral,
-                                        None => 1u64, // Default to 1 if not found
-                                    };
-
-                                    // Phase 3E.4: Verify vote signature (stub - TODO: implement Ed25519 verification)
-                                    // For now, we accept the vote; in production, verify the signature
-
-                                    consensus.avalanche.accumulate_prepare_vote(*block_hash, voter_id.clone(), voter_weight);
-
-                                    // Check if prepare consensus reached (>50% majority Avalanche)
-                                    if consensus.avalanche.check_prepare_consensus(*block_hash) {
-                                        tracing::info!("✅ Prepare consensus reached for block {}",
-                                            hex::encode(block_hash));
-
-                                        // Generate precommit vote with actual weight
-                                        let validator_id = "validator_node".to_string();
-                                        let validator_weight = match masternode_registry.get(&validator_id).await {
-                                            Some(info) => info.masternode.collateral,
-                                            None => 1u64,
-                                        };
-
-                                        consensus.avalanche.generate_precommit_vote(*block_hash, &validator_id, validator_weight);
-                                        tracing::info!("✅ Generated precommit vote for block {}", hex::encode(block_hash));
-
-                                        // Broadcast precommit vote
-                                        let precommit_vote = NetworkMessage::TSCDPrecommitVote {
-                                            block_hash: *block_hash,
-                                            voter_id: validator_id,
-                                            signature: vec![],
-                                        };
-
-                                        let _ = broadcast_tx.send(precommit_vote);
-                                    }
-                                }
-                                NetworkMessage::TSCDPrecommitVote { block_hash, voter_id, signature: _ } => {
-                                    check_message_size!(MAX_VOTE_SIZE, "PrecommitVote");
-                                    check_rate_limit!("vote");
-
-                                    tracing::debug!("🗳️  Received precommit vote for block {} from {}",
-                                        hex::encode(block_hash), voter_id);
-
-                                    // Phase 3E.2: Look up voter weight from masternode registry
-                                    let voter_weight = match masternode_registry.get(voter_id).await {
-                                        Some(info) => info.masternode.collateral,
-                                        None => 1u64, // Default to 1 if not found
-                                    };
-
-                                    // Phase 3E.4: Verify vote signature (stub)
-                                    // In production, verify Ed25519 signature here
-
-                                    consensus.avalanche.accumulate_precommit_vote(*block_hash, voter_id.clone(), voter_weight);
-
-                                    // Check if precommit consensus reached (>50% majority Avalanche)
-                                    if consensus.avalanche.check_precommit_consensus(*block_hash) {
-                                        tracing::info!("✅ Precommit consensus reached for block {}",
-                                            hex::encode(block_hash));
-
-                                        // Phase 3E.3: Finalization Callback
-                                        // 1. Retrieve the block from cache
-                                        if let Some((_, block)) = block_cache.remove(block_hash) {
-                                            // 2. Collect precommit signatures (TODO: implement signature collection)
-                                            let _signatures: Vec<Vec<u8>> = vec![]; // TODO: Collect actual signatures
-
-                                            // 3. Phase 3E.3: Call tsdc.finalize_block_complete()
-                                            // Note: This would be called through a TSDC module instance
-                                            // For now, emit finalization event
-                                            tracing::info!("🎉 Block {} finalized with consensus!", hex::encode(block_hash));
-                                            tracing::info!("📦 Block height: {}, txs: {}", block.header.height, block.transactions.len());
-
-                                            // 4. Emit finalization event
-                                            // Calculate reward
-                                            let height = block.header.height;
-                                            let ln_height = if height == 0 { 0.0 } else { (height as f64).ln() };
-                                            let block_subsidy = (100_000_000.0 * (1.0 + ln_height)) as u64;
-                                            let tx_fees: u64 = block.transactions.iter().map(|tx| tx.fee_amount()).sum();
-                                            let total_reward = block_subsidy + tx_fees;
-
-                                            tracing::info!(
-                                                "💰 Block {} rewards - subsidy: {}, fees: {}, total: {:.2} TIME",
-                                                height,
-                                                block_subsidy / 100_000_000,
-                                                tx_fees / 100_000_000,
-                                                total_reward as f64 / 100_000_000.0
-                                            );
-                                        } else {
-                                            tracing::warn!("⚠️  Block {} not found in cache for finalization", hex::encode(block_hash));
-                                        }
+                                    if let Err(e) = handler.handle_message(&msg, &context).await {
+                                        tracing::warn!("[Inbound] Error handling TSDC message from {}: {}", peer.addr, e);
                                     }
                                 }
                                 NetworkMessage::GetChainWork => {

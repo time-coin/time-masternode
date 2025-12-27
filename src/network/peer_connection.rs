@@ -1090,6 +1090,8 @@ impl PeerConnection {
                     peer_registry: Arc::clone(_peer_registry),
                     masternode_registry: Arc::clone(masternode_registry),
                     consensus: None, // Not needed for GetMasternodes
+                    block_cache: None,
+                    broadcast_tx: None,
                 };
 
                 if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
@@ -1109,6 +1111,8 @@ impl PeerConnection {
                     peer_registry: Arc::clone(_peer_registry),
                     masternode_registry: Arc::clone(masternode_registry),
                     consensus: None, // Not needed for GetBlocks
+                    block_cache: None,
+                    broadcast_tx: None,
                 };
 
                 if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
@@ -1119,6 +1123,16 @@ impl PeerConnection {
                         );
                     }
                 }
+            }
+            NetworkMessage::TSCDBlockProposal { .. }
+            | NetworkMessage::TSCDPrepareVote { .. }
+            | NetworkMessage::TSCDPrecommitVote { .. } => {
+                // TSDC consensus messages - these should be handled by a consensus-aware message loop
+                // For now, log a warning that they're being ignored in outbound connections
+                warn!(
+                    "⚠️ [{:?}] Received TSDC message from {} but consensus handling not available in outbound connection",
+                    self.direction, self.peer_ip
+                );
             }
             _ => {
                 debug!(

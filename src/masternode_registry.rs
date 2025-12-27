@@ -351,8 +351,7 @@ impl MasternodeRegistry {
         self.masternodes.read().await.values().cloned().collect()
     }
 
-    #[allow(dead_code)]
-    pub async fn list_active(&self) -> Vec<MasternodeInfo> {
+    pub async fn get_active_masternodes(&self) -> Vec<MasternodeInfo> {
         self.masternodes
             .read()
             .await
@@ -360,6 +359,11 @@ impl MasternodeRegistry {
             .filter(|info| info.is_active)
             .cloned()
             .collect()
+    }
+
+    #[allow(dead_code)]
+    pub async fn list_active(&self) -> Vec<MasternodeInfo> {
+        self.get_active_masternodes().await
     }
 
     /// Count all registered masternodes (not just active ones)
