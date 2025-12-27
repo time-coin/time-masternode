@@ -1007,8 +1007,18 @@ async fn main() {
                                     while sync_attempts < max_sync_attempts {
                                         let current_height = block_blockchain.get_height().await;
 
+                                        // Request blocks - if at height 0 and no genesis, start from 0
+                                        let start_height = if current_height == 0 {
+                                            match block_blockchain.get_block_by_height(0).await {
+                                                Ok(_) => 1, // Have genesis, request from 1
+                                                Err(_) => 0, // No genesis, request from 0
+                                            }
+                                        } else {
+                                            current_height + 1 // Normal case
+                                        };
+
                                         // Request blocks from all connected peers
-                                        let get_blocks = NetworkMessage::GetBlocks(current_height + 1, expected_height);
+                                        let get_blocks = NetworkMessage::GetBlocks(start_height, expected_height);
                                         for peer_ip in &connected_peers {
                                             let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
                                         }
