@@ -989,10 +989,10 @@ async fn main() {
 
                             // If height didn't change, leader failed - try syncing from peers first
                             if height_after == height_before {
-                                let our_height = block_blockchain.get_height().await;
+                                let _our_height = block_blockchain.get_height().await;
                                 let expected_height = block_blockchain.calculate_expected_height();
 
-                                // Before producing blocks locally, try to sync from connected peers
+                                // Before producing blocks locally, try harder to sync from connected peers
                                 let connected_peers = block_peer_registry.list_peers().await;
                                 if !connected_peers.is_empty() {
                                     tracing::info!(
@@ -1000,31 +1000,82 @@ async fn main() {
                                         connected_peers.len()
                                     );
 
-                                    // Request blocks from all connected peers
-                                    let get_blocks = NetworkMessage::GetBlocks(our_height + 1, expected_height);
-                                    for peer_ip in &connected_peers {
-                                        let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
-                                    }
+                                    // Try syncing multiple times before giving up
+                                    let mut sync_attempts = 0;
+                                    let max_sync_attempts = 5; // Try 5 times before fallback
 
-                                    // Wait for blocks to arrive
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                                    while sync_attempts < max_sync_attempts {
+                                        let current_height = block_blockchain.get_height().await;
 
-                                    let new_height = block_blockchain.get_height().await;
-                                    if new_height > our_height {
-                                        tracing::info!(
-                                            "✅ Synced from peers, height: {} → {}",
-                                            our_height, new_height
-                                        );
-                                        // Check if we're caught up now
-                                        if new_height >= expected_height {
-                                            continue; // Fully synced, skip fallback production
+                                        // Request blocks from all connected peers
+                                        let get_blocks = NetworkMessage::GetBlocks(current_height + 1, expected_height);
+                                        for peer_ip in &connected_peers {
+                                            let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
                                         }
-                                        // Partially synced, update our_height for next check
-                                        tracing::info!("📊 Partial sync, still {} blocks behind", expected_height - new_height);
-                                    } else {
-                                        tracing::warn!("⚠️ Peer sync didn't provide blocks, falling back to local production");
+
+                                        // Wait longer for blocks to arrive (30 seconds per attempt)
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+                                        let new_height = block_blockchain.get_height().await;
+                                        if new_height > current_height {
+                                            let synced_blocks = new_height - current_height;
+                                            tracing::info!(
+                                                "✅ Synced {} blocks from peers (height: {} → {})",
+                                                synced_blocks, current_height, new_height
+                                            );
+
+                                            // Check if we're caught up now
+                                            if new_height >= expected_height {
+                                                tracing::info!("✅ Fully synced via peers, skipping fallback production");
+                                                is_producing.store(false, Ordering::SeqCst);
+                                                continue; // Fully synced, skip fallback production
+                                            }
+
+                                            // Made progress, reset attempt counter
+                                            sync_attempts = 0;
+                                            tracing::info!("📊 Partial sync successful, still {} blocks behind", expected_height - new_height);
+                                        } else {
+                                            sync_attempts += 1;
+                                            tracing::warn!(
+                                                "⚠️  Peer sync attempt {}/{} didn't provide blocks",
+                                                sync_attempts, max_sync_attempts
+                                            );
+
+                                            if sync_attempts < max_sync_attempts {
+                                                tracing::info!("🔄 Retrying peer sync in 10 seconds...");
+                                                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                                            }
+                                        }
                                     }
+
+                                    // After all attempts, check final status
+                                    let final_height = block_blockchain.get_height().await;
+                                    if final_height >= expected_height {
+                                        tracing::info!("✅ Caught up via peer sync, skipping fallback");
+                                        is_producing.store(false, Ordering::SeqCst);
+                                        continue;
+                                    }
+
+                                    tracing::warn!(
+                                        "⚠️  After {} sync attempts, still {} blocks behind - NOT using fallback production",
+                                        max_sync_attempts, expected_height - final_height
+                                    );
+                                    tracing::warn!(
+                                        "⚠️  Waiting for peers to provide valid blocks (fallback production disabled to prevent chain splits)"
+                                    );
+                                    is_producing.store(false, Ordering::SeqCst);
+                                    continue; // Skip fallback production entirely
+                                } else {
+                                    tracing::warn!("⚠️  No connected peers available for sync");
+                                    is_producing.store(false, Ordering::SeqCst);
+                                    continue;
                                 }
+
+                                // FALLBACK PRODUCTION DISABLED: We now always sync from peers
+                                // to prevent chain splits. If sync fails, node waits for valid
+                                // blocks from peers rather than generating its own chain.
+
+                                /* OLD FALLBACK CODE (DISABLED TO PREVENT CHAIN SPLITS)
 
                                 // Acquire block production lock (P2P best practice #8)
                                 if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -1109,6 +1160,9 @@ async fn main() {
                                     catchup_produced,
                                     block_blockchain.get_height().await
                                 );
+
+                                END OF OLD FALLBACK CODE */
+
                             } else {
                                 tracing::info!(
                                     "✅ Leader produced blocks, height: {} → {}",
