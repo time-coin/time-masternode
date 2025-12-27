@@ -465,7 +465,6 @@ async fn main() {
         let registry_clone = registry.clone();
         let attestation_clone = attestation_system.clone();
         let mn_address = mn.address.clone();
-        let mn_clone = mn.clone();
         let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
         let heartbeat_handle = tokio::spawn(async move {
@@ -482,14 +481,10 @@ async fn main() {
                             tracing::warn!("❌ Failed to send heartbeat: {}", e);
                         }
 
-                        // Broadcast masternode announcement periodically so peers discover us
-                        let announcement = NetworkMessage::MasternodeAnnouncement {
-                            address: mn_clone.address.clone(),
-                            reward_address: mn_clone.wallet_address.clone(),
-                            tier: mn_clone.tier.clone(),
-                            public_key: mn_clone.public_key,
-                        };
-                        peer_connection_registry_clone.broadcast(announcement).await;
+                        // NOTE: Masternode announcements are only sent on initial connection handshake
+                        // (see server.rs handle_inbound_peer). Periodic re-announcements cause rate
+                        // limit violations (1 per 5min limit) and lead to nodes banning each other.
+                        // Discovery happens via GetMasternodes/MasternodesResponse protocol below.
 
                         // Request masternodes from all connected peers for peer exchange
                         tracing::info!("📤 Broadcasting GetMasternodes to all peers");
