@@ -473,13 +473,23 @@ impl MasternodeRegistry {
         use crate::network::message::NetworkMessage;
 
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-            let msg = NetworkMessage::BlockAnnouncement(block);
+            // Send inventory message (just the height) instead of full block
+            // Peers will request the full block if they need it
+            let block_height = block.header.height;
+            let msg = NetworkMessage::BlockInventory(block_height);
             match tx.send(msg) {
                 Ok(0) => {
-                    tracing::debug!("📡 Block produced (no peers connected yet)");
+                    tracing::debug!(
+                        "📡 Block {} inventory sent (no peers connected yet)",
+                        block_height
+                    );
                 }
                 Ok(receivers) => {
-                    tracing::info!("📡 Broadcast block to {} connected peer(s)", receivers);
+                    tracing::info!(
+                        "📡 Broadcast block {} inventory to {} peer(s)",
+                        block_height,
+                        receivers
+                    );
                 }
                 Err(_) => {
                     tracing::debug!("Broadcast channel closed (no active connections)");

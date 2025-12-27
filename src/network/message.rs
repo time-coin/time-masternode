@@ -36,6 +36,8 @@ pub enum NetworkMessage {
     Subscribe(Subscription),
     Unsubscribe(String),
     BlockAnnouncement(Block),
+    // Inventory-based block propagation (more efficient)
+    BlockInventory(u64), // Just announce the height, peer can request if needed
     BlockRequest(u64),
     BlockResponse(Block),
     GetUTXOSet,
@@ -197,6 +199,7 @@ impl NetworkMessage {
             NetworkMessage::Subscribe(_) => "Subscribe",
             NetworkMessage::Unsubscribe(_) => "Unsubscribe",
             NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+            NetworkMessage::BlockInventory(_) => "BlockInventory",
             NetworkMessage::BlockRequest(_) => "BlockRequest",
             NetworkMessage::BlockResponse(_) => "BlockResponse",
             NetworkMessage::GetUTXOSet => "GetUTXOSet",

@@ -795,7 +795,37 @@ async fn handle_peer(
                                         tracing::info!("✓ Registered {} masternode(s) from peer exchange with {}", registered, peer.addr);
                                     }
                                 }
-                                NetworkMessage::BlockAnnouncement(block) => {
+                                NetworkMessage::BlockInventory(block_height) => {
+                                    check_rate_limit!("block");
+
+                                    let our_height = blockchain.get_height().await;
+
+                                    // Only request if we need it
+                                    if *block_height > our_height {
+                                        tracing::debug!("📦 Received inventory for block {} from {}, requesting", block_height, peer.addr);
+
+                                        // Request the full block via peer registry
+                                        let request = NetworkMessage::BlockRequest(*block_height);
+                                        let _ = peer_registry.send_to_peer(&ip_str, request).await;
+                                    } else {
+                                        tracing::debug!("⏭️ Ignoring inventory for block {} from {} (we're at {})", block_height, peer.addr, our_height);
+                                    }
+                                }
+                                NetworkMessage::BlockRequest(block_height) => {
+                                    check_rate_limit!("block");
+
+                                    tracing::debug!("📨 Received block request for height {} from {}", block_height, peer.addr);
+
+                                    // Send the requested block if we have it
+                                    if let Ok(block) = blockchain.get_block_by_height(*block_height).await {
+                                        let response = NetworkMessage::BlockResponse(block);
+                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                        tracing::debug!("✅ Sent block {} to {}", block_height, peer.addr);
+                                    } else {
+                                        tracing::debug!("⚠️ Don't have block {} requested by {}", block_height, peer.addr);
+                                    }
+                                }
+                                NetworkMessage::BlockResponse(block) => {
                                     check_message_size!(MAX_BLOCK_SIZE, "Block");
                                     check_rate_limit!("block");
 
@@ -811,21 +841,64 @@ async fn handle_peer(
                                         continue;
                                     }
 
-                                    tracing::info!("📥 Received block {} announcement from {}", block_height, peer.addr);
+                                    tracing::info!("📥 Received block {} response from {}", block_height, peer.addr);
 
                                     // Add block to our blockchain with fork handling
                                     match blockchain.add_block_with_fork_handling(block.clone()).await {
                                         Ok(true) => {
                                             tracing::info!("✅ Added block {} from {}", block_height, peer.addr);
 
-                                            // GOSSIP: Relay to all other connected peers
-                                            let msg = NetworkMessage::BlockAnnouncement(block.clone());
+                                            // GOSSIP: Send inventory to all other connected peers
+                                            let msg = NetworkMessage::BlockInventory(block_height);
                                             match broadcast_tx.send(msg) {
                                                 Ok(receivers) => {
-                                                    tracing::info!("🔄 Gossiped block {} to {} other peer(s)", block_height, receivers.saturating_sub(1));
+                                                    tracing::info!("🔄 Gossiped block {} inventory to {} other peer(s)", block_height, receivers.saturating_sub(1));
                                                 }
                                                 Err(e) => {
-                                                    tracing::warn!("Failed to gossip block: {}", e);
+                                                    tracing::warn!("Failed to gossip block inventory: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Ok(false) => {
+                                            tracing::debug!("⏭️ Skipped block {} (already have or invalid)", block_height);
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("❌ Failed to add block {}: {}", block_height, e);
+                                        }
+                                    }
+                                }
+                                NetworkMessage::BlockAnnouncement(block) => {
+                                    // Legacy full block announcement (for backward compatibility)
+                                    check_message_size!(MAX_BLOCK_SIZE, "Block");
+                                    check_rate_limit!("block");
+
+                                    let block_height = block.header.height;
+
+                                    // Check if we've already seen this block using Bloom filter
+                                    let block_height_bytes = block_height.to_le_bytes();
+                                    let already_seen = seen_blocks.check_and_insert(&block_height_bytes).await;
+
+                                    if already_seen {
+                                        tracing::debug!("🔁 Ignoring duplicate block {} from {}", block_height, peer.addr);
+                                        line.clear();
+                                        continue;
+                                    }
+
+                                    tracing::debug!("📥 Received legacy block {} announcement from {}", block_height, peer.addr);
+
+                                    // Add block to our blockchain with fork handling
+                                    match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                        Ok(true) => {
+                                            tracing::info!("✅ Added block {} from {}", block_height, peer.addr);
+
+                                            // GOSSIP: Use inventory for efficiency
+                                            let msg = NetworkMessage::BlockInventory(block_height);
+                                            match broadcast_tx.send(msg) {
+                                                Ok(receivers) => {
+                                                    tracing::info!("🔄 Gossiped block {} inventory to {} other peer(s)", block_height, receivers.saturating_sub(1));
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!("Failed to gossip block inventory: {}", e);
                                                 }
                                             }
                                         }
@@ -1392,7 +1465,10 @@ async fn handle_peer(
                         // Log what we're broadcasting
                         match &msg {
                             NetworkMessage::BlockAnnouncement(block) => {
-                                tracing::info!("📤 Sending block {} to peer {}", block.header.height, peer.addr);
+                                tracing::debug!("📤 Sending block {} to peer {}", block.header.height, peer.addr);
+                            }
+                            NetworkMessage::BlockInventory(height) => {
+                                tracing::debug!("📤 Sending block {} inventory to peer {}", height, peer.addr);
                             }
                             _ => {
                                 tracing::debug!("📤 Sending message to peer {}", peer.addr);

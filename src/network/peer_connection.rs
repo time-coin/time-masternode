@@ -858,12 +858,95 @@ impl PeerConnection {
                     }
                 }
             }
-            NetworkMessage::BlockAnnouncement(block) => {
-                // Handle new block announcement
+            NetworkMessage::BlockInventory(block_height) => {
+                // Handle block inventory announcement - only request if we need it
+                let our_height = blockchain.get_height().await;
+
+                if *block_height > our_height {
+                    // We're behind, request the block
+                    debug!(
+                        "📦 [{:?}] Received inventory for block {} from {} (our height: {}), requesting",
+                        self.direction, block_height, self.peer_ip, our_height
+                    );
+                    let request = NetworkMessage::BlockRequest(*block_height);
+                    if let Err(e) = self.send_message(&request).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to request block {} from {}: {}",
+                            self.direction, block_height, self.peer_ip, e
+                        );
+                    }
+                } else {
+                    // We already have this block or are ahead, ignore
+                    debug!(
+                        "⏭️ [{:?}] Ignoring inventory for block {} from {} (we're at {})",
+                        self.direction, block_height, self.peer_ip, our_height
+                    );
+                }
+            }
+            NetworkMessage::BlockRequest(block_height) => {
+                // Peer is requesting a specific block from us
+                debug!(
+                    "📨 [{:?}] Received block request for height {} from {}",
+                    self.direction, block_height, self.peer_ip
+                );
+
+                if let Ok(block) = blockchain.get_block_by_height(*block_height).await {
+                    let response = NetworkMessage::BlockResponse(block);
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send block {} to {}: {}",
+                            self.direction, block_height, self.peer_ip, e
+                        );
+                    } else {
+                        debug!(
+                            "✅ [{:?}] Sent block {} to {}",
+                            self.direction, block_height, self.peer_ip
+                        );
+                    }
+                } else {
+                    debug!(
+                        "⚠️ [{:?}] Don't have block {} requested by {}",
+                        self.direction, block_height, self.peer_ip
+                    );
+                }
+            }
+            NetworkMessage::BlockResponse(block) => {
+                // Handle block response to our request
                 let block_height = block.header.height;
                 let our_height = blockchain.get_height().await;
 
-                info!(
+                debug!(
+                    "📦 [{:?}] Received block {} from {} (our height: {})",
+                    self.direction, block_height, self.peer_ip, our_height
+                );
+
+                match blockchain.add_block_with_fork_handling(block.clone()).await {
+                    Ok(true) => {
+                        info!(
+                            "✅ [{:?}] Added block {} from {}",
+                            self.direction, block_height, self.peer_ip
+                        );
+                    }
+                    Ok(false) => {
+                        debug!(
+                            "⏭️ [{:?}] Skipped block {} (already have or invalid)",
+                            self.direction, block_height
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            "⏭️ [{:?}] Skipped block {}: {}",
+                            self.direction, block_height, e
+                        );
+                    }
+                }
+            }
+            NetworkMessage::BlockAnnouncement(block) => {
+                // Keep legacy full block announcement support for backward compatibility
+                let block_height = block.header.height;
+                let our_height = blockchain.get_height().await;
+
+                debug!(
                     "📦 [{:?}] Received block announcement {} from {} (our height: {})",
                     self.direction, block_height, self.peer_ip, our_height
                 );
@@ -1119,6 +1202,9 @@ impl PeerConnection {
                     match &message {
                         NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
                         NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+                        NetworkMessage::BlockInventory(_) => "BlockInventory",
+                        NetworkMessage::BlockRequest(_) => "BlockRequest",
+                        NetworkMessage::BlockResponse(_) => "BlockResponse",
                         NetworkMessage::Handshake { .. } => "Handshake",
                         _ => "Other",
                     }
@@ -1189,6 +1275,9 @@ impl PeerConnection {
                     match &message {
                         NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
                         NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+                        NetworkMessage::BlockInventory(_) => "BlockInventory",
+                        NetworkMessage::BlockRequest(_) => "BlockRequest",
+                        NetworkMessage::BlockResponse(_) => "BlockResponse",
                         NetworkMessage::Handshake { .. } => "Handshake",
                         _ => "Other",
                     }
@@ -1320,6 +1409,9 @@ impl PeerConnection {
                     match &message {
                         NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",
                         NetworkMessage::BlockAnnouncement(_) => "BlockAnnouncement",
+                        NetworkMessage::BlockInventory(_) => "BlockInventory",
+                        NetworkMessage::BlockRequest(_) => "BlockRequest",
+                        NetworkMessage::BlockResponse(_) => "BlockResponse",
                         NetworkMessage::MasternodeAnnouncement { .. } => "MasternodeAnnouncement",
                         NetworkMessage::Handshake { .. } => "Handshake",
                         _ => "Other",
