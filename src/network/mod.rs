@@ -4,6 +4,7 @@ pub mod connection_manager;
 pub mod connection_state;
 pub mod dedup_filter;
 pub mod message;
+pub mod message_handler;
 pub mod peer_connection;
 pub mod peer_connection_registry;
 pub mod peer_discovery;
