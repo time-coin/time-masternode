@@ -811,7 +811,7 @@ async fn main() {
                     let eligible = block_registry.get_eligible_for_rewards().await;
                     let mut masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _)| mn.clone()).collect();
                     // Sort deterministically by address for consistent leader election across all nodes
-                    masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+                    sort_masternodes_canonical(&mut masternodes);
 
                     // Require at least 3 masternodes for block production
                     if masternodes.len() < 3 {
@@ -857,7 +857,7 @@ async fn main() {
                         // Leader selection: deterministic based on current height + masternode list
                         // CRITICAL: Sort masternodes by IP to ensure all nodes pick the same leader
                         let mut sorted_masternodes = masternodes.clone();
-                        sorted_masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+                        sort_masternodes_canonical(&mut sorted_masternodes);
 
                         use sha2::{Digest, Sha256};
                         let mut hasher = Sha256::new();

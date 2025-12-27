@@ -1,7 +1,6 @@
 use crate::block::types::{Block, BlockHeader};
-use crate::types::{Hash256, Masternode, Transaction};
+use crate::types::{sort_masternodes_canonical, Hash256, Masternode, Transaction};
 use chrono::Timelike;
-use sha2::{Digest, Sha256};
 
 pub struct DeterministicBlockGenerator;
 
@@ -46,7 +45,7 @@ impl DeterministicBlockGenerator {
             .timestamp();
 
         let mut masternodes_sorted = masternodes;
-        masternodes_sorted.sort_by(|a, b| a.address.cmp(&b.address));
+        sort_masternodes_canonical(&mut masternodes_sorted);
 
         // Phase 1.2: Enforce canonical transaction ordering for deterministic merkle roots
         // All transactions MUST be sorted by txid to ensure all nodes compute identical merkle roots
@@ -107,7 +106,7 @@ impl DeterministicBlockGenerator {
         let mut all_txs = vec![coinbase_tx];
         all_txs.extend(txs_sorted);
 
-        let merkle_root = Self::merkle_root(&all_txs);
+        let merkle_root = crate::block::types::calculate_merkle_root(&all_txs);
 
         let header = BlockHeader {
             version: 2,
@@ -127,28 +126,6 @@ impl DeterministicBlockGenerator {
             masternode_rewards,
             time_attestations: vec![], // Attestations added later
         }
-    }
-
-    fn merkle_root(txs: &[Transaction]) -> Hash256 {
-        if txs.is_empty() {
-            return [0u8; 32];
-        }
-        let mut hashes: Vec<Hash256> = txs.iter().map(|tx| tx.txid()).collect();
-        while hashes.len() > 1 {
-            if hashes.len() % 2 == 1 {
-                hashes.push(*hashes.last().unwrap());
-            }
-            hashes = hashes
-                .chunks(2)
-                .map(|pair| {
-                    let mut hasher = Sha256::new();
-                    hasher.update(pair[0]);
-                    hasher.update(pair[1]);
-                    hasher.finalize().into()
-                })
-                .collect();
-        }
-        hashes[0]
     }
 
     /// Calculate next block timestamp (clock-aligned every 10 minutes)

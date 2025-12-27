@@ -103,6 +103,12 @@ pub struct Masternode {
     pub registered_at: u64,
 }
 
+/// Sort masternodes deterministically by address for consensus
+/// This ensures all nodes compute the same leader election, merkle roots, etc.
+pub fn sort_masternodes_canonical(masternodes: &mut [Masternode]) {
+    masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MasternodeTier {
     Free = 0,       // Can receive rewards (0.1x weight vs Bronze), cannot vote on governance

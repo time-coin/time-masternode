@@ -1138,7 +1138,7 @@ impl Blockchain {
         }
 
         // 2. Verify merkle root matches transactions
-        let computed_merkle = block.compute_merkle_root();
+        let computed_merkle = crate::block::types::calculate_merkle_root(&block.transactions);
         if computed_merkle != block.header.merkle_root {
             return Err(format!(
                 "Block {} merkle root mismatch: computed {}, header {}",

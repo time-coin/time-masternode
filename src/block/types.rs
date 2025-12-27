@@ -7,6 +7,38 @@
 
 use crate::types::{Hash256, Transaction};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Build a merkle tree from a list of hashes
+/// Generic merkle root calculator used for transactions, attestations, etc.
+fn build_merkle_root(mut hashes: Vec<Hash256>) -> Hash256 {
+    if hashes.is_empty() {
+        return [0u8; 32];
+    }
+
+    while hashes.len() > 1 {
+        if hashes.len() % 2 == 1 {
+            hashes.push(*hashes.last().unwrap());
+        }
+        hashes = hashes
+            .chunks(2)
+            .map(|pair| {
+                let mut hasher = Sha256::new();
+                hasher.update(pair[0]);
+                hasher.update(pair[1]);
+                hasher.finalize().into()
+            })
+            .collect();
+    }
+    hashes[0]
+}
+
+/// Calculate merkle root from transactions
+/// This is the canonical implementation used by both block generation and validation
+pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
+    let hashes: Vec<Hash256> = txs.iter().map(|tx| tx.txid()).collect();
+    build_merkle_root(hashes)
+}
 
 /// Proof-of-Time attestation included in blocks
 /// This proves a masternode was online and witnessed by peers
@@ -89,61 +121,9 @@ impl Block {
         Sha256::digest(bytes).into()
     }
 
-    /// Compute the merkle root from the block's transactions
-    pub fn compute_merkle_root(&self) -> Hash256 {
-        use sha2::{Digest, Sha256};
-
-        if self.transactions.is_empty() {
-            return [0u8; 32]; // Empty merkle root for no transactions
-        }
-
-        // Hash each transaction using txid() for consistency with block generation
-        // Sort by txid to ensure deterministic ordering across all nodes
-        let mut hashes: Vec<(Hash256, Hash256)> = self
-            .transactions
-            .iter()
-            .map(|tx| {
-                let txid = tx.txid();
-                (txid, txid) // (sort_key, hash)
-            })
-            .collect();
-
-        // Sort by txid to ensure deterministic merkle root
-        hashes.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Extract just the hashes for merkle tree construction
-        let mut hashes: Vec<Hash256> = hashes.into_iter().map(|(_, hash)| hash).collect();
-
-        // Build merkle tree
-        while hashes.len() > 1 {
-            let mut next_level = Vec::new();
-            for chunk in hashes.chunks(2) {
-                let mut hasher = Sha256::new();
-                hasher.update(chunk[0]);
-                if chunk.len() > 1 {
-                    hasher.update(chunk[1]);
-                } else {
-                    // Duplicate last hash if odd number
-                    hasher.update(chunk[0]);
-                }
-                next_level.push(hasher.finalize().into());
-            }
-            hashes = next_level;
-        }
-
-        hashes.into_iter().next().unwrap_or([0u8; 32])
-    }
-
     /// Compute the merkle root of time attestations
     pub fn compute_attestation_root(&self) -> Hash256 {
-        use sha2::{Digest, Sha256};
-
-        if self.time_attestations.is_empty() {
-            return [0u8; 32];
-        }
-
-        // Hash each attestation
-        let mut hashes: Vec<Hash256> = self
+        let hashes: Vec<Hash256> = self
             .time_attestations
             .iter()
             .map(|att| {
@@ -155,23 +135,7 @@ impl Block {
             })
             .collect();
 
-        // Build merkle tree
-        while hashes.len() > 1 {
-            let mut next_level = Vec::new();
-            for chunk in hashes.chunks(2) {
-                let mut hasher = Sha256::new();
-                hasher.update(chunk[0]);
-                if chunk.len() > 1 {
-                    hasher.update(chunk[1]);
-                } else {
-                    hasher.update(chunk[0]);
-                }
-                next_level.push(hasher.finalize().into());
-            }
-            hashes = next_level;
-        }
-
-        hashes.into_iter().next().unwrap_or([0u8; 32])
+        build_merkle_root(hashes)
     }
 
     /// Get count of masternodes with valid attestations in this block
@@ -273,9 +237,9 @@ mod tests {
         };
 
         // Compute merkle roots
-        let merkle1 = block1.compute_merkle_root();
-        let merkle2 = block2.compute_merkle_root();
-        let merkle3 = block3.compute_merkle_root();
+        let merkle1 = calculate_merkle_root(&block1.transactions);
+        let merkle2 = calculate_merkle_root(&block2.transactions);
+        let merkle3 = calculate_merkle_root(&block3.transactions);
 
         // CRITICAL: All merkle roots MUST be identical
         assert_eq!(
@@ -318,7 +282,7 @@ mod tests {
             time_attestations: vec![],
         };
 
-        let merkle = block.compute_merkle_root();
+        let merkle = calculate_merkle_root(&block.transactions);
         assert_eq!(
             merkle, [0u8; 32],
             "Empty block should have zero merkle root"
@@ -345,7 +309,7 @@ mod tests {
             time_attestations: vec![],
         };
 
-        let merkle = block.compute_merkle_root();
+        let merkle = calculate_merkle_root(&block.transactions);
         let txid = tx.txid();
 
         assert_eq!(
