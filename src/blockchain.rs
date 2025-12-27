@@ -451,12 +451,13 @@ impl Blockchain {
 
             while current < expected && sync_start.elapsed() < max_sync_time {
                 // Request next batch of blocks
-                // If we don't have genesis, start from 0. Otherwise start from current + 1
-                let has_genesis = self
-                    .storage
-                    .contains_key("block_0".as_bytes())
-                    .unwrap_or(false);
-                let batch_start = if !has_genesis { 0 } else { current + 1 };
+                // If we don't have a valid genesis, start from 0. Otherwise start from current + 1
+                let has_genesis = self.get_block_by_height(0).await.is_ok();
+                let batch_start = if !has_genesis && current == 0 {
+                    0
+                } else {
+                    current + 1
+                };
                 let batch_end = (batch_start + 500).min(expected);
 
                 // Request from multiple peers in parallel
@@ -702,7 +703,12 @@ impl Blockchain {
 
         // Build transaction list: coinbase + reward distribution + finalized transactions
         let mut all_txs = vec![coinbase.clone(), reward_distribution];
-        all_txs.extend(finalized_txs);
+
+        // CRITICAL: Sort finalized transactions deterministically by txid
+        // This ensures all nodes compute the same merkle root for the same block
+        let mut sorted_finalized = finalized_txs;
+        sorted_finalized.sort_by_key(|a| a.txid());
+        all_txs.extend(sorted_finalized);
 
         let mut block = Block {
             header: BlockHeader {
