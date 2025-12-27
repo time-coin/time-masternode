@@ -476,16 +476,20 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&ip_str, ack_msg).await;
 
                                         // Send our masternode announcement if we're a masternode
-                                        let local_masternodes = masternode_registry.get_all().await;
-                                        for mn_info in local_masternodes {
-                                            let announcement = NetworkMessage::MasternodeAnnouncement {
-                                                address: mn_info.masternode.address.clone(),
-                                                reward_address: mn_info.reward_address.clone(),
-                                                tier: mn_info.masternode.tier.clone(),
-                                                public_key: mn_info.masternode.public_key,
-                                            };
-                                            let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
-                                            tracing::info!("📢 Sent masternode announcement to newly connected peer {}", ip_str);
+                                        let local_address = masternode_registry.get_local_address().await;
+                                        if let Some(our_address) = local_address {
+                                            // Only send OUR masternode announcement, not all masternodes
+                                            let local_masternodes = masternode_registry.get_all().await;
+                                            if let Some(our_mn) = local_masternodes.iter().find(|mn| mn.masternode.address == our_address) {
+                                                let announcement = NetworkMessage::MasternodeAnnouncement {
+                                                    address: our_mn.masternode.address.clone(),
+                                                    reward_address: our_mn.reward_address.clone(),
+                                                    tier: our_mn.masternode.tier.clone(),
+                                                    public_key: our_mn.masternode.public_key,
+                                                };
+                                                let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
+                                                tracing::info!("📢 Sent our masternode announcement to newly connected peer {}", ip_str);
+                                            }
                                         }
 
                                         // Request peer list for peer discovery
@@ -1114,7 +1118,7 @@ async fn handle_peer(
 
                                             // Phase 2: Track consecutive invalid blocks from this peer
                                             let mut status = peer_fork_status.entry(peer.addr.clone())
-                                                .or_insert_with(PeerForkStatus::default);
+                                                .or_default();
                                             status.consecutive_invalid_blocks += 1;
                                             status.last_invalid_at = Instant::now();
 

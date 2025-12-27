@@ -625,6 +625,12 @@ impl Blockchain {
             return Err("No active masternodes for block production".to_string());
         }
 
+        tracing::debug!(
+            "📊 Block {}: {} active masternodes for reward distribution",
+            next_height,
+            masternodes.len()
+        );
+
         // Get finalized transactions from consensus layer
         let finalized_txs = self.consensus.get_finalized_transactions_for_block();
         let total_fees = self.consensus.tx_pool.get_total_fees();
@@ -635,8 +641,19 @@ impl Blockchain {
         let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
 
         if rewards.is_empty() {
-            return Err("No valid masternode rewards".to_string());
+            return Err(format!(
+                "No valid masternode rewards calculated for {} masternodes",
+                masternodes.len()
+            ));
         }
+
+        tracing::debug!(
+            "💰 Block {}: distributing {} satoshis to {} masternodes ({} each)",
+            next_height,
+            total_reward,
+            rewards.len(),
+            total_reward / masternodes.len() as u64
+        );
 
         // Coinbase transaction creates the total block reward
         let coinbase = Transaction {
