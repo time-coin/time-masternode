@@ -451,16 +451,12 @@ impl Blockchain {
 
             while current < expected && sync_start.elapsed() < max_sync_time {
                 // Request next batch of blocks
-                // If current is 0 and we don't have genesis block yet, start from 0
+                // Always start from current height when at 0 (to get genesis)
                 // Otherwise start from current + 1 (next block we need)
                 let batch_start = if current == 0 {
-                    // Check if we actually have genesis block
-                    match self.get_block_by_height(0).await {
-                        Ok(_) => 1,  // We have genesis, request from block 1
-                        Err(_) => 0, // No genesis, request from block 0
-                    }
+                    0  // Always request genesis block when at height 0
                 } else {
-                    current + 1 // Normal case: request next block after current
+                    current + 1  // Normal case: request next block after current
                 };
                 let batch_end = (batch_start + 500).min(expected);
 
