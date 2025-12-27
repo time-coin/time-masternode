@@ -396,21 +396,7 @@ async fn main() {
         peer_connection_registry.set_local_ip(ip.clone());
     }
 
-    // Start network client for outbound connections and masternode announcements
-    let network_client = network::client::NetworkClient::new(
-        peer_manager.clone(),
-        registry.clone(),
-        blockchain.clone(),
-        attestation_system.clone(),
-        network_type,
-        config.network.max_peers as usize,
-        peer_connection_registry.clone(),
-        peer_state.clone(),
-        connection_manager.clone(),
-        local_ip.clone(),
-        config.network.blacklisted_peers.clone(),
-    );
-    network_client.start().await;
+    // Network client will be started after server is created so we can share resources
 
     // Register this node if running as masternode
     let masternode_address = masternode_info.as_ref().map(|mn| mn.address.clone());
@@ -1543,6 +1529,22 @@ async fn main() {
                 .await;
 
             println!("  ✅ Network server listening on {}", p2p_addr);
+
+            // Now create network client for outbound connections
+            let network_client = network::client::NetworkClient::new(
+                peer_manager.clone(),
+                registry.clone(),
+                blockchain.clone(),
+                attestation_system.clone(),
+                network_type,
+                config.network.max_peers as usize,
+                peer_connection_registry.clone(),
+                peer_state.clone(),
+                connection_manager.clone(),
+                local_ip.clone(),
+                config.network.blacklisted_peers.clone(),
+            );
+            network_client.start().await;
             println!("\n╔═══════════════════════════════════════════════════════╗");
             println!("║  🎉 TIME Coin Daemon is Running!                      ║");
             println!("╠═══════════════════════════════════════════════════════╣");

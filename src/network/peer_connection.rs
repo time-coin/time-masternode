@@ -1127,12 +1127,30 @@ impl PeerConnection {
             NetworkMessage::TSCDBlockProposal { .. }
             | NetworkMessage::TSCDPrepareVote { .. }
             | NetworkMessage::TSCDPrecommitVote { .. } => {
-                // TSDC consensus messages - these should be handled by a consensus-aware message loop
-                // For now, log a warning that they're being ignored in outbound connections
-                warn!(
-                    "⚠️ [{:?}] Received TSDC message from {} but consensus handling not available in outbound connection",
-                    self.direction, self.peer_ip
-                );
+                // Use unified message handler for TSDC messages
+                // Note: Outbound connections don't have consensus/block_cache/broadcast access yet
+                // This is logged for visibility - proper support requires architecture changes
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext {
+                    blockchain: Arc::clone(blockchain),
+                    peer_registry: Arc::clone(_peer_registry),
+                    masternode_registry: Arc::clone(masternode_registry),
+                    consensus: None, // TODO: Pass from network client
+                    block_cache: None, // TODO: Share from server
+                    broadcast_tx: None, // TODO: Share from server
+                };
+
+                if let Err(e) = handler.handle_message(&message, &context).await {
+                    warn!(
+                        "⚠️ [{:?}] Error handling TSDC message from {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                } else {
+                    warn!(
+                        "⚠️ [{:?}] Received TSDC message from {} but consensus handling not fully available in outbound connection",
+                        self.direction, self.peer_ip
+                    );
+                }
             }
             _ => {
                 debug!(
