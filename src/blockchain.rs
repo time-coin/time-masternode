@@ -454,9 +454,9 @@ impl Blockchain {
                 // Always start from current height when at 0 (to get genesis)
                 // Otherwise start from current + 1 (next block we need)
                 let batch_start = if current == 0 {
-                    0  // Always request genesis block when at height 0
+                    0 // Always request genesis block when at height 0
                 } else {
-                    current + 1  // Normal case: request next block after current
+                    current + 1 // Normal case: request next block after current
                 };
                 let batch_end = (batch_start + 500).min(expected);
 
@@ -1161,7 +1161,25 @@ impl Blockchain {
         }
 
         // 2. Verify merkle root matches transactions
-        let computed_merkle = crate::block::types::calculate_merkle_root(&block.transactions);
+        // CRITICAL: Coinbase (empty inputs) MUST be first, then remaining txs sorted by TXID
+        // This matches block generation: [coinbase, sorted_user_txs...]
+        let mut sorted_txs = Vec::with_capacity(block.transactions.len());
+        let mut user_txs = Vec::new();
+
+        for tx in &block.transactions {
+            if tx.inputs.is_empty() {
+                // Coinbase transaction - must be first
+                sorted_txs.push(tx.clone());
+            } else {
+                user_txs.push(tx.clone());
+            }
+        }
+
+        // Sort user transactions by txid for deterministic ordering
+        user_txs.sort_by_key(|tx| tx.txid());
+        sorted_txs.extend(user_txs);
+
+        let computed_merkle = crate::block::types::calculate_merkle_root(&sorted_txs);
         if computed_merkle != block.header.merkle_root {
             return Err(format!(
                 "Block {} merkle root mismatch: computed {}, header {}",

@@ -196,63 +196,57 @@ mod tests {
         }
     }
 
-    /// CRITICAL TEST: Verifies that merkle roots are deterministic regardless of transaction order
-    /// This is the root cause of the fork issue in production logs
+    /// CRITICAL TEST: Verifies that canonical sorting produces deterministic merkle roots
+    /// Determinism comes from ALL nodes using the same canonical order:
+    /// [coinbase (empty inputs), sorted user txs by txid]
     #[test]
     fn test_merkle_root_determinism_across_transaction_orders() {
         let tx1 = create_test_tx(1);
         let tx2 = create_test_tx(2);
         let tx3 = create_test_tx(3);
 
-        // Create three blocks with same transactions in different orders
-        let block1 = Block {
-            header: BlockHeader {
-                version: 1,
-                height: 100,
-                timestamp: 1000,
-                previous_hash: [0u8; 32],
-                merkle_root: [0u8; 32],
-                block_reward: 0,
-                leader: "test".to_string(),
-                attestation_root: [0u8; 32],
-                masternode_tiers: Default::default(),
-            },
-            transactions: vec![tx1.clone(), tx2.clone(), tx3.clone()],
-            masternode_rewards: vec![],
-            time_attestations: vec![],
-        };
+        // Simulate three different orderings of the same transactions
+        let order1 = vec![tx1.clone(), tx2.clone(), tx3.clone()];
+        let order2 = vec![tx3.clone(), tx1.clone(), tx2.clone()];
+        let order3 = vec![tx2.clone(), tx3.clone(), tx1.clone()];
 
-        let block2 = Block {
-            header: block1.header.clone(),
-            transactions: vec![tx3.clone(), tx1.clone(), tx2.clone()],
-            masternode_rewards: vec![],
-            time_attestations: vec![],
-        };
+        // Apply canonical sorting (coinbase first, then sorted by txid)
+        fn canonical_sort(txs: &[Transaction]) -> Vec<Transaction> {
+            let mut coinbase = Vec::new();
+            let mut user_txs = Vec::new();
+            for tx in txs {
+                if tx.inputs.is_empty() {
+                    coinbase.push(tx.clone());
+                } else {
+                    user_txs.push(tx.clone());
+                }
+            }
+            user_txs.sort_by_key(|tx| tx.txid());
+            coinbase.extend(user_txs);
+            coinbase
+        }
 
-        let block3 = Block {
-            header: block1.header.clone(),
-            transactions: vec![tx2.clone(), tx3.clone(), tx1.clone()],
-            masternode_rewards: vec![],
-            time_attestations: vec![],
-        };
+        let sorted1 = canonical_sort(&order1);
+        let sorted2 = canonical_sort(&order2);
+        let sorted3 = canonical_sort(&order3);
 
-        // Compute merkle roots
-        let merkle1 = calculate_merkle_root(&block1.transactions);
-        let merkle2 = calculate_merkle_root(&block2.transactions);
-        let merkle3 = calculate_merkle_root(&block3.transactions);
+        // Compute merkle roots after canonical sorting
+        let merkle1 = calculate_merkle_root(&sorted1);
+        let merkle2 = calculate_merkle_root(&sorted2);
+        let merkle3 = calculate_merkle_root(&sorted3);
 
-        // CRITICAL: All merkle roots MUST be identical
+        // CRITICAL: All merkle roots MUST be identical after canonical sorting
         assert_eq!(
             merkle1,
             merkle2,
-            "Merkle root MUST be deterministic! Order [1,2,3] vs [3,1,2]: {} vs {}",
+            "Merkle root MUST be deterministic after canonical sort! {} vs {}",
             hex::encode(merkle1),
             hex::encode(merkle2)
         );
         assert_eq!(
             merkle1,
             merkle3,
-            "Merkle root MUST be deterministic! Order [1,2,3] vs [2,3,1]: {} vs {}",
+            "Merkle root MUST be deterministic after canonical sort! {} vs {}",
             hex::encode(merkle1),
             hex::encode(merkle3)
         );

@@ -982,10 +982,7 @@ impl PeerConnection {
                                 "🚫 [{:?}] Peer {} sent invalid block - disconnecting",
                                 self.direction, self.peer_ip
                             );
-                            return Err(format!(
-                                "Peer {} sent invalid block: {}",
-                                self.peer_ip, e
-                            ));
+                            return Err(format!("Peer {} sent invalid block: {}", self.peer_ip, e));
                         }
                     }
                 }
