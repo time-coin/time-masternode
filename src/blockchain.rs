@@ -1303,11 +1303,48 @@ impl Blockchain {
                 .unwrap_or(false)
             {
                 if let Ok(existing) = self.get_block(0) {
-                    if existing.hash() == block.hash() {
+                    let existing_hash = existing.hash();
+                    let incoming_hash = block.hash();
+
+                    if existing_hash == incoming_hash {
                         return Ok(false); // Already have correct genesis
                     }
+
+                    // Different genesis - log detailed comparison
+                    tracing::error!(
+                        "🚫 Genesis block mismatch detected!\n\
+                         Our genesis: {}\n\
+                         - timestamp: {}\n\
+                         - previous_hash: {}\n\
+                         - merkle_root: {}\n\
+                         - masternodes: {}\n\
+                         - transactions: {}\n\
+                         Peer genesis: {}\n\
+                         - timestamp: {}\n\
+                         - previous_hash: {}\n\
+                         - merkle_root: {}\n\
+                         - masternodes: {}\n\
+                         - transactions: {}",
+                        hex::encode(existing_hash),
+                        existing.header.timestamp,
+                        hex::encode(existing.header.previous_hash),
+                        hex::encode(existing.header.merkle_root),
+                        existing.header.masternode_tiers.total(),
+                        existing.transactions.len(),
+                        hex::encode(incoming_hash),
+                        block.header.timestamp,
+                        hex::encode(block.header.previous_hash),
+                        hex::encode(block.header.merkle_root),
+                        block.header.masternode_tiers.total(),
+                        block.transactions.len()
+                    );
+
                     // Different genesis - reject
-                    return Err("Received different genesis block than what we have".to_string());
+                    return Err(format!(
+                        "Genesis block mismatch: our {} vs peer {}",
+                        hex::encode(&existing_hash[..8]),
+                        hex::encode(&incoming_hash[..8])
+                    ));
                 }
             }
 

@@ -179,11 +179,23 @@ impl GenesisBlock {
     }
 
     /// Generate genesis block with active masternodes
+    /// CRITICAL: masternodes MUST be pre-sorted by address for determinism
     pub fn generate_with_masternodes(
         network: NetworkType,
         masternodes: Vec<GenesisMasternode>,
         leader: &str,
     ) -> Block {
+        // Validate input is sorted for determinism
+        #[cfg(debug_assertions)]
+        {
+            for i in 1..masternodes.len() {
+                assert!(
+                    masternodes[i - 1].address <= masternodes[i].address,
+                    "Masternodes must be sorted by address for deterministic genesis generation"
+                );
+            }
+        }
+
         // Load template to get timestamp and other settings
         let template =
             Self::load_template(network).unwrap_or_else(|_| Self::default_template(network));
@@ -248,6 +260,8 @@ impl GenesisBlock {
     }
 
     /// Calculate reward distribution based on masternode tiers
+    /// CRITICAL: Input must be pre-sorted by address for determinism
+    /// Returns rewards in the same sorted order
     pub fn calculate_rewards(
         total_reward: u64,
         masternodes: &[GenesisMasternode],
@@ -264,12 +278,13 @@ impl GenesisBlock {
         }
 
         // Distribute rewards proportionally
+        // Since input is pre-sorted, output will maintain sorted order
         let mut rewards = Vec::new();
         let mut distributed = 0u64;
 
         for (i, mn) in masternodes.iter().enumerate() {
             let share = if i == masternodes.len() - 1 {
-                // Last masternode gets remainder to avoid rounding errors
+                // Last masternode (alphabetically last) gets remainder to avoid rounding errors
                 total_reward - distributed
             } else {
                 (total_reward * mn.tier.reward_weight()) / total_weight
@@ -420,6 +435,64 @@ mod tests {
     }
 
     #[test]
+    fn test_genesis_deterministic_with_sorting() {
+        // Test that sorted input produces same result regardless of initial order
+        let mut masternodes1 = vec![
+            GenesisMasternode {
+                address: "TIME0aaa".to_string(),
+                tier: MasternodeTier::Free,
+            },
+            GenesisMasternode {
+                address: "TIME0bbb".to_string(),
+                tier: MasternodeTier::Bronze,
+            },
+            GenesisMasternode {
+                address: "TIME0ccc".to_string(),
+                tier: MasternodeTier::Silver,
+            },
+        ];
+
+        let mut masternodes2 = vec![
+            GenesisMasternode {
+                address: "TIME0ccc".to_string(),
+                tier: MasternodeTier::Silver,
+            },
+            GenesisMasternode {
+                address: "TIME0aaa".to_string(),
+                tier: MasternodeTier::Free,
+            },
+            GenesisMasternode {
+                address: "TIME0bbb".to_string(),
+                tier: MasternodeTier::Bronze,
+            },
+        ];
+
+        // Sort both
+        masternodes1.sort_by(|a, b| a.address.cmp(&b.address));
+        masternodes2.sort_by(|a, b| a.address.cmp(&b.address));
+
+        let genesis1 =
+            GenesisBlock::generate_with_masternodes(NetworkType::Testnet, masternodes1, "TIME0aaa");
+        let genesis2 =
+            GenesisBlock::generate_with_masternodes(NetworkType::Testnet, masternodes2, "TIME0aaa");
+
+        // Blocks should be identical
+        assert_eq!(genesis1.hash(), genesis2.hash(), "Block hashes must match");
+        assert_eq!(
+            genesis1.masternode_rewards, genesis2.masternode_rewards,
+            "Masternode rewards must be identical"
+        );
+
+        // Verify rewards are sorted by address
+        for i in 1..genesis1.masternode_rewards.len() {
+            assert!(
+                genesis1.masternode_rewards[i - 1].0 <= genesis1.masternode_rewards[i].0,
+                "Rewards must be sorted by address"
+            );
+        }
+    }
+
+    #[test]
     fn test_genesis_verification() {
         let masternodes = vec![
             GenesisMasternode {
@@ -446,7 +519,7 @@ mod tests {
     fn test_tier_reward_distribution() {
         // 1 Free (1x) + 1 Bronze (2x) = 3 total weight
         // Free gets 1/3, Bronze gets 2/3
-        let masternodes = vec![
+        let mut masternodes = vec![
             GenesisMasternode {
                 address: "TIME0free".to_string(),
                 tier: MasternodeTier::Free,
@@ -457,8 +530,14 @@ mod tests {
             },
         ];
 
-        let genesis =
-            GenesisBlock::generate_with_masternodes(NetworkType::Testnet, masternodes, "TIME0free");
+        // Sort for deterministic generation
+        masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+
+        let genesis = GenesisBlock::generate_with_masternodes(
+            NetworkType::Testnet,
+            masternodes,
+            "TIME0bronze",
+        );
 
         let free_reward = genesis
             .masternode_rewards

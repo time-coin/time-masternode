@@ -10,7 +10,7 @@ use crate::masternode_registry::MasternodeRegistry;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Direction of the network connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,8 +31,10 @@ impl std::fmt::Display for ConnectionDirection {
 /// Context containing all dependencies needed for message handling
 pub struct MessageContext {
     pub blockchain: Arc<Blockchain>,
+    #[allow(dead_code)]
     pub peer_registry: Arc<PeerConnectionRegistry>,
     pub masternode_registry: Arc<MasternodeRegistry>,
+    #[allow(dead_code)]
     pub consensus: Option<Arc<ConsensusEngine>>,
 }
 
@@ -96,7 +98,7 @@ impl MessageHandler {
     async fn handle_ping(
         &self,
         nonce: u64,
-        timestamp: i64,
+        _timestamp: i64,
     ) -> Result<Option<NetworkMessage>, String> {
         info!(
             "📨 [{}] Received ping from {} (nonce: {})",
