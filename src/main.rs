@@ -823,6 +823,10 @@ async fn main() {
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
 
+        // Give a moment for initial peer connections and masternode discovery
+        // before checking if we're behind (prevents false immediate catchup trigger)
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
         // Check if we're significantly behind - if so, start catchup immediately
         let current_height = block_blockchain.get_height().await;
         let expected_height = block_blockchain.calculate_expected_height();

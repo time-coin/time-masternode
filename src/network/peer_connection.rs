@@ -1096,6 +1096,44 @@ impl PeerConnection {
                     self.direction, self.peer_ip
                 );
             }
+            NetworkMessage::GetBlocks(start, end) => {
+                // Handle GetBlocks request on outbound connection
+                let our_height = blockchain.get_height().await;
+                info!(
+                    "📥 [{:?}] Received GetBlocks({}-{}) from {} (our height: {})",
+                    self.direction, start, end, self.peer_ip, our_height
+                );
+
+                let mut blocks = Vec::new();
+                // Send blocks we have: cap at our_height, requested end, and batch limit of 100
+                let effective_end = (*end).min(*start + 100).min(our_height);
+                if *start <= our_height {
+                    for h in *start..=effective_end {
+                        if let Ok(block) = blockchain.get_block_by_height(h).await {
+                            blocks.push(block);
+                        }
+                    }
+                }
+
+                info!(
+                    "📤 [{:?}] Sending {} blocks to {} (requested {}-{}, effective {}-{})",
+                    self.direction,
+                    blocks.len(),
+                    self.peer_ip,
+                    start,
+                    end,
+                    start,
+                    effective_end
+                );
+
+                let reply = NetworkMessage::BlocksResponse(blocks);
+                if let Err(e) = self.send_message(&reply).await {
+                    warn!(
+                        "⚠️ [{:?}] Failed to send BlocksResponse to {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+            }
             _ => {
                 debug!(
                     "📨 [{:?}] Received other message from {}",
