@@ -968,15 +968,15 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, *count
                         );
 
-                        // If peer consistently sends invalid blocks, they're on a fork
-                        if *count >= 5 {
+                        // If peer sends invalid blocks, they're on a fork - disconnect immediately
+                        if *count >= 1 {
                             error!(
-                                "🚫 [{:?}] Peer {} is on a fork (sent {} consecutive invalid blocks) - disconnecting",
-                                self.direction, self.peer_ip, *count
+                                "🚫 [{:?}] Peer {} is on a fork (sent invalid block) - disconnecting",
+                                self.direction, self.peer_ip
                             );
                             return Err(format!(
-                                "Peer {} sent {} consecutive invalid blocks - likely on a fork",
-                                self.peer_ip, *count
+                                "Peer {} sent invalid block - likely on a fork",
+                                self.peer_ip
                             ));
                         }
                     }
@@ -990,15 +990,15 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, e, *count
                         );
 
-                        // Check for fork after multiple consecutive errors
-                        if *count >= 5 {
+                        // Check for fork immediately on error
+                        if *count >= 1 {
                             error!(
-                                "🚫 [{:?}] Peer {} sent {} consecutive invalid blocks - disconnecting",
-                                self.direction, self.peer_ip, *count
+                                "🚫 [{:?}] Peer {} sent invalid block - disconnecting",
+                                self.direction, self.peer_ip
                             );
                             return Err(format!(
-                                "Peer {} sent {} consecutive invalid blocks: {}",
-                                self.peer_ip, *count, e
+                                "Peer {} sent invalid block: {}",
+                                self.peer_ip, e
                             ));
                         }
                     }
