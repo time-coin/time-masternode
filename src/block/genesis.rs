@@ -64,6 +64,10 @@ impl GenesisBlock {
     /// Minimum masternodes required to generate genesis
     pub const MIN_MASTERNODES_FOR_GENESIS: usize = 3;
 
+    /// Buffer time (seconds) after genesis timestamp to wait for peer discovery
+    /// This ensures all nodes have time to discover each other before creating genesis
+    pub const PEER_DISCOVERY_BUFFER: i64 = 300; // 5 minutes
+
     /// Load genesis template from JSON file
     pub fn load_template(network: NetworkType) -> Result<GenesisTemplate, String> {
         let filename = match network {
@@ -246,7 +250,7 @@ impl GenesisBlock {
     /// Get genesis timestamp for network
     pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
-            NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z
+            NetworkType::Testnet => 1735327500, // 2025-12-27T18:35:00Z
             NetworkType::Mainnet => 1767225600, // 2026-01-01T00:00:00Z
         }
     }

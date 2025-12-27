@@ -136,12 +136,58 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No genesis block exists - attempt to create if enough masternodes
+        // No genesis block exists - check if we should create it
+        let now = Utc::now().timestamp();
+        let genesis_time = self.genesis_timestamp();
+
+        // Only attempt genesis creation after the scheduled genesis timestamp
+        if now < genesis_time {
+            tracing::info!(
+                "📦 No genesis block - waiting until genesis time ({}s remaining)",
+                genesis_time - now
+            );
+            return Ok(());
+        }
+
+        // At or after genesis time - wait for peer discovery before creating genesis
+        // This ensures all nodes create the same genesis block with the same masternode set
+        let time_since_genesis = now - genesis_time;
+        const PEER_DISCOVERY_WAIT: i64 = 60; // Wait 60 seconds after genesis time for peer discovery
+
+        if time_since_genesis < PEER_DISCOVERY_WAIT {
+            tracing::info!(
+                "📦 Waiting for peer discovery before genesis creation ({}s remaining)",
+                PEER_DISCOVERY_WAIT - time_since_genesis
+            );
+            return Ok(());
+        }
+
+        // Check if we have enough connected peers
+        let connected_peers = if let Some(peer_registry) = self.peer_registry.read().await.as_ref()
+        {
+            peer_registry.get_connected_peers().await.len()
+        } else {
+            0
+        };
+
+        // Require at least 2 connected peers for genesis creation (to ensure network connectivity)
+        const MIN_PEERS_FOR_GENESIS: usize = 2;
+        if connected_peers < MIN_PEERS_FOR_GENESIS {
+            tracing::info!(
+                "📦 Waiting for more peers before genesis creation ({}/{} connected)",
+                connected_peers,
+                MIN_PEERS_FOR_GENESIS
+            );
+            return Ok(());
+        }
+
+        // Now attempt to create if enough masternodes
         let masternodes = self.masternode_registry.list_active().await;
         if masternodes.len() >= GenesisBlock::MIN_MASTERNODES_FOR_GENESIS {
             tracing::info!(
-                "📦 No genesis block found - creating with {} active masternodes",
-                masternodes.len()
+                "📦 Creating genesis block with {} masternodes from {} connected peers",
+                masternodes.len(),
+                connected_peers
             );
 
             match self.create_genesis_block().await {
@@ -577,7 +623,17 @@ impl Blockchain {
         let genesis_result = self.get_block_by_height(0).await;
 
         if genesis_result.is_err() {
-            // No genesis block - try to create one if we have enough masternodes
+            // No genesis block - check if we should create one
+            let now = Utc::now().timestamp();
+            let genesis_time = self.genesis_timestamp();
+
+            if now < genesis_time {
+                return Err(format!(
+                    "Cannot produce blocks yet - waiting for genesis time ({}s remaining)",
+                    genesis_time - now
+                ));
+            }
+
             tracing::info!("📦 No genesis block found - attempting to create one");
 
             let genesis_block = self.create_genesis_block().await?;

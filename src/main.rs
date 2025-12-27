@@ -689,39 +689,50 @@ async fn main() {
                 // Wait a bit for masternodes to sync their announcements
                 tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-                // Check masternode count
-                let active_masternodes = registry_for_genesis.list_active().await;
-                tracing::info!(
-                    "📦 {} active masternode(s) registered, minimum {} required for genesis",
-                    active_masternodes.len(),
-                    3
-                );
+                // Check if we've reached genesis time
+                let now = chrono::Utc::now().timestamp();
+                let genesis_time = blockchain_init.genesis_timestamp();
 
-                // Try to create genesis block if we have enough masternodes
-                match blockchain_init.create_genesis_block().await {
-                    Ok(genesis_block) => {
-                        tracing::info!(
-                            "📦 Generating deterministic genesis block with {} masternodes",
-                            active_masternodes.len()
-                        );
+                if now < genesis_time {
+                    tracing::info!(
+                        "📦 Waiting for genesis time ({}s remaining)",
+                        genesis_time - now
+                    );
+                } else {
+                    // Check masternode count
+                    let active_masternodes = registry_for_genesis.list_active().await;
+                    tracing::info!(
+                        "📦 {} active masternode(s) registered, minimum {} required for genesis",
+                        active_masternodes.len(),
+                        3
+                    );
 
-                        // Add the genesis block to our chain
-                        if let Err(e) = blockchain_init.add_block(genesis_block.clone()).await {
-                            tracing::error!("❌ Failed to add genesis block: {}", e);
-                        } else {
+                    // Try to create genesis block if we have enough masternodes
+                    match blockchain_init.create_genesis_block().await {
+                        Ok(genesis_block) => {
                             tracing::info!(
-                                "✅ Genesis block created at height 0, hash: {}",
-                                hex::encode(genesis_block.hash())
+                                "📦 Generating deterministic genesis block with {} masternodes",
+                                active_masternodes.len()
                             );
 
-                            // Broadcast genesis to peers
-                            peer_registry_for_sync
-                                .broadcast(NetworkMessage::BlockAnnouncement(genesis_block))
-                                .await;
+                            // Add the genesis block to our chain
+                            if let Err(e) = blockchain_init.add_block(genesis_block.clone()).await {
+                                tracing::error!("❌ Failed to add genesis block: {}", e);
+                            } else {
+                                tracing::info!(
+                                    "✅ Genesis block created at height 0, hash: {}",
+                                    hex::encode(genesis_block.hash())
+                                );
+
+                                // Broadcast genesis to peers
+                                peer_registry_for_sync
+                                    .broadcast(NetworkMessage::BlockAnnouncement(genesis_block))
+                                    .await;
+                            }
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("⚠️  Cannot create genesis yet: {} - will retry during block production", e);
+                        Err(e) => {
+                            tracing::warn!("⚠️  Cannot create genesis yet: {} - will retry during block production", e);
+                        }
                     }
                 }
             }
