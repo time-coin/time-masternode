@@ -876,6 +876,7 @@ async fn main() {
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let shutdown_token_clone = shutdown_token.clone();
     let tsdc_for_catchup = tsdc_consensus.clone();
+    let local_ip_for_catchup = local_ip.clone();
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
     let is_producing_block = Arc::new(AtomicBool::new(false));
@@ -986,10 +987,8 @@ async fn main() {
                             Ok(leader) => {
                                 tracing::info!("🗳️  Catchup leader selected: {} for slot {}", leader.id, catchup_slot);
                                 let leader_addr = leader.id.clone();
-                                let is_leader = masternode_address
-                                    .as_ref()
-                                    .map(|addr| addr == &leader_addr)
-                                    .unwrap_or(false);
+                                let my_ip = local_ip_for_catchup.as_deref().unwrap_or("");
+                                let is_leader = my_ip == leader_addr;
                                 (is_leader, leader_addr)
                             }
                             Err(e) => {
