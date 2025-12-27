@@ -17,11 +17,29 @@ use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
+
+// Phase 2 Enhancement: Track peers on different forks
+#[derive(Clone, Debug)]
+pub(crate) struct PeerForkStatus {
+    consecutive_invalid_blocks: u32,
+    last_invalid_at: Instant,
+    on_incompatible_fork: bool,
+}
+
+impl Default for PeerForkStatus {
+    fn default() -> Self {
+        Self {
+            consecutive_invalid_blocks: 0,
+            last_invalid_at: Instant::now(),
+            on_incompatible_fork: false,
+        }
+    }
+}
 
 #[allow(dead_code)]
 pub struct NetworkServer {
@@ -45,6 +63,7 @@ pub struct NetworkServer {
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
     pub block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Cache blocks during voting
     pub attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
+    pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -136,6 +155,7 @@ impl NetworkServer {
             local_ip,
             block_cache: Arc::new(DashMap::new()), // Phase 3E.1: Initialize block cache
             attestation_system,
+            peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
         })
     }
 
@@ -225,6 +245,7 @@ impl NetworkServer {
             let local_ip = self.local_ip.clone();
             let block_cache = self.block_cache.clone(); // Phase 3E.1: Clone block cache
             let attestation_sys = self.attestation_system.clone();
+            let fork_status = self.peer_fork_status.clone(); // Phase 2: Clone fork status tracker
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -248,6 +269,7 @@ impl NetworkServer {
                     local_ip,
                     block_cache, // Phase 3E.1: Pass block cache
                     attestation_sys,
+                    fork_status, // Phase 2: Pass fork status tracker
                 )
                 .await;
             });
@@ -305,6 +327,7 @@ async fn handle_peer(
     _local_ip: Option<String>,
     block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Block cache parameter
     attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
+    peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -1078,17 +1101,39 @@ async fn handle_peer(
                                             }
                                         }
                                         if added > 0 {
-                                            tracing::info!("✅ Synced {} blocks from {} (skipped {})", added, peer.addr, skipped);
+                                            tracing::info!("✅ [Outbound] Synced {} blocks from {} (skipped {})", added, peer.addr, skipped);
+
+                                            // Phase 2: Reset fork counter on successful sync
+                                            if let Some(mut status) = peer_fork_status.get_mut(&peer.addr) {
+                                                status.consecutive_invalid_blocks = 0;
+                                                status.on_incompatible_fork = false;
+                                            }
                                         } else if skipped > 0 && fork_detected {
                                             // All blocks skipped and we're behind - likely on wrong fork
                                             let our_height = blockchain.get_height().await;
+
+                                            // Phase 2: Track consecutive invalid blocks from this peer
+                                            let mut status = peer_fork_status.entry(peer.addr.clone())
+                                                .or_insert_with(PeerForkStatus::default);
+                                            status.consecutive_invalid_blocks += 1;
+                                            status.last_invalid_at = Instant::now();
+
+                                            // If peer has sent 3+ batches of invalid blocks, mark as incompatible fork
+                                            if status.consecutive_invalid_blocks >= 3 && !status.on_incompatible_fork {
+                                                status.on_incompatible_fork = true;
+                                                tracing::warn!(
+                                                    "🚫 Peer {} marked as on incompatible fork after {} failed sync attempts",
+                                                    peer.addr, status.consecutive_invalid_blocks
+                                                );
+                                            }
+
                                             tracing::warn!(
-                                                "⚠️ All {} blocks skipped from {} - potential fork at height {}",
-                                                skipped, peer.addr, our_height
+                                                "⚠️  [Outbound] All {} blocks skipped from {} - potential fork at height {} (failed attempts: {})",
+                                                skipped, peer.addr, our_height, status.consecutive_invalid_blocks
                                             );
 
-                                            // Request chain from earlier to find common ancestor
-                                            if our_height > 0 {
+                                            // Only request reorg if not yet marked as incompatible fork
+                                            if !status.on_incompatible_fork && our_height > 0 {
                                                 let reorg_start = our_height.saturating_sub(10);
                                                 tracing::info!("🔄 Requesting chain from height {} to resolve fork", reorg_start);
 
@@ -1097,6 +1142,8 @@ async fn handle_peer(
                                                 if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
                                                     tracing::warn!("Failed to request reorg blocks: {}", e);
                                                 }
+                                            } else if status.on_incompatible_fork {
+                                                tracing::debug!("⏭️  Skipping reorg request from incompatible fork peer {}", peer.addr);
                                             }
                                         }
                                     }
