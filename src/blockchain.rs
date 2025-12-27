@@ -346,7 +346,7 @@ impl Blockchain {
         }
     }
 
-    async fn create_genesis_block(&self) -> Result<Block, String> {
+    pub async fn create_genesis_block(&self) -> Result<Block, String> {
         use crate::block::genesis::{GenesisBlock, GenesisMasternode};
 
         let masternodes_info = self.masternode_registry.list_active().await;

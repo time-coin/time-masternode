@@ -682,12 +682,47 @@ async fn main() {
             if let Err(e) = blockchain_init.sync_from_peers().await {
                 tracing::warn!("⚠️  Initial sync from peers: {}", e);
             }
+
+            // Check again after sync attempt
+            let still_no_genesis = blockchain_init.get_height().await == 0
+                && blockchain_init.get_block_by_height(0).await.is_err();
+
+            if still_no_genesis {
+                tracing::info!("📦 Peers don't have genesis - attempting to create locally");
+
+                // Try to create genesis block if we have enough masternodes
+                match blockchain_init.create_genesis_block().await {
+                    Ok(genesis_block) => {
+                        tracing::info!("📦 Generating genesis block with active masternodes");
+
+                        // Add the genesis block to our chain
+                        if let Err(e) = blockchain_init.add_block(genesis_block.clone()).await {
+                            tracing::error!("❌ Failed to add genesis block: {}", e);
+                        } else {
+                            tracing::info!(
+                                "✅ Genesis block created at height 0, hash: {}",
+                                hex::encode(genesis_block.hash())
+                            );
+
+                            // Broadcast genesis to peers
+                            peer_registry_for_sync
+                                .broadcast(NetworkMessage::BlockAnnouncement(genesis_block))
+                                .await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️  Cannot create genesis yet: {} - will retry during block production", e);
+                    }
+                }
+            }
         }
 
         // Now verify genesis is correct (if we have one)
         if let Err(e) = blockchain_init.initialize_genesis().await {
-            tracing::error!("❌ Genesis verification failed: {}", e);
-            return;
+            tracing::warn!(
+                "⚠️  Genesis verification: {} - will create during block production",
+                e
+            );
         }
 
         // Verify chain integrity and download any missing blocks
