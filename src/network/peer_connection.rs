@@ -864,8 +864,8 @@ impl PeerConnection {
 
                 if *block_height > our_height {
                     // We're behind, request the block
-                    debug!(
-                        "📦 [{:?}] Received inventory for block {} from {} (our height: {}), requesting",
+                    info!(
+                        "📥 [{:?}] Requesting block {} from {} (we're at {})",
                         self.direction, block_height, self.peer_ip, our_height
                     );
                     let request = NetworkMessage::BlockRequest(*block_height);
@@ -876,11 +876,8 @@ impl PeerConnection {
                         );
                     }
                 } else {
-                    // We already have this block or are ahead, ignore
-                    debug!(
-                        "⏭️ [{:?}] Ignoring inventory for block {} from {} (we're at {})",
-                        self.direction, block_height, self.peer_ip, our_height
-                    );
+                    // We already have this block or are ahead, ignore silently
+                    // This is normal and expected - reduces log spam
                 }
             }
             NetworkMessage::BlockRequest(block_height) => {
