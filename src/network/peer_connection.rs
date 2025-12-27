@@ -112,6 +112,9 @@ pub struct PeerConnection {
     /// Ping/pong state
     ping_state: Arc<RwLock<PingState>>,
 
+    /// Invalid/skipped block counter (for fork detection)
+    invalid_block_count: Arc<RwLock<u32>>,
+
     /// Local listening port (for logging)
     #[allow(dead_code)]
     local_port: u16,
@@ -152,6 +155,7 @@ impl PeerConnection {
             reader: BufReader::new(read_half),
             writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
             ping_state: Arc::new(RwLock::new(PingState::new())),
+            invalid_block_count: Arc::new(RwLock::new(0)),
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
         })
@@ -180,6 +184,7 @@ impl PeerConnection {
             reader: BufReader::new(read_half),
             writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
             ping_state: Arc::new(RwLock::new(PingState::new())),
+            invalid_block_count: Arc::new(RwLock::new(0)),
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
         })
@@ -950,18 +955,52 @@ impl PeerConnection {
                             "✅ [{:?}] Added announced block {} from {}",
                             self.direction, block_height, self.peer_ip
                         );
+                        // Reset invalid counter on successful block
+                        *self.invalid_block_count.write().await = 0;
                     }
                     Ok(false) => {
+                        // Block was skipped - increment invalid counter
+                        let mut count = self.invalid_block_count.write().await;
+                        *count += 1;
+
                         warn!(
-                            "⏭️ [{:?}] Skipped announced block {} from {} (already have or invalid)",
-                            self.direction, block_height, self.peer_ip
+                            "⏭️ [{:?}] Skipped announced block {} from {} (invalid count: {})",
+                            self.direction, block_height, self.peer_ip, *count
                         );
+
+                        // If peer consistently sends invalid blocks, they're on a fork
+                        if *count >= 5 {
+                            error!(
+                                "🚫 [{:?}] Peer {} is on a fork (sent {} consecutive invalid blocks) - disconnecting",
+                                self.direction, self.peer_ip, *count
+                            );
+                            return Err(format!(
+                                "Peer {} sent {} consecutive invalid blocks - likely on a fork",
+                                self.peer_ip, *count
+                            ));
+                        }
                     }
                     Err(e) => {
+                        // Block validation error - also increment counter
+                        let mut count = self.invalid_block_count.write().await;
+                        *count += 1;
+
                         warn!(
-                            "⏭️ [{:?}] Skipped announced block {} from {}: {}",
-                            self.direction, block_height, self.peer_ip, e
+                            "⏭️ [{:?}] Skipped announced block {} from {} (error: {}, invalid count: {})",
+                            self.direction, block_height, self.peer_ip, e, *count
                         );
+
+                        // Check for fork after multiple consecutive errors
+                        if *count >= 5 {
+                            error!(
+                                "🚫 [{:?}] Peer {} sent {} consecutive invalid blocks - disconnecting",
+                                self.direction, self.peer_ip, *count
+                            );
+                            return Err(format!(
+                                "Peer {} sent {} consecutive invalid blocks: {}",
+                                self.peer_ip, *count, e
+                            ));
+                        }
                     }
                 }
             }
