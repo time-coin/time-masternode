@@ -869,6 +869,7 @@ async fn main() {
     let block_blockchain = blockchain.clone();
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let shutdown_token_clone = shutdown_token.clone();
+    let tsdc_for_catchup = tsdc_consensus.clone();
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
     let is_producing_block = Arc::new(AtomicBool::new(false));
@@ -973,41 +974,23 @@ async fn main() {
                         }
 
                         // Sync failed - all peers may also be behind
-                        // Elect a leader to produce catchup blocks
-                        // Leader selection: deterministic based on current height + masternode list
-                        // CRITICAL: Sort masternodes by IP to ensure all nodes pick the same leader
-                        let mut sorted_masternodes = masternodes.clone();
-                        sort_masternodes_canonical(&mut sorted_masternodes);
-
-                        use sha2::{Digest, Sha256};
-                        let mut hasher = Sha256::new();
-                        hasher.update(b"catchup_leader");
-                        hasher.update(current_height.to_le_bytes());
-                        // Also include sorted masternode addresses in the hash for consistency
-                        for mn in &sorted_masternodes {
-                            hasher.update(mn.address.as_bytes());
-                        }
-                        let leader_hash: [u8; 32] = hasher.finalize().into();
-
-                        let leader_index = {
-                            let mut val = 0u64;
-                            for (i, &byte) in leader_hash.iter().take(8).enumerate() {
-                                val |= (byte as u64) << (i * 8);
+                        // Use TSDC leader selection for catchup blocks (use current_height as slot)
+                        let catchup_slot = current_height;
+                        let (is_leader, leader_address) = match tsdc_for_catchup.select_leader(catchup_slot).await {
+                            Ok(leader) => {
+                                tracing::info!("🗳️  Catchup leader selected: {} for slot {}", leader.id, catchup_slot);
+                                let leader_addr = leader.id.clone();
+                                let is_leader = masternode_address
+                                    .as_ref()
+                                    .map(|addr| addr == &leader_addr)
+                                    .unwrap_or(false);
+                                (is_leader, leader_addr)
                             }
-                            (val % sorted_masternodes.len() as u64) as usize
+                            Err(e) => {
+                                tracing::warn!("⚠️  Failed to select catchup leader: {}", e);
+                                (false, String::from("unknown"))
+                            }
                         };
-
-                        let selected_leader = &sorted_masternodes[leader_index];
-                        tracing::info!(
-                            "🗳️  Leader election: sorted {} masternodes, selected index {} = {}",
-                            sorted_masternodes.len(),
-                            leader_index,
-                            selected_leader.address
-                        );
-                        let is_leader = masternode_address
-                            .as_ref()
-                            .map(|addr| addr == &selected_leader.address)
-                            .unwrap_or(false);
 
                         if is_leader {
                             // Acquire block production lock (P2P best practice #8)
@@ -1099,7 +1082,7 @@ async fn main() {
                         } else {
                             tracing::info!(
                                 "⏳ Waiting for catchup leader {} to produce blocks (30s timeout)",
-                                selected_leader.address
+                                leader_address
                             );
 
                             // Wait for leader to produce blocks
