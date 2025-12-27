@@ -1127,28 +1127,26 @@ impl PeerConnection {
             NetworkMessage::TSCDBlockProposal { .. }
             | NetworkMessage::TSCDPrepareVote { .. }
             | NetworkMessage::TSCDPrecommitVote { .. } => {
-                // Use unified message handler for TSDC messages
-                // Note: Outbound connections don't have consensus/block_cache/broadcast access yet
-                // This is logged for visibility - proper support requires architecture changes
+                // Use unified message handler for TSDC messages with shared resources
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+
+                // Get TSDC resources from peer registry
+                let (consensus, block_cache, broadcast_tx) =
+                    _peer_registry.get_tsdc_resources().await;
+
                 let context = MessageContext {
                     blockchain: Arc::clone(blockchain),
                     peer_registry: Arc::clone(_peer_registry),
                     masternode_registry: Arc::clone(masternode_registry),
-                    consensus: None, // TODO: Pass from network client
-                    block_cache: None, // TODO: Share from server
-                    broadcast_tx: None, // TODO: Share from server
+                    consensus,
+                    block_cache,
+                    broadcast_tx,
                 };
 
                 if let Err(e) = handler.handle_message(&message, &context).await {
                     warn!(
                         "⚠️ [{:?}] Error handling TSDC message from {}: {}",
                         self.direction, self.peer_ip, e
-                    );
-                } else {
-                    warn!(
-                        "⚠️ [{:?}] Received TSDC message from {} but consensus handling not fully available in outbound connection",
-                        self.direction, self.peer_ip
                     );
                 }
             }

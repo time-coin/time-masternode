@@ -1528,6 +1528,15 @@ async fn main() {
                 .set_broadcast_channel(server.tx_notifier.clone())
                 .await;
 
+            // Share TSDC resources with peer connection registry for outbound connections
+            peer_connection_registry
+                .set_tsdc_resources(
+                    consensus_engine.clone(),
+                    server.block_cache.clone(),
+                    server.tx_notifier.clone(),
+                )
+                .await;
+
             println!("  ✅ Network server listening on {}", p2p_addr);
 
             // Now create network client for outbound connections

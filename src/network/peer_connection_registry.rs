@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+use crate::block::types::Block;
+use crate::consensus::ConsensusEngine;
 use crate::network::message::NetworkMessage;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
@@ -14,8 +16,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::sync::oneshot;
 use tokio::sync::RwLock;
+use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, warn};
 
 type PeerWriter = BufWriter<OwnedWriteHalf>;
@@ -58,6 +60,10 @@ pub struct PeerConnectionRegistry {
     peer_writers: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<PeerWriter>>>>>,
     // Pending responses for request/response pattern
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
+    // TSDC consensus resources (shared from server)
+    tsdc_consensus: Arc<RwLock<Option<Arc<ConsensusEngine>>>>,
+    tsdc_block_cache: Arc<RwLock<Option<Arc<DashMap<[u8; 32], Block>>>>>,
+    tsdc_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -77,7 +83,41 @@ impl PeerConnectionRegistry {
             outbound_count: AtomicUsize::new(0),
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
             pending_responses: Arc::new(RwLock::new(HashMap::new())),
+            tsdc_consensus: Arc::new(RwLock::new(None)),
+            tsdc_block_cache: Arc::new(RwLock::new(None)),
+            tsdc_broadcast: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set TSDC consensus resources (called once after server initialization)
+    pub async fn set_tsdc_resources(
+        &self,
+        consensus: Arc<ConsensusEngine>,
+        block_cache: Arc<DashMap<[u8; 32], Block>>,
+        broadcast_tx: broadcast::Sender<NetworkMessage>,
+    ) {
+        *self.tsdc_consensus.write().await = Some(consensus);
+        *self.tsdc_block_cache.write().await = Some(block_cache);
+        *self.tsdc_broadcast.write().await = Some(broadcast_tx);
+    }
+
+    /// Get TSDC consensus resources for message handling
+    pub async fn get_tsdc_resources(
+        &self,
+    ) -> (
+        Option<Arc<ConsensusEngine>>,
+        Option<Arc<DashMap<[u8; 32], Block>>>,
+        Option<broadcast::Sender<NetworkMessage>>,
+    ) {
+        (
+            self.tsdc_consensus.read().await.clone(),
+            self.tsdc_block_cache.read().await.clone(),
+            self.tsdc_broadcast
+                .read()
+                .await
+                .as_ref()
+                .map(|tx| tx.clone()),
+        )
     }
 
     // ===== Connection Direction Logic =====
