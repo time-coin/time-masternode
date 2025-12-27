@@ -15,15 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::network::message::NetworkMessage;
-
-/// Direction of connection establishment
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum ConnectionDirection {
-    /// They connected to us
-    Inbound,
-    /// We connected to them
-    Outbound,
-}
+use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 
 /// State for tracking ping/pong health
 #[derive(Debug)]
@@ -1091,47 +1083,41 @@ impl PeerConnection {
                 }
             }
             NetworkMessage::GetMasternodes => {
-                debug!(
-                    "📥 [{:?}] Received GetMasternodes request from {}",
-                    self.direction, self.peer_ip
-                );
-            }
-            NetworkMessage::GetBlocks(start, end) => {
-                // Handle GetBlocks request on outbound connection
-                let our_height = blockchain.get_height().await;
-                info!(
-                    "📥 [{:?}] Received GetBlocks({}-{}) from {} (our height: {})",
-                    self.direction, start, end, self.peer_ip, our_height
-                );
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext {
+                    blockchain: Arc::clone(blockchain),
+                    peer_registry: Arc::clone(_peer_registry),
+                    masternode_registry: Arc::clone(masternode_registry),
+                    consensus: None, // Not needed for GetMasternodes
+                };
 
-                let mut blocks = Vec::new();
-                // Send blocks we have: cap at our_height, requested end, and batch limit of 100
-                let effective_end = (*end).min(*start + 100).min(our_height);
-                if *start <= our_height {
-                    for h in *start..=effective_end {
-                        if let Ok(block) = blockchain.get_block_by_height(h).await {
-                            blocks.push(block);
-                        }
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send response to {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
                     }
                 }
+            }
+            NetworkMessage::GetBlocks(_start, _end) => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext {
+                    blockchain: Arc::clone(blockchain),
+                    peer_registry: Arc::clone(_peer_registry),
+                    masternode_registry: Arc::clone(masternode_registry),
+                    consensus: None, // Not needed for GetBlocks
+                };
 
-                info!(
-                    "📤 [{:?}] Sending {} blocks to {} (requested {}-{}, effective {}-{})",
-                    self.direction,
-                    blocks.len(),
-                    self.peer_ip,
-                    start,
-                    end,
-                    start,
-                    effective_end
-                );
-
-                let reply = NetworkMessage::BlocksResponse(blocks);
-                if let Err(e) = self.send_message(&reply).await {
-                    warn!(
-                        "⚠️ [{:?}] Failed to send BlocksResponse to {}: {}",
-                        self.direction, self.peer_ip, e
-                    );
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send response to {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
                 }
             }
             _ => {

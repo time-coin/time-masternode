@@ -33,7 +33,7 @@ pub struct MessageContext {
     pub blockchain: Arc<Blockchain>,
     pub peer_registry: Arc<PeerConnectionRegistry>,
     pub masternode_registry: Arc<MasternodeRegistry>,
-    pub consensus: Arc<ConsensusEngine>,
+    pub consensus: Option<Arc<ConsensusEngine>>,
 }
 
 /// Unified message handler for all network messages
