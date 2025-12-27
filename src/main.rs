@@ -822,14 +822,31 @@ async fn main() {
 
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
-        // Calculate time until next 10-minute boundary
-        let now = chrono::Utc::now();
-        let minute = now.minute();
-        let seconds_into_period = (minute % 10) * 60 + now.second();
-        let seconds_until_next = 600 - seconds_into_period;
 
-        // Wait until the next 10-minute boundary
-        tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until_next as u64)).await;
+        // Check if we're significantly behind - if so, start catchup immediately
+        let current_height = block_blockchain.get_height().await;
+        let expected_height = block_blockchain.calculate_expected_height();
+        let blocks_behind = expected_height.saturating_sub(current_height);
+
+        let initial_wait = if blocks_behind > 10 {
+            // More than 10 blocks behind - start catchup immediately
+            tracing::info!(
+                "⚡ {} blocks behind - starting immediate catchup (bypassing 10-min boundary wait)",
+                blocks_behind
+            );
+            0
+        } else {
+            // Calculate time until next 10-minute boundary for normal operation
+            let now = chrono::Utc::now();
+            let minute = now.minute();
+            let seconds_into_period = (minute % 10) * 60 + now.second();
+            600 - seconds_into_period
+        };
+
+        // Wait until the next 10-minute boundary (or start immediately if behind)
+        if initial_wait > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(initial_wait as u64)).await;
+        }
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
