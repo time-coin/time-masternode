@@ -97,17 +97,22 @@ impl Block {
             return [0u8; 32]; // Empty merkle root for no transactions
         }
 
-        // Hash each transaction using canonical JSON serialization
-        // This ensures consistent hashing regardless of bincode vs JSON transmission
-        let mut hashes: Vec<Hash256> = self
+        // Hash each transaction using txid() for consistency with block generation
+        // Sort by txid to ensure deterministic ordering across all nodes
+        let mut hashes: Vec<(Hash256, Hash256)> = self
             .transactions
             .iter()
             .map(|tx| {
-                // Use serde_json with sorted keys for canonical representation
-                let json = serde_json::to_string(tx).unwrap_or_default();
-                Sha256::digest(json.as_bytes()).into()
+                let txid = tx.txid();
+                (txid, txid) // (sort_key, hash)
             })
             .collect();
+
+        // Sort by txid to ensure deterministic merkle root
+        hashes.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Extract just the hashes for merkle tree construction
+        let mut hashes: Vec<Hash256> = hashes.into_iter().map(|(_, hash)| hash).collect();
 
         // Build merkle tree
         while hashes.len() > 1 {
