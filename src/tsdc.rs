@@ -692,7 +692,7 @@ impl TSCDConsensus {
         // Formula: 100 * (1 + ln(height)) - from Protocol §10
         let height = block.header.height;
         let block_subsidy = if height == 0 {
-            100_000_000 // Genesis block: 1 TIME = 100M smallest units
+            10_000_000_000 // Genesis block: 100 TIME = 10B smallest units
         } else {
             let ln_height = (height as f64).ln();
             (100_000_000.0 * (1.0 + ln_height)) as u64

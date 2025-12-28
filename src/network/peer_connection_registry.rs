@@ -62,6 +62,7 @@ pub struct PeerConnectionRegistry {
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
     // TSDC consensus resources (shared from server)
     tsdc_consensus: Arc<RwLock<Option<Arc<ConsensusEngine>>>>,
+    #[allow(clippy::type_complexity)]
     tsdc_block_cache: Arc<RwLock<Option<Arc<DashMap<[u8; 32], Block>>>>>,
     tsdc_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
 }

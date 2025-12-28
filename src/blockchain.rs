@@ -683,17 +683,35 @@ impl Blockchain {
         // Use deterministic timestamp (already aligned to 10-minute intervals)
         let aligned_timestamp = deterministic_timestamp;
 
-        // Get active masternodes
-        let masternodes = self.masternode_registry.list_active().await;
-        if masternodes.is_empty() {
-            return Err("No active masternodes for block production".to_string());
-        }
+        // During catchup (more than 10 blocks behind), use ALL registered masternodes
+        // This ensures all masternodes get rewards even if they haven't sent heartbeats yet
+        // For normal block production, only use active (heartbeat-sending) masternodes
+        let blocks_behind = self
+            .calculate_expected_height()
+            .saturating_sub(current_height);
+        let masternodes = if blocks_behind > 10 {
+            // Catchup mode - use all registered masternodes
+            let all_mns = self.masternode_registry.list_all().await;
+            tracing::debug!(
+                "📊 Block {} (CATCHUP): using {} total registered masternodes for reward distribution",
+                next_height,
+                all_mns.len()
+            );
+            all_mns
+        } else {
+            // Normal mode - use only active masternodes
+            let active_mns = self.masternode_registry.list_active().await;
+            tracing::debug!(
+                "📊 Block {}: {} active masternodes for reward distribution",
+                next_height,
+                active_mns.len()
+            );
+            active_mns
+        };
 
-        tracing::debug!(
-            "📊 Block {}: {} active masternodes for reward distribution",
-            next_height,
-            masternodes.len()
-        );
+        if masternodes.is_empty() {
+            return Err("No masternodes available for block production".to_string());
+        }
 
         // Get finalized transactions from consensus layer
         let finalized_txs = self.consensus.get_finalized_transactions_for_block();

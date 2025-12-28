@@ -504,6 +504,7 @@ async fn main() {
         let consensus_tsdc = consensus_engine.clone();
         let peer_registry_tsdc = peer_connection_registry.clone();
         let masternode_registry_tsdc = registry.clone();
+        let blockchain_tsdc = blockchain.clone();
         let shutdown_token_tsdc = shutdown_token.clone();
         let mn_address_tsdc = mn.address.clone();
         let mn_tier = mn.tier.clone();
@@ -561,6 +562,14 @@ async fn main() {
                         // Skip if we already proposed for this slot
                         if last_proposed_slot == Some(current_slot) {
                             tracing::trace!("Already proposed for slot {}, skipping", current_slot);
+                            continue;
+                        }
+
+                        // Don't produce regular blocks if genesis doesn't exist
+                        let genesis_exists = blockchain_tsdc.get_height().await > 0;
+
+                        if !genesis_exists {
+                            tracing::trace!("Waiting for genesis block before producing regular blocks");
                             continue;
                         }
 
