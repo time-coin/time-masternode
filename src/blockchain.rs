@@ -402,8 +402,26 @@ impl Blockchain {
     }
 
     pub async fn create_genesis_block(&self) -> Result<Block, String> {
-        use crate::block::genesis::{GenesisBlock, GenesisMasternode};
+        use crate::block::genesis::GenesisBlock;
 
+        // First, try to load the canonical genesis block from disk
+        match GenesisBlock::load_from_file(self.network_type) {
+            Ok(genesis_block) => {
+                tracing::info!("✅ Using canonical genesis block from file");
+                tracing::info!("   Hash: {}", hex::encode(&genesis_block.hash()[..8]));
+                tracing::info!("   Masternodes: {}", genesis_block.masternode_rewards.len());
+                return Ok(genesis_block);
+            }
+            Err(e) => {
+                tracing::warn!("⚠️  Could not load genesis from file: {}", e);
+                tracing::warn!(
+                    "⚠️  Falling back to dynamic generation (NOT RECOMMENDED for production)"
+                );
+            }
+        }
+
+        // Fallback: Generate dynamically (only if file not found)
+        use crate::block::genesis::GenesisMasternode;
         let masternodes_info = self.masternode_registry.list_active().await;
 
         // Convert to GenesisMasternode format

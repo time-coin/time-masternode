@@ -68,6 +68,46 @@ impl GenesisBlock {
     /// This ensures all nodes have time to discover each other before creating genesis
     pub const PEER_DISCOVERY_BUFFER: i64 = 300; // 5 minutes
 
+    /// Load canonical genesis block from JSON file
+    /// This ensures all nodes use the exact same genesis block
+    pub fn load_from_file(network: NetworkType) -> Result<Block, String> {
+        let filename = match network {
+            NetworkType::Testnet => "genesis.testnet.json",
+            NetworkType::Mainnet => "genesis.mainnet.json",
+        };
+
+        // Try current directory first, then common locations
+        let paths = [
+            filename.to_string(),
+            format!("./{}", filename),
+            format!("/etc/timecoin/{}", filename),
+            format!("~/.timecoin/{}", filename),
+        ];
+
+        for path in &paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                match serde_json::from_str::<Block>(&content) {
+                    Ok(block) => {
+                        tracing::info!("✓ Loaded genesis block from {}", path);
+                        tracing::info!("  Hash: {}", hex::encode(block.hash()));
+                        tracing::info!("  Timestamp: {}", block.header.timestamp);
+                        tracing::info!("  Masternodes: {}", block.masternode_rewards.len());
+                        return Ok(block);
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️  Failed to parse {}: {}", path, e);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        Err(format!(
+            "Genesis file {} not found in any standard location",
+            filename
+        ))
+    }
+
     /// Load genesis template from JSON file
     pub fn load_template(network: NetworkType) -> Result<GenesisTemplate, String> {
         let filename = match network {
