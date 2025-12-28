@@ -12,6 +12,9 @@ pub enum NetworkMessage {
     BlockHeightResponse(u64),
     GetBlocks(u64, u64), // (start_height, end_height)
     BlocksResponse(Vec<Block>),
+    // Genesis coordination
+    RequestGenesis,             // Non-leader requests genesis from network
+    GenesisAnnouncement(Block), // Leader announces genesis creation
     // First message must be handshake with magic bytes
     Handshake {
         magic: [u8; 4],
@@ -188,6 +191,8 @@ impl NetworkMessage {
             NetworkMessage::BlockHeightResponse(_) => "BlockHeightResponse",
             NetworkMessage::GetBlocks(_, _) => "GetBlocks",
             NetworkMessage::BlocksResponse(_) => "BlocksResponse",
+            NetworkMessage::RequestGenesis => "RequestGenesis",
+            NetworkMessage::GenesisAnnouncement(_) => "GenesisAnnouncement",
             NetworkMessage::Handshake { .. } => "Handshake",
             NetworkMessage::Ack { .. } => "Ack",
             NetworkMessage::TransactionBroadcast(_) => "TransactionBroadcast",

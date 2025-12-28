@@ -979,6 +979,92 @@ impl PeerConnection {
                     }
                 }
             }
+            NetworkMessage::GenesisAnnouncement(block) => {
+                // Special handling for genesis block announcements
+                if block.header.height != 0 {
+                    warn!(
+                        "⚠️ [{:?}] Received GenesisAnnouncement for non-genesis block {} from {}",
+                        self.direction, block.header.height, self.peer_ip
+                    );
+                    return Ok(());
+                }
+
+                // Check if we already have genesis
+                let current_height = blockchain.get_height().await;
+                if current_height > 0 {
+                    debug!(
+                        "⏭️ [{:?}] Ignoring genesis announcement from {} (already have genesis)",
+                        self.direction, self.peer_ip
+                    );
+                    return Ok(());
+                }
+
+                info!(
+                    "📦 [{:?}] Received genesis announcement from {}",
+                    self.direction, self.peer_ip
+                );
+
+                // Validate genesis matches our expected genesis
+                match blockchain.validate_genesis_matches(block).await {
+                    Ok(()) => {
+                        info!("✅ Genesis validation passed, adding to chain");
+
+                        match blockchain.add_block(block.clone()).await {
+                            Ok(()) => {
+                                info!(
+                                    "✅ [{:?}] Genesis block added successfully from {}, hash: {}",
+                                    self.direction,
+                                    self.peer_ip,
+                                    hex::encode(&block.hash()[..8])
+                                );
+                                // Reset invalid counter
+                                *self.invalid_block_count.write().await = 0;
+                            }
+                            Err(e) => {
+                                error!(
+                                    "❌ [{:?}] Failed to add genesis block from {}: {}",
+                                    self.direction, self.peer_ip, e
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "⚠️ [{:?}] Genesis validation failed from {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
+                }
+            }
+            NetworkMessage::RequestGenesis => {
+                info!(
+                    "📥 [{:?}] Received genesis request from {}",
+                    self.direction, self.peer_ip
+                );
+
+                // If we have genesis, send it to the requester
+                match blockchain.get_block_by_height(0).await {
+                    Ok(genesis) => {
+                        info!(
+                            "📤 [{:?}] Sending genesis block to {}",
+                            self.direction, self.peer_ip
+                        );
+                        let msg = NetworkMessage::GenesisAnnouncement(genesis);
+                        if let Err(e) = self.send_message(&msg).await {
+                            warn!(
+                                "⚠️ [{:?}] Failed to send genesis to {}: {}",
+                                self.direction, self.peer_ip, e
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        debug!(
+                            "⚠️ [{:?}] Cannot fulfill genesis request from {} - we don't have genesis yet",
+                            self.direction, self.peer_ip
+                        );
+                    }
+                }
+            }
             NetworkMessage::BlockHeightResponse(peer_height) => {
                 // Handle peer's height response for fork detection
                 let our_height = blockchain.get_height().await;

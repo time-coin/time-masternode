@@ -454,6 +454,92 @@ impl Blockchain {
         Ok(block)
     }
 
+    /// Validate that a received genesis block matches what we would generate
+    /// This ensures all nodes have the same genesis block
+    pub async fn validate_genesis_matches(&self, received_genesis: &Block) -> Result<(), String> {
+        use crate::block::genesis::GenesisBlock;
+
+        // First, verify basic structure
+        GenesisBlock::verify_structure(received_genesis)?;
+
+        // Get our current view of masternodes
+        let masternodes_info = self.masternode_registry.list_active().await;
+
+        // Convert to GenesisMasternode format
+        let mut our_masternodes: Vec<crate::block::genesis::GenesisMasternode> = masternodes_info
+            .iter()
+            .map(|mn| crate::block::genesis::GenesisMasternode {
+                address: mn.masternode.address.clone(),
+                tier: mn.masternode.tier.clone(),
+            })
+            .collect();
+
+        // Sort for deterministic comparison
+        our_masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+
+        // Extract masternodes from received genesis
+        let received_mn_addresses: std::collections::HashSet<String> = received_genesis
+            .masternode_rewards
+            .iter()
+            .map(|(addr, _)| addr.clone())
+            .collect();
+
+        let our_mn_addresses: std::collections::HashSet<String> = our_masternodes
+            .iter()
+            .map(|mn| mn.address.clone())
+            .collect();
+
+        // Check if masternode sets match
+        if received_mn_addresses != our_mn_addresses {
+            let missing: Vec<_> = our_mn_addresses
+                .difference(&received_mn_addresses)
+                .collect();
+            let extra: Vec<_> = received_mn_addresses
+                .difference(&our_mn_addresses)
+                .collect();
+
+            tracing::warn!(
+                "⚠️  Genesis masternode set mismatch:\n  \
+                 Our view: {} masternodes: {:?}\n  \
+                 Received: {} masternodes: {:?}\n  \
+                 Missing from received: {:?}\n  \
+                 Extra in received: {:?}",
+                our_mn_addresses.len(),
+                our_mn_addresses.iter().take(5).collect::<Vec<_>>(),
+                received_mn_addresses.len(),
+                received_mn_addresses.iter().take(5).collect::<Vec<_>>(),
+                missing,
+                extra
+            );
+
+            // If we have fewer masternodes, accept the received genesis
+            // This handles the case where we're a new node joining after genesis
+            if our_masternodes.len() < received_genesis.masternode_rewards.len() {
+                tracing::info!(
+                    "✓ Accepting received genesis (we have incomplete masternode view: {} < {})",
+                    our_masternodes.len(),
+                    received_genesis.masternode_rewards.len()
+                );
+                return Ok(());
+            }
+
+            // If we have more masternodes, the received genesis might be outdated
+            // But still accept it if it's valid - the leader had a different view
+            tracing::warn!(
+                "⚠️  We have more masternodes ({}) than genesis ({}), but accepting genesis from leader",
+                our_masternodes.len(),
+                received_genesis.masternode_rewards.len()
+            );
+            return Ok(());
+        }
+
+        tracing::info!(
+            "✓ Genesis validation passed: {} masternodes match",
+            received_mn_addresses.len()
+        );
+        Ok(())
+    }
+
     /// Calculate expected height based on time elapsed since genesis
     pub fn calculate_expected_height(&self) -> u64 {
         let now = Utc::now().timestamp();

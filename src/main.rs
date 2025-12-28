@@ -705,10 +705,12 @@ async fn main() {
                 && blockchain_init.get_block_by_height(0).await.is_err();
 
             if still_no_genesis {
-                tracing::info!("📦 Peers don't have genesis - waiting for masternode sync");
+                tracing::info!("📦 Peers don't have genesis - coordinating genesis creation");
 
-                // Wait a bit for masternodes to sync their announcements
-                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                // CRITICAL: Wait longer for masternode synchronization across network
+                // All nodes must have the same view of active masternodes for deterministic genesis
+                tracing::info!("⏳ Waiting 30 seconds for masternode announcements to propagate across network...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
                 // Check if we've reached genesis time
                 let now = chrono::Utc::now().timestamp();
@@ -731,27 +733,35 @@ async fn main() {
                         tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
                     }
 
-                    // Check if genesis already exists
+                    // Final check if genesis was created while we waited
                     let current_height = blockchain_init.get_height().await;
                     if current_height > 0 {
                         tracing::info!(
-                            "✓ Genesis block already exists at height 0, skipping creation"
+                            "✓ Genesis block already exists at height 0 (created while waiting)"
                         );
                     } else {
-                        // Check masternode count
+                        // Get synchronized view of masternodes (all nodes should have same view now)
                         let active_masternodes = registry_for_genesis.list_active().await;
                         tracing::info!(
-                            "📦 {} active masternode(s) registered, minimum {} required for genesis",
-                            active_masternodes.len(),
-                            3
+                            "📦 Masternode sync complete: {} active masternode(s) (minimum 3 required)",
+                            active_masternodes.len()
                         );
 
+                        // Log masternode addresses for debugging
+                        let mut mn_addresses: Vec<String> = active_masternodes
+                            .iter()
+                            .map(|mn| mn.masternode.address.clone())
+                            .collect();
+                        mn_addresses.sort();
+                        tracing::info!("📋 Active masternodes for genesis: {:?}", mn_addresses);
+
                         // Use TSDC leader selection for genesis (slot 0)
+                        // This is deterministic based on masternode set
                         let is_leader = match tsdc_for_genesis.select_leader(0).await {
                             Ok(leader) => {
                                 let my_ip = local_ip_for_genesis.as_deref().unwrap_or("");
                                 tracing::info!(
-                                    "👑 Genesis leader selected: {} (my IP: {})",
+                                    "👑 Genesis leader elected via TSDC: {} (my IP: {})",
                                     leader.id,
                                     my_ip
                                 );
@@ -765,15 +775,17 @@ async fn main() {
 
                         if is_leader {
                             tracing::info!(
-                                "👑 This node is the genesis leader, creating genesis block"
+                                "👑 🎯 I am the genesis leader - creating genesis block now"
                             );
-                            // Try to create genesis block if we have enough masternodes
+
+                            // Leader creates genesis block
                             match blockchain_init.create_genesis_block().await {
                                 Ok(genesis_block) => {
                                     tracing::info!(
-                                    "📦 Generating deterministic genesis block with {} masternodes",
-                                    active_masternodes.len()
-                                );
+                                        "📦 Generated deterministic genesis with {} masternodes, hash: {}",
+                                        active_masternodes.len(),
+                                        hex::encode(&genesis_block.hash()[..8])
+                                    );
 
                                     // Add the genesis block to our chain
                                     if let Err(e) =
@@ -782,24 +794,73 @@ async fn main() {
                                         tracing::error!("❌ Failed to add genesis block: {}", e);
                                     } else {
                                         tracing::info!(
-                                            "✅ Genesis block created at height 0, hash: {}",
-                                            hex::encode(genesis_block.hash())
+                                            "✅ Genesis block created successfully at height 0"
                                         );
 
-                                        // Broadcast genesis to peers
+                                        // Broadcast genesis to ALL peers immediately using GenesisAnnouncement
+                                        tracing::info!("📡 Broadcasting genesis to all peers...");
+                                        peer_registry_for_sync
+                                            .broadcast(NetworkMessage::GenesisAnnouncement(
+                                                genesis_block.clone(),
+                                            ))
+                                            .await;
+
+                                        // Also use regular BlockAnnouncement for backward compatibility
                                         peer_registry_for_sync
                                             .broadcast(NetworkMessage::BlockAnnouncement(
                                                 genesis_block,
                                             ))
                                             .await;
+
+                                        tracing::info!("📡 Genesis broadcasted to network");
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!("⚠️  Cannot create genesis yet: {} - will retry during block production", e);
+                                    tracing::error!(
+                                        "❌ Leader failed to create genesis: {} - will retry",
+                                        e
+                                    );
                                 }
                             }
                         } else {
-                            tracing::info!("📥 Not the genesis leader, waiting to receive genesis block from leader");
+                            tracing::info!(
+                                "📥 Not the genesis leader - requesting genesis from network"
+                            );
+
+                            // Non-leader: actively request genesis from peers
+                            peer_registry_for_sync
+                                .broadcast(NetworkMessage::RequestGenesis)
+                                .await;
+
+                            // Wait up to 60 seconds for genesis to arrive
+                            tracing::info!(
+                                "⏳ Waiting up to 60 seconds for genesis from leader..."
+                            );
+                            for i in 1..=12 {
+                                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+                                let height = blockchain_init.get_height().await;
+                                if height > 0 {
+                                    tracing::info!("✅ Received genesis block from network!");
+                                    break;
+                                }
+
+                                if i % 3 == 0 {
+                                    tracing::info!(
+                                        "⏳ Still waiting for genesis... ({}s elapsed)",
+                                        i * 5
+                                    );
+                                    // Re-request every 15 seconds
+                                    peer_registry_for_sync
+                                        .broadcast(NetworkMessage::RequestGenesis)
+                                        .await;
+                                }
+                            }
+
+                            // Check if we received it
+                            if blockchain_init.get_height().await == 0 {
+                                tracing::warn!("⚠️  Timeout waiting for genesis - will retry on next sync cycle");
+                            }
                         }
                     }
                 }

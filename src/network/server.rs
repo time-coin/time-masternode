@@ -927,6 +927,69 @@ async fn handle_peer(
                                         }
                                     }
                                 }
+                                NetworkMessage::GenesisAnnouncement(block) => {
+                                    // Special handling for genesis block announcements
+                                    check_message_size!(MAX_BLOCK_SIZE, "GenesisBlock");
+                                    check_rate_limit!("genesis");
+
+                                    // Verify this is actually a genesis block
+                                    if block.header.height != 0 {
+                                        tracing::warn!("⚠️  Received GenesisAnnouncement for non-genesis block {} from {}", block.header.height, peer.addr);
+                                        line.clear();
+                                        continue;
+                                    }
+
+                                    // Check if we already have genesis
+                                    let current_height = blockchain.get_height().await;
+                                    if current_height > 0 {
+                                        tracing::debug!("⏭️ Ignoring genesis announcement (already have genesis) from {}", peer.addr);
+                                        line.clear();
+                                        continue;
+                                    }
+
+                                    tracing::info!("📦 Received genesis announcement from {}", peer.addr);
+
+                                    // Validate genesis matches our expected genesis
+                                    match blockchain.validate_genesis_matches(block).await {
+                                        Ok(()) => {
+                                            tracing::info!("✅ Genesis validation passed, adding to chain");
+
+                                            // Add genesis to our blockchain
+                                            match blockchain.add_block(block.clone()).await {
+                                                Ok(()) => {
+                                                    tracing::info!("✅ Genesis block added successfully, hash: {}", hex::encode(&block.hash()[..8]));
+
+                                                    // Broadcast to other peers who might not have it yet
+                                                    let msg = NetworkMessage::GenesisAnnouncement(block.clone());
+                                                    let _ = broadcast_tx.send(msg);
+                                                }
+                                                Err(e) => {
+                                                    tracing::error!("❌ Failed to add genesis block: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("⚠️  Genesis validation failed: {}", e);
+                                        }
+                                    }
+                                }
+                                NetworkMessage::RequestGenesis => {
+                                    check_rate_limit!("genesis_request");
+
+                                    tracing::info!("📥 Received genesis request from {}", peer.addr);
+
+                                    // If we have genesis, send it to the requester
+                                    match blockchain.get_block_by_height(0).await {
+                                        Ok(genesis) => {
+                                            tracing::info!("📤 Sending genesis block to {}", peer.addr);
+                                            let msg = NetworkMessage::GenesisAnnouncement(genesis.clone());
+                                            let _ = peer_registry.send_to_peer(&ip_str, msg).await;
+                                        }
+                                        Err(_) => {
+                                            tracing::debug!("⚠️  Cannot fulfill genesis request - we don't have genesis yet");
+                                        }
+                                    }
+                                }
                                 NetworkMessage::GetBlockHash(height) => {
                                     tracing::debug!("📥 Received GetBlockHash({}) from {}", height, peer.addr);
                                     let hash = blockchain.get_block_hash_at_height(*height).await;
