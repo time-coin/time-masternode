@@ -889,6 +889,117 @@ async fn main() {
         Blockchain::start_chain_comparison_task(blockchain_init.clone());
         tracing::info!("✓ Fork detection task started (checks every 5 minutes)");
 
+        // Start periodic genesis retry task if stuck at height 0
+        {
+            let blockchain_genesis_retry = blockchain_init.clone();
+            let peer_registry_genesis_retry = peer_registry_for_sync.clone();
+            let registry_genesis_retry = registry_for_genesis.clone();
+            let tsdc_genesis_retry = tsdc_for_genesis.clone();
+            let local_ip_genesis_retry = local_ip_for_genesis.clone();
+
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+
+                    // Only retry if we're still at height 0
+                    let height = blockchain_genesis_retry.get_height().await;
+                    if height > 0 {
+                        continue;
+                    }
+
+                    // Check if genesis block exists
+                    if blockchain_genesis_retry
+                        .get_block_by_height(0)
+                        .await
+                        .is_ok()
+                    {
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        "🔄 Still at height 0 without genesis - retrying genesis election"
+                    );
+
+                    // Wait for next 10-minute boundary
+                    let now = chrono::Utc::now().timestamp();
+                    let seconds_in_period = (now % 600) as u64;
+                    if seconds_in_period < 595 {
+                        let wait_secs = 600 - seconds_in_period;
+                        tracing::info!(
+                            "⏳ Waiting {}s for 10-minute boundary for genesis retry",
+                            wait_secs
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_secs)).await;
+                    }
+
+                    // Re-run leader election
+                    let active_masternodes = registry_genesis_retry.list_active().await;
+                    if active_masternodes.is_empty() {
+                        tracing::warn!("⚠️  No active masternodes for genesis retry");
+                        continue;
+                    }
+
+                    tracing::info!(
+                        "🗳️  Retrying genesis election with {} masternodes",
+                        active_masternodes.len()
+                    );
+
+                    let is_leader = match tsdc_genesis_retry.select_leader(0).await {
+                        Ok(leader) => {
+                            let my_ip = local_ip_genesis_retry.as_deref().unwrap_or("");
+                            tracing::info!(
+                                "👑 Genesis leader (retry): {} (my IP: {})",
+                                leader.id,
+                                my_ip
+                            );
+                            my_ip == leader.id
+                        }
+                        Err(e) => {
+                            tracing::warn!("⚠️  Failed to select genesis leader (retry): {}", e);
+                            false
+                        }
+                    };
+
+                    if is_leader {
+                        tracing::info!(
+                            "👑 I am the genesis leader (retry) - creating genesis block"
+                        );
+                        match blockchain_genesis_retry.create_genesis_block().await {
+                            Ok(genesis_block) => {
+                                if let Err(e) = blockchain_genesis_retry
+                                    .add_block(genesis_block.clone())
+                                    .await
+                                {
+                                    tracing::error!("❌ Failed to add genesis (retry): {}", e);
+                                } else {
+                                    tracing::info!(
+                                        "✅ Genesis block created (retry) - broadcasting"
+                                    );
+                                    peer_registry_genesis_retry
+                                        .broadcast(NetworkMessage::GenesisAnnouncement(
+                                            genesis_block.clone(),
+                                        ))
+                                        .await;
+                                    peer_registry_genesis_retry
+                                        .broadcast(NetworkMessage::BlockAnnouncement(genesis_block))
+                                        .await;
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Genesis creation failed (retry): {}", e);
+                            }
+                        }
+                    } else {
+                        tracing::info!("📥 Not genesis leader (retry) - requesting from network");
+                        peer_registry_genesis_retry
+                            .broadcast(NetworkMessage::RequestGenesis)
+                            .await;
+                    }
+                }
+            });
+        }
+        tracing::info!("✓ Genesis retry task started (checks every 2 minutes)");
+
         // Block production is handled by the timer task below
     });
 
