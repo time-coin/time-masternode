@@ -410,7 +410,7 @@ impl Blockchain {
         let mut genesis_masternodes: Vec<GenesisMasternode> = masternodes_info
             .iter()
             .map(|mn| GenesisMasternode {
-                address: mn.masternode.wallet_address.clone(),
+                address: mn.masternode.address.clone(), // Use IP address for determinism
                 tier: mn.masternode.tier.clone(),
             })
             .collect();
