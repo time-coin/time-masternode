@@ -154,8 +154,9 @@ impl Blockchain {
             return Ok(());
         }
 
-        // At or after genesis time - wait until the next 10-minute block boundary
+        // Wait until the next 10-minute block boundary after genesis time
         // This ensures all nodes create the same genesis block at the same time
+        // and gives nodes time to start up and connect
         let seconds_since_epoch = now % 600;
         let seconds_until_boundary = if seconds_since_epoch == 0 {
             0
@@ -165,7 +166,7 @@ impl Blockchain {
 
         if seconds_until_boundary > 0 {
             tracing::info!(
-                "📦 Waiting for next 10-minute boundary before genesis creation ({}s remaining)",
+                "📦 Waiting for next 10-minute block boundary before genesis creation ({}s remaining)",
                 seconds_until_boundary
             );
             return Ok(());
