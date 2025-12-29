@@ -629,23 +629,9 @@ impl Blockchain {
             // Check if we have genesis block
             let has_genesis = self.get_block_by_height(0).await.is_ok();
 
-            // If we only have genesis (height 0) and are way behind, it might be a bad genesis
-            // Delete it and sync from scratch from a peer with the full chain
-            if current == 0 && has_genesis && behind > 10 {
-                tracing::warn!(
-                    "⚠️  We have only genesis but are {} blocks behind - may be invalid genesis",
-                    behind
-                );
-                tracing::info!("🗑️  Deleting potentially invalid genesis block to sync from peer with full chain");
-
-                // Clear the genesis block from storage
-                if let Err(e) = self.storage.remove(b"block_0") {
-                    tracing::warn!("Failed to delete genesis block: {}", e);
-                }
-                // Update height to reflect no blocks
-                *self.current_height.write().await = 0;
-                current = 0;
-            }
+            // NOTE: We do NOT delete genesis anymore even if peers are ahead
+            // The genesis block should be the canonical one loaded from genesis.testnet.json
+            // If peers have a different chain, they need to restart with the new genesis
 
             // Find the best peer to sync from by querying all peers for their chain height
             // We'll request a small sample (blocks 0-10) from each peer to see who has the longest chain
