@@ -100,7 +100,7 @@ impl Blockchain {
         self.network_type.genesis_timestamp()
     }
 
-    /// Initialize blockchain - verify existing genesis or create if enough masternodes
+    /// Initialize blockchain - load local chain or sync from network
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
 
@@ -115,7 +115,7 @@ impl Blockchain {
                 }
             }
             *self.current_height.write().await = height;
-            tracing::info!("✓ Genesis block verified (height: {})", height);
+            tracing::info!("✓ Local blockchain verified (height: {})", height);
             return Ok(());
         }
 
@@ -136,95 +136,8 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No genesis block exists - generate it dynamically from active masternodes
-        tracing::info!(
-            "📦 No genesis block in database - will generate dynamically at genesis time"
-        );
-
-        let now = Utc::now().timestamp();
-        let genesis_time = self.genesis_timestamp();
-
-        // Check if we're before genesis time
-        if now < genesis_time {
-            tracing::info!(
-                "📦 Waiting for genesis time: {} ({}s remaining)",
-                chrono::DateTime::from_timestamp(genesis_time, 0)
-                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                    .unwrap_or_else(|| "unknown".to_string()),
-                genesis_time - now
-            );
-            return Ok(());
-        }
-
-        // Check if genesis time was recent (within last hour)
-        // If so, nodes are starting up together - wait for exact genesis timestamp
-        let time_since_genesis = now - genesis_time;
-        let genesis_was_recent = time_since_genesis < 3600; // 1 hour
-
-        if genesis_was_recent {
-            // Nodes started before/at genesis time - generate at exact genesis timestamp
-            // This is for mainnet launch where all nodes are running before genesis
-            if now < genesis_time {
-                // Still before genesis - wait
-                return Ok(());
-            }
-            // Past genesis time but recent - generate immediately
-            tracing::info!("📦 Genesis time recently passed - generating genesis block now");
-        } else {
-            // Genesis was long ago - nodes starting after genesis time (testnet restart)
-            // Wait for next 10-minute block boundary to let all nodes connect
-            let seconds_since_epoch = now % 600;
-
-            // Generate at the start of any 10-minute boundary (first 60 seconds)
-            // This gives nodes time to connect and generate genesis together
-            let at_boundary = seconds_since_epoch <= 60;
-
-            if !at_boundary {
-                let seconds_until_boundary = 600 - seconds_since_epoch;
-                tracing::info!(
-                    "📦 Genesis was long ago - waiting for next 10-minute block boundary ({}s remaining)",
-                    seconds_until_boundary
-                );
-                return Ok(());
-            }
-
-            tracing::info!("📦 At 10-minute boundary (first 60s) - generating genesis block now");
-        }
-
-        // We're at a 10-minute boundary - check if we have enough connected peers
-        let connected_peers = if let Some(peer_registry) = self.peer_registry.read().await.as_ref()
-        {
-            peer_registry.get_connected_peers().await.len()
-        } else {
-            0
-        };
-
-        // Require at least 2 connected peers for genesis creation (to ensure network connectivity)
-        const MIN_PEERS_FOR_GENESIS: usize = 2;
-        if connected_peers < MIN_PEERS_FOR_GENESIS {
-            tracing::info!(
-                "📦 Waiting for more peers before genesis creation ({}/{} connected)",
-                connected_peers,
-                MIN_PEERS_FOR_GENESIS
-            );
-            return Ok(());
-        }
-
-        // Ready to create genesis - do it now!
-        let masternodes = self.masternode_registry.list_active().await;
-        tracing::info!(
-            "📦 At 10-minute boundary with {} masternodes and {} peers - creating genesis now",
-            masternodes.len(),
-            connected_peers
-        );
-
-        // Create genesis block
-        let genesis = self.create_genesis_block().await?;
-
-        // Insert into blockchain
-        self.add_block(genesis.clone()).await?;
-        tracing::info!("✅ Genesis block created and inserted into blockchain");
-
+        // No local blockchain - will sync from peers
+        tracing::info!("📥 No local blockchain found - will sync from network peers");
         Ok(())
     }
 
@@ -432,6 +345,7 @@ impl Blockchain {
         }
     }
 
+    #[allow(dead_code)]
     pub async fn create_genesis_block(&self) -> Result<Block, String> {
         // Generate genesis dynamically from active masternodes at genesis time
         tracing::info!("📦 Generating deterministic genesis block from active masternodes...");
