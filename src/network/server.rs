@@ -940,7 +940,7 @@ async fn handle_peer(
                                     }
 
                                     // Check if we already have genesis - try to get block at height 0
-                                    if let Ok(_) = blockchain.get_block_by_height(0).await {
+                                    if blockchain.get_block_by_height(0).await.is_ok() {
                                         tracing::debug!("⏭️ Ignoring genesis announcement (already have genesis) from {}", peer.addr);
                                         line.clear();
                                         continue;

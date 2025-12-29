@@ -665,9 +665,6 @@ async fn main() {
     let blockchain_init = blockchain.clone();
     let blockchain_server = blockchain_init.clone();
     let peer_registry_for_sync = peer_connection_registry.clone();
-    let registry_for_genesis = registry.clone();
-    let tsdc_for_genesis = tsdc_consensus.clone();
-    let local_ip_for_genesis = local_ip.clone();
     tokio::spawn(async move {
         // Wait for peer connections to establish first
         // New nodes need peers to download the blockchain including genesis
