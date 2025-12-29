@@ -136,7 +136,27 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No genesis block exists - check if we should create it
+        // No genesis block exists - try to load from file first
+        tracing::info!("📦 No genesis block in database - attempting to load from file...");
+        if let Ok(genesis_block) = GenesisBlock::load_from_file(self.network_type) {
+            tracing::info!("✅ Loaded genesis block from file");
+            tracing::info!("   Hash: {}", hex::encode(&genesis_block.hash()[..8]));
+            tracing::info!("   Masternodes: {}", genesis_block.masternode_rewards.len());
+            
+            // Insert the genesis block into the database
+            if let Err(e) = self.add_block(genesis_block.clone()).await {
+                tracing::error!("❌ Failed to insert genesis block from file: {}", e);
+                return Err(format!("Failed to insert genesis: {}", e));
+            }
+            
+            tracing::info!("✅ Genesis block inserted into blockchain");
+            *self.current_height.write().await = 0;
+            return Ok(());
+        }
+        
+        // File not found - fall back to dynamic generation
+        tracing::warn!("⚠️  Genesis file not found - falling back to dynamic generation");
+        
         let now = Utc::now().timestamp();
         let genesis_time = self.genesis_timestamp();
 
