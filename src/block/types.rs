@@ -116,9 +116,21 @@ pub struct BlockHeader {
 impl Block {
     pub fn hash(&self) -> Hash256 {
         use sha2::{Digest, Sha256};
-        let bytes =
-            bincode::serialize(&self.header).expect("BlockHeader serialization must not fail");
-        Sha256::digest(bytes).into()
+        
+        // Hash only the consensus-critical fields, excluding masternode_tiers
+        // which is metadata that changes over time and should not affect block identity
+        let mut hasher = Sha256::new();
+        hasher.update(self.header.version.to_le_bytes());
+        hasher.update(self.header.height.to_le_bytes());
+        hasher.update(self.header.previous_hash);
+        hasher.update(self.header.merkle_root);
+        hasher.update(self.header.timestamp.to_le_bytes());
+        hasher.update(self.header.block_reward.to_le_bytes());
+        hasher.update(self.header.leader.as_bytes());
+        hasher.update(self.header.attestation_root);
+        // Explicitly NOT including masternode_tiers - it's metadata only
+        
+        hasher.finalize().into()
     }
 
     /// Compute the merkle root of time attestations

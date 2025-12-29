@@ -273,7 +273,7 @@ impl Config {
             },
             consensus: ConsensusConfig {
                 min_masternodes: 3,
-                use_genesis_file: false,
+                use_genesis_file: true,
                 genesis_file: "genesis.testnet.json".to_string(),
             },
             block: BlockConfig {

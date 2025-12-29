@@ -45,7 +45,7 @@ voting_timeout_ms = 3000
 min_masternodes = 3
 quorum_percentage = 67  # 2/3 = 66.67%
 # Use genesis block from file (true = load from file, false = sync from network)
-use_genesis_file = false
+use_genesis_file = true
 # Genesis block file path (only used if use_genesis_file = true)
 genesis_file = "genesis.testnet.json"
 

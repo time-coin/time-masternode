@@ -666,44 +666,9 @@ impl Blockchain {
         let genesis_result = self.get_block_by_height(0).await;
 
         if genesis_result.is_err() {
-            // No genesis block exists - generate it now if conditions are met
-            let now = Utc::now().timestamp();
-            let genesis_time = self.genesis_timestamp();
-
-            if now < genesis_time {
-                return Err(format!(
-                    "Cannot produce blocks yet - waiting for genesis time ({}s remaining)",
-                    genesis_time - now
-                ));
-            }
-
-            // Check if we have enough active masternodes
-            let active_masternodes = self.masternode_registry.list_active().await;
-            if active_masternodes.len() < 3 {
-                return Err(format!(
-                    "Cannot generate genesis block: only {} masternodes active (minimum 3 required)",
-                    active_masternodes.len()
-                ));
-            }
-
-            // Generate genesis block dynamically
-            tracing::info!(
-                "🏗️  Generating genesis block with {} active masternodes",
-                active_masternodes.len()
-            );
-
-            let genesis = GenesisBlock::generate_dynamic(genesis_time, active_masternodes)
-                .map_err(|e| format!("Failed to generate genesis block: {}", e))?;
-
-            // Insert genesis into blockchain
-            self.add_block(genesis.clone())
-                .await
-                .map_err(|e| format!("Failed to insert generated genesis block: {}", e))?;
-
-            tracing::info!("✅ Genesis block generated and inserted successfully");
-
-            // Return early - genesis block was just created, try producing next block on next call
-            return Err("Genesis block just created - retry block production".to_string());
+            // No genesis block exists - cannot produce blocks
+            // Genesis must be loaded from file or synced from peers
+            return Err("Cannot produce blocks: no genesis block exists. Load from genesis file or sync from peers.".to_string());
         }
 
         let genesis = genesis_result.unwrap();
@@ -1450,31 +1415,32 @@ impl Blockchain {
                     }
 
                     // Different genesis - log detailed comparison
+                    // Note: masternode_tiers are excluded from comparison as they're metadata only
                     tracing::error!(
                         "🚫 Genesis block mismatch detected!\n\
                          Our genesis: {}\n\
                          - timestamp: {}\n\
                          - previous_hash: {}\n\
                          - merkle_root: {}\n\
-                         - masternodes: {}\n\
+                         - leader: {}\n\
                          - transactions: {}\n\
                          Peer genesis: {}\n\
                          - timestamp: {}\n\
                          - previous_hash: {}\n\
                          - merkle_root: {}\n\
-                         - masternodes: {}\n\
+                         - leader: {}\n\
                          - transactions: {}",
                         hex::encode(existing_hash),
                         existing.header.timestamp,
                         hex::encode(existing.header.previous_hash),
                         hex::encode(existing.header.merkle_root),
-                        existing.header.masternode_tiers.total(),
+                        existing.header.leader,
                         existing.transactions.len(),
                         hex::encode(incoming_hash),
                         block.header.timestamp,
                         hex::encode(block.header.previous_hash),
                         hex::encode(block.header.merkle_root),
-                        block.header.masternode_tiers.total(),
+                        block.header.leader,
                         block.transactions.len()
                     );
 
