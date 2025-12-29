@@ -926,12 +926,21 @@ impl Blockchain {
         // Validate block height is sequential
         let current = *self.current_height.read().await;
 
-        // Special case: genesis block (height 0) when chain is empty
+        // Special case: genesis block (height 0)
         let is_genesis = block.header.height == 0;
-        let chain_empty = current == 0 && self.get_block_by_height(0).await.is_err();
-
-        if is_genesis && chain_empty {
-            // Genesis block is allowed
+        
+        // Allow genesis block if:
+        // 1. Chain is at height 0 AND no block exists at height 0, OR
+        // 2. We're at height 0 and trying to add genesis (replace placeholder)
+        if is_genesis {
+            if current == 0 {
+                // Allow genesis at height 0
+            } else {
+                return Err(format!(
+                    "Cannot add genesis block at height 0 when chain is at height {}",
+                    current
+                ));
+            }
         } else if block.header.height != current + 1 {
             return Err(format!(
                 "Block height mismatch: expected {}, got {}",
