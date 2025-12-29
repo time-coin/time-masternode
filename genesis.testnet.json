@@ -3,10 +3,10 @@
     "version": 2,
     "height": 0,
     "previous_hash": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-    "merkle_root": [227,176,196,66,152,252,28,20,154,251,244,200,153,111,185,36,39,174,65,228,100,155,147,76,164,149,153,27,120,82,184,85],
+    "merkle_root": [212,53,147,199,21,253,211,28,97,20,26,189,4,169,159,214,130,44,133,88,133,76,205,227,154,86,132,231,165,109,162,125],
     "timestamp": 1733011200,
     "block_reward": 10000000000,
-    "leader": "50.28.104.50",
+    "leader": "GENESIS",
     "attestation_root": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
     "masternode_tiers": {
       "free": 4,
@@ -19,7 +19,24 @@
     {
       "version": 1,
       "inputs": [],
-      "outputs": [],
+      "outputs": [
+        {
+          "address": "TIME0DsCkC1DBLyHvWUv9M7tbUYZt1SvTfri5T",
+          "amount": 2500000000
+        },
+        {
+          "address": "TIME0KjEcdBiNjiLe2Tx35LYSJ3E7KXCcj48oh",
+          "amount": 2500000000
+        },
+        {
+          "address": "TIME0K8wwmqtqkdG34pdjmMqrXX85TFH7bpM3X",
+          "amount": 2500000000
+        },
+        {
+          "address": "TIME0Lfe8RRTGtT9jJDZgpiL9hTJ83RUgTz6Yi",
+          "amount": 2500000000
+        }
+      ],
       "lock_time": 0,
       "timestamp": 1733011200
     }
