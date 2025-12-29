@@ -626,9 +626,6 @@ impl Blockchain {
                 return Err("No connected peers to sync from".to_string());
             }
 
-            // Check if we have genesis block
-            let has_genesis = self.get_block_by_height(0).await.is_ok();
-
             // NOTE: We do NOT delete genesis anymore even if peers are ahead
             // The genesis block should be the canonical one loaded from genesis.testnet.json
             // If peers have a different chain, they need to restart with the new genesis
