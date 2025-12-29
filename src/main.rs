@@ -691,10 +691,60 @@ async fn main() {
             || blockchain_init.get_block_by_height(0).await.is_ok();
 
         if !has_genesis {
-            tracing::info!("📦 No genesis block found - syncing blockchain from peers...");
-            // Sync from peers - this will get genesis block (height 0) and subsequent blocks
-            if let Err(e) = blockchain_init.sync_from_peers().await {
-                tracing::warn!("⚠️  Initial sync from peers: {}", e);
+            // Check if we should load genesis from file
+            if config.consensus.use_genesis_file {
+                tracing::info!(
+                    "📦 Loading genesis block from file: {}",
+                    config.consensus.genesis_file
+                );
+                // Load and insert genesis block from file
+                match std::fs::read_to_string(&config.consensus.genesis_file) {
+                    Ok(genesis_json) => {
+                        match serde_json::from_str::<block::types::Block>(&genesis_json) {
+                            Ok(genesis_block) => {
+                                // Verify it's actually a genesis block
+                                if genesis_block.header.height == 0 {
+                                    match blockchain_init.add_block(genesis_block.clone()).await {
+                                        Ok(_) => {
+                                            tracing::info!(
+                                                "✅ Genesis block loaded from file: {}",
+                                                hex::encode(genesis_block.hash())
+                                            );
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "❌ Failed to add genesis block from file: {}",
+                                                e
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!(
+                                        "❌ File {} does not contain a genesis block (height = {})",
+                                        config.consensus.genesis_file,
+                                        genesis_block.header.height
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to parse genesis file: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "❌ Failed to read genesis file {}: {}",
+                            config.consensus.genesis_file,
+                            e
+                        );
+                    }
+                }
+            } else {
+                tracing::info!("📦 No genesis block found - syncing blockchain from peers...");
+                // Sync from peers - this will get genesis block (height 0) and subsequent blocks
+                if let Err(e) = blockchain_init.sync_from_peers().await {
+                    tracing::warn!("⚠️  Initial sync from peers: {}", e);
+                }
             }
         }
 

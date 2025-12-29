@@ -44,7 +44,9 @@ cache_size_mb = 256
 voting_timeout_ms = 3000
 min_masternodes = 3
 quorum_percentage = 67  # 2/3 = 66.67%
-# Genesis block file (required for testnet/mainnet)
+# Use genesis block from file (true = load from file, false = sync from network)
+use_genesis_file = false
+# Genesis block file path (only used if use_genesis_file = true)
 genesis_file = "genesis.testnet.json"
 
 [block]

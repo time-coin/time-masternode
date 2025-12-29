@@ -169,6 +169,16 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusConfig {
     pub min_masternodes: u32,
+    /// Use genesis block from file (genesis.testnet.json or genesis.mainnet.json)
+    #[serde(default)]
+    pub use_genesis_file: bool,
+    /// Path to genesis file (relative to working directory or absolute)
+    #[serde(default = "default_genesis_file")]
+    pub genesis_file: String,
+}
+
+fn default_genesis_file() -> String {
+    "genesis.testnet.json".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,7 +271,11 @@ impl Config {
                 data_dir: "".to_string(), // Will be auto-configured
                 cache_size_mb: 256,
             },
-            consensus: ConsensusConfig { min_masternodes: 3 },
+            consensus: ConsensusConfig {
+                min_masternodes: 3,
+                use_genesis_file: false,
+                genesis_file: "genesis.testnet.json".to_string(),
+            },
             block: BlockConfig {
                 block_time_seconds: 600, // 10 minutes
                 max_block_size_kb: 1024,
