@@ -86,6 +86,11 @@ impl GenesisBlock {
             }
         }
 
+        // Add data directory (most likely location)
+        if let Ok(data_dir) = crate::config::Config::get_data_directory(network) {
+            paths.push(data_dir.join(filename).to_string_lossy().to_string());
+        }
+
         // Add common system locations
         paths.extend([
             format!("/etc/timecoin/{}", filename),
@@ -97,6 +102,12 @@ impl GenesisBlock {
         if let Ok(home) = std::env::var("HOME") {
             paths.push(format!("{}/.timecoin/{}", home, filename));
             paths.push(format!("{}/{}", home, filename));
+            // Also try network-specific subdirectory
+            let network_dir = match network {
+                NetworkType::Testnet => "testnet",
+                NetworkType::Mainnet => "mainnet",
+            };
+            paths.push(format!("{}/.timecoin/{}/{}", home, network_dir, filename));
         }
 
         for path in &paths {
