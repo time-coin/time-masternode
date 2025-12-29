@@ -230,7 +230,7 @@ impl MessageHandler {
                 crate::network::message::MasternodeAnnouncementData {
                     address: ip_only,
                     reward_address: mn_info.reward_address.clone(),
-                    tier: mn_info.masternode.tier.clone(),
+                    tier: mn_info.masternode.tier,
                     public_key: mn_info.masternode.public_key,
                 }
             })

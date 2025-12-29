@@ -1103,7 +1103,7 @@ impl PeerConnection {
                 let masternode = crate::types::Masternode {
                     address: address.clone(),
                     wallet_address: reward_address.clone(),
-                    tier: tier.clone(),
+                    tier: *tier,
                     public_key: *public_key,
                     collateral: 0,
                     registered_at: std::time::SystemTime::now()
@@ -1145,7 +1145,7 @@ impl PeerConnection {
                     let masternode = crate::types::Masternode {
                         address: mn_data.address.clone(),
                         wallet_address: mn_data.reward_address.clone(),
-                        tier: mn_data.tier.clone(),
+                        tier: mn_data.tier,
                         public_key: mn_data.public_key,
                         collateral: 0,
                         registered_at: now,
@@ -1278,7 +1278,7 @@ impl PeerConnection {
                 let masternode = crate::types::Masternode {
                     address: address.clone(),
                     wallet_address: reward_address.clone(),
-                    tier: tier.clone(),
+                    tier: *tier,
                     public_key: *public_key,
                     collateral: 0,
                     registered_at: std::time::SystemTime::now()
@@ -1320,7 +1320,7 @@ impl PeerConnection {
                     let masternode = crate::types::Masternode {
                         address: mn_data.address.clone(),
                         wallet_address: mn_data.reward_address.clone(),
-                        tier: mn_data.tier.clone(),
+                        tier: mn_data.tier,
                         public_key: mn_data.public_key,
                         collateral: 0,
                         registered_at: now,

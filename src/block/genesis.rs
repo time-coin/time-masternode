@@ -250,6 +250,79 @@ impl GenesisBlock {
         Ok(())
     }
 
+    /// Generate genesis block dynamically from active masternodes (runtime format)
+    /// Converts from masternode registry format and sorts for determinism
+    pub fn generate_dynamic(
+        genesis_timestamp: i64,
+        active_masternodes: Vec<crate::masternode_registry::MasternodeInfo>,
+    ) -> Result<Block, String> {
+        if active_masternodes.is_empty() {
+            return Err("No masternodes available for genesis generation".to_string());
+        }
+
+        // Convert to genesis masternode format and sort by address for determinism
+        let mut masternodes: Vec<GenesisMasternode> = active_masternodes
+            .iter()
+            .map(|info| GenesisMasternode {
+                address: info.masternode.wallet_address.clone(),
+                tier: info.masternode.tier,
+            })
+            .collect();
+
+        masternodes.sort_by(|a, b| a.address.cmp(&b.address));
+
+        // Use first masternode as leader (deterministic since sorted)
+        let leader = &masternodes[0].address;
+
+        tracing::info!(
+            "🎯 Genesis leader: {} (from {} sorted masternodes)",
+            leader,
+            masternodes.len()
+        );
+
+        // Count masternodes by tier
+        let mut tier_counts = MasternodeTierCounts::default();
+        for mn in &masternodes {
+            match mn.tier {
+                MasternodeTier::Free => tier_counts.free += 1,
+                MasternodeTier::Bronze => tier_counts.bronze += 1,
+                MasternodeTier::Silver => tier_counts.silver += 1,
+                MasternodeTier::Gold => tier_counts.gold += 1,
+            }
+        }
+
+        const BLOCK_REWARD: u64 = 10_000_000_000; // 100 TIME
+
+        // Calculate reward distribution
+        let masternode_rewards = Self::calculate_rewards(BLOCK_REWARD, &masternodes);
+
+        // Coinbase transaction marker (empty outputs - rewards are in masternode_rewards)
+        let coinbase = Transaction {
+            version: 1,
+            inputs: vec![],
+            outputs: vec![],
+            lock_time: 0,
+            timestamp: genesis_timestamp,
+        };
+
+        Ok(Block {
+            header: BlockHeader {
+                version: 2,
+                height: 0,
+                previous_hash: [0u8; 32],
+                merkle_root: coinbase.txid(),
+                timestamp: genesis_timestamp,
+                block_reward: BLOCK_REWARD,
+                leader: leader.to_string(),
+                attestation_root: [0u8; 32],
+                masternode_tiers: tier_counts,
+            },
+            transactions: vec![coinbase],
+            masternode_rewards,
+            time_attestations: vec![],
+        })
+    }
+
     /// Generate genesis block with active masternodes
     /// CRITICAL: masternodes MUST be pre-sorted by address for determinism
     pub fn generate_with_masternodes(

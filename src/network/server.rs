@@ -485,7 +485,7 @@ async fn handle_peer(
                                                 let announcement = NetworkMessage::MasternodeAnnouncement {
                                                     address: our_mn.masternode.address.clone(),
                                                     reward_address: our_mn.reward_address.clone(),
-                                                    tier: our_mn.masternode.tier.clone(),
+                                                    tier: our_mn.masternode.tier,
                                                     public_key: our_mn.masternode.public_key,
                                                 };
                                                 let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
@@ -727,7 +727,7 @@ async fn handle_peer(
                                         address: peer_ip.clone(), // Store only IP
                                         wallet_address: reward_address.clone(),
                                         collateral: tier.collateral(),
-                                        tier: tier.clone(),
+                                        tier: *tier,
                                         public_key: *public_key,
                                         registered_at: std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
@@ -798,7 +798,7 @@ async fn handle_peer(
                                         let masternode = Masternode {
                                             address: mn_data.address.clone(),
                                             wallet_address: mn_data.reward_address.clone(),
-                                            tier: mn_data.tier.clone(),
+                                            tier: mn_data.tier,
                                             public_key: mn_data.public_key,
                                             collateral: 0, // Collateral unknown from peer response
                                             registered_at: now,

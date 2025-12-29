@@ -137,8 +137,10 @@ impl Blockchain {
         }
 
         // No genesis block exists - generate it dynamically from active masternodes
-        tracing::info!("📦 No genesis block in database - will generate dynamically at genesis time");
-        
+        tracing::info!(
+            "📦 No genesis block in database - will generate dynamically at genesis time"
+        );
+
         let now = Utc::now().timestamp();
         let genesis_time = self.genesis_timestamp();
 
@@ -158,7 +160,7 @@ impl Blockchain {
         // If so, nodes are starting up together - wait for exact genesis timestamp
         let time_since_genesis = now - genesis_time;
         let genesis_was_recent = time_since_genesis < 3600; // 1 hour
-        
+
         if genesis_was_recent {
             // Nodes started before/at genesis time - generate at exact genesis timestamp
             // This is for mainnet launch where all nodes are running before genesis
@@ -167,9 +169,7 @@ impl Blockchain {
                 return Ok(());
             }
             // Past genesis time but recent - generate immediately
-            tracing::info!(
-                "📦 Genesis time recently passed - generating genesis block now"
-            );
+            tracing::info!("📦 Genesis time recently passed - generating genesis block now");
         } else {
             // Genesis was long ago - nodes starting after genesis time (testnet restart)
             // Wait for next 10-minute block boundary to let all nodes connect
@@ -187,10 +187,8 @@ impl Blockchain {
                 );
                 return Ok(());
             }
-            
-            tracing::info!(
-                "📦 At 10-minute boundary - generating genesis block now"
-            );
+
+            tracing::info!("📦 At 10-minute boundary - generating genesis block now");
         }
 
         // We're at a 10-minute boundary - check if we have enough connected peers
@@ -212,14 +210,20 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Genesis block creation is handled by main.rs with proper leader selection
-        // This function just waits for the right time, then main.rs will create it if we're the leader
+        // Ready to create genesis - do it now!
         let masternodes = self.masternode_registry.list_active().await;
         tracing::info!(
-            "📦 At 10-minute boundary with {} masternodes and {} peers - waiting for leader to create genesis",
+            "📦 At 10-minute boundary with {} masternodes and {} peers - creating genesis now",
             masternodes.len(),
             connected_peers
         );
+
+        // Create genesis block
+        let genesis = self.create_genesis_block().await?;
+
+        // Insert into blockchain
+        self.add_block(genesis.clone()).await?;
+        tracing::info!("✅ Genesis block created and inserted into blockchain");
 
         Ok(())
     }
@@ -431,17 +435,18 @@ impl Blockchain {
     pub async fn create_genesis_block(&self) -> Result<Block, String> {
         // Generate genesis dynamically from active masternodes at genesis time
         tracing::info!("📦 Generating deterministic genesis block from active masternodes...");
-        
+
         let masternodes_info = self.masternode_registry.list_active().await;
 
         // Convert to GenesisMasternode format
-        let mut genesis_masternodes: Vec<crate::block::genesis::GenesisMasternode> = masternodes_info
-            .iter()
-            .map(|mn| crate::block::genesis::GenesisMasternode {
-                address: mn.masternode.address.clone(), // Use IP address for determinism
-                tier: mn.masternode.tier.clone(),
-            })
-            .collect();
+        let mut genesis_masternodes: Vec<crate::block::genesis::GenesisMasternode> =
+            masternodes_info
+                .iter()
+                .map(|mn| crate::block::genesis::GenesisMasternode {
+                    address: mn.masternode.address.clone(), // Use IP address for determinism
+                    tier: mn.masternode.tier,
+                })
+                .collect();
 
         // Check minimum masternodes
         use crate::block::genesis::GenesisBlock;
@@ -474,18 +479,9 @@ impl Blockchain {
             masternodes_info.len(),
             block.header.block_reward
         );
-        tracing::info!(
-            "   Hash: {}",
-            hex::encode(&block.hash()[..8])
-        );
-        tracing::info!(
-            "   Leader: {}",
-            leader
-        );
-        tracing::info!(
-            "   Timestamp: {}",
-            block.header.timestamp
-        );
+        tracing::info!("   Hash: {}", hex::encode(&block.hash()[..8]));
+        tracing::info!("   Leader: {}", leader);
+        tracing::info!("   Timestamp: {}", block.header.timestamp);
 
         Ok(block)
     }
@@ -506,7 +502,7 @@ impl Blockchain {
             .iter()
             .map(|mn| crate::block::genesis::GenesisMasternode {
                 address: mn.masternode.address.clone(),
-                tier: mn.masternode.tier.clone(),
+                tier: mn.masternode.tier,
             })
             .collect();
 
@@ -756,7 +752,7 @@ impl Blockchain {
         let genesis_result = self.get_block_by_height(0).await;
 
         if genesis_result.is_err() {
-            // No genesis block - must wait for leader to create it
+            // No genesis block exists - generate it now if conditions are met
             let now = Utc::now().timestamp();
             let genesis_time = self.genesis_timestamp();
 
@@ -767,10 +763,33 @@ impl Blockchain {
                 ));
             }
 
-            return Err(
-                "Cannot produce blocks - no genesis block exists. Waiting for genesis leader to create it."
-                    .to_string(),
+            // Check if we have enough active masternodes
+            let active_masternodes = self.masternode_registry.list_active().await;
+            if active_masternodes.len() < 3 {
+                return Err(format!(
+                    "Cannot generate genesis block: only {} masternodes active (minimum 3 required)",
+                    active_masternodes.len()
+                ));
+            }
+
+            // Generate genesis block dynamically
+            tracing::info!(
+                "🏗️  Generating genesis block with {} active masternodes",
+                active_masternodes.len()
             );
+
+            let genesis = GenesisBlock::generate_dynamic(genesis_time, active_masternodes)
+                .map_err(|e| format!("Failed to generate genesis block: {}", e))?;
+
+            // Insert genesis into blockchain
+            self.add_block(genesis.clone())
+                .await
+                .map_err(|e| format!("Failed to insert generated genesis block: {}", e))?;
+
+            tracing::info!("✅ Genesis block generated and inserted successfully");
+
+            // Return early - genesis block was just created, try producing next block on next call
+            return Err("Genesis block just created - retry block production".to_string());
         }
 
         let genesis = genesis_result.unwrap();

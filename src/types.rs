@@ -109,7 +109,7 @@ pub fn sort_masternodes_canonical(masternodes: &mut [Masternode]) {
     masternodes.sort_by(|a, b| a.address.cmp(&b.address));
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum MasternodeTier {
     Free = 0,       // Can receive rewards (0.1x weight vs Bronze), cannot vote on governance
     Bronze = 1000,  // Can vote on governance, 1x baseline reward weight
