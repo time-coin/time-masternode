@@ -1,0 +1,8 @@
+{
+  "network": "testnet",
+  "genesis_date": "2025-12-01T00:00:00Z",
+  "genesis_timestamp": 1764547200,
+  "message": "TIME Coin Testnet Launch - December 1, 2025 - Deterministic Genesis",
+  "block_reward": 10000000000,
+  "description": "Genesis block will be generated dynamically at launch time based on active masternodes"
+}

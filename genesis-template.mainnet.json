@@ -1,0 +1,8 @@
+{
+  "network": "mainnet",
+  "genesis_date": "2026-01-01T00:00:00Z",
+  "genesis_timestamp": 1767225600,
+  "message": "TIME Coin Mainnet Launch - January 1, 2026 - Deterministic Genesis",
+  "block_reward": 10000000000,
+  "description": "Genesis block will be generated dynamically at launch time based on active masternodes"
+}

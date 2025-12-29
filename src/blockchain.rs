@@ -136,26 +136,8 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No genesis block exists - try to load from file first
-        tracing::info!("📦 No genesis block in database - attempting to load from file...");
-        if let Ok(genesis_block) = GenesisBlock::load_from_file(self.network_type) {
-            tracing::info!("✅ Loaded genesis block from file");
-            tracing::info!("   Hash: {}", hex::encode(&genesis_block.hash()[..8]));
-            tracing::info!("   Masternodes: {}", genesis_block.masternode_rewards.len());
-            
-            // Insert the genesis block into the database
-            if let Err(e) = self.add_block(genesis_block.clone()).await {
-                tracing::error!("❌ Failed to insert genesis block from file: {}", e);
-                return Err(format!("Failed to insert genesis: {}", e));
-            }
-            
-            tracing::info!("✅ Genesis block inserted into blockchain");
-            *self.current_height.write().await = 0;
-            return Ok(());
-        }
-        
-        // File not found - fall back to dynamic generation
-        tracing::warn!("⚠️  Genesis file not found - falling back to dynamic generation");
+        // No genesis block exists - generate it dynamically from active masternodes
+        tracing::info!("📦 No genesis block in database - will generate dynamically at genesis time");
         
         let now = Utc::now().timestamp();
         let genesis_time = self.genesis_timestamp();
@@ -163,7 +145,10 @@ impl Blockchain {
         // Only attempt genesis creation after the scheduled genesis timestamp
         if now < genesis_time {
             tracing::info!(
-                "📦 No genesis block - waiting until genesis time ({}s remaining)",
+                "📦 Waiting for genesis time: {} ({}s remaining)",
+                chrono::DateTime::from_timestamp(genesis_time, 0)
+                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
                 genesis_time - now
             );
             return Ok(());
@@ -422,38 +407,22 @@ impl Blockchain {
     }
 
     pub async fn create_genesis_block(&self) -> Result<Block, String> {
-        use crate::block::genesis::GenesisBlock;
-
-        // First, try to load the canonical genesis block from disk
-        match GenesisBlock::load_from_file(self.network_type) {
-            Ok(genesis_block) => {
-                tracing::info!("✅ Using canonical genesis block from file");
-                tracing::info!("   Hash: {}", hex::encode(&genesis_block.hash()[..8]));
-                tracing::info!("   Masternodes: {}", genesis_block.masternode_rewards.len());
-                return Ok(genesis_block);
-            }
-            Err(e) => {
-                tracing::warn!("⚠️  Could not load genesis from file: {}", e);
-                tracing::warn!(
-                    "⚠️  Falling back to dynamic generation (NOT RECOMMENDED for production)"
-                );
-            }
-        }
-
-        // Fallback: Generate dynamically (only if file not found)
-        use crate::block::genesis::GenesisMasternode;
+        // Generate genesis dynamically from active masternodes at genesis time
+        tracing::info!("📦 Generating deterministic genesis block from active masternodes...");
+        
         let masternodes_info = self.masternode_registry.list_active().await;
 
         // Convert to GenesisMasternode format
-        let mut genesis_masternodes: Vec<GenesisMasternode> = masternodes_info
+        let mut genesis_masternodes: Vec<crate::block::genesis::GenesisMasternode> = masternodes_info
             .iter()
-            .map(|mn| GenesisMasternode {
+            .map(|mn| crate::block::genesis::GenesisMasternode {
                 address: mn.masternode.address.clone(), // Use IP address for determinism
                 tier: mn.masternode.tier.clone(),
             })
             .collect();
 
         // Check minimum masternodes
+        use crate::block::genesis::GenesisBlock;
         if genesis_masternodes.len() < GenesisBlock::MIN_MASTERNODES_FOR_GENESIS {
             return Err(format!(
                 "Need {} masternodes to generate genesis, only {} active",
@@ -479,14 +448,21 @@ impl Blockchain {
         );
 
         tracing::info!(
-            "📦 Generated genesis block with {} masternodes, reward: {} satoshis",
+            "✅ Generated genesis block with {} masternodes, reward: {} satoshis",
             masternodes_info.len(),
             block.header.block_reward
         );
         tracing::info!(
-            "📦 Genesis block hash: {}, leader: {}",
-            hex::encode(block.hash()),
+            "   Hash: {}",
+            hex::encode(&block.hash()[..8])
+        );
+        tracing::info!(
+            "   Leader: {}",
             leader
+        );
+        tracing::info!(
+            "   Timestamp: {}",
+            block.header.timestamp
         );
 
         Ok(block)
