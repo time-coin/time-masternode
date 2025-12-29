@@ -174,13 +174,13 @@ impl Blockchain {
             // Genesis was long ago - nodes starting after genesis time (testnet restart)
             // Wait for next 10-minute block boundary to let all nodes connect
             let seconds_since_epoch = now % 600;
-            let seconds_until_boundary = if seconds_since_epoch == 0 {
-                0
-            } else {
-                600 - seconds_since_epoch
-            };
 
-            if seconds_until_boundary > 0 {
+            // Generate at the start of any 10-minute boundary (first 60 seconds)
+            // This gives nodes time to connect and generate genesis together
+            let at_boundary = seconds_since_epoch <= 60;
+
+            if !at_boundary {
+                let seconds_until_boundary = 600 - seconds_since_epoch;
                 tracing::info!(
                     "📦 Genesis was long ago - waiting for next 10-minute block boundary ({}s remaining)",
                     seconds_until_boundary
@@ -188,7 +188,7 @@ impl Blockchain {
                 return Ok(());
             }
 
-            tracing::info!("📦 At 10-minute boundary - generating genesis block now");
+            tracing::info!("📦 At 10-minute boundary (first 60s) - generating genesis block now");
         }
 
         // We're at a 10-minute boundary - check if we have enough connected peers
