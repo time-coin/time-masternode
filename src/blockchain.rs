@@ -607,9 +607,8 @@ impl Blockchain {
             }
 
             tracing::info!(
-                "📡 Requesting blocks from {} connected peer(s): {:?}",
-                connected_peers.len(),
-                connected_peers
+                "📡 Requesting blocks from 1 selected peer: {:?}",
+                connected_peers.first()
             );
 
             // Sync loop - keep requesting batches until caught up or timeout
@@ -627,8 +626,9 @@ impl Blockchain {
                 };
                 let batch_end = (batch_start + 500).min(expected);
 
-                // Request from multiple peers in parallel
-                for peer in connected_peers.iter().take(3) {
+                // Use ONLY ONE peer for syncing to avoid conflicts
+                // Select the first available peer (deterministic)
+                if let Some(peer) = connected_peers.first() {
                     let req = NetworkMessage::GetBlocks(batch_start, batch_end);
                     tracing::info!(
                         "📤 Requesting blocks {}-{} from {}",
@@ -639,6 +639,9 @@ impl Blockchain {
                     if let Err(e) = peer_registry.send_to_peer(peer, req).await {
                         tracing::warn!("❌ Failed to send GetBlocks to {}: {}", peer, e);
                     }
+                } else {
+                    tracing::warn!("⚠️  No peers available for block sync");
+                    break;
                 }
 
                 // Wait for blocks to arrive (with shorter timeout per batch)
