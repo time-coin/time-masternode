@@ -598,7 +598,7 @@ impl Blockchain {
         );
 
         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
-            // Get actually connected peers from the registry, not just known peers
+            // Get all connected peers
             let connected_peers = peer_registry.get_connected_peers().await;
 
             if connected_peers.is_empty() {
@@ -606,10 +606,60 @@ impl Blockchain {
                 return Err("No connected peers to sync from".to_string());
             }
 
-            tracing::info!(
-                "📡 Requesting blocks from 1 selected peer: {:?}",
-                connected_peers.first()
-            );
+            // Check if we have genesis block
+            let has_genesis = self.get_block_by_height(0).await.is_ok();
+
+            // If we only have genesis (height 0) and are way behind, it might be a bad genesis
+            // Delete it and sync from scratch from a peer with the full chain
+            if current == 0 && has_genesis && behind > 10 {
+                tracing::warn!(
+                    "⚠️  We have only genesis but are {} blocks behind - may be invalid genesis",
+                    behind
+                );
+                tracing::info!("🗑️  Deleting potentially invalid genesis block to sync from peer with full chain");
+
+                // Clear the genesis block from storage
+                if let Err(e) = self.storage.remove(b"block_0") {
+                    tracing::warn!("Failed to delete genesis block: {}", e);
+                }
+                // Update height to reflect no blocks
+                *self.current_height.write().await = 0;
+                current = 0;
+            }
+
+            // Find the best peer to sync from by querying all peers for their chain height
+            // We'll request a small sample (blocks 0-10) from each peer to see who has the longest chain
+            let mut best_peer: Option<String> = None;
+            let mut best_peer_height = current;
+
+            for peer in &connected_peers {
+                // Send a status request or query blocks 0-10 to gauge chain length
+                let req = NetworkMessage::GetBlocks(0, 10);
+                if peer_registry.send_to_peer(peer, req).await.is_ok() {
+                    // Give peer a moment to respond
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                    // Check if we got any new blocks (this is a heuristic)
+                    let now_height = *self.current_height.read().await;
+                    if now_height > best_peer_height {
+                        best_peer = Some(peer.clone());
+                        best_peer_height = now_height;
+                    }
+                }
+            }
+
+            let sync_peer = if let Some(peer) = best_peer {
+                tracing::info!(
+                    "📡 Selected best peer for sync: {} (appears to have height > {})",
+                    peer,
+                    best_peer_height
+                );
+                peer
+            } else {
+                // Fallback to first peer if we couldn't determine best
+                tracing::warn!("⚠️  Could not determine best peer, using first available");
+                connected_peers.first().ok_or("No peers available")?.clone()
+            };
 
             // Sync loop - keep requesting batches until caught up or timeout
             let sync_start = std::time::Instant::now();
@@ -617,30 +667,24 @@ impl Blockchain {
 
             while current < expected && sync_start.elapsed() < max_sync_time {
                 // Request next batch of blocks
-                // Always start from current height when at 0 (to get genesis)
-                // Otherwise start from current + 1 (next block we need)
+                // Always start from 0 when current is 0 (need genesis)
+                // Otherwise start from current + 1 (need next block after our tip)
                 let batch_start = if current == 0 {
-                    0 // Always request genesis block when at height 0
+                    0 // Request genesis and subsequent blocks
                 } else {
-                    current + 1 // Normal case: request next block after current
+                    current + 1 // Request next block after our tip
                 };
                 let batch_end = (batch_start + 500).min(expected);
 
-                // Use ONLY ONE peer for syncing to avoid conflicts
-                // Select the first available peer (deterministic)
-                if let Some(peer) = connected_peers.first() {
-                    let req = NetworkMessage::GetBlocks(batch_start, batch_end);
-                    tracing::info!(
-                        "📤 Requesting blocks {}-{} from {}",
-                        batch_start,
-                        batch_end,
-                        peer
-                    );
-                    if let Err(e) = peer_registry.send_to_peer(peer, req).await {
-                        tracing::warn!("❌ Failed to send GetBlocks to {}: {}", peer, e);
-                    }
-                } else {
-                    tracing::warn!("⚠️  No peers available for block sync");
+                let req = NetworkMessage::GetBlocks(batch_start, batch_end);
+                tracing::info!(
+                    "📤 Requesting blocks {}-{} from {}",
+                    batch_start,
+                    batch_end,
+                    sync_peer
+                );
+                if let Err(e) = peer_registry.send_to_peer(&sync_peer, req).await {
+                    tracing::warn!("❌ Failed to send GetBlocks to {}: {}", sync_peer, e);
                     break;
                 }
 
@@ -928,7 +972,7 @@ impl Blockchain {
 
         // Special case: genesis block (height 0)
         let is_genesis = block.header.height == 0;
-        
+
         // Allow genesis block if:
         // 1. Chain is at height 0 AND no block exists at height 0, OR
         // 2. We're at height 0 and trying to add genesis (replace placeholder)
