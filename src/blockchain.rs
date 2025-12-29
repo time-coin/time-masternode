@@ -142,7 +142,7 @@ impl Blockchain {
         let now = Utc::now().timestamp();
         let genesis_time = self.genesis_timestamp();
 
-        // Only attempt genesis creation after the scheduled genesis timestamp
+        // Check if we're before genesis time
         if now < genesis_time {
             tracing::info!(
                 "📦 Waiting for genesis time: {} ({}s remaining)",
@@ -154,22 +154,43 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Wait until the next 10-minute block boundary after genesis time
-        // This ensures all nodes create the same genesis block at the same time
-        // and gives nodes time to start up and connect
-        let seconds_since_epoch = now % 600;
-        let seconds_until_boundary = if seconds_since_epoch == 0 {
-            0
-        } else {
-            600 - seconds_since_epoch
-        };
-
-        if seconds_until_boundary > 0 {
+        // Check if genesis time was recent (within last hour)
+        // If so, nodes are starting up together - wait for exact genesis timestamp
+        let time_since_genesis = now - genesis_time;
+        let genesis_was_recent = time_since_genesis < 3600; // 1 hour
+        
+        if genesis_was_recent {
+            // Nodes started before/at genesis time - generate at exact genesis timestamp
+            // This is for mainnet launch where all nodes are running before genesis
+            if now < genesis_time {
+                // Still before genesis - wait
+                return Ok(());
+            }
+            // Past genesis time but recent - generate immediately
             tracing::info!(
-                "📦 Waiting for next 10-minute block boundary before genesis creation ({}s remaining)",
-                seconds_until_boundary
+                "📦 Genesis time recently passed - generating genesis block now"
             );
-            return Ok(());
+        } else {
+            // Genesis was long ago - nodes starting after genesis time (testnet restart)
+            // Wait for next 10-minute block boundary to let all nodes connect
+            let seconds_since_epoch = now % 600;
+            let seconds_until_boundary = if seconds_since_epoch == 0 {
+                0
+            } else {
+                600 - seconds_since_epoch
+            };
+
+            if seconds_until_boundary > 0 {
+                tracing::info!(
+                    "📦 Genesis was long ago - waiting for next 10-minute block boundary ({}s remaining)",
+                    seconds_until_boundary
+                );
+                return Ok(());
+            }
+            
+            tracing::info!(
+                "📦 At 10-minute boundary - generating genesis block now"
+            );
         }
 
         // We're at a 10-minute boundary - check if we have enough connected peers
