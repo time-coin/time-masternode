@@ -76,15 +76,31 @@ impl GenesisBlock {
             NetworkType::Mainnet => "genesis.mainnet.json",
         };
 
-        // Try current directory first, then common locations
-        let paths = [
-            filename.to_string(),
-            format!("./{}", filename),
+        // Try multiple locations
+        let mut paths = vec![filename.to_string(), format!("./{}", filename)];
+
+        // Add executable directory
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                paths.push(exe_dir.join(filename).to_string_lossy().to_string());
+            }
+        }
+
+        // Add common system locations
+        paths.extend([
             format!("/etc/timecoin/{}", filename),
-            format!("~/.timecoin/{}", filename),
-        ];
+            format!("/usr/local/share/timecoin/{}", filename),
+            format!("/root/{}", filename),
+        ]);
+
+        // Add home directory
+        if let Ok(home) = std::env::var("HOME") {
+            paths.push(format!("{}/.timecoin/{}", home, filename));
+            paths.push(format!("{}/{}", home, filename));
+        }
 
         for path in &paths {
+            tracing::debug!("Trying to load genesis from: {}", path);
             if let Ok(content) = std::fs::read_to_string(path) {
                 match serde_json::from_str::<Block>(&content) {
                     Ok(block) => {
@@ -103,8 +119,9 @@ impl GenesisBlock {
         }
 
         Err(format!(
-            "Genesis file {} not found in any standard location",
-            filename
+            "Genesis file {} not found in any of {} locations tried",
+            filename,
+            paths.len()
         ))
     }
 
