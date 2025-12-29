@@ -217,6 +217,14 @@ fn default_message_max_age() -> i64 {
 }
 
 impl Config {
+    /// Get the data directory for a specific network
+    #[allow(dead_code)]
+    pub fn get_data_directory(network: &NetworkType) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let data_dir = get_network_data_dir(network);
+        fs::create_dir_all(&data_dir)?;
+        Ok(data_dir)
+    }
+
     #[allow(dead_code)]
     pub fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let contents = fs::read_to_string(path)?;

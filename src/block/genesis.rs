@@ -87,7 +87,7 @@ impl GenesisBlock {
         }
 
         // Add data directory (most likely location)
-        if let Ok(data_dir) = crate::config::Config::get_data_directory(network) {
+        if let Ok(data_dir) = crate::config::Config::get_data_directory(&network) {
             paths.push(data_dir.join(filename).to_string_lossy().to_string());
         }
 
