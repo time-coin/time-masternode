@@ -1477,10 +1477,14 @@ impl Blockchain {
                     hex::encode(&block.hash()[..8])
                 );
 
-                // We detected a fork - need to fetch the competing chain
-                // and potentially reorganize
-                // For now, just reject and let sync handle it
-                return Ok(false);
+                // AUTO-RESOLVE: If we detect a fork at height N, check if the peer
+                // is trying to give us a competing block. We should wait to see if
+                // they have a longer chain, rather than immediately rejecting.
+                // Signal that we need fork resolution (caller should request more blocks)
+                return Err(format!(
+                    "Fork detected at height {}: different block at same height",
+                    block_height
+                ));
             }
 
             // We don't have a block at this height - fill the gap
@@ -1743,6 +1747,65 @@ impl Blockchain {
                 blockchain.compare_chain_with_peers().await;
             }
         });
+    }
+
+    /// Automatic fork resolution: given competing blocks, choose the longest chain
+    /// Returns true if we should accept the new blocks (they extend a longer chain)
+    pub async fn should_accept_fork(
+        &self,
+        competing_blocks: &[Block],
+        peer_claimed_height: u64,
+    ) -> Result<bool, String> {
+        if competing_blocks.is_empty() {
+            return Ok(false);
+        }
+
+        let our_height = self.get_height().await;
+        let fork_height = competing_blocks.first().unwrap().header.height;
+
+        tracing::info!(
+            "🔀 Fork resolution: comparing chains at height {} (our height: {}, peer height: {})",
+            fork_height,
+            our_height,
+            peer_claimed_height
+        );
+
+        // Rule 1: Longest chain wins
+        if peer_claimed_height > our_height {
+            tracing::info!(
+                "✅ Accepting fork: peer has longer chain ({} > {})",
+                peer_claimed_height,
+                our_height
+            );
+            return Ok(true);
+        } else if peer_claimed_height < our_height {
+            tracing::info!(
+                "❌ Rejecting fork: our chain is longer ({} > {})",
+                our_height,
+                peer_claimed_height
+            );
+            return Ok(false);
+        }
+
+        // Rule 2: Same length - compare hashes (deterministic tiebreaker)
+        if let Ok(our_tip_block) = self.get_block(our_height) {
+            let peer_tip_block = competing_blocks.last().unwrap();
+            let our_tip_hash = our_tip_block.hash();
+            let peer_tip_hash = peer_tip_block.hash();
+
+            // Use lexicographic comparison of hashes as tiebreaker
+            if peer_tip_hash < our_tip_hash {
+                tracing::info!(
+                    "✅ Accepting fork: same length but peer has lower hash (tiebreaker)"
+                );
+                return Ok(true);
+            } else {
+                tracing::info!("❌ Rejecting fork: same length but our hash is lower (tiebreaker)");
+                return Ok(false);
+            }
+        }
+
+        Ok(false)
     }
 
     /// Validate that our chain hasn't gotten ahead of the network time schedule
