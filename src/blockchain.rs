@@ -1661,6 +1661,76 @@ impl Blockchain {
             last_new
         );
 
+        // Validate all new blocks BEFORE starting reorganization
+        tracing::info!(
+            "🔍 Validating {} blocks before reorganization...",
+            new_blocks.len()
+        );
+
+        let now = chrono::Utc::now().timestamp();
+        let mut expected_prev_hash = if common_ancestor > 0 {
+            self.get_block_hash(common_ancestor).ok()
+        } else {
+            None
+        };
+
+        for (index, block) in new_blocks.iter().enumerate() {
+            let expected_height = common_ancestor + 1 + (index as u64);
+
+            // Validate block height is sequential
+            if block.header.height != expected_height {
+                return Err(format!(
+                    "Block height mismatch during reorg validation: expected {}, got {}",
+                    expected_height, block.header.height
+                ));
+            }
+
+            // Validate block timestamps are not in the future
+            if block.header.timestamp > now + TIMESTAMP_TOLERANCE_SECS {
+                return Err(format!(
+                    "Block {} timestamp {} is too far in future (now: {}, tolerance: {}s)",
+                    block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
+                ));
+            }
+
+            // Validate previous hash chain continuity
+            if let Some(prev_hash) = expected_prev_hash {
+                if block.header.previous_hash != prev_hash {
+                    return Err(format!(
+                        "Block {} previous_hash mismatch: expected {}, got {}",
+                        block.header.height,
+                        hex::encode(&prev_hash[..8]),
+                        hex::encode(&block.header.previous_hash[..8])
+                    ));
+                }
+            }
+
+            // Validate merkle root
+            let computed_merkle = crate::block::types::calculate_merkle_root(&block.transactions);
+            if computed_merkle != block.header.merkle_root {
+                return Err(format!(
+                    "Block {} merkle root mismatch during reorg validation",
+                    block.header.height
+                ));
+            }
+
+            // Validate block size
+            let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
+            if serialized.len() > MAX_BLOCK_SIZE {
+                return Err(format!(
+                    "Block {} exceeds max size: {} > {} bytes",
+                    block.header.height,
+                    serialized.len(),
+                    MAX_BLOCK_SIZE
+                ));
+            }
+
+            // Update expected previous hash for next block
+            expected_prev_hash = Some(block.hash());
+        }
+
+        tracing::info!("✅ All blocks validated successfully, proceeding with reorganization");
+
         // Step 1: Rollback to common ancestor
         self.rollback_to_height(common_ancestor).await?;
 
@@ -1668,19 +1738,8 @@ impl Blockchain {
         let ancestor_work = self.get_work_at_height(common_ancestor).await.unwrap_or(0);
         *self.cumulative_work.write().await = ancestor_work;
 
-        // Step 2: Apply new blocks in order with corrected heights
-        for (index, mut block) in new_blocks.into_iter().enumerate() {
-            // Correct the block height to be sequential after common ancestor
-            let expected_height = common_ancestor + 1 + (index as u64);
-            if block.header.height != expected_height {
-                tracing::debug!(
-                    "🔧 Adjusting block height from {} to {} during reorg",
-                    block.header.height,
-                    expected_height
-                );
-                block.header.height = expected_height;
-            }
-
+        // Step 2: Apply new blocks in order (already validated)
+        for block in new_blocks.into_iter() {
             if let Err(e) = self.add_block(block.clone()).await {
                 tracing::error!(
                     "❌ Failed to apply block {} during reorg: {}",
