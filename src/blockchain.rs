@@ -1028,10 +1028,11 @@ impl Blockchain {
             // Spend inputs (mark UTXOs as spent)
             for input in &tx.inputs {
                 if let Err(e) = self.utxo_manager.spend_utxo(&input.previous_output).await {
-                    tracing::debug!(
-                        "Could not spend UTXO {}:{}: {:?}",
+                    tracing::warn!(
+                        "⚠️  Could not spend UTXO {}:{} in block {}: {:?}",
                         hex::encode(input.previous_output.txid),
                         input.previous_output.vout,
+                        block.header.height,
                         e
                     );
                 } else {
@@ -1055,10 +1056,11 @@ impl Blockchain {
                 };
 
                 if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
-                    tracing::debug!(
-                        "Could not add UTXO for tx {} vout {}: {:?}",
+                    tracing::warn!(
+                        "⚠️  Could not add UTXO for tx {} vout {} in block {}: {:?}",
                         hex::encode(txid),
                         vout,
+                        block.header.height,
                         e
                     );
                 } else {
@@ -1270,18 +1272,27 @@ impl Blockchain {
 
         // Additional check: Verify timestamp aligns with blockchain timeline
         // Expected time = genesis_time + (height * block_time)
-        // This prevents accepting entire chains that are too far ahead
+        // This check is DISABLED during initial sync because catchup blocks use current time
+        // Only enforce this for recently produced blocks (within a few blocks of chain tip)
+        // This prevents accepting entire fake chains that are too far ahead of schedule
         let genesis_time = self.genesis_timestamp();
         let expected_time = genesis_time + (block.header.height as i64 * BLOCK_TIME_SECONDS);
         let time_drift = block.header.timestamp - expected_time;
 
-        // Allow some flexibility for network delays and clock drift, but reject if way ahead
-        const MAX_DRIFT_FROM_SCHEDULE: i64 = 3600; // 1 hour ahead of schedule is suspicious
-        if time_drift > MAX_DRIFT_FROM_SCHEDULE {
-            return Err(format!(
-                "Block {} timestamp {} is too far ahead of expected schedule (expected: {}, drift: {}s)",
-                block.header.height, block.header.timestamp, expected_time, time_drift
-            ));
+        // Only check schedule drift if block is recent (not historical/catchup)
+        // If we're syncing old blocks, they may have catchup timestamps that don't match original schedule
+        let current_height = *self.current_height.blocking_read();
+        let is_recent_block = block.header.height <= current_height + 10;
+        
+        if is_recent_block {
+            // Allow some flexibility for network delays and clock drift, but reject if way ahead
+            const MAX_DRIFT_FROM_SCHEDULE: i64 = 3600; // 1 hour ahead of schedule is suspicious
+            if time_drift > MAX_DRIFT_FROM_SCHEDULE {
+                return Err(format!(
+                    "Block {} timestamp {} is too far ahead of expected schedule (expected: {}, drift: {}s)",
+                    block.header.height, block.header.timestamp, expected_time, time_drift
+                ));
+            }
         }
 
         // 4. Check for duplicate transactions (Phase 1.3)
