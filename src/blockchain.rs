@@ -754,12 +754,15 @@ impl Blockchain {
         sorted_finalized.sort_by_key(|a| a.txid());
         all_txs.extend(sorted_finalized);
 
+        // Calculate merkle root from ALL transactions in canonical order
+        let merkle_root = crate::block::types::calculate_merkle_root(&all_txs);
+
         let mut block = Block {
             header: BlockHeader {
                 version: 1,
                 height: next_height,
                 previous_hash: prev_hash,
-                merkle_root: coinbase.txid(),
+                merkle_root,
                 timestamp: aligned_timestamp,
                 block_reward: total_reward,
                 leader: String::new(),
