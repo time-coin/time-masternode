@@ -641,14 +641,29 @@ impl Blockchain {
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
         // CRITICAL: During catchup, use current time instead of historical deterministic time
-        // Otherwise we'd be creating blocks with timestamps 30 days in the past
+        // If the scheduled timestamp is too far in the past (>15min), use current time
+        // to avoid timestamp validation failures
         let blocks_behind = self
             .calculate_expected_height()
             .saturating_sub(current_height);
 
-        // ALWAYS use deterministic timestamp for consistent merkle roots
-        // Catchup or not, blocks must have reproducible timestamps
-        let aligned_timestamp = deterministic_timestamp;
+        let now = chrono::Utc::now().timestamp();
+        let timestamp_age = now - deterministic_timestamp;
+        let use_current_time = timestamp_age > TIMESTAMP_TOLERANCE_SECS;
+
+        let aligned_timestamp = if use_current_time {
+            tracing::debug!(
+                "📅 Block {} using current timestamp {} (scheduled {} is {}s old, exceeds tolerance)",
+                next_height,
+                now,
+                deterministic_timestamp,
+                timestamp_age
+            );
+            now
+        } else {
+            deterministic_timestamp
+        };
+
         let masternodes = if blocks_behind > 10 {
             // Catchup mode - use all registered masternodes
             let all_mns = self.masternode_registry.list_all().await;
