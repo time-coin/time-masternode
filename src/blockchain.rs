@@ -807,6 +807,19 @@ impl Blockchain {
                 block.header.height
             ));
         }
+        
+        // Additional timestamp validation: check if too far in past
+        // Skip this check during initial sync (when we're significantly behind)
+        let is_syncing = block.header.height > current + 10;
+        if !is_syncing && !is_genesis {
+            let now = chrono::Utc::now().timestamp();
+            if block.header.timestamp < now - TIMESTAMP_TOLERANCE_SECS {
+                return Err(format!(
+                    "Block {} timestamp {} is too far in past (now: {}, tolerance: {}s)",
+                    block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
+                ));
+            }
+        }
 
         // Validate block size
         let serialized = bincode::serialize(&block).map_err(|e| e.to_string())?;
@@ -1231,23 +1244,19 @@ impl Blockchain {
         }
 
         // 3. Verify timestamp is reasonable (Phase 1.3: strict ±15 minute tolerance)
+        // During initial sync, we skip strict timestamp validation to allow historical blocks
+        // This check will be done at add_block time when we know if we're syncing
         let now = chrono::Utc::now().timestamp();
 
-        // Check not too far in future
+        // Always check not too far in future (prevents fake future blocks)
         if block.header.timestamp > now + TIMESTAMP_TOLERANCE_SECS {
             return Err(format!(
                 "Block {} timestamp {} is too far in future (now: {}, tolerance: {}s)",
                 block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
             ));
         }
-
-        // Check not too far in past (prevents timestamp manipulation attacks)
-        if block.header.timestamp < now - TIMESTAMP_TOLERANCE_SECS {
-            return Err(format!(
-                "Block {} timestamp {} is too far in past (now: {}, tolerance: {}s)",
-                block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
-            ));
-        }
+        
+        // Note: Past timestamp check is done in add_block() where we know if we're syncing
 
         // Additional check: Verify timestamp aligns with blockchain timeline
         // Expected time = genesis_time + (height * block_time)
