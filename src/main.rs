@@ -675,16 +675,16 @@ async fn main() {
                 e
             );
         }
-        
+
         // Verify we now have genesis
         let has_genesis = blockchain_init.get_height().await > 0
             || blockchain_init.get_block_by_height(0).await.is_ok();
-        
+
         if !has_genesis {
             tracing::error!("❌ Failed to load genesis block - cannot proceed");
             return;
         }
-        
+
         tracing::info!("✓ Genesis block loaded, now syncing remaining blocks from peers");
 
         // STEP 2: Wait for peer connections to sync remaining blocks
@@ -880,7 +880,7 @@ async fn main() {
 
                     let current_height = block_blockchain.get_height().await;
                     let expected_height = block_blockchain.calculate_expected_height();
-                    
+
                     // Allow single-node bootstrap during initial catchup (height 0)
                     // After genesis, require at least 3 masternodes for normal operation
                     if masternodes.len() < 3 && current_height > 0 {
@@ -890,7 +890,7 @@ async fn main() {
                         );
                         continue;
                     }
-                    
+
                     // During initial bootstrap (height 0), allow 1 masternode to produce blocks
                     if masternodes.is_empty() {
                         tracing::warn!("⚠️ Skipping block production: no masternodes registered");

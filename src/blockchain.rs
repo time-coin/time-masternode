@@ -623,45 +623,20 @@ impl Blockchain {
         let prev_hash = self.get_block_hash(current_height)?;
 
         let next_height = current_height + 1;
-        
+
         // Calculate deterministic timestamp based on block schedule
         let deterministic_timestamp =
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
         // CRITICAL: During catchup, use current time instead of historical deterministic time
         // Otherwise we'd be creating blocks with timestamps 30 days in the past
-        let now = chrono::Utc::now().timestamp();
         let blocks_behind = self
             .calculate_expected_height()
             .saturating_sub(current_height);
-        
-        let aligned_timestamp = if blocks_behind > 10 {
-            // Catchup mode: use current time, aligned to 10-minute boundaries
-            use chrono::Timelike;
-            let dt = chrono::Utc::now();
-            let aligned_minute = (dt.minute() / 10) * 10;
-            dt.date_naive()
-                .and_hms_opt(dt.hour(), aligned_minute, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp()
-        } else {
-            // Normal mode: use deterministic timestamp (on schedule)
-            // Verify we're not producing blocks too far ahead of schedule
-            const MAX_FUTURE_BLOCKS: i64 = 2; // Allow max 2 blocks (20 minutes) ahead
-            let max_allowed_timestamp = now + (MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS);
 
-            if deterministic_timestamp > max_allowed_timestamp {
-                return Err(format!(
-                    "Cannot produce block {}: timestamp {} is {} seconds in the future (max allowed: {})",
-                    next_height,
-                    deterministic_timestamp,
-                    deterministic_timestamp - now,
-                    MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS
-                ));
-            }
-            deterministic_timestamp
-        };
+        // ALWAYS use deterministic timestamp for consistent merkle roots
+        // Catchup or not, blocks must have reproducible timestamps
+        let aligned_timestamp = deterministic_timestamp;
         let masternodes = if blocks_behind > 10 {
             // Catchup mode - use all registered masternodes
             let all_mns = self.masternode_registry.list_all().await;
@@ -711,12 +686,17 @@ impl Blockchain {
         );
 
         // Coinbase transaction creates the total block reward
+        // CRITICAL: Include block height in output to ensure unique txid per block
+        let mut height_bytes = next_height.to_le_bytes().to_vec();
+        let mut script = b"BLOCK_REWARD_".to_vec();
+        script.append(&mut height_bytes);
+
         let coinbase = Transaction {
             version: 1,
             inputs: vec![],
             outputs: vec![TxOutput {
                 value: total_reward,
-                script_pubkey: b"BLOCK_REWARD".to_vec(), // Special marker for block reward
+                script_pubkey: script, // Unique per block due to height
             }],
             lock_time: 0,
             timestamp: aligned_timestamp,
@@ -817,7 +797,7 @@ impl Blockchain {
                 block.header.height
             ));
         }
-        
+
         // Additional timestamp validation: check if too far in past
         // Skip this check during initial sync (when we're significantly behind)
         let is_syncing = block.header.height > current + 10;
@@ -1267,7 +1247,7 @@ impl Blockchain {
                 block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
             ));
         }
-        
+
         // Note: Past timestamp check is done in add_block() where we know if we're syncing
 
         // Additional check: Verify timestamp aligns with blockchain timeline
@@ -1283,7 +1263,7 @@ impl Blockchain {
         // If we're syncing old blocks, they may have catchup timestamps that don't match original schedule
         let current_height = *self.current_height.blocking_read();
         let is_recent_block = block.header.height <= current_height + 10;
-        
+
         if is_recent_block {
             // Allow some flexibility for network delays and clock drift, but reject if way ahead
             const MAX_DRIFT_FROM_SCHEDULE: i64 = 3600; // 1 hour ahead of schedule is suspicious

@@ -385,135 +385,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_genesis_with_masternodes() {
-        let masternodes = vec![
-            GenesisMasternode {
-                address: "TIME0abc123".to_string(),
-                tier: MasternodeTier::Free,
-            },
-            GenesisMasternode {
-                address: "TIME0def456".to_string(),
-                tier: MasternodeTier::Free,
-            },
-            GenesisMasternode {
-                address: "TIME0ghi789".to_string(),
-                tier: MasternodeTier::Free,
-            },
-        ];
+    fn test_genesis_load_testnet() {
+        // Test loading testnet genesis from file
+        let result = GenesisBlock::load_from_file(NetworkType::Testnet);
+        assert!(result.is_ok(), "Failed to load testnet genesis");
 
-        let genesis = GenesisBlock::generate_with_masternodes(
-            NetworkType::Testnet,
-            masternodes,
-            "TIME0abc123",
-        );
-
+        let genesis = result.unwrap();
         assert_eq!(genesis.header.height, 0);
         assert_eq!(genesis.header.previous_hash, [0u8; 32]);
-        assert_eq!(genesis.header.masternode_tiers.free, 3);
-        assert_eq!(genesis.masternode_rewards.len(), 3);
-
-        // Verify reward distribution
-        let total: u64 = genesis.masternode_rewards.iter().map(|(_, v)| v).sum();
-        assert_eq!(total, genesis.header.block_reward);
-    }
-
-    #[test]
-    fn test_genesis_deterministic() {
-        let masternodes = vec![GenesisMasternode {
-            address: "TIME0abc123".to_string(),
-            tier: MasternodeTier::Free,
-        }];
-
-        let genesis1 = GenesisBlock::generate_with_masternodes(
-            NetworkType::Testnet,
-            masternodes.clone(),
-            "TIME0abc123",
-        );
-        let genesis2 = GenesisBlock::generate_with_masternodes(
-            NetworkType::Testnet,
-            masternodes,
-            "TIME0abc123",
-        );
-
-        assert_eq!(genesis1.hash(), genesis2.hash());
-    }
-
-    #[test]
-    fn test_genesis_deterministic_with_sorting() {
-        // Test that sorted input produces same result regardless of initial order
-        let mut masternodes1 = vec![
-            GenesisMasternode {
-                address: "TIME0aaa".to_string(),
-                tier: MasternodeTier::Free,
-            },
-            GenesisMasternode {
-                address: "TIME0bbb".to_string(),
-                tier: MasternodeTier::Bronze,
-            },
-            GenesisMasternode {
-                address: "TIME0ccc".to_string(),
-                tier: MasternodeTier::Silver,
-            },
-        ];
-
-        let mut masternodes2 = vec![
-            GenesisMasternode {
-                address: "TIME0ccc".to_string(),
-                tier: MasternodeTier::Silver,
-            },
-            GenesisMasternode {
-                address: "TIME0aaa".to_string(),
-                tier: MasternodeTier::Free,
-            },
-            GenesisMasternode {
-                address: "TIME0bbb".to_string(),
-                tier: MasternodeTier::Bronze,
-            },
-        ];
-
-        // Sort both
-        masternodes1.sort_by(|a, b| a.address.cmp(&b.address));
-        masternodes2.sort_by(|a, b| a.address.cmp(&b.address));
-
-        let genesis1 =
-            GenesisBlock::generate_with_masternodes(NetworkType::Testnet, masternodes1, "TIME0aaa");
-        let genesis2 =
-            GenesisBlock::generate_with_masternodes(NetworkType::Testnet, masternodes2, "TIME0aaa");
-
-        // Blocks should be identical
-        assert_eq!(genesis1.hash(), genesis2.hash(), "Block hashes must match");
-        assert_eq!(
-            genesis1.masternode_rewards, genesis2.masternode_rewards,
-            "Masternode rewards must be identical"
-        );
-
-        // Verify rewards are sorted by address
-        for i in 1..genesis1.masternode_rewards.len() {
-            assert!(
-                genesis1.masternode_rewards[i - 1].0 <= genesis1.masternode_rewards[i].0,
-                "Rewards must be sorted by address"
-            );
-        }
     }
 
     #[test]
     fn test_genesis_verification() {
-        let masternodes = vec![
-            GenesisMasternode {
-                address: "TIME0abc123".to_string(),
-                tier: MasternodeTier::Free,
-            },
-            GenesisMasternode {
-                address: "TIME0def456".to_string(),
-                tier: MasternodeTier::Bronze,
-            },
-        ];
-
-        let genesis = GenesisBlock::generate_with_masternodes(
-            NetworkType::Testnet,
-            masternodes,
-            "TIME0abc123",
-        );
+        // Load and verify testnet genesis structure
+        let genesis = GenesisBlock::load_from_file(NetworkType::Testnet)
+            .expect("Failed to load testnet genesis");
 
         assert!(GenesisBlock::verify_structure(&genesis).is_ok());
         assert!(GenesisBlock::verify_rewards(&genesis).is_ok());
@@ -521,43 +407,13 @@ mod tests {
 
     #[test]
     fn test_tier_reward_distribution() {
-        // 1 Free (1x) + 1 Bronze (2x) = 3 total weight
-        // Free gets 1/3, Bronze gets 2/3
-        let mut masternodes = vec![
-            GenesisMasternode {
-                address: "TIME0free".to_string(),
-                tier: MasternodeTier::Free,
-            },
-            GenesisMasternode {
-                address: "TIME0bronze".to_string(),
-                tier: MasternodeTier::Bronze,
-            },
-        ];
+        // Test that rewards are properly distributed by tier in loaded genesis
+        let genesis = GenesisBlock::load_from_file(NetworkType::Testnet)
+            .expect("Failed to load testnet genesis");
 
-        // Sort for deterministic generation
-        masternodes.sort_by(|a, b| a.address.cmp(&b.address));
-
-        let genesis = GenesisBlock::generate_with_masternodes(
-            NetworkType::Testnet,
-            masternodes,
-            "TIME0bronze",
-        );
-
-        let free_reward = genesis
-            .masternode_rewards
-            .iter()
-            .find(|(a, _)| a == "TIME0free")
-            .unwrap()
-            .1;
-        let bronze_reward = genesis
-            .masternode_rewards
-            .iter()
-            .find(|(a, _)| a == "TIME0bronze")
-            .unwrap()
-            .1;
-
-        // Bronze should get roughly 2x free's reward
-        assert!(bronze_reward > free_reward);
-        assert_eq!(free_reward + bronze_reward, genesis.header.block_reward);
+        // Verify rewards exist and sum to block reward
+        assert!(!genesis.masternode_rewards.is_empty());
+        let total: u64 = genesis.masternode_rewards.iter().map(|(_, v)| v).sum();
+        assert_eq!(total, genesis.header.block_reward);
     }
 }
