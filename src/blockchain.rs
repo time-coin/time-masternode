@@ -104,14 +104,54 @@ impl Blockchain {
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
 
+        // Helper function to load and store canonical genesis from file
+        let load_and_store_genesis =
+            |storage: &sled::Db, network_type: NetworkType| -> Result<Block, String> {
+                tracing::info!("📥 Loading canonical genesis from file...");
+                let genesis = GenesisBlock::load_from_file(network_type)?;
+
+                // Verify it's valid before storing
+                GenesisBlock::verify_structure(&genesis)?;
+
+                // Store the genesis block
+                let genesis_bytes = bincode::serialize(&genesis)
+                    .map_err(|e| format!("Failed to serialize genesis: {}", e))?;
+                storage
+                    .insert("block_0".as_bytes(), genesis_bytes)
+                    .map_err(|e| format!("Failed to store genesis block: {}", e))?;
+                storage
+                    .insert(genesis.hash().as_slice(), &0u64.to_be_bytes())
+                    .map_err(|e| format!("Failed to index genesis block: {}", e))?;
+                storage
+                    .flush()
+                    .map_err(|e| format!("Failed to flush genesis: {}", e))?;
+
+                tracing::info!("✅ Genesis block loaded and stored from file");
+                tracing::info!("   Hash: {}", hex::encode(&genesis.hash()[..8]));
+                tracing::info!("   Timestamp: {}", genesis.header.timestamp);
+                tracing::info!("   Transactions: {}", genesis.transactions.len());
+
+                Ok(genesis)
+            };
+
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
         if height > 0 {
             // Verify the genesis block structure
             if let Ok(genesis) = self.get_block_by_height(0).await {
                 if let Err(e) = GenesisBlock::verify_structure(&genesis) {
-                    tracing::error!("❌ FATAL: Local genesis block is invalid: {}", e);
-                    return Err(format!("Genesis verification failed: {}", e));
+                    tracing::error!(
+                        "❌ Local genesis block is invalid: {} - replacing with canonical genesis",
+                        e
+                    );
+
+                    // Remove the invalid genesis and all blocks built on it
+                    self.clear_all_blocks();
+
+                    // Load canonical genesis from file
+                    load_and_store_genesis(&self.storage, self.network_type)?;
+                    *self.current_height.write().await = 0;
+                    return Ok(());
                 }
             }
             *self.current_height.write().await = height;
@@ -127,8 +167,20 @@ impl Blockchain {
         {
             if let Ok(genesis) = self.get_block_by_height(0).await {
                 if let Err(e) = GenesisBlock::verify_structure(&genesis) {
-                    tracing::error!("❌ FATAL: Local genesis is invalid: {}", e);
-                    return Err(format!("Genesis verification failed: {}", e));
+                    tracing::error!(
+                        "❌ Local genesis is invalid: {} - replacing with canonical genesis",
+                        e
+                    );
+
+                    // Remove the invalid genesis
+                    let _ = self.storage.remove("block_0".as_bytes());
+                    let _ = self.storage.remove(genesis.hash().as_slice());
+                    let _ = self.storage.flush();
+
+                    // Load canonical genesis from file
+                    load_and_store_genesis(&self.storage, self.network_type)?;
+                    *self.current_height.write().await = 0;
+                    return Ok(());
                 }
             }
             *self.current_height.write().await = 0;
@@ -137,24 +189,9 @@ impl Blockchain {
         }
 
         // No local blockchain - load genesis from file
-        tracing::info!("📥 No local blockchain found - loading genesis from file");
-        let genesis = GenesisBlock::load_from_file(self.network_type)?;
-        
-        // Store the genesis block
-        let genesis_bytes =
-            bincode::serialize(&genesis).map_err(|e| format!("Failed to serialize genesis: {}", e))?;
-        self.storage
-            .insert("block_0".as_bytes(), genesis_bytes)
-            .map_err(|e| format!("Failed to store genesis block: {}", e))?;
-        self.storage
-            .insert(genesis.hash().as_slice(), &0u64.to_be_bytes())
-            .map_err(|e| format!("Failed to index genesis block: {}", e))?;
-        
+        load_and_store_genesis(&self.storage, self.network_type)?;
         *self.current_height.write().await = 0;
-        tracing::info!("✅ Genesis block loaded and stored from file");
-        tracing::info!("   Hash: {}", hex::encode(&genesis.hash()[..8]));
-        tracing::info!("   Timestamp: {}", genesis.header.timestamp);
-        
+
         Ok(())
     }
 
@@ -360,147 +397,6 @@ impl Blockchain {
                 }
             }
         }
-    }
-
-    #[allow(dead_code)]
-    pub async fn create_genesis_block(&self) -> Result<Block, String> {
-        // Generate genesis dynamically from active masternodes at genesis time
-        tracing::info!("📦 Generating deterministic genesis block from active masternodes...");
-
-        let masternodes_info = self.masternode_registry.list_active().await;
-
-        // Convert to GenesisMasternode format
-        let mut genesis_masternodes: Vec<crate::block::genesis::GenesisMasternode> =
-            masternodes_info
-                .iter()
-                .map(|mn| crate::block::genesis::GenesisMasternode {
-                    address: mn.masternode.address.clone(), // Use IP address for determinism
-                    tier: mn.masternode.tier,
-                })
-                .collect();
-
-        // Check minimum masternodes
-        use crate::block::genesis::GenesisBlock;
-        if genesis_masternodes.len() < GenesisBlock::MIN_MASTERNODES_FOR_GENESIS {
-            return Err(format!(
-                "Need {} masternodes to generate genesis, only {} active",
-                GenesisBlock::MIN_MASTERNODES_FOR_GENESIS,
-                genesis_masternodes.len()
-            ));
-        }
-
-        // IMPORTANT: Sort masternodes by address for deterministic genesis across all nodes
-        genesis_masternodes.sort_by(|a, b| a.address.cmp(&b.address));
-
-        // Get leader (first masternode after sorting)
-        let leader = genesis_masternodes
-            .first()
-            .map(|mn| mn.address.clone())
-            .unwrap_or_else(|| "genesis".to_string());
-
-        // Generate using the template system
-        let block = GenesisBlock::generate_with_masternodes(
-            self.network_type,
-            genesis_masternodes.clone(),
-            &leader,
-        );
-
-        tracing::info!(
-            "✅ Generated genesis block with {} masternodes, reward: {} satoshis",
-            masternodes_info.len(),
-            block.header.block_reward
-        );
-        tracing::info!("   Hash: {}", hex::encode(&block.hash()[..8]));
-        tracing::info!("   Leader: {}", leader);
-        tracing::info!("   Timestamp: {}", block.header.timestamp);
-
-        Ok(block)
-    }
-
-    /// Validate that a received genesis block matches what we would generate
-    /// This ensures all nodes have the same genesis block
-    pub async fn validate_genesis_matches(&self, received_genesis: &Block) -> Result<(), String> {
-        use crate::block::genesis::GenesisBlock;
-
-        // First, verify basic structure
-        GenesisBlock::verify_structure(received_genesis)?;
-
-        // Get our current view of masternodes
-        let masternodes_info = self.masternode_registry.list_active().await;
-
-        // Convert to GenesisMasternode format
-        let mut our_masternodes: Vec<crate::block::genesis::GenesisMasternode> = masternodes_info
-            .iter()
-            .map(|mn| crate::block::genesis::GenesisMasternode {
-                address: mn.masternode.address.clone(),
-                tier: mn.masternode.tier,
-            })
-            .collect();
-
-        // Sort for deterministic comparison
-        our_masternodes.sort_by(|a, b| a.address.cmp(&b.address));
-
-        // Extract masternodes from received genesis
-        let received_mn_addresses: std::collections::HashSet<String> = received_genesis
-            .masternode_rewards
-            .iter()
-            .map(|(addr, _)| addr.clone())
-            .collect();
-
-        let our_mn_addresses: std::collections::HashSet<String> = our_masternodes
-            .iter()
-            .map(|mn| mn.address.clone())
-            .collect();
-
-        // Check if masternode sets match
-        if received_mn_addresses != our_mn_addresses {
-            let missing: Vec<_> = our_mn_addresses
-                .difference(&received_mn_addresses)
-                .collect();
-            let extra: Vec<_> = received_mn_addresses
-                .difference(&our_mn_addresses)
-                .collect();
-
-            tracing::warn!(
-                "⚠️  Genesis masternode set mismatch:\n  \
-                 Our view: {} masternodes: {:?}\n  \
-                 Received: {} masternodes: {:?}\n  \
-                 Missing from received: {:?}\n  \
-                 Extra in received: {:?}",
-                our_mn_addresses.len(),
-                our_mn_addresses.iter().take(5).collect::<Vec<_>>(),
-                received_mn_addresses.len(),
-                received_mn_addresses.iter().take(5).collect::<Vec<_>>(),
-                missing,
-                extra
-            );
-
-            // If we have fewer masternodes, accept the received genesis
-            // This handles the case where we're a new node joining after genesis
-            if our_masternodes.len() < received_genesis.masternode_rewards.len() {
-                tracing::info!(
-                    "✓ Accepting received genesis (we have incomplete masternode view: {} < {})",
-                    our_masternodes.len(),
-                    received_genesis.masternode_rewards.len()
-                );
-                return Ok(());
-            }
-
-            // If we have more masternodes, the received genesis might be outdated
-            // But still accept it if it's valid - the leader had a different view
-            tracing::warn!(
-                "⚠️  We have more masternodes ({}) than genesis ({}), but accepting genesis from leader",
-                our_masternodes.len(),
-                received_genesis.masternode_rewards.len()
-            );
-            return Ok(());
-        }
-
-        tracing::info!(
-            "✓ Genesis validation passed: {} masternodes match",
-            received_mn_addresses.len()
-        );
-        Ok(())
     }
 
     /// Calculate expected height based on time elapsed since genesis
@@ -1500,9 +1396,10 @@ impl Blockchain {
             .contains_key("block_0".as_bytes())
             .unwrap_or(false);
         if !has_genesis {
-            tracing::debug!(
-                "⏳ Cannot add block {} - waiting for genesis block first",
-                block_height
+            tracing::warn!(
+                "⏳ Cannot add block {} - waiting for genesis block first (current_height: {})",
+                block_height,
+                *self.current_height.read().await
             );
             return Ok(false);
         }

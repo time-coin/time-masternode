@@ -1003,10 +1003,11 @@ impl PeerConnection {
                     self.direction, self.peer_ip
                 );
 
-                // Validate genesis matches our expected genesis
-                match blockchain.validate_genesis_matches(block).await {
+                // Simply verify basic genesis structure
+                use crate::block::genesis::GenesisBlock;
+                match GenesisBlock::verify_structure(block) {
                     Ok(()) => {
-                        info!("✅ Genesis validation passed, adding to chain");
+                        info!("✅ Genesis structure validation passed, adding to chain");
 
                         match blockchain.add_block(block.clone()).await {
                             Ok(()) => {

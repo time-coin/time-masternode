@@ -948,10 +948,11 @@ async fn handle_peer(
 
                                     tracing::info!("📦 Received genesis announcement from {}", peer.addr);
 
-                                    // Validate genesis matches our expected genesis
-                                    match blockchain.validate_genesis_matches(block).await {
+                                    // Simply verify basic genesis structure
+                                    use crate::block::genesis::GenesisBlock;
+                                    match GenesisBlock::verify_structure(block) {
                                         Ok(()) => {
-                                            tracing::info!("✅ Genesis validation passed, adding to chain");
+                                            tracing::info!("✅ Genesis structure validation passed, adding to chain");
 
                                             // Add genesis to our blockchain
                                             match blockchain.add_block(block.clone()).await {
@@ -1144,15 +1145,25 @@ async fn handle_peer(
                                                 }
                                                 Ok(false) => {
                                                     skipped += 1;
+                                                    tracing::debug!(
+                                                        "⏭️ Block {} from {} already exists or was skipped (our height: {})",
+                                                        block.header.height,
+                                                        peer.addr,
+                                                        blockchain.get_height().await
+                                                    );
                                                     // If we're skipping a block that's ahead of us, might be a fork
                                                     if block.header.height > blockchain.get_height().await {
                                                         fork_detected = true;
                                                     }
                                                 }
                                                 Err(e) => {
-                                                    // Could be duplicate or invalid - log at debug level
-                                                    tracing::debug!("⏭️ Skipped block {}: {}", block.header.height, e);
+                                                    // Could be duplicate or invalid - log at warn level to diagnose sync issues
+                                                    tracing::warn!("⏭️ Skipped block {} from {}: {}", block.header.height, peer.addr, e);
                                                     skipped += 1;
+                                                    // If we're skipping a block that's ahead of us, might be a fork
+                                                    if block.header.height > blockchain.get_height().await {
+                                                        fork_detected = true;
+                                                    }
                                                 }
                                             }
                                         }

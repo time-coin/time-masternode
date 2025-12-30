@@ -116,7 +116,7 @@ pub struct BlockHeader {
 impl Block {
     pub fn hash(&self) -> Hash256 {
         use sha2::{Digest, Sha256};
-        
+
         // Hash only the consensus-critical fields, excluding masternode_tiers
         // which is metadata that changes over time and should not affect block identity
         let mut hasher = Sha256::new();
@@ -129,7 +129,7 @@ impl Block {
         hasher.update(self.header.leader.as_bytes());
         hasher.update(self.header.attestation_root);
         // Explicitly NOT including masternode_tiers - it's metadata only
-        
+
         hasher.finalize().into()
     }
 

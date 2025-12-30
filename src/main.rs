@@ -701,8 +701,8 @@ async fn main() {
 
         // Now verify genesis is correct (if we have one)
         if let Err(e) = blockchain_init.initialize_genesis().await {
-            tracing::warn!(
-                "⚠️  Genesis verification: {} - will create during block production",
+            tracing::error!(
+                "❌ Genesis initialization failed: {} - check that genesis.testnet.json exists",
                 e
             );
         }
@@ -721,18 +721,18 @@ async fn main() {
         Blockchain::start_chain_comparison_task(blockchain_init.clone());
         tracing::info!("✓ Fork detection task started (checks every 5 minutes)");
 
-        // Start periodic genesis creation check
+        // Start periodic genesis validation check (in case of late genesis file deployment)
         let blockchain_for_genesis = blockchain_init.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
-                // Only check if we don't have genesis yet
+                // Only check if we don't have a valid genesis yet
                 let height = blockchain_for_genesis.get_height().await;
                 if height == 0 {
                     // Check if we have a genesis block
                     if blockchain_for_genesis.get_block_by_height(0).await.is_err() {
-                        // No genesis - try to create it
+                        // No genesis - try to load from file
                         if let Err(e) = blockchain_for_genesis.initialize_genesis().await {
                             tracing::debug!("Genesis not ready yet: {}", e);
                         }
