@@ -666,8 +666,28 @@ async fn main() {
     let blockchain_server = blockchain_init.clone();
     let peer_registry_for_sync = peer_connection_registry.clone();
     tokio::spawn(async move {
-        // Wait for peer connections to establish first
-        // New nodes need peers to download the blockchain including genesis
+        // STEP 1: Load genesis from file FIRST (before waiting for peers)
+        // Genesis file is local - no network needed
+        tracing::info!("📥 Initializing genesis block...");
+        if let Err(e) = blockchain_init.initialize_genesis().await {
+            tracing::error!(
+                "❌ Genesis initialization failed: {} - check that genesis.testnet.json exists",
+                e
+            );
+        }
+        
+        // Verify we now have genesis
+        let has_genesis = blockchain_init.get_height().await > 0
+            || blockchain_init.get_block_by_height(0).await.is_ok();
+        
+        if !has_genesis {
+            tracing::error!("❌ Failed to load genesis block - cannot proceed");
+            return;
+        }
+        
+        tracing::info!("✓ Genesis block loaded, now syncing remaining blocks from peers");
+
+        // STEP 2: Wait for peer connections to sync remaining blocks
         let mut wait_seconds = 0u64;
         let max_wait = 60u64; // Wait up to 60 seconds for peers
         while wait_seconds < max_wait {
@@ -686,25 +706,10 @@ async fn main() {
             }
         }
 
-        // Check if we have genesis block
-        let has_genesis = blockchain_init.get_height().await > 0
-            || blockchain_init.get_block_by_height(0).await.is_ok();
-
-        if !has_genesis {
-            // Genesis block is automatically loaded by blockchain initialization
-            // Sync from peers to get remaining blocks
-            tracing::info!("📦 Syncing blockchain from peers...");
-            if let Err(e) = blockchain_init.sync_from_peers().await {
-                tracing::warn!("⚠️  Initial sync from peers: {}", e);
-            }
-        }
-
-        // Now verify genesis is correct (if we have one)
-        if let Err(e) = blockchain_init.initialize_genesis().await {
-            tracing::error!(
-                "❌ Genesis initialization failed: {} - check that genesis.testnet.json exists",
-                e
-            );
+        // STEP 3: Sync remaining blocks from peers
+        tracing::info!("📦 Syncing blockchain from peers...");
+        if let Err(e) = blockchain_init.sync_from_peers().await {
+            tracing::warn!("⚠️  Initial sync from peers: {}", e);
         }
 
         // Verify chain integrity and download any missing blocks
