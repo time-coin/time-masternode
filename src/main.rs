@@ -924,6 +924,42 @@ async fn main() {
                             }
                         }
 
+                        // Before producing catchup blocks, check if any peer has a longer chain
+                        // If so, we should NOT produce blocks as it may create a fork
+                        let connected_peers = block_peer_registry.list_peers().await;
+                        let mut peer_has_longer_chain = false;
+
+                        if !connected_peers.is_empty() {
+                            // Query peers for their heights by requesting blocks beyond our height
+                            let probe_start = current_height + 1;
+                            let probe_end = expected_height + 100; // Check well beyond expected
+                            let get_blocks = NetworkMessage::GetBlocks(probe_start, probe_end);
+
+                            for peer_ip in &connected_peers {
+                                let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
+                            }
+
+                            // Wait briefly for responses
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                            // Check if our height increased (meaning a peer sent us blocks)
+                            let new_height = block_blockchain.get_height().await;
+                            if new_height > current_height {
+                                peer_has_longer_chain = true;
+                                tracing::info!(
+                                    "✅ Peer(s) have longer chain ({} > {}), will wait for sync instead of producing catchup blocks",
+                                    new_height, current_height
+                                );
+                            }
+                        }
+
+                        // If any peer has blocks beyond our height, do NOT produce catchup blocks
+                        // This prevents creating competing forks when the network is split
+                        if peer_has_longer_chain {
+                            tracing::warn!("⚠️  Skipping catchup production: peers have longer chain, waiting for sync/reorg");
+                            continue;
+                        }
+
                         // Sync failed - all peers may also be behind
                         // Use TSDC leader selection for catchup blocks (use current_height as slot)
                         let catchup_slot = current_height;
