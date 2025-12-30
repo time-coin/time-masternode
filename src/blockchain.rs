@@ -423,18 +423,18 @@ impl Blockchain {
     /// NOTE: If peers don't have blocks, they'll be produced on TSDC schedule
     pub async fn sync_from_peers(&self) -> Result<(), String> {
         let mut current = *self.current_height.read().await;
-        let expected = self.calculate_expected_height();
+        let time_expected = self.calculate_expected_height();
 
-        if current >= expected {
+        if current >= time_expected {
             tracing::info!("✓ Blockchain synced (height: {})", current);
             return Ok(());
         }
 
-        let behind = expected - current;
+        let behind = time_expected - current;
         tracing::info!(
-            "⏳ Syncing from peers: {} → {} ({} blocks behind)",
+            "⏳ Syncing from peers: {} → {} ({} blocks behind based on time)",
             current,
-            expected,
+            time_expected,
             behind
         );
 
@@ -488,8 +488,9 @@ impl Blockchain {
             // Sync loop - keep requesting batches until caught up or timeout
             let sync_start = std::time::Instant::now();
             let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
+            let starting_height = current;
 
-            while current < expected && sync_start.elapsed() < max_sync_time {
+            while current < time_expected && sync_start.elapsed() < max_sync_time {
                 // Request next batch of blocks
                 // Always start from 0 when current is 0 (need genesis)
                 // Otherwise start from current + 1 (need next block after our tip)
@@ -498,7 +499,7 @@ impl Blockchain {
                 } else {
                     current + 1 // Request next block after our tip
                 };
-                let batch_end = (batch_start + 100).min(expected);
+                let batch_end = (batch_start + 100).min(time_expected);
 
                 let req = NetworkMessage::GetBlocks(batch_start, batch_end);
                 tracing::info!(
@@ -516,12 +517,13 @@ impl Blockchain {
                 let batch_start_time = std::time::Instant::now();
                 let batch_timeout = std::time::Duration::from_secs(15);
                 let mut last_height = current;
+                let mut made_progress = false;
 
                 while batch_start_time.elapsed() < batch_timeout {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     let now_height = *self.current_height.read().await;
 
-                    if now_height >= expected {
+                    if now_height >= time_expected {
                         tracing::info!("✓ Sync complete at height {}", now_height);
                         return Ok(());
                     }
@@ -530,12 +532,22 @@ impl Blockchain {
                     if now_height > last_height {
                         tracing::debug!("📈 Progress: {} → {}", last_height, now_height);
                         last_height = now_height;
+                        made_progress = true;
                     }
 
                     // If we received all blocks in this batch, request next batch
                     if now_height >= batch_end {
                         break;
                     }
+                }
+
+                // If no progress after first batch, peers likely don't have the blocks
+                if !made_progress && current == starting_height {
+                    tracing::warn!(
+                        "⚠️  No progress after requesting blocks from peers - they may not have blocks {} yet",
+                        batch_start
+                    );
+                    break;
                 }
 
                 // Update current height for next iteration
@@ -547,7 +559,7 @@ impl Blockchain {
                     tracing::info!(
                         "⏳ Still syncing... height {} / {} ({}s elapsed)",
                         current,
-                        expected,
+                        time_expected,
                         elapsed
                     );
                 }
@@ -555,19 +567,19 @@ impl Blockchain {
         }
 
         let final_height = *self.current_height.read().await;
-        if final_height >= expected {
+        if final_height >= time_expected {
             tracing::info!("✓ Sync complete at height {}", final_height);
             return Ok(());
         }
 
         tracing::warn!(
-            "⚠️  Sync timeout at height {} (target: {})",
+            "⚠️  Sync incomplete at height {} (time-based target: {})",
             final_height,
-            expected
+            time_expected
         );
         Err(format!(
-            "Peer sync timeout (height: {} / {})",
-            final_height, expected
+            "Peers don't have blocks beyond {} (time-based target: {})",
+            final_height, time_expected
         ))
     }
 
