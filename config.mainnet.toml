@@ -41,10 +41,12 @@ data_dir = ""  # Leave empty for automatic platform-specific path
 cache_size_mb = 512
 
 [consensus]
-# BFT consensus settings
+# Avalanche consensus settings
 voting_timeout_ms = 3000
 min_masternodes = 10
-quorum_percentage = 67  # 2/3 = 66.67%
+# Avalanche uses simple majority (>50%) of total stake weight for finality
+# Sample quorum within each round: alpha=14 out of k=20 validators (70%)
+quorum_percentage = 51  # Simple majority for Avalanche consensus
 
 [block]
 # Block production settings
