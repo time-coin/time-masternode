@@ -873,17 +873,24 @@ async fn main() {
                     // Sort deterministically by address for consistent leader election across all nodes
                     sort_masternodes_canonical(&mut masternodes);
 
-                    // Require at least 3 masternodes for block production
-                    if masternodes.len() < 3 {
+                    let current_height = block_blockchain.get_height().await;
+                    let expected_height = block_blockchain.calculate_expected_height();
+                    
+                    // Allow single-node bootstrap during initial catchup (height 0)
+                    // After genesis, require at least 3 masternodes for normal operation
+                    if masternodes.len() < 3 && current_height > 0 {
                         tracing::warn!(
-                            "⚠️ Skipping block production: only {} masternodes active (minimum 3 required)",
+                            "⚠️ Skipping block production: only {} masternodes active (minimum 3 required for post-genesis blocks)",
                             masternodes.len()
                         );
                         continue;
                     }
-
-                    let current_height = block_blockchain.get_height().await;
-                    let expected_height = block_blockchain.calculate_expected_height();
+                    
+                    // During initial bootstrap (height 0), allow 1 masternode to produce blocks
+                    if masternodes.is_empty() {
+                        tracing::warn!("⚠️ Skipping block production: no masternodes registered");
+                        continue;
+                    }
 
                     // Determine what to do based on height comparison
                     if current_height < expected_height - 1 {
