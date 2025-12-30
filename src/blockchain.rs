@@ -799,9 +799,11 @@ impl Blockchain {
         }
 
         // Additional timestamp validation: check if too far in past
-        // Skip this check during initial sync (when we're significantly behind)
+        // Skip this check during initial sync or catchup (when adding historical blocks)
         let is_syncing = block.header.height > current + 10;
-        if !is_syncing && !is_genesis {
+        // Also skip if the block is from a historical time period (older than 24 hours)
+        let is_historical = block.header.timestamp < chrono::Utc::now().timestamp() - 86400;
+        if !is_syncing && !is_genesis && !is_historical {
             let now = chrono::Utc::now().timestamp();
             if block.header.timestamp < now - TIMESTAMP_TOLERANCE_SECS {
                 return Err(format!(
