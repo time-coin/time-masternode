@@ -113,6 +113,9 @@ pub struct PeerConnection {
 
     /// Remote port for this connection (ephemeral)
     remote_port: u16,
+
+    /// Last known height of the peer (for fork resolution)
+    peer_height: Arc<RwLock<Option<u64>>>,
 }
 
 impl PeerConnection {
@@ -148,6 +151,7 @@ impl PeerConnection {
             writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
+            peer_height: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
         })
@@ -177,6 +181,7 @@ impl PeerConnection {
             writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
+            peer_height: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
         })
@@ -670,6 +675,13 @@ impl PeerConnection {
                     let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
                     let our_height = blockchain.get_height().await;
 
+                    // Update our knowledge of peer's height (they at least have end_height)
+                    let current_known = self.peer_height.read().await;
+                    if current_known.is_none() || current_known.unwrap() < end_height {
+                        *self.peer_height.write().await = Some(end_height);
+                    }
+                    drop(current_known);
+
                     info!(
                         "📥 [{:?}] Received {} blocks (height {}-{}) from {} (our height: {})",
                         self.direction,
@@ -864,16 +876,19 @@ impl PeerConnection {
                             self.direction, fork_height, self.peer_ip
                         );
 
-                        // Check if peer has a longer chain
-                        if end_height > our_height {
+                        // Get peer's last known height (or use end_height as fallback)
+                        let peer_tip_height = self.peer_height.read().await.unwrap_or(end_height);
+
+                        // Check if peer has a longer chain using their tip height
+                        if peer_tip_height > our_height {
                             info!(
                                 "📊 Peer {} has longer chain ({} > {}), requesting full chain for reorganization",
-                                self.peer_ip, end_height, our_height
+                                self.peer_ip, peer_tip_height, our_height
                             );
 
                             // Request blocks from further back to find common ancestor
                             let request_from = fork_height.saturating_sub(10);
-                            let msg = NetworkMessage::GetBlocks(request_from, end_height + 100);
+                            let msg = NetworkMessage::GetBlocks(request_from, peer_tip_height);
                             if let Err(e) = self.send_message(&msg).await {
                                 warn!("Failed to request blocks for reorganization: {}", e);
                             }
@@ -881,7 +896,7 @@ impl PeerConnection {
                         } else {
                             warn!(
                                 "⚠️ [{:?}] Peer {} has fork but not longer chain (peer: {}, ours: {}), ignoring",
-                                self.direction, self.peer_ip, end_height, our_height
+                                self.direction, self.peer_ip, peer_tip_height, our_height
                             );
                         }
                     }
@@ -1124,6 +1139,9 @@ impl PeerConnection {
                 }
             }
             NetworkMessage::BlockHeightResponse(peer_height) => {
+                // Store peer's height for fork resolution
+                *self.peer_height.write().await = Some(*peer_height);
+
                 // Handle peer's height response for fork detection
                 let our_height = blockchain.get_height().await;
 
