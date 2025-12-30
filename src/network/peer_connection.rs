@@ -726,22 +726,59 @@ impl PeerConnection {
                                         common_ancestor = common_ancestor.saturating_sub(1);
                                     }
 
-                                    // Collect blocks after common ancestor
-                                    let reorg_blocks: Vec<Block> = blocks
+                                    // Collect blocks after common ancestor, sorted by height
+                                    let mut reorg_blocks: Vec<Block> = blocks
                                         .iter()
                                         .filter(|b| b.header.height > common_ancestor)
                                         .cloned()
                                         .collect();
+                                    reorg_blocks.sort_by_key(|b| b.header.height);
 
-                                    if reorg_blocks.is_empty() {
-                                        // Need to request more blocks from common ancestor
+                                    // Check if we have all blocks needed (must be contiguous)
+                                    let need_full_chain = if reorg_blocks.is_empty() {
+                                        true
+                                    } else {
+                                        let first_height =
+                                            reorg_blocks.first().unwrap().header.height;
+                                        let last_height =
+                                            reorg_blocks.last().unwrap().header.height;
+
+                                        // Must start from common_ancestor + 1
+                                        if first_height != common_ancestor + 1 {
+                                            info!(
+                                                "🔍 Missing blocks: need to start from {}, but first block is {}",
+                                                common_ancestor + 1,
+                                                first_height
+                                            );
+                                            true
+                                        // Must have all blocks up to at least end_height
+                                        } else if last_height < end_height {
+                                            info!(
+                                                "🔍 Incomplete chain: have up to {}, need up to {}",
+                                                last_height, end_height
+                                            );
+                                            true
+                                        // Check for gaps in the sequence
+                                        } else {
+                                            let has_gaps = reorg_blocks.windows(2).any(|w| {
+                                                w[1].header.height != w[0].header.height + 1
+                                            });
+                                            if has_gaps {
+                                                info!("🔍 Detected gaps in block sequence");
+                                            }
+                                            has_gaps
+                                        }
+                                    };
+
+                                    if need_full_chain {
+                                        // Need to request complete chain from common ancestor
                                         info!(
                                             "📤 Requesting full chain from {} to {} for reorganization",
-                                            common_ancestor,
+                                            common_ancestor + 1,
                                             end_height
                                         );
                                         let msg = NetworkMessage::GetBlocks(
-                                            common_ancestor,
+                                            common_ancestor + 1,
                                             end_height + 100,
                                         );
                                         if let Err(e) = self.send_message(&msg).await {
