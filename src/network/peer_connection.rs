@@ -784,6 +784,7 @@ impl PeerConnection {
                     let mut added = 0;
                     let mut skipped = 0;
                     let mut fork_detected_at = None;
+                    let mut fork_blocks = Vec::new();
 
                     for block in blocks {
                         match blockchain.add_block_with_fork_handling(block.clone()).await {
@@ -792,7 +793,10 @@ impl PeerConnection {
                             Err(e) => {
                                 // Check if this is a fork error
                                 if e.contains("Fork detected") {
-                                    fork_detected_at = Some(block.header.height);
+                                    if fork_detected_at.is_none() {
+                                        fork_detected_at = Some(block.header.height);
+                                    }
+                                    fork_blocks.push(block.clone());
                                     warn!(
                                         "🔀 [{:?}] Fork detected at block {}: {}",
                                         self.direction, block.header.height, e
@@ -816,16 +820,33 @@ impl PeerConnection {
                         }
                     }
 
-                    // If fork was detected, disconnect this peer - they're on a different chain
+                    // If fork was detected during block application, try to reorganize instead of disconnecting
                     if let Some(fork_height) = fork_detected_at {
-                        error!(
-                            "🚫 [{:?}] Peer {} is on a fork (fork detected at height {}) - disconnecting",
-                            self.direction, self.peer_ip, fork_height
+                        warn!(
+                            "🔀 [{:?}] Fork detected during block sync at height {} from {}",
+                            self.direction, fork_height, self.peer_ip
                         );
-                        return Err(format!(
-                            "Peer {} is on a fork - detected at height {}",
-                            self.peer_ip, fork_height
-                        ));
+
+                        // Check if peer has a longer chain
+                        if end_height > our_height {
+                            info!(
+                                "📊 Peer {} has longer chain ({} > {}), requesting full chain for reorganization",
+                                self.peer_ip, end_height, our_height
+                            );
+
+                            // Request blocks from further back to find common ancestor
+                            let request_from = fork_height.saturating_sub(10);
+                            let msg = NetworkMessage::GetBlocks(request_from, end_height + 100);
+                            if let Err(e) = self.send_message(&msg).await {
+                                warn!("Failed to request blocks for reorganization: {}", e);
+                            }
+                            return Ok(());
+                        } else {
+                            warn!(
+                                "⚠️ [{:?}] Peer {} has fork but not longer chain (peer: {}, ours: {}), ignoring",
+                                self.direction, self.peer_ip, end_height, our_height
+                            );
+                        }
                     }
 
                     if added > 0 {
