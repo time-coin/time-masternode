@@ -1106,26 +1106,35 @@ async fn main() {
                                         continue;
                                     }
 
+                                    let blocks_still_behind = expected_height - final_height;
                                     tracing::warn!(
-                                        "⚠️  After {} sync attempts, still {} blocks behind - NOT using fallback production",
-                                        max_sync_attempts, expected_height - final_height
+                                        "⚠️  After {} sync attempts, still {} blocks behind",
+                                        max_sync_attempts, blocks_still_behind
                                     );
-                                    tracing::warn!(
-                                        "⚠️  Waiting for peers to provide valid blocks (fallback production disabled to prevent chain splits)"
-                                    );
-                                    is_producing.store(false, Ordering::SeqCst);
-                                    continue; // Skip fallback production entirely
+
+                                    // Allow fallback production if:
+                                    // 1. Catchup leader has timed out (we waited 30s)
+                                    // 2. Peer sync exhausted (tried 5 times)
+                                    // 3. Still far behind (>10 blocks)
+                                    // This prevents permanent deadlock while maintaining safety
+                                    if blocks_still_behind > 10 {
+                                        tracing::info!("🔧 Catchup leader timed out and peers don't have blocks - will attempt local block production to recover");
+                                        // Continue to fallback production below
+                                    } else {
+                                        tracing::warn!(
+                                            "⚠️  Waiting for peers to provide remaining {} blocks",
+                                            blocks_still_behind
+                                        );
+                                        is_producing.store(false, Ordering::SeqCst);
+                                        continue; // Only skip fallback if close to catching up
+                                    }
                                 } else {
                                     tracing::warn!("⚠️  No connected peers available for sync");
-                                    is_producing.store(false, Ordering::SeqCst);
-                                    continue;
+                                    // Continue to fallback production below
                                 }
 
-                                // FALLBACK PRODUCTION DISABLED: We now always sync from peers
-                                // to prevent chain splits. If sync fails, node waits for valid
-                                // blocks from peers rather than generating its own chain.
-
-                                /* OLD FALLBACK CODE (DISABLED TO PREVENT CHAIN SPLITS)
+                                // FALLBACK PRODUCTION: If catchup leader times out and peer sync fails,
+                                // attempt local block production to recover the network
 
                                 // Acquire block production lock (P2P best practice #8)
                                 if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -1134,8 +1143,7 @@ async fn main() {
                                 }
 
                                 tracing::warn!(
-                                    "⚠️  Catchup leader {} timeout - becoming fallback producer",
-                                    selected_leader.address
+                                    "⚠️  Catchup leader timeout - becoming fallback producer"
                                 );
 
                                 // Produce catchup blocks ourselves (only after sync attempt failed)
@@ -1201,8 +1209,6 @@ async fn main() {
                                     catchup_produced,
                                     block_blockchain.get_height().await
                                 );
-
-                                END OF OLD FALLBACK CODE */
 
                             } else {
                                 tracing::info!(
