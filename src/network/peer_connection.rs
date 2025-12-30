@@ -1078,7 +1078,7 @@ impl PeerConnection {
 
                     // Request missing blocks
                     let start = our_height.saturating_add(1);
-                    let end = std::cmp::min(start + 500, *peer_height);
+                    let end = std::cmp::min(start + 100, *peer_height);
                     let get_blocks = NetworkMessage::GetBlocks(start, end);
                     if let Err(e) = self.send_message(&get_blocks).await {
                         warn!(

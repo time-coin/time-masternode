@@ -498,7 +498,7 @@ impl Blockchain {
                 } else {
                     current + 1 // Request next block after our tip
                 };
-                let batch_end = (batch_start + 500).min(expected);
+                let batch_end = (batch_start + 100).min(expected);
 
                 let req = NetworkMessage::GetBlocks(batch_start, batch_end);
                 tracing::info!(
