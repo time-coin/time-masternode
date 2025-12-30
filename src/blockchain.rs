@@ -623,35 +623,45 @@ impl Blockchain {
         let prev_hash = self.get_block_hash(current_height)?;
 
         let next_height = current_height + 1;
+        
+        // Calculate deterministic timestamp based on block schedule
         let deterministic_timestamp =
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
-        // CRITICAL: Always use deterministic timestamp to maintain consensus
-        // Verify we're not producing blocks too far ahead of schedule
+        // CRITICAL: During catchup, use current time instead of historical deterministic time
+        // Otherwise we'd be creating blocks with timestamps 30 days in the past
         let now = chrono::Utc::now().timestamp();
-        const MAX_FUTURE_BLOCKS: i64 = 2; // Allow max 2 blocks (20 minutes) ahead
-
-        let max_allowed_timestamp = now + (MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS);
-
-        if deterministic_timestamp > max_allowed_timestamp {
-            return Err(format!(
-                "Cannot produce block {}: timestamp {} is {} seconds in the future (max allowed: {})",
-                next_height,
-                deterministic_timestamp,
-                deterministic_timestamp - now,
-                MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS
-            ));
-        }
-
-        // Use deterministic timestamp (already aligned to 10-minute intervals)
-        let aligned_timestamp = deterministic_timestamp;
-
-        // During catchup (more than 10 blocks behind), use ALL registered masternodes
-        // This ensures all masternodes get rewards even if they haven't sent heartbeats yet
-        // For normal block production, only use active (heartbeat-sending) masternodes
         let blocks_behind = self
             .calculate_expected_height()
             .saturating_sub(current_height);
+        
+        let aligned_timestamp = if blocks_behind > 10 {
+            // Catchup mode: use current time, aligned to 10-minute boundaries
+            use chrono::Timelike;
+            let dt = chrono::Utc::now();
+            let aligned_minute = (dt.minute() / 10) * 10;
+            dt.date_naive()
+                .and_hms_opt(dt.hour(), aligned_minute, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        } else {
+            // Normal mode: use deterministic timestamp (on schedule)
+            // Verify we're not producing blocks too far ahead of schedule
+            const MAX_FUTURE_BLOCKS: i64 = 2; // Allow max 2 blocks (20 minutes) ahead
+            let max_allowed_timestamp = now + (MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS);
+
+            if deterministic_timestamp > max_allowed_timestamp {
+                return Err(format!(
+                    "Cannot produce block {}: timestamp {} is {} seconds in the future (max allowed: {})",
+                    next_height,
+                    deterministic_timestamp,
+                    deterministic_timestamp - now,
+                    MAX_FUTURE_BLOCKS * BLOCK_TIME_SECONDS
+                ));
+            }
+            deterministic_timestamp
+        };
         let masternodes = if blocks_behind > 10 {
             // Catchup mode - use all registered masternodes
             let all_mns = self.masternode_registry.list_all().await;
