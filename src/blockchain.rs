@@ -136,8 +136,25 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No local blockchain - will sync from peers
-        tracing::info!("📥 No local blockchain found - will sync from network peers");
+        // No local blockchain - load genesis from file
+        tracing::info!("📥 No local blockchain found - loading genesis from file");
+        let genesis = GenesisBlock::load_from_file(self.network_type)?;
+        
+        // Store the genesis block
+        let genesis_bytes =
+            bincode::serialize(&genesis).map_err(|e| format!("Failed to serialize genesis: {}", e))?;
+        self.storage
+            .insert("block_0".as_bytes(), genesis_bytes)
+            .map_err(|e| format!("Failed to store genesis block: {}", e))?;
+        self.storage
+            .insert(genesis.hash().as_slice(), &0u64.to_be_bytes())
+            .map_err(|e| format!("Failed to index genesis block: {}", e))?;
+        
+        *self.current_height.write().await = 0;
+        tracing::info!("✅ Genesis block loaded and stored from file");
+        tracing::info!("   Hash: {}", hex::encode(&genesis.hash()[..8]));
+        tracing::info!("   Timestamp: {}", genesis.header.timestamp);
+        
         Ok(())
     }
 
