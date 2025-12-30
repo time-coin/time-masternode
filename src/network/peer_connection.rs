@@ -675,9 +675,12 @@ impl PeerConnection {
                     let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
                     let our_height = blockchain.get_height().await;
 
-                    // Update our knowledge of peer's height (they at least have end_height)
+                    // Update our knowledge of peer's height only if this is higher than what we know
+                    // Don't downgrade peer_height based on partial block responses
                     let current_known = self.peer_height.read().await;
-                    if current_known.is_none() || current_known.unwrap() < end_height {
+                    if current_known.is_none()
+                        || (current_known.is_some() && current_known.unwrap() < end_height)
+                    {
                         *self.peer_height.write().await = Some(end_height);
                     }
                     drop(current_known);
@@ -876,8 +879,29 @@ impl PeerConnection {
                             self.direction, fork_height, self.peer_ip
                         );
 
-                        // Get peer's last known height (or use end_height as fallback)
+                        // Request peer's current height to make accurate comparison
+                        if let Err(e) = self.send_message(&NetworkMessage::GetBlockHeight).await {
+                            warn!("Failed to request peer height: {}", e);
+                        }
+
+                        // Get peer's last known height - wait a bit for the height response
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                         let peer_tip_height = self.peer_height.read().await.unwrap_or(end_height);
+
+                        // If we still don't have accurate peer height, use blocks we received as estimate
+                        let peer_tip_height = if peer_tip_height == end_height
+                            && end_height < our_height
+                        {
+                            // Peer sent us a partial range, they likely have more
+                            // Estimate based on block timestamps or just assume they're ahead
+                            warn!(
+                                "⚠️ [{:?}] Using incomplete height info from peer {} (end: {}, ours: {})",
+                                self.direction, self.peer_ip, end_height, our_height
+                            );
+                            our_height + 10 // Conservative estimate - assume peer is ahead
+                        } else {
+                            peer_tip_height
+                        };
 
                         // Check if peer has a longer chain using their tip height
                         if peer_tip_height > our_height {
