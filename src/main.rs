@@ -946,22 +946,6 @@ async fn main() {
                     let current_height = block_blockchain.get_height().await;
                     let expected_height = block_blockchain.calculate_expected_height();
 
-                    // Allow single-node bootstrap during initial catchup (height 0)
-                    // After genesis, require at least 3 masternodes for normal operation
-                    if masternodes.len() < 3 && current_height > 0 {
-                        tracing::warn!(
-                            "⚠️ Skipping block production: only {} masternodes active (minimum 3 required for post-genesis blocks)",
-                            masternodes.len()
-                        );
-                        continue;
-                    }
-
-                    // During initial bootstrap (height 0), allow 1 masternode to produce blocks
-                    if masternodes.is_empty() {
-                        tracing::warn!("⚠️ Skipping block production: no masternodes registered");
-                        continue;
-                    }
-
                     // Determine what to do based on height and time comparison
                     let blocks_behind = expected_height.saturating_sub(current_height);
 
@@ -977,6 +961,32 @@ async fn main() {
                     // - If few blocks behind (1-3): Use 5-minute grace period
                     let should_catchup = blocks_behind > 3
                         || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
+
+                    // Allow single-node bootstrap during initial catchup (height 0)
+                    // For catchup mode, allow fewer masternodes (network may be degraded)
+                    // For normal production, require at least 3 masternodes
+                    if masternodes.len() < 3 && current_height > 0 && !should_catchup {
+                        // Log periodically (every 60s) to avoid spam
+                        static LAST_WARN: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                        let now_secs = chrono::Utc::now().timestamp();
+                        let last_warn = LAST_WARN.load(Ordering::Relaxed);
+                        if now_secs - last_warn >= 60 {
+                            LAST_WARN.store(now_secs, Ordering::Relaxed);
+                            tracing::warn!(
+                                "⚠️ Skipping normal block production: only {} masternodes active (minimum 3 required). Height: {}, Expected: {}",
+                                masternodes.len(),
+                                current_height,
+                                expected_height
+                            );
+                        }
+                        continue;
+                    }
+
+                    // During initial bootstrap (height 0), allow 1 masternode to produce blocks
+                    if masternodes.is_empty() {
+                        tracing::warn!("⚠️ Skipping block production: no masternodes registered");
+                        continue;
+                    }
 
                     if should_catchup {
                         // Behind schedule - trigger TSDC coordinated catchup
