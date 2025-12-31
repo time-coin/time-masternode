@@ -189,18 +189,24 @@ impl MessageHandler {
                     blocks.push(block);
                 }
             }
-        }
 
-        info!(
-            "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{})",
-            self.direction,
-            blocks.len(),
-            self.peer_ip,
-            start,
-            end,
-            start,
-            effective_end
-        );
+            info!(
+                "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{})",
+                self.direction,
+                blocks.len(),
+                self.peer_ip,
+                start,
+                end,
+                start,
+                effective_end
+            );
+        } else {
+            // Requested blocks are beyond our height - we don't have them yet
+            info!(
+                "⏭️  [{}] Cannot send blocks {}-{} to {} - we only have up to height {}",
+                self.direction, start, end, self.peer_ip, our_height
+            );
+        }
 
         Ok(Some(NetworkMessage::BlocksResponse(blocks)))
     }

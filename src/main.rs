@@ -981,16 +981,30 @@ async fn main() {
                                 let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
                             }
 
-                            // Wait briefly for responses
-                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            // Wait longer for responses (5 seconds) to give peers time to respond
+                            // This prevents premature catchup when peers have the blocks but are slow to respond
+                            tracing::info!("⏳ Waiting 5 seconds for peer responses before starting catchup...");
+                            let wait_start = tokio::time::Instant::now();
+                            let wait_duration = tokio::time::Duration::from_secs(5);
 
-                            // Check if our height increased (meaning a peer sent us blocks)
-                            let new_height = block_blockchain.get_height().await;
-                            if new_height > current_height {
-                                peer_has_longer_chain = true;
+                            while wait_start.elapsed() < wait_duration {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                                // Check if our height increased (meaning a peer sent us blocks)
+                                let new_height = block_blockchain.get_height().await;
+                                if new_height > current_height {
+                                    peer_has_longer_chain = true;
+                                    tracing::info!(
+                                        "✅ Received blocks from peer(s) ({} > {}), canceling catchup",
+                                        new_height, current_height
+                                    );
+                                    break;
+                                }
+                            }
+
+                            if !peer_has_longer_chain {
                                 tracing::info!(
-                                    "✅ Peer(s) have longer chain ({} > {}), will wait for sync instead of producing catchup blocks",
-                                    new_height, current_height
+                                    "⏸️  No blocks received after 5s wait - proceeding with catchup production"
                                 );
                             }
                         }
