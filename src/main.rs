@@ -706,7 +706,15 @@ async fn main() {
             }
         }
 
-        // STEP 3: Sync remaining blocks from peers
+        // STEP 3: Start fork detection BEFORE syncing (run immediately then every 5 min)
+        Blockchain::start_chain_comparison_task(blockchain_init.clone());
+        tracing::info!("✓ Fork detection task started (checks immediately, then every 5 minutes)");
+
+        // Run initial fork detection before syncing
+        tracing::info!("🔍 Running initial fork detection...");
+        blockchain_init.compare_chain_with_peers().await;
+
+        // STEP 4: Sync remaining blocks from peers
         tracing::info!("📦 Syncing blockchain from peers...");
         if let Err(e) = blockchain_init.sync_from_peers().await {
             tracing::warn!("⚠️  Initial sync from peers: {}", e);
@@ -721,10 +729,6 @@ async fn main() {
         if let Err(e) = blockchain_init.sync_from_peers().await {
             tracing::warn!("⚠️  Block sync from peers: {}", e);
         }
-
-        // Start periodic chain comparison for fork detection
-        Blockchain::start_chain_comparison_task(blockchain_init.clone());
-        tracing::info!("✓ Fork detection task started (checks every 5 minutes)");
 
         // Start periodic genesis validation check (in case of late genesis file deployment)
         let blockchain_for_genesis = blockchain_init.clone();
