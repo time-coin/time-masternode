@@ -958,6 +958,8 @@ async fn main() {
                             continue;
                         }
 
+                        tracing::info!("📡 Connected peers available for catchup check: {}", connected_peers.len());
+
                         let mut peer_has_longer_chain = false;
 
                         if !connected_peers.is_empty() {
