@@ -1010,16 +1010,40 @@ async fn main() {
                             }
                         }
 
-                        // If any peer has blocks beyond our height, do NOT produce catchup blocks
-                        // This prevents creating competing forks when the network is split
-                        if peer_has_longer_chain {
-                            tracing::warn!("⚠️  Skipping catchup production: peers have longer chain, waiting for sync/reorg");
-                            continue;
-                        }
+                        // CRITICAL FIX: NEVER produce catchup blocks in solo mode
+                        // This is the ROOT CAUSE of network forks
+                        //
+                        // Even if peers don't respond or are also behind, producing blocks alone
+                        // creates competing chains that cannot be resolved. Block production must
+                        // ALWAYS involve consensus among multiple active masternodes.
+                        //
+                        // Proper behavior:
+                        // - If peers have blocks: Wait for sync/reorg to complete
+                        // - If peers don't have blocks: Wait for normal consensus block production
+                        // - NEVER: Produce blocks without multi-node consensus
+                        tracing::warn!(
+                            "⚠️  Cannot sync from peers at height {}. Waiting for consensus blocks from other masternodes.",
+                            current_height
+                        );
+                        tracing::warn!(
+                            "⚠️  Solo catchup block production is DISABLED to prevent forks."
+                        );
+                        continue;
 
+                        // DISABLED CODE - DO NOT RE-ENABLE without fixing consensus mechanism
+                        //
+                        // The following code was the ROOT CAUSE of continuous forking:
+                        // - Single nodes would produce catchup blocks independently
+                        // - Each node would create different blocks at the same height
+                        // - This created irreconcilable forks across the network
+                        //
                         // Sync failed - all peers may also be behind
                         // Use TSDC leader selection for catchup blocks (use current_height as slot)
-                        let catchup_slot = current_height;
+                        #[allow(unreachable_code)]
+                        let catchup_slot: u64 = {
+                            tracing::error!("FATAL: Unreachable catchup block production code was executed!");
+                            continue; // Safety: ensure we never reach the block production code below
+                        };
                         let (is_leader, leader_address) = match tsdc_for_catchup.select_leader(catchup_slot).await {
                             Ok(leader) => {
                                 tracing::info!("🗳️  Catchup leader selected: {} for slot {}", leader.id, catchup_slot);
@@ -1205,103 +1229,37 @@ async fn main() {
                                         max_sync_attempts, blocks_still_behind
                                     );
 
-                                    // Allow fallback production if:
-                                    // 1. Catchup leader has timed out (we waited 30s)
-                                    // 2. Peer sync exhausted (tried 5 times)
-                                    // 3. Still far behind (>10 blocks)
-                                    // This prevents permanent deadlock while maintaining safety
-                                    if blocks_still_behind > 10 {
-                                        tracing::info!("🔧 Catchup leader timed out and peers don't have blocks - will attempt local block production to recover");
-                                        // Continue to fallback production below
-                                    } else {
-                                        tracing::warn!(
-                                            "⚠️  Waiting for peers to provide remaining {} blocks",
-                                            blocks_still_behind
-                                        );
-                                        is_producing.store(false, Ordering::SeqCst);
-                                        continue; // Only skip fallback if close to catching up
-                                    }
+                                    // SAFETY: Never produce catchup blocks solo - prevents forks
+                                    // All nodes must wait for consensus-based block production
+                                    tracing::warn!(
+                                        "⚠️  Still {} blocks behind after sync attempts. Waiting for consensus blocks.",
+                                        blocks_still_behind
+                                    );
+                                    tracing::warn!(
+                                        "⚠️  Solo/fallback catchup production is DISABLED to prevent forks."
+                                    );
+                                    tracing::info!(
+                                        "✅ Will continue requesting blocks from peers via normal sync mechanism"
+                                    );
+                                    is_producing.store(false, Ordering::SeqCst);
+                                    continue;
                                 } else {
                                     tracing::warn!("⚠️  No connected peers available for sync");
-                                    // Continue to fallback production below
-                                }
-
-                                // FALLBACK PRODUCTION: If catchup leader times out and peer sync fails,
-                                // attempt local block production to recover the network
-
-                                // Acquire block production lock (P2P best practice #8)
-                                if is_producing.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                                    tracing::warn!("⚠️  Block production already in progress, skipping fallback catchup");
+                                    tracing::warn!("⚠️  Waiting for peers to connect and provide blocks");
+                                    is_producing.store(false, Ordering::SeqCst);
                                     continue;
                                 }
 
-                                tracing::warn!(
-                                    "⚠️  Catchup leader timeout - becoming fallback producer"
-                                );
-
-                                // Produce catchup blocks ourselves (only after sync attempt failed)
-                                let mut catchup_produced = 0u64;
-                                let current_height = block_blockchain.get_height().await;
-                                let genesis_timestamp = block_blockchain.genesis_timestamp();
-
-                                for target_height in (current_height + 1)..=expected_height {
-                                    // CRITICAL: Enforce time-based schedule even in fallback catch-up
-                                    let expected_timestamp =
-                                        genesis_timestamp + (target_height as i64 * 600);
-                                    let now = chrono::Utc::now().timestamp();
-
-                                    if expected_timestamp > now {
-                                        // We've caught up to real time - stop producing
-                                        tracing::info!(
-                                            "⏰ Fallback catch-up reached real-time at height {}",
-                                            target_height - 1
-                                        );
-                                        break;
-                                    }
-
-                                    match block_blockchain.produce_block().await {
-                                        Ok(block) => {
-                                            if let Err(e) = block_blockchain.add_block(block.clone()).await {
-                                                tracing::error!("❌ Fallback catchup block {} failed: {}", block.header.height, e);
-                                                break;
-                                            }
-
-                                            block_registry.broadcast_block(block.clone()).await;
-                                            catchup_produced += 1;
-
-                                            if catchup_produced % 10 == 0 {
-                                                tracing::info!(
-                                                    "📦 Fallback catchup progress: {} blocks produced",
-                                                    catchup_produced
-                                                );
-                                            }
-
-                                            // Network propagation delay
-                                            tokio::time::sleep(tokio::time::Duration::from_millis(500))
-                                                .await;
-                                        }
-                                        Err(e) => {
-                                            // Check if error is due to timestamp in future
-                                            if e.contains("timestamp") && e.contains("future") {
-                                                tracing::info!(
-                                                    "⏰ Fallback catch-up stopped: reached real-time schedule"
-                                                );
-                                                break;
-                                            }
-                                            tracing::error!("❌ Failed to produce fallback catchup block: {}", e);
-                                            break;
-                                        }
-                                    }
-                                }
-
-                                // Release block production lock
-                                is_producing.store(false, Ordering::SeqCst);
-
-                                tracing::info!(
-                                    "✅ Fallback catchup complete: produced {} blocks, height now: {}",
-                                    catchup_produced,
-                                    block_blockchain.get_height().await
-                                );
+                                // DISABLED CODE - DO NOT RE-ENABLE
+                                // The following fallback production code was the ROOT CAUSE of continuous forking:
+                                // - Multiple nodes would independently become "fallback producers"
+                                // - Each would produce different blocks at the same height
+                                // - This created irreconcilable forks (e.g., 3 different block 4390s)
+                                //
+                                // Proper behavior:
+                                // - Wait for peers to provide missing blocks via sync
+                                // - Wait for time-based consensus to produce NEW blocks
+                                // - NEVER produce historical catchup blocks without multi-node consensus
 
                             } else {
                                 tracing::info!(
