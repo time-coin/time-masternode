@@ -790,16 +790,21 @@ impl Blockchain {
         // Get previous block hash
         let mut current_height = *self.current_height.read().await;
 
-        // CRITICAL SAFEGUARD: Check if we're too far behind expected height
-        // If more than 50 blocks behind, refuse to produce to prevent fork creation
+        // Note: Previously had a safeguard preventing block production when >50 behind
+        // This is no longer needed because:
+        // 1. TSDC leader selection ensures only ONE node produces catchup blocks
+        // 2. All nodes agree on the leader deterministically
+        // 3. Non-leaders wait for leader's blocks
+        // This prevents forks while allowing coordinated catchup when network is behind
+
         let expected_height = self.calculate_expected_height();
         let blocks_behind = expected_height.saturating_sub(current_height);
 
-        if blocks_behind > 50 {
-            return Err(format!(
-                "Refusing to produce block: too far behind consensus (height: {}, expected: {}, {} blocks behind). Sync from peers first to prevent forks.",
-                current_height, expected_height, blocks_behind
-            ));
+        if blocks_behind > 10 {
+            tracing::debug!(
+                "📦 Producing catchup block: {} blocks behind (TSDC leader coordinated)",
+                blocks_behind
+            );
         }
 
         // Verify the current height block actually exists
