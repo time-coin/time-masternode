@@ -375,6 +375,11 @@ async fn main() {
         .set_peer_registry(peer_connection_registry.clone())
         .await;
 
+    // Set connection manager on blockchain for reward distribution
+    blockchain
+        .set_connection_manager(connection_manager.clone())
+        .await;
+
     // Extract local IP from external address to prevent self-connections
     let local_ip = if let Some(ref mn) = masternode_info {
         Some(mn.address.clone()) // Already IP-only format

@@ -93,6 +93,8 @@ pub struct Blockchain {
     is_syncing: Arc<RwLock<bool>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>,
     peer_registry: Arc<RwLock<Option<Arc<PeerConnectionRegistry>>>>,
+    connection_manager:
+        Arc<RwLock<Option<Arc<crate::network::connection_manager::ConnectionManager>>>>,
     /// Cumulative chain work for longest-chain-by-work rule
     cumulative_work: Arc<RwLock<u128>>,
     /// Recent reorganization events (for monitoring and debugging)
@@ -117,6 +119,7 @@ impl Blockchain {
             is_syncing: Arc::new(RwLock::new(false)),
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
+            connection_manager: Arc::new(RwLock::new(None)),
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
         }
@@ -131,6 +134,14 @@ impl Blockchain {
     /// Set peer registry for P2P communication
     pub async fn set_peer_registry(&self, peer_registry: Arc<PeerConnectionRegistry>) {
         *self.peer_registry.write().await = Some(peer_registry);
+    }
+
+    /// Set connection manager for tracking peer connections
+    pub async fn set_connection_manager(
+        &self,
+        connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
+    ) {
+        *self.connection_manager.write().await = Some(connection_manager);
     }
 
     pub fn genesis_timestamp(&self) -> i64 {
@@ -762,14 +773,31 @@ impl Blockchain {
             );
             all_mns
         } else {
-            // Normal mode - use only active masternodes
-            let active_mns = self.masternode_registry.list_active().await;
-            tracing::debug!(
-                "📊 Block {}: {} active masternodes for reward distribution",
-                next_height,
-                active_mns.len()
-            );
-            active_mns
+            // Normal mode - use only active AND connected masternodes
+            let conn_mgr = self.connection_manager.read().await;
+            let masternodes = if let Some(cm) = conn_mgr.as_ref() {
+                // Check connection status
+                let connected_active = self
+                    .masternode_registry
+                    .get_connected_active_masternodes(cm)
+                    .await;
+                tracing::debug!(
+                    "📊 Block {}: {} connected active masternodes for reward distribution",
+                    next_height,
+                    connected_active.len()
+                );
+                connected_active
+            } else {
+                // Fallback: if no connection manager set, use all active
+                let active_mns = self.masternode_registry.list_active().await;
+                tracing::warn!(
+                    "⚠️  Block {}: connection manager not set, using {} active masternodes (may include disconnected)",
+                    next_height,
+                    active_mns.len()
+                );
+                active_mns
+            };
+            masternodes
         };
 
         if masternodes.is_empty() {
@@ -2251,6 +2279,7 @@ impl Clone for Blockchain {
             is_syncing: self.is_syncing.clone(),
             peer_manager: self.peer_manager.clone(),
             peer_registry: self.peer_registry.clone(),
+            connection_manager: self.connection_manager.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
         }

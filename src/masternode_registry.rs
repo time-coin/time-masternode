@@ -361,6 +361,23 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    /// Get active masternodes that are currently connected
+    /// This should be used for reward distribution to ensure only connected nodes get rewards
+    pub async fn get_connected_active_masternodes(
+        &self,
+        connection_manager: &crate::network::connection_manager::ConnectionManager,
+    ) -> Vec<MasternodeInfo> {
+        let masternodes = self.masternodes.read().await;
+        masternodes
+            .values()
+            .filter(|info| {
+                // Must be active AND connected
+                info.is_active && connection_manager.is_connected(&info.masternode.address)
+            })
+            .cloned()
+            .collect()
+    }
+
     #[allow(dead_code)]
     pub async fn list_active(&self) -> Vec<MasternodeInfo> {
         self.get_active_masternodes().await
