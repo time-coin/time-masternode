@@ -1482,23 +1482,70 @@ async fn handle_peer(
                                 _ => {}
                             }
                         } else {
-                            failed_parse_count += 1;
-                            // Try to parse to see what the error is
-                            if let Err(parse_err) = serde_json::from_str::<NetworkMessage>(&line) {
-                                tracing::warn!("❌ Failed to parse message {} from {}: {} | Raw: {} | Error: {}",
-                                    failed_parse_count, peer.addr, line.trim(),
-                                    line.chars().take(100).collect::<String>(), parse_err);
-                            }
-                            // Record violation and check if should ban
-                            let should_ban = blacklist.write().await.record_violation(
-                                ip,
-                                "Failed to parse message"
-                            );
-                            // Be more lenient - allow up to 10 parse failures before disconnecting
-                            // This handles cases where peers send extra newlines or have temporary issues
-                            if should_ban || failed_parse_count >= 10 {
-                                tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts", peer.addr, failed_parse_count);
-                                break;
+                            // Check if buffer contains multiple JSON objects (happens during high-throughput sync)
+                            // This is a transport-level issue, not malicious behavior
+                            let trimmed = line.trim();
+                            if trimmed.contains('\n') || (trimmed.starts_with('{') && trimmed.matches('{').count() > 1) {
+                                tracing::debug!("📦 Received concatenated messages from {}, attempting to split", peer.addr);
+
+                                // First split by newlines if present
+                                let mut json_objects = Vec::new();
+                                for segment in trimmed.split('\n').filter(|s| !s.trim().is_empty()) {
+                                    // For each segment, check if it contains multiple JSON objects
+                                    let segment_trimmed = segment.trim();
+                                    if segment_trimmed.starts_with('{') && segment_trimmed.matches('{').count() > 1 {
+                                        // Multiple JSON objects on same line - split by brace matching
+                                        let mut depth = 0;
+                                        let mut start = 0;
+                                        let chars: Vec<char> = segment_trimmed.chars().collect();
+
+                                        for i in 0..chars.len() {
+                                            match chars[i] {
+                                                '{' => depth += 1,
+                                                '}' => {
+                                                    depth -= 1;
+                                                    if depth == 0 {
+                                                        // Found complete JSON object
+                                                        let obj: String = chars[start..=i].iter().collect();
+                                                        json_objects.push(obj);
+                                                        start = i + 1;
+                                                    }
+                                                }
+                                                _ => {}
+                                            }
+                                        }
+                                    } else {
+                                        json_objects.push(segment_trimmed.to_string());
+                                    }
+                                }
+
+                                if json_objects.len() > 1 {
+                                    tracing::info!("📦 Split {} concatenated JSON objects from {}, discarding to prevent processing duplicates", json_objects.len(), peer.addr);
+                                    // Don't count as failed parse - this is a transport issue during high sync
+                                    // The messages will be resent if needed
+                                } else {
+                                    failed_parse_count += 1;
+                                    tracing::warn!("❌ Failed to parse message from {} (appears concatenated but couldn't split properly)", peer.addr);
+                                }
+                            } else {
+                                failed_parse_count += 1;
+                                // Try to parse to see what the error is
+                                if let Err(parse_err) = serde_json::from_str::<NetworkMessage>(&line) {
+                                    tracing::warn!("❌ Failed to parse message {} from {}: {} | Raw: {}",
+                                        failed_parse_count, peer.addr, parse_err,
+                                        line.chars().take(200).collect::<String>());
+                                }
+                                // Record violation and check if should ban
+                                let should_ban = blacklist.write().await.record_violation(
+                                    ip,
+                                    "Failed to parse message"
+                                );
+                                // Be more lenient - allow up to 10 parse failures before disconnecting
+                                // This handles cases where peers send extra newlines or have temporary issues
+                                if should_ban || failed_parse_count >= 10 {
+                                    tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts", peer.addr, failed_parse_count);
+                                    break;
+                                }
                             }
                         }
                         line.clear();
