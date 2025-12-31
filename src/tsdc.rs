@@ -280,6 +280,67 @@ impl TSCDConsensus {
         })
     }
 
+    /// Select leader for catchup based on target height (deterministic across all nodes)
+    /// This version uses target_height instead of chain_head to ensure all nodes agree
+    /// on the leader even when their local chains differ during catchup
+    pub async fn select_leader_for_catchup(
+        &self,
+        slot: u64,
+        target_height: u64,
+    ) -> Result<TSCDValidator, TSCDError> {
+        // Get masternodes from registry
+        let masternodes = match &self.masternode_registry {
+            Some(registry) => registry.list_active().await,
+            None => {
+                return Err(TSCDError::ConfigError(
+                    "No masternode registry configured".to_string(),
+                ))
+            }
+        };
+
+        if masternodes.is_empty() {
+            return Err(TSCDError::ConfigError("No active masternodes".to_string()));
+        }
+
+        // Deterministic leader selection based on slot and target height
+        // Using target_height ensures all nodes agree on leader even if their
+        // local chain_head differs (common during catchup scenarios)
+        let mut hasher = Sha256::new();
+        hasher.update(b"catchup_leader_selection");
+        hasher.update(slot.to_le_bytes());
+        hasher.update(target_height.to_le_bytes()); // All nodes agree on expected height
+
+        let hash: [u8; 32] = hasher.finalize().into();
+
+        // Convert hash to index
+        let mut val = 0u64;
+        for (i, &byte) in hash.iter().take(8).enumerate() {
+            val |= (byte as u64) << (i * 8);
+        }
+        let leader_index = (val % masternodes.len() as u64) as usize;
+
+        let masternode = &masternodes[leader_index];
+
+        // Log leader selection details for debugging
+        tracing::debug!(
+            "Catchup leader selection for slot {} (target height {}): leader_index={}/{}, selected={}",
+            slot,
+            target_height,
+            leader_index,
+            masternodes.len(),
+            masternode.masternode.address
+        );
+
+        // Convert Masternode to TSCDValidator
+        Ok(TSCDValidator {
+            id: masternode.masternode.address.clone(),
+            public_key: masternode.masternode.public_key.to_bytes().to_vec(),
+            stake: masternode.masternode.collateral,
+            vrf_secret_key: None,
+            vrf_public_key: None,
+        })
+    }
+
     /// Validate a PREPARE message (block proposal from leader)
     #[allow(dead_code)]
     pub async fn validate_prepare(&self, block: &Block) -> Result<(), TSCDError> {

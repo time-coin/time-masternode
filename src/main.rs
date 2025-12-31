@@ -1075,11 +1075,14 @@ async fn main() {
                         // - Deterministic and predictable
 
                         // Determine catchup leader using TSDC for current slot
+                        // CRITICAL: Use select_leader_for_catchup() which uses expected_height
+                        // instead of chain_head to ensure ALL nodes agree on the same leader
+                        // even when their local chains differ during catchup
                         let current_slot = block_tsdc.current_slot();
-                        let tsdc_leader = match block_tsdc.select_leader(current_slot).await {
+                        let tsdc_leader = match block_tsdc.select_leader_for_catchup(current_slot, expected_height).await {
                             Ok(leader) => leader,
                             Err(e) => {
-                                tracing::warn!("⚠️  Cannot select TSDC leader for catchup: {}", e);
+                                tracing::warn!("⚠️  Cannot select TSDC catchup leader: {}", e);
                                 continue;
                             }
                         };
