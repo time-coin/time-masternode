@@ -477,7 +477,14 @@ impl MessageHandler {
 
                     // Add block to blockchain (if not already present)
                     let current_height = context.blockchain.get_height().await;
-                    if block.header.height > current_height {
+
+                    // Skip adding genesis block if chain already has blocks
+                    if block.header.height == 0 && current_height > 0 {
+                        debug!(
+                            "[{}] Skipping finalization add for genesis block (chain at height {})",
+                            self.direction, current_height
+                        );
+                    } else if block.header.height > current_height {
                         if let Err(e) = context.blockchain.add_block(block).await {
                             warn!(
                                 "[{}] Failed to add finalized block to blockchain: {}",
