@@ -1040,13 +1040,30 @@ impl PeerConnection {
                 let our_height = blockchain.get_height().await;
 
                 if *block_height > our_height {
-                    // We're behind, request the block
-                    let request = NetworkMessage::BlockRequest(*block_height);
-                    if let Err(e) = self.send_message(&request).await {
-                        warn!(
-                            "⚠️ [{:?}] Failed to request block {} from {}: {}",
-                            self.direction, block_height, self.peer_ip, e
+                    // Check if the gap is too large (more than 1 block)
+                    let gap = block_height - our_height;
+
+                    if gap > 1 {
+                        // We're far behind - don't request this specific block
+                        // Instead, let the sync mechanism handle catchup
+                        debug!(
+                            "📊 [{:?}] Peer {} announced block {} but we're at {} (gap: {}). Ignoring - will sync via GetBlocks.",
+                            self.direction, self.peer_ip, block_height, our_height, gap
                         );
+                        // No action - the sync loop will handle catching up
+                    } else {
+                        // Gap is 1 - this is the next block we need
+                        debug!(
+                            "📥 [{:?}] Requesting block {} from {} (next block after our {})",
+                            self.direction, block_height, self.peer_ip, our_height
+                        );
+                        let request = NetworkMessage::BlockRequest(*block_height);
+                        if let Err(e) = self.send_message(&request).await {
+                            warn!(
+                                "⚠️ [{:?}] Failed to request block {} from {}: {}",
+                                self.direction, block_height, self.peer_ip, e
+                            );
+                        }
                     }
                 } else {
                     // We already have this block or are ahead, ignore silently
