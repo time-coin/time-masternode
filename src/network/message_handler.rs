@@ -184,22 +184,38 @@ impl MessageHandler {
         let effective_end = end.min(start + 100).min(our_height);
 
         if start <= our_height {
+            let mut missing_blocks = Vec::new();
             for h in start..=effective_end {
-                if let Ok(block) = context.blockchain.get_block_by_height(h).await {
-                    blocks.push(block);
+                match context.blockchain.get_block_by_height(h).await {
+                    Ok(block) => blocks.push(block),
+                    Err(e) => {
+                        warn!(
+                            "⚠️ [{}] Failed to retrieve block {} for {}: {}",
+                            self.direction, h, self.peer_ip, e
+                        );
+                        missing_blocks.push(h);
+                    }
                 }
             }
 
-            info!(
-                "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{})",
-                self.direction,
-                blocks.len(),
-                self.peer_ip,
-                start,
-                end,
-                start,
-                effective_end
-            );
+            if blocks.is_empty() && start <= our_height {
+                warn!(
+                    "⚠️ [{}] No blocks available to send to {} (requested {}-{}, our height: {}, missing: {:?})",
+                    self.direction, self.peer_ip, start, end, our_height, missing_blocks
+                );
+            } else {
+                info!(
+                    "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{}, missing: {})",
+                    self.direction,
+                    blocks.len(),
+                    self.peer_ip,
+                    start,
+                    end,
+                    start,
+                    effective_end,
+                    missing_blocks.len()
+                );
+            }
         } else {
             // Requested blocks are beyond our height - we don't have them yet
             info!(

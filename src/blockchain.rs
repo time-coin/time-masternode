@@ -565,9 +565,9 @@ impl Blockchain {
                     break;
                 }
 
-                // Wait for blocks to arrive (with shorter timeout per batch)
+                // Wait for blocks to arrive (with longer timeout per batch to reduce spurious retries)
                 let batch_start_time = std::time::Instant::now();
-                let batch_timeout = std::time::Duration::from_secs(15);
+                let batch_timeout = std::time::Duration::from_secs(30); // Increased from 15s
                 let mut last_height = current;
                 let mut made_progress = false;
 
@@ -582,7 +582,7 @@ impl Blockchain {
 
                     // Check if we made progress
                     if now_height > last_height {
-                        tracing::debug!("📈 Progress: {} → {}", last_height, now_height);
+                        tracing::info!("📈 Block sync progress: {} → {} from {}", last_height, now_height, sync_peer);
                         last_height = now_height;
                         made_progress = true;
                     }
@@ -593,19 +593,18 @@ impl Blockchain {
                     }
                 }
 
-                // If no progress after request, try a different peer
+                // If no progress after request, try a different peer with exponential backoff
                 if !made_progress {
                     tracing::warn!(
-                        "⚠️  No progress after requesting blocks {}-{} from {} (attempt {})",
+                        "⚠️  No progress after requesting blocks {}-{} from {} (timeout after 30s)",
                         batch_start,
                         batch_end,
-                        sync_peer,
-                        1
+                        sync_peer
                     );
 
-                    // Try up to 3 different peers before giving up
+                    // Try up to 5 different peers with exponential backoff before giving up
                     let mut tried_peers = vec![sync_peer.clone()];
-                    for attempt in 2..=3 {
+                    for attempt in 2..=5 {
                         // Find a peer we haven't tried yet
                         let alternate_peer = connected_peers
                             .iter()
@@ -613,39 +612,48 @@ impl Blockchain {
                             .cloned();
 
                         if let Some(alt_peer) = alternate_peer {
+                            // Exponential backoff: 20s, 30s, 40s, 50s
+                            let retry_timeout_secs = 10 + (attempt * 10);
                             tracing::info!(
-                                "🔄 Trying alternate peer {} (attempt {})",
+                                "🔄 Trying alternate peer {} (attempt {}, timeout {}s)",
                                 alt_peer,
-                                attempt
+                                attempt,
+                                retry_timeout_secs
                             );
 
                             let req = NetworkMessage::GetBlocks(batch_start, batch_end);
-                            if peer_registry.send_to_peer(&alt_peer, req).await.is_ok() {
-                                // Wait for response
-                                let retry_start = std::time::Instant::now();
-                                let retry_timeout = std::time::Duration::from_secs(15);
+                            if let Err(e) = peer_registry.send_to_peer(&alt_peer, req).await {
+                                tracing::warn!("❌ Failed to send GetBlocks to {}: {}", alt_peer, e);
+                                tried_peers.push(alt_peer);
+                                continue;
+                            }
+                            
+                            // Wait for response with exponential backoff timeout
+                            let retry_start = std::time::Instant::now();
+                            let retry_timeout = std::time::Duration::from_secs(retry_timeout_secs);
 
-                                while retry_start.elapsed() < retry_timeout {
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                                    let retry_height = *self.current_height.read().await;
+                            while retry_start.elapsed() < retry_timeout {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                let retry_height = *self.current_height.read().await;
 
-                                    if retry_height > last_height {
-                                        tracing::info!("✅ Alternate peer {} responded!", alt_peer);
-                                        last_height = retry_height;
-                                        made_progress = true;
-                                        sync_peer = alt_peer.clone(); // Switch to working peer
-                                        break;
-                                    }
+                                if retry_height > last_height {
+                                    tracing::info!("✅ Alternate peer {} responded with blocks!", alt_peer);
+                                    last_height = retry_height;
+                                    made_progress = true;
+                                    sync_peer = alt_peer.clone(); // Switch to working peer
+                                    break;
                                 }
+                            }
 
-                                if made_progress {
-                                    break; // Got blocks, continue with this peer
-                                }
+                            if made_progress {
+                                break; // Got blocks, continue with this peer
+                            } else {
+                                tracing::warn!("⚠️  Peer {} did not respond within {}s", alt_peer, retry_timeout_secs);
                             }
 
                             tried_peers.push(alt_peer);
                         } else {
-                            tracing::warn!("⚠️  No more alternate peers to try");
+                            tracing::warn!("⚠️  No more alternate peers available (tried {} peers)", tried_peers.len());
                             break;
                         }
                     }
@@ -762,6 +770,18 @@ impl Blockchain {
 
         // Get previous block hash
         let mut current_height = *self.current_height.read().await;
+        
+        // CRITICAL SAFEGUARD: Check if we're too far behind expected height
+        // If more than 50 blocks behind, refuse to produce to prevent fork creation
+        let expected_height = self.calculate_expected_height();
+        let blocks_behind = expected_height.saturating_sub(current_height);
+        
+        if blocks_behind > 50 {
+            return Err(format!(
+                "Refusing to produce block: too far behind consensus (height: {}, expected: {}, {} blocks behind). Sync from peers first to prevent forks.",
+                current_height, expected_height, blocks_behind
+            ));
+        }
 
         // Verify the current height block actually exists
         // If not, find the actual highest block

@@ -944,16 +944,20 @@ impl PeerConnection {
                         {
                             // Same fork height detected recently
                             if last_height == fork_height
-                                && last_seen.elapsed() < std::time::Duration::from_secs(10)
+                                && last_seen.elapsed() < std::time::Duration::from_secs(30) // Increased from 10s
                             {
                                 let new_count = count + 1;
-                                if new_count > 3 {
+                                if new_count > 5 { // Increased from 3 to allow more resolution attempts
                                     error!(
-                                        "❌ [{:?}] Fork resolution loop detected for {} at height {} (attempt {}). Disconnecting peer.",
+                                        "❌ [{:?}] Fork resolution loop detected for {} at height {} (attempt {}). Peer on incompatible fork.",
                                         self.direction, self.peer_ip, fork_height, new_count
                                     );
                                     true
                                 } else {
+                                    warn!(
+                                        "⚠️ [{:?}] Fork at height {} detected {} times in 30s from {}",
+                                        self.direction, fork_height, new_count, self.peer_ip
+                                    );
                                     *tracker =
                                         Some((fork_height, new_count, std::time::Instant::now()));
                                     false
