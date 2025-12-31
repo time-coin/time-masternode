@@ -506,8 +506,8 @@ impl MessageHandler {
                         );
                     }
                 } else {
-                    warn!(
-                        "⚠️  [{}] Block {} not found in cache for finalization",
+                    debug!(
+                        "[{}] Block {} not found in cache (likely already finalized)",
                         self.direction,
                         hex::encode(block_hash)
                     );
