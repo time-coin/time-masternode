@@ -524,7 +524,7 @@ impl Blockchain {
                 }
             }
 
-            let sync_peer = if let Some(peer) = best_peer {
+            let mut sync_peer = if let Some(peer) = best_peer {
                 tracing::info!(
                     "📡 Selected best peer for sync: {} (appears to have height > {})",
                     peer,
@@ -593,10 +593,68 @@ impl Blockchain {
                     }
                 }
 
-                // If no progress after first batch, peers likely don't have the blocks
+                // If no progress after request, try a different peer
+                if !made_progress {
+                    tracing::warn!(
+                        "⚠️  No progress after requesting blocks {}-{} from {} (attempt {})",
+                        batch_start,
+                        batch_end,
+                        sync_peer,
+                        1
+                    );
+
+                    // Try up to 3 different peers before giving up
+                    let mut tried_peers = vec![sync_peer.clone()];
+                    for attempt in 2..=3 {
+                        // Find a peer we haven't tried yet
+                        let alternate_peer = connected_peers
+                            .iter()
+                            .find(|p| !tried_peers.contains(p))
+                            .cloned();
+
+                        if let Some(alt_peer) = alternate_peer {
+                            tracing::info!(
+                                "🔄 Trying alternate peer {} (attempt {})",
+                                alt_peer,
+                                attempt
+                            );
+
+                            let req = NetworkMessage::GetBlocks(batch_start, batch_end);
+                            if peer_registry.send_to_peer(&alt_peer, req).await.is_ok() {
+                                // Wait for response
+                                let retry_start = std::time::Instant::now();
+                                let retry_timeout = std::time::Duration::from_secs(15);
+
+                                while retry_start.elapsed() < retry_timeout {
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                    let retry_height = *self.current_height.read().await;
+
+                                    if retry_height > last_height {
+                                        tracing::info!("✅ Alternate peer {} responded!", alt_peer);
+                                        last_height = retry_height;
+                                        made_progress = true;
+                                        sync_peer = alt_peer.clone(); // Switch to working peer
+                                        break;
+                                    }
+                                }
+
+                                if made_progress {
+                                    break; // Got blocks, continue with this peer
+                                }
+                            }
+
+                            tried_peers.push(alt_peer);
+                        } else {
+                            tracing::warn!("⚠️  No more alternate peers to try");
+                            break;
+                        }
+                    }
+                }
+
+                // If no progress after trying multiple peers, give up
                 if !made_progress && current == starting_height {
                     tracing::warn!(
-                        "⚠️  No progress after requesting blocks from peers - they may not have blocks {} yet",
+                        "⚠️  No progress after trying multiple peers - they may not have blocks {} yet",
                         batch_start
                     );
                     break;
