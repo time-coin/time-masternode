@@ -844,8 +844,7 @@ async fn main() {
     let block_blockchain = blockchain.clone();
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let shutdown_token_clone = shutdown_token.clone();
-    let tsdc_for_catchup = tsdc_consensus.clone();
-    let local_ip_for_catchup = local_ip.clone();
+    // Note: tsdc_consensus and local_ip are available in outer scope if needed
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
     let is_producing_block = Arc::new(AtomicBool::new(false));
@@ -1028,35 +1027,26 @@ async fn main() {
                         tracing::warn!(
                             "⚠️  Solo catchup block production is DISABLED to prevent forks."
                         );
-                        continue;
+                        continue; // Skip to next iteration - wait for regular consensus blocks
 
-                        // DISABLED CODE - DO NOT RE-ENABLE without fixing consensus mechanism
-                        //
-                        // The following code was the ROOT CAUSE of continuous forking:
+                        // ============================================================================
+                        // DISABLED CODE - DO NOT RE-ENABLE
+                        // ============================================================================
+                        // The code below is unreachable and kept only for reference
+                        // It was the ROOT CAUSE of continuous forking:
                         // - Single nodes would produce catchup blocks independently
                         // - Each node would create different blocks at the same height
                         // - This created irreconcilable forks across the network
                         //
-                        // Sync failed - all peers may also be behind
-                        // Use TSDC leader selection for catchup blocks (use current_height as slot)
-                        #[allow(unreachable_code)]
-                        let catchup_slot: u64 = {
-                            tracing::error!("FATAL: Unreachable catchup block production code was executed!");
-                            continue; // Safety: ensure we never reach the block production code below
-                        };
-                        let (is_leader, leader_address) = match tsdc_for_catchup.select_leader(catchup_slot).await {
-                            Ok(leader) => {
-                                tracing::info!("🗳️  Catchup leader selected: {} for slot {}", leader.id, catchup_slot);
-                                let leader_addr = leader.id.clone();
-                                let my_ip = local_ip_for_catchup.as_deref().unwrap_or("");
-                                let is_leader = my_ip == leader_addr;
-                                (is_leader, leader_addr)
-                            }
-                            Err(e) => {
-                                tracing::warn!("⚠️  Failed to select catchup leader: {}", e);
-                                (false, String::from("unknown"))
-                            }
-                        };
+                        // Proper behavior:
+                        // - Wait for peers to provide missing blocks
+                        // - Wait for time-based consensus to produce new blocks
+                        // - NEVER produce historical catchup blocks solo
+                        // ============================================================================
+                        #[allow(unreachable_code, unused_variables, dead_code)]
+                        {
+                            let catchup_slot: u64 = current_height;
+                            let (is_leader, leader_address) = (false, String::from("disabled"));
 
                         if is_leader {
                             // Acquire block production lock (P2P best practice #8)
@@ -1269,6 +1259,7 @@ async fn main() {
                                 );
                             }
                         }
+                        } // End of unreachable catchup block production code
                     } else if current_height == expected_height - 1 || current_height == expected_height {
                         // At expected height or one behind (normal) - determine if we should produce
 
