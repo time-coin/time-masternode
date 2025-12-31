@@ -583,6 +583,53 @@ impl Blockchain {
         ))
     }
 
+    /// Sync from a specific peer (used when we detect a fork and want the consensus chain)
+    pub async fn sync_from_specific_peer(&self, peer_ip: &str) -> Result<(), String> {
+        let current = *self.current_height.read().await;
+        let time_expected = self.calculate_expected_height();
+
+        if current >= time_expected {
+            tracing::info!("✓ Already synced to expected height {}", current);
+            return Ok(());
+        }
+
+        let peer_registry = self.peer_registry.read().await;
+        let registry = peer_registry.as_ref().ok_or("No peer registry available")?;
+
+        // Request blocks from the specific peer
+        let batch_start = current + 1;
+        let batch_end = time_expected;
+
+        tracing::info!(
+            "📤 Requesting blocks {}-{} from consensus peer {}",
+            batch_start,
+            batch_end,
+            peer_ip
+        );
+
+        let req = NetworkMessage::GetBlocks(batch_start, batch_end);
+        registry
+            .send_to_peer(peer_ip, req)
+            .await
+            .map_err(|e| format!("Failed to request blocks from {}: {}", peer_ip, e))?;
+
+        // Wait for blocks to arrive
+        let wait_start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(30);
+
+        while wait_start.elapsed() < timeout {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let now_height = *self.current_height.read().await;
+
+            if now_height >= time_expected {
+                tracing::info!("✓ Synced from consensus peer to height {}", now_height);
+                return Ok(());
+            }
+        }
+
+        Err(format!("Timeout waiting for blocks from {}", peer_ip))
+    }
+
     /// Produce a block for the current TSDC slot
     pub async fn produce_block(&self) -> Result<Block, String> {
         use crate::block::genesis::GenesisBlock;
@@ -1786,9 +1833,62 @@ impl Blockchain {
             }
         }
 
-        // The actual fork detection happens when we receive BlockHeightResponse
-        // in the message handler, not here. This just triggers the queries.
-        None
+        // Wait for responses (with timeout)
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+
+        // Collect peer heights from registry
+        let mut peer_heights: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        for peer_ip in &connected_peers {
+            if let Some(height) = registry.get_peer_height(peer_ip).await {
+                peer_heights.insert(peer_ip.clone(), height);
+            }
+        }
+
+        if peer_heights.is_empty() {
+            tracing::debug!("No peer height responses received");
+            return None;
+        }
+
+        // Find the most common height (consensus)
+        let mut height_counts: std::collections::HashMap<u64, usize> =
+            std::collections::HashMap::new();
+        for height in peer_heights.values() {
+            *height_counts.entry(*height).or_insert(0) += 1;
+        }
+
+        // Get the height with most peers (longest chain by consensus)
+        let consensus_height = height_counts
+            .iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(height, _)| *height)?;
+
+        // Find a peer with the consensus height
+        let consensus_peer = peer_heights
+            .iter()
+            .find(|(_, height)| **height == consensus_height)
+            .map(|(peer, height)| (peer.clone(), *height))?;
+
+        let our_height = self.get_height().await;
+
+        if consensus_height > our_height {
+            tracing::info!(
+                "🔀 Fork detected: consensus height {} > our height {} (peer: {})",
+                consensus_height,
+                our_height,
+                consensus_peer.0
+            );
+            Some((consensus_height, consensus_peer.0))
+        } else if consensus_height < our_height {
+            tracing::warn!(
+                "⚠️  We appear to be ahead of consensus: our height {} > consensus {}",
+                our_height,
+                consensus_height
+            );
+            None
+        } else {
+            None
+        }
     }
 
     /// Start periodic chain comparison task

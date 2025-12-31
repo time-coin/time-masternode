@@ -58,6 +58,8 @@ pub struct PeerConnectionRegistry {
     outbound_count: AtomicUsize,
     // Map of peer IP to their TCP writer (wrapped in Arc<Mutex<>> for safe mutable access)
     peer_writers: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<PeerWriter>>>>>,
+    // Map of peer IP to their reported blockchain height
+    peer_heights: Arc<RwLock<HashMap<String, u64>>>,
     // Pending responses for request/response pattern
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
     // TSDC consensus resources (shared from server)
@@ -83,6 +85,7 @@ impl PeerConnectionRegistry {
             inbound_count: AtomicUsize::new(0),
             outbound_count: AtomicUsize::new(0),
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
+            peer_heights: Arc::new(RwLock::new(HashMap::new())),
             pending_responses: Arc::new(RwLock::new(HashMap::new())),
             tsdc_consensus: Arc::new(RwLock::new(None)),
             tsdc_block_cache: Arc::new(RwLock::new(None)),
@@ -300,6 +303,22 @@ impl PeerConnectionRegistry {
 
         let mut pending = self.pending_responses.write().await;
         pending.remove(peer_ip);
+
+        // Remove peer height
+        let mut heights = self.peer_heights.write().await;
+        heights.remove(peer_ip);
+    }
+
+    /// Set a peer's reported blockchain height
+    pub async fn set_peer_height(&self, peer_ip: &str, height: u64) {
+        let mut heights = self.peer_heights.write().await;
+        heights.insert(peer_ip.to_string(), height);
+    }
+
+    /// Get a peer's reported blockchain height
+    pub async fn get_peer_height(&self, peer_ip: &str) -> Option<u64> {
+        let heights = self.peer_heights.read().await;
+        heights.get(peer_ip).copied()
     }
 
     pub async fn get_peer_writer(

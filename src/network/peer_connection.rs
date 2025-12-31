@@ -204,6 +204,11 @@ impl PeerConnection {
         self.remote_port
     }
 
+    /// Get peer's reported blockchain height
+    pub async fn get_peer_height(&self) -> Option<u64> {
+        *self.peer_height.read().await
+    }
+
     /// Get a clone of the shared writer for registration in peer registry
     pub fn shared_writer(&self) -> Arc<Mutex<BufWriter<OwnedWriteHalf>>> {
         self.writer.clone()
@@ -1163,36 +1168,22 @@ impl PeerConnection {
                 }
             }
             NetworkMessage::BlockHeightResponse(peer_height) => {
-                // Store peer's height for fork resolution
+                // Store peer's height for fork resolution (both locally and in registry)
                 *self.peer_height.write().await = Some(*peer_height);
 
-                // Handle peer's height response for fork detection
+                // Also store in peer registry for fork detection
+                _peer_registry
+                    .set_peer_height(&self.peer_ip, *peer_height)
+                    .await;
+
+                // Log the peer's height but don't automatically sync
+                // Fork detection happens centrally in compare_chain_with_peers()
                 let our_height = blockchain.get_height().await;
 
-                if *peer_height > our_height + 1 {
-                    // Peer is ahead - we might need to sync
-                    info!(
-                        "📊 [{:?}] Peer {} has height {} (we have {}), triggering sync",
-                        self.direction, self.peer_ip, peer_height, our_height
-                    );
-
-                    // Request missing blocks
-                    let start = our_height.saturating_add(1);
-                    let end = std::cmp::min(start + 100, *peer_height);
-                    let get_blocks = NetworkMessage::GetBlocks(start, end);
-                    if let Err(e) = self.send_message(&get_blocks).await {
-                        warn!(
-                            "⚠️ [{:?}] Failed to request blocks from {}: {}",
-                            self.direction, self.peer_ip, e
-                        );
-                    }
-                } else if *peer_height < our_height.saturating_sub(10) {
-                    // Peer is significantly behind - might be on a fork
-                    debug!(
-                        "📊 [{:?}] Peer {} is behind: height {} vs our {}",
-                        self.direction, self.peer_ip, peer_height, our_height
-                    );
-                }
+                debug!(
+                    "📊 [{:?}] Peer {} reported height {} (we have {})",
+                    self.direction, self.peer_ip, peer_height, our_height
+                );
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,

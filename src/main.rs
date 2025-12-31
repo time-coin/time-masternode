@@ -712,7 +712,26 @@ async fn main() {
 
         // Run initial fork detection before syncing
         tracing::info!("🔍 Running initial fork detection...");
-        blockchain_init.compare_chain_with_peers().await;
+        if let Some((consensus_height, consensus_peer)) =
+            blockchain_init.compare_chain_with_peers().await
+        {
+            tracing::info!(
+                "🔀 Detected fork: syncing from consensus peer {} at height {}",
+                consensus_peer,
+                consensus_height
+            );
+            // Sync specifically from the consensus peer
+            if let Err(e) = blockchain_init
+                .sync_from_specific_peer(&consensus_peer)
+                .await
+            {
+                tracing::warn!(
+                    "⚠️  Failed to sync from consensus peer {}: {}",
+                    consensus_peer,
+                    e
+                );
+            }
+        }
 
         // STEP 4: Sync remaining blocks from peers
         tracing::info!("📦 Syncing blockchain from peers...");
