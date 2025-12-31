@@ -949,7 +949,7 @@ async fn main() {
 
                         // Before producing catchup blocks, check if any peer has a longer chain
                         // If so, we should NOT produce blocks as it may create a fork
-                        let connected_peers = block_peer_registry.list_peers().await;
+                        let connected_peers = block_peer_registry.get_connected_peers().await;
 
                         // CRITICAL: If no peers are connected at all, do NOT produce catchup blocks
                         // This prevents creating a fork when the node is isolated
