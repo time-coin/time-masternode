@@ -871,11 +871,20 @@ async fn main() {
         let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
         let time_since_expected = now_timestamp - expected_block_time;
 
-        // Trigger immediate catchup if we're 5+ minutes past when block should have been produced
+        // Smart catchup trigger:
+        // - If many blocks behind (>3): Start immediately regardless of time
+        // - If few blocks behind (1-3): Use 5-minute grace period
         let catchup_delay_threshold = 300; // 5 minutes in seconds
 
-        let initial_wait = if blocks_behind > 0 && time_since_expected >= catchup_delay_threshold {
-            // We're behind AND 5+ minutes past when block should have been produced
+        let initial_wait = if blocks_behind > 3 {
+            // Significantly behind - start catchup immediately
+            tracing::info!(
+                "⚡ {} blocks behind - starting immediate TSDC catchup (>3 blocks threshold)",
+                blocks_behind
+            );
+            0
+        } else if blocks_behind > 0 && time_since_expected >= catchup_delay_threshold {
+            // Few blocks behind AND 5+ minutes past when block should have been produced
             // Start catchup immediately - normal production had its chance
             tracing::info!(
                 "⚡ {} blocks behind, {}s past expected block time - starting immediate TSDC catchup",
@@ -884,7 +893,7 @@ async fn main() {
             );
             0
         } else if blocks_behind > 0 {
-            // We're behind but still within the 5-minute grace period
+            // 1-3 blocks behind but still within the 5-minute grace period
             // Wait a bit longer to give normal production a chance
             let remaining_grace = catchup_delay_threshold - time_since_expected;
             tracing::info!(
@@ -963,11 +972,14 @@ async fn main() {
                     let time_since_expected = now_timestamp - expected_block_time;
                     let catchup_delay_threshold = 300; // 5 minutes
 
-                    // Trigger catchup if: behind by any amount AND 5+ minutes past scheduled time
-                    let should_catchup = blocks_behind > 0 && time_since_expected >= catchup_delay_threshold;
+                    // Smart catchup trigger:
+                    // - If many blocks behind (>3): Catch up immediately
+                    // - If few blocks behind (1-3): Use 5-minute grace period
+                    let should_catchup = blocks_behind > 3
+                        || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
 
                     if should_catchup {
-                        // Behind schedule and past 5-minute grace period - trigger TSDC coordinated catchup
+                        // Behind schedule - trigger TSDC coordinated catchup
                         tracing::info!(
                             "🧱 Catching up: height {} → {} ({} blocks behind, {}s past expected) at {} ({}:{}0) with {} eligible masternodes",
                             current_height,
@@ -1283,7 +1295,7 @@ async fn main() {
                             );
                         }
                     }
-                    
+
                     // Handle case where we're ahead of expected height
                     if current_height > expected_height {
                         // Height is ahead of expected - this can happen if:
