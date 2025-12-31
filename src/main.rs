@@ -1330,6 +1330,20 @@ async fn main() {
                             );
                         }
                     }
+
+                    // Dynamically adjust check interval based on sync status
+                    // When behind, check more frequently to trigger catchup quickly
+                    let next_check_delay = if blocks_behind > 0 {
+                        // Behind: Check every 30 seconds to trigger catchup promptly
+                        tokio::time::Duration::from_secs(30)
+                    } else {
+                        // Synced: Use normal 10-minute interval
+                        tokio::time::Duration::from_secs(600)
+                    };
+
+                    // Reset interval with new duration
+                    interval = tokio::time::interval(next_check_delay);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 }
             }
         }
