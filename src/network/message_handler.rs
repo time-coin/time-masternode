@@ -475,17 +475,27 @@ impl MessageHandler {
                         total_reward as f64 / 100_000_000.0
                     );
 
-                    // Add block to blockchain
-                    if let Err(e) = context.blockchain.add_block(block).await {
-                        warn!(
-                            "[{}] Failed to add finalized block to blockchain: {}",
-                            self.direction, e
-                        );
+                    // Add block to blockchain (if not already present)
+                    let current_height = context.blockchain.get_height().await;
+                    if block.header.height > current_height {
+                        if let Err(e) = context.blockchain.add_block(block).await {
+                            warn!(
+                                "[{}] Failed to add finalized block to blockchain: {}",
+                                self.direction, e
+                            );
+                        } else {
+                            info!(
+                                "✅ [{}] Added finalized block {} to blockchain",
+                                self.direction,
+                                hex::encode(block_hash)
+                            );
+                        }
                     } else {
-                        info!(
-                            "✅ [{}] Added finalized block {} to blockchain",
+                        debug!(
+                            "[{}] Block {} already in blockchain at height {}, skipping add",
                             self.direction,
-                            hex::encode(block_hash)
+                            hex::encode(block_hash),
+                            block.header.height
                         );
                     }
                 } else {
