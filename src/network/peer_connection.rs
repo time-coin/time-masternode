@@ -116,6 +116,9 @@ pub struct PeerConnection {
 
     /// Last known height of the peer (for fork resolution)
     peer_height: Arc<RwLock<Option<u64>>>,
+
+    /// Fork loop detection: track consecutive fork detections at same height
+    fork_loop_tracker: Arc<RwLock<Option<(u64, u32, std::time::Instant)>>>, // (height, count, last_seen)
 }
 
 impl PeerConnection {
@@ -155,6 +158,7 @@ impl PeerConnection {
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
+            fork_loop_tracker: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
         })
@@ -188,6 +192,7 @@ impl PeerConnection {
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
+            fork_loop_tracker: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
         })
@@ -931,6 +936,48 @@ impl PeerConnection {
                             self.direction, fork_height, self.peer_ip
                         );
 
+                        // Check if we're stuck in a loop - track consecutive fork detections
+                        let mut tracker = self.fork_loop_tracker.write().await;
+
+                        let should_disconnect = if let Some((last_height, count, last_seen)) =
+                            *tracker
+                        {
+                            // Same fork height detected recently
+                            if last_height == fork_height
+                                && last_seen.elapsed() < std::time::Duration::from_secs(10)
+                            {
+                                let new_count = count + 1;
+                                if new_count > 3 {
+                                    error!(
+                                        "❌ [{:?}] Fork resolution loop detected for {} at height {} (attempt {}). Disconnecting peer.",
+                                        self.direction, self.peer_ip, fork_height, new_count
+                                    );
+                                    true
+                                } else {
+                                    *tracker =
+                                        Some((fork_height, new_count, std::time::Instant::now()));
+                                    false
+                                }
+                            } else {
+                                // Different height or too much time passed, reset
+                                *tracker = Some((fork_height, 1, std::time::Instant::now()));
+                                false
+                            }
+                        } else {
+                            // First detection
+                            *tracker = Some((fork_height, 1, std::time::Instant::now()));
+                            false
+                        };
+
+                        drop(tracker);
+
+                        if should_disconnect {
+                            return Err(format!(
+                                "Fork resolution loop detected at height {} - peer may be on incompatible fork",
+                                fork_height
+                            ));
+                        }
+
                         // Request peer's current height to make accurate comparison
                         if let Err(e) = self.send_message(&NetworkMessage::GetBlockHeight).await {
                             warn!("Failed to request peer height: {}", e);
@@ -957,18 +1004,16 @@ impl PeerConnection {
 
                         // Check if peer has a longer chain using their tip height
                         if peer_tip_height > our_height {
-                            info!(
-                                "📊 Peer {} has longer chain ({} > {}), requesting full chain for reorganization",
-                                self.peer_ip, peer_tip_height, our_height
+                            warn!(
+                                "⚠️ [{:?}] Peer {} has longer chain ({} > {}) but fork detected at {}. Disconnecting to prevent loop.",
+                                self.direction, self.peer_ip, peer_tip_height, our_height, fork_height
                             );
 
-                            // Request blocks from further back to find common ancestor
-                            let request_from = fork_height.saturating_sub(10);
-                            let msg = NetworkMessage::GetBlocks(request_from, peer_tip_height);
-                            if let Err(e) = self.send_message(&msg).await {
-                                warn!("Failed to request blocks for reorganization: {}", e);
-                            }
-                            return Ok(());
+                            // Disconnect to prevent loop - node will reconnect for fresh sync
+                            return Err(format!(
+                                "Fork detected at height {} - peer on different chain. Disconnecting for fresh sync.",
+                                fork_height
+                            ));
                         } else {
                             warn!(
                                 "⚠️ [{:?}] Peer {} has fork but not longer chain (peer: {}, ours: {}), ignoring",
