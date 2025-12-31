@@ -981,11 +981,12 @@ async fn main() {
                                 let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
                             }
 
-                            // Wait longer for responses (5 seconds) to give peers time to respond
-                            // This prevents premature catchup when peers have the blocks but are slow to respond
-                            tracing::info!("⏳ Waiting 5 seconds for peer responses before starting catchup...");
+                            // Wait longer for responses (10 seconds) to give peers time to respond
+                            // and for TSDC consensus to finalize any blocks in progress
+                            // This prevents premature catchup when blocks are being finalized
+                            tracing::info!("⏳ Waiting 10 seconds for peer responses and TSDC consensus before starting catchup...");
                             let wait_start = tokio::time::Instant::now();
-                            let wait_duration = tokio::time::Duration::from_secs(5);
+                            let wait_duration = tokio::time::Duration::from_secs(10);
 
                             while wait_start.elapsed() < wait_duration {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -1004,7 +1005,7 @@ async fn main() {
 
                             if !peer_has_longer_chain {
                                 tracing::info!(
-                                    "⏸️  No blocks received after 5s wait - proceeding with catchup production"
+                                    "⏸️  No blocks received after 10s wait - proceeding with catchup production"
                                 );
                             }
                         }
