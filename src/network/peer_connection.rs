@@ -147,7 +147,7 @@ impl PeerConnection {
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Outbound,
-            reader: BufReader::new(read_half),
+            reader: BufReader::with_capacity(1024 * 1024, read_half), // 1MB buffer for large block responses
             writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
@@ -177,7 +177,7 @@ impl PeerConnection {
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Inbound,
-            reader: BufReader::new(read_half),
+            reader: BufReader::with_capacity(1024 * 1024, read_half), // 1MB buffer for large block responses
             writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
