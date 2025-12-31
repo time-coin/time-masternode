@@ -950,6 +950,14 @@ async fn main() {
                         // Before producing catchup blocks, check if any peer has a longer chain
                         // If so, we should NOT produce blocks as it may create a fork
                         let connected_peers = block_peer_registry.list_peers().await;
+
+                        // CRITICAL: If no peers are connected at all, do NOT produce catchup blocks
+                        // This prevents creating a fork when the node is isolated
+                        if connected_peers.is_empty() {
+                            tracing::warn!("⚠️  No connected peers - waiting for connections before producing catchup blocks");
+                            continue;
+                        }
+
                         let mut peer_has_longer_chain = false;
 
                         if !connected_peers.is_empty() {
