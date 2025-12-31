@@ -452,13 +452,17 @@ impl Blockchain {
             // If peers have a different chain, they need to restart with the new genesis
 
             // Find the best peer to sync from by querying all peers for their chain height
-            // We'll request a small sample (blocks 0-10) from each peer to see who has the longest chain
+            // Request blocks near current height to check who has the longest chain
             let mut best_peer: Option<String> = None;
             let mut best_peer_height = current;
 
+            // Request a sample of blocks near our current height
+            let sample_start = current.saturating_sub(5); // Check 5 blocks back
+            let sample_end = current + 10; // And 10 blocks ahead
+
             for peer in &connected_peers {
-                // Send a status request or query blocks 0-10 to gauge chain length
-                let req = NetworkMessage::GetBlocks(0, 10);
+                // Query blocks around our current height to see who's ahead
+                let req = NetworkMessage::GetBlocks(sample_start, sample_end);
                 if peer_registry.send_to_peer(peer, req).await.is_ok() {
                     // Give peer a moment to respond
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
