@@ -26,7 +26,7 @@ use tokio::sync::RwLock;
 
 // Phase 2 Enhancement: Track peers on different forks
 #[derive(Clone, Debug)]
-pub(crate) struct PeerForkStatus {
+pub struct PeerForkStatus {
     consecutive_invalid_blocks: u32,
     last_invalid_at: Instant,
     on_incompatible_fork: bool,

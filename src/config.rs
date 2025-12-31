@@ -245,6 +245,7 @@ impl Config {
     }
 
     #[allow(dead_code)]
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self {
             node: NodeConfig {
