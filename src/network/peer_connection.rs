@@ -1004,16 +1004,13 @@ impl PeerConnection {
 
                         // Check if peer has a longer chain using their tip height
                         if peer_tip_height > our_height {
-                            warn!(
-                                "⚠️ [{:?}] Peer {} has longer chain ({} > {}) but fork detected at {}. Disconnecting to prevent loop.",
+                            info!(
+                                "📊 [{:?}] Peer {} has longer chain ({} > {}) with fork at {}. Blocks were skipped - will retry sync.",
                                 self.direction, self.peer_ip, peer_tip_height, our_height, fork_height
                             );
-
-                            // Disconnect to prevent loop - node will reconnect for fresh sync
-                            return Err(format!(
-                                "Fork detected at height {} - peer on different chain. Disconnecting for fresh sync.",
-                                fork_height
-                            ));
+                            // Don't disconnect - fork resolution already attempted earlier (lines 755-842)
+                            // If it didn't succeed, we may need more blocks or peer needs to catch up
+                            // Natural sync process will continue requesting blocks
                         } else {
                             warn!(
                                 "⚠️ [{:?}] Peer {} has fork but not longer chain (peer: {}, ours: {}), ignoring",
