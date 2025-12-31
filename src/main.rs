@@ -596,6 +596,9 @@ async fn main() {
 
                                     tracing::info!("🎯 SELECTED AS LEADER for slot {}", current_slot);
 
+                                    // Get current blockchain height for block proposal
+                                    let current_height = blockchain_tsdc.get_height().await;
+
                                     // Get finalized transactions from consensus engine
                                     let finalized_txs = consensus_tsdc.get_finalized_transactions_for_block();
 
@@ -622,8 +625,9 @@ async fn main() {
                                         }
                                     );
 
-                                    // Propose block with finalized transactions
+                                    // Propose block with current blockchain height
                                     match tsdc_loop.propose_block(
+                                        current_height,
                                         mn_address_tsdc.clone(),
                                         finalized_txs.clone(),
                                         masternode_rewards,

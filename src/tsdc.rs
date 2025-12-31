@@ -392,17 +392,21 @@ impl TSCDConsensus {
     /// Propose a block for the current slot (leader only)
     pub async fn propose_block(
         &self,
+        current_height: u64,
         _proposer_id: String,
         transactions: Vec<crate::types::Transaction>,
         masternode_rewards: Vec<(String, u64)>,
     ) -> Result<Block, TSCDError> {
         // Get current chain head for parent hash
         let chain_head = self.chain_head.read().await;
-        let (parent_hash, block_height) = match chain_head.as_ref() {
-            Some(block) => (block.hash(), block.header.height + 1),
-            None => (Hash256::default(), 0),
+        let parent_hash = match chain_head.as_ref() {
+            Some(block) => block.hash(),
+            None => Hash256::default(),
         };
         drop(chain_head);
+
+        // Use provided current_height instead of internal chain_head state
+        let block_height = current_height + 1;
 
         // Get current timestamp
         let timestamp = std::time::SystemTime::now()
