@@ -518,6 +518,14 @@ fn spawn_connection_task(
 
             connection_manager.mark_disconnected(&ip);
 
+            // If this is a masternode connection, mark it as inactive in the registry
+            // This ensures it won't receive rewards while disconnected
+            if is_masternode {
+                if let Err(e) = masternode_registry.mark_inactive_on_disconnect(&ip).await {
+                    tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
+                }
+            }
+
             let tag = if is_masternode { "[MASTERNODE]" } else { "" };
             tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
 
@@ -554,6 +562,17 @@ fn spawn_connection_task(
         }
 
         connection_manager.mark_disconnected(&ip);
+
+        // Final cleanup: Mark masternode as inactive when task exits
+        if is_masternode {
+            if let Err(e) = masternode_registry.mark_inactive_on_disconnect(&ip).await {
+                tracing::debug!(
+                    "Could not mark masternode {} as inactive on task exit: {:?}",
+                    ip,
+                    e
+                );
+            }
+        }
     });
 }
 
@@ -596,6 +615,17 @@ async fn maintain_peer_connection(
     connection_manager.mark_disconnected(&peer_ip);
     peer_registry.mark_inbound_disconnected(&peer_ip);
     peer_registry.unregister_peer(&peer_ip).await;
+
+    // If this peer is a registered masternode, mark it as inactive on disconnect
+    if masternode_registry.is_registered(&peer_ip).await {
+        if let Err(e) = masternode_registry
+            .mark_inactive_on_disconnect(&peer_ip)
+            .await
+        {
+            tracing::debug!("Could not mark masternode {} as inactive: {:?}", peer_ip, e);
+        }
+    }
+
     tracing::debug!("🔌 Unregistered peer {}", peer_ip);
 
     result

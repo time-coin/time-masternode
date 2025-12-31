@@ -324,6 +324,37 @@ impl MasternodeRegistry {
         info!("✓ Started new block reward period at {}", now);
     }
 
+    /// Mark a masternode as inactive when connection is lost
+    /// This ensures disconnected nodes don't receive rewards
+    pub async fn mark_inactive_on_disconnect(&self, address: &str) -> Result<(), RegistryError> {
+        let now = Self::now();
+        let mut masternodes = self.masternodes.write().await;
+
+        if let Some(info) = masternodes.get_mut(address) {
+            if info.is_active {
+                info.is_active = false;
+                if info.uptime_start > 0 {
+                    info.total_uptime += now - info.uptime_start;
+                }
+                warn!(
+                    "⚠️  Masternode {} marked inactive (connection lost)",
+                    address
+                );
+
+                // Persist to disk
+                let key = format!("masternode:{}", address);
+                let value =
+                    bincode::serialize(&info).map_err(|e| RegistryError::Storage(e.to_string()))?;
+                self.db
+                    .insert(key.as_bytes(), value)
+                    .map_err(|e| RegistryError::Storage(e.to_string()))?;
+            }
+            Ok(())
+        } else {
+            Err(RegistryError::NotFound)
+        }
+    }
+
     #[allow(dead_code)]
     pub async fn unregister(&self, address: &str) -> Result<(), RegistryError> {
         let mut nodes = self.masternodes.write().await;
