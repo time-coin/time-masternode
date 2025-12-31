@@ -2341,7 +2341,8 @@ impl Blockchain {
         let expected_height = self.get_expected_height(now);
 
         // Allow a small buffer for network latency and clock skew
-        const MAX_BLOCKS_AHEAD: u64 = 2;
+        // TIME COIN: Keep this minimal - temporal precision is critical
+        const MAX_BLOCKS_AHEAD: u64 = 0; // Zero tolerance - blocks must be on time
 
         if current_height > expected_height + MAX_BLOCKS_AHEAD {
             let blocks_ahead = current_height - expected_height;

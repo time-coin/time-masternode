@@ -1138,23 +1138,57 @@ async fn main() {
                         let genesis_timestamp = block_blockchain.genesis_timestamp();
 
                         for target_height in (current_height + 1)..=expected_height {
-                            // CRITICAL: Enforce time-based schedule even in catch-up mode
-                            let expected_timestamp =
-                                genesis_timestamp + (target_height as i64 * 600);
+                            // CRITICAL TIME COIN REQUIREMENT: Never produce blocks ahead of schedule
+                            // Check current time against this block's scheduled time
+                            let expected_timestamp = genesis_timestamp + (target_height as i64 * 600);
                             let now = chrono::Utc::now().timestamp();
 
                             if expected_timestamp > now {
-                                // We've caught up to real time - stop producing
-                                tracing::info!(
-                                    "⏰ Reached real-time at height {} (expected time: {}, now: {})",
-                                    target_height - 1,
-                                    expected_timestamp,
-                                    now
+                                // Haven't reached the scheduled time yet
+                                let wait_seconds = expected_timestamp - now;
+
+                                if wait_seconds > 60 {
+                                    // More than 1 minute until scheduled - stop catchup
+                                    // Regular block production will handle this at the proper time
+                                    tracing::info!(
+                                        "⏰ Stopping catchup: block {} not due for {}s",
+                                        target_height,
+                                        wait_seconds
                                     );
                                     break;
                                 }
 
-                                match block_blockchain.produce_block().await {
+                                // Less than 1 minute - wait for EXACT scheduled time
+                                tracing::info!(
+                                    "⏱️  Waiting {}s for block {} scheduled time (TIME COIN precision)",
+                                    wait_seconds,
+                                    target_height
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_secs(wait_seconds as u64)).await;
+
+                                // Re-check time after waiting to ensure precision
+                                let now_after_wait = chrono::Utc::now().timestamp();
+                                if expected_timestamp > now_after_wait {
+                                    tracing::warn!(
+                                        "⚠️  Time check failed after wait - block {} still not due, skipping",
+                                        target_height
+                                    );
+                                    continue;
+                                }
+                            }
+
+                            // Double-check: NEVER produce if current blockchain height >= target
+                            let current_height_check = block_blockchain.get_height().await;
+                            if current_height_check >= target_height {
+                                tracing::info!(
+                                    "✓ Block {} already exists (height: {}), skipping",
+                                    target_height,
+                                    current_height_check
+                                );
+                                continue;
+                            }
+
+                            match block_blockchain.produce_block().await {
                                     Ok(block) => {
                                         // Add block to our chain
                                         if let Err(e) = block_blockchain.add_block(block.clone()).await {
