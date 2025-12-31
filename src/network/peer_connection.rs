@@ -944,10 +944,12 @@ impl PeerConnection {
                         {
                             // Same fork height detected recently
                             if last_height == fork_height
-                                && last_seen.elapsed() < std::time::Duration::from_secs(30) // Increased from 10s
+                                && last_seen.elapsed() < std::time::Duration::from_secs(30)
+                            // Increased from 10s
                             {
                                 let new_count = count + 1;
-                                if new_count > 5 { // Increased from 3 to allow more resolution attempts
+                                if new_count > 5 {
+                                    // Increased from 3 to allow more resolution attempts
                                     error!(
                                         "❌ [{:?}] Fork resolution loop detected for {} at height {} (attempt {}). Peer on incompatible fork.",
                                         self.direction, self.peer_ip, fork_height, new_count

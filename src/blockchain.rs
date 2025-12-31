@@ -582,7 +582,12 @@ impl Blockchain {
 
                     // Check if we made progress
                     if now_height > last_height {
-                        tracing::info!("📈 Block sync progress: {} → {} from {}", last_height, now_height, sync_peer);
+                        tracing::info!(
+                            "📈 Block sync progress: {} → {} from {}",
+                            last_height,
+                            now_height,
+                            sync_peer
+                        );
                         last_height = now_height;
                         made_progress = true;
                     }
@@ -623,11 +628,15 @@ impl Blockchain {
 
                             let req = NetworkMessage::GetBlocks(batch_start, batch_end);
                             if let Err(e) = peer_registry.send_to_peer(&alt_peer, req).await {
-                                tracing::warn!("❌ Failed to send GetBlocks to {}: {}", alt_peer, e);
+                                tracing::warn!(
+                                    "❌ Failed to send GetBlocks to {}: {}",
+                                    alt_peer,
+                                    e
+                                );
                                 tried_peers.push(alt_peer);
                                 continue;
                             }
-                            
+
                             // Wait for response with exponential backoff timeout
                             let retry_start = std::time::Instant::now();
                             let retry_timeout = std::time::Duration::from_secs(retry_timeout_secs);
@@ -637,7 +646,10 @@ impl Blockchain {
                                 let retry_height = *self.current_height.read().await;
 
                                 if retry_height > last_height {
-                                    tracing::info!("✅ Alternate peer {} responded with blocks!", alt_peer);
+                                    tracing::info!(
+                                        "✅ Alternate peer {} responded with blocks!",
+                                        alt_peer
+                                    );
                                     last_height = retry_height;
                                     made_progress = true;
                                     sync_peer = alt_peer.clone(); // Switch to working peer
@@ -648,12 +660,19 @@ impl Blockchain {
                             if made_progress {
                                 break; // Got blocks, continue with this peer
                             } else {
-                                tracing::warn!("⚠️  Peer {} did not respond within {}s", alt_peer, retry_timeout_secs);
+                                tracing::warn!(
+                                    "⚠️  Peer {} did not respond within {}s",
+                                    alt_peer,
+                                    retry_timeout_secs
+                                );
                             }
 
                             tried_peers.push(alt_peer);
                         } else {
-                            tracing::warn!("⚠️  No more alternate peers available (tried {} peers)", tried_peers.len());
+                            tracing::warn!(
+                                "⚠️  No more alternate peers available (tried {} peers)",
+                                tried_peers.len()
+                            );
                             break;
                         }
                     }
@@ -770,12 +789,12 @@ impl Blockchain {
 
         // Get previous block hash
         let mut current_height = *self.current_height.read().await;
-        
+
         // CRITICAL SAFEGUARD: Check if we're too far behind expected height
         // If more than 50 blocks behind, refuse to produce to prevent fork creation
         let expected_height = self.calculate_expected_height();
         let blocks_behind = expected_height.saturating_sub(current_height);
-        
+
         if blocks_behind > 50 {
             return Err(format!(
                 "Refusing to produce block: too far behind consensus (height: {}, expected: {}, {} blocks behind). Sync from peers first to prevent forks.",
