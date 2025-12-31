@@ -858,27 +858,51 @@ async fn main() {
         // before checking if we're behind (prevents false immediate catchup trigger)
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-        // Check if we're significantly behind - if so, start catchup immediately
+        // Time-based catchup trigger: Check if we're behind schedule
+        // Use time rather than block count to determine when to trigger catchup
         let current_height = block_blockchain.get_height().await;
         let expected_height = block_blockchain.calculate_expected_height();
         let blocks_behind = expected_height.saturating_sub(current_height);
 
-        let initial_wait = if blocks_behind > 10 {
-            // More than 10 blocks behind - start catchup immediately
+        let genesis_timestamp = block_blockchain.genesis_timestamp();
+        let now_timestamp = chrono::Utc::now().timestamp();
+
+        // Calculate when the current expected block should have been produced
+        let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
+        let time_since_expected = now_timestamp - expected_block_time;
+
+        // Trigger immediate catchup if we're 5+ minutes past when block should have been produced
+        let catchup_delay_threshold = 300; // 5 minutes in seconds
+
+        let initial_wait = if blocks_behind > 0 && time_since_expected >= catchup_delay_threshold {
+            // We're behind AND 5+ minutes past when block should have been produced
+            // Start catchup immediately - normal production had its chance
             tracing::info!(
-                "⚡ {} blocks behind - starting immediate catchup (bypassing 10-min boundary wait)",
-                blocks_behind
+                "⚡ {} blocks behind, {}s past expected block time - starting immediate TSDC catchup",
+                blocks_behind,
+                time_since_expected
             );
             0
+        } else if blocks_behind > 0 {
+            // We're behind but still within the 5-minute grace period
+            // Wait a bit longer to give normal production a chance
+            let remaining_grace = catchup_delay_threshold - time_since_expected;
+            tracing::info!(
+                "⏳ {} blocks behind but only {}s past expected time - waiting {}s before catchup",
+                blocks_behind,
+                time_since_expected,
+                remaining_grace
+            );
+            remaining_grace.max(30) as u64 // Wait at least 30s
         } else {
-            // Calculate time until next 10-minute boundary for normal operation
+            // Not behind - calculate time until next 10-minute boundary for normal operation
             let now = chrono::Utc::now();
             let minute = now.minute();
             let seconds_into_period = (minute % 10) * 60 + now.second();
-            600 - seconds_into_period
+            (600 - seconds_into_period) as u64
         };
 
-        // Wait until the next 10-minute boundary (or start immediately if behind)
+        // Wait until the appropriate time (or start immediately if past catchup threshold)
         if initial_wait > 0 {
             tokio::time::sleep(tokio::time::Duration::from_secs(initial_wait as u64)).await;
         }
@@ -929,15 +953,27 @@ async fn main() {
                         continue;
                     }
 
-                    // Determine what to do based on height comparison
-                    if current_height < expected_height - 1 {
-                        // More than 1 block behind - need catchup
-                        let blocks_behind = expected_height - current_height;
+                    // Determine what to do based on height and time comparison
+                    let blocks_behind = expected_height.saturating_sub(current_height);
+
+                    // Calculate time-based catchup trigger
+                    let genesis_timestamp = block_blockchain.genesis_timestamp();
+                    let now_timestamp = chrono::Utc::now().timestamp();
+                    let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
+                    let time_since_expected = now_timestamp - expected_block_time;
+                    let catchup_delay_threshold = 300; // 5 minutes
+
+                    // Trigger catchup if: behind by any amount AND 5+ minutes past scheduled time
+                    let should_catchup = blocks_behind > 0 && time_since_expected >= catchup_delay_threshold;
+
+                    if should_catchup {
+                        // Behind schedule and past 5-minute grace period - trigger TSDC coordinated catchup
                         tracing::info!(
-                            "🧱 Catching up: height {} → {} ({} blocks behind) at {} ({}:{}0) with {} eligible masternodes",
+                            "🧱 Catching up: height {} → {} ({} blocks behind, {}s past expected) at {} ({}:{}0) with {} eligible masternodes",
                             current_height,
                             expected_height,
                             blocks_behind,
+                            time_since_expected,
                             timestamp,
                             now.hour(),
                             (now.minute() / 10),
@@ -1137,8 +1173,9 @@ async fn main() {
                                 catchup_produced,
                                 block_blockchain.get_height().await
                             );
-                    } else if current_height == expected_height - 1 || current_height == expected_height {
-                        // At expected height or one behind (normal) - determine if we should produce
+                    } else {
+                        // Either at expected height or behind but within 5-minute grace period
+                        // Use normal block production - no race with catchup mode
 
                         // Use VDF to select block producer deterministically
                         let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
@@ -1245,7 +1282,10 @@ async fn main() {
                                 selected_producer.address
                             );
                         }
-                    } else {
+                    }
+                    
+                    // Handle case where we're ahead of expected height
+                    if current_height > expected_height {
                         // Height is ahead of expected - this can happen if:
                         // 1. Clock skew caused blocks to be produced early
                         // 2. We received blocks from a peer with clock skew
