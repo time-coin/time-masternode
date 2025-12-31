@@ -876,15 +876,15 @@ async fn main() {
         // - If few blocks behind (1-3): Use 5-minute grace period
         let catchup_delay_threshold = 300; // 5 minutes in seconds
 
-        let initial_wait = if blocks_behind > 3 {
-            // Significantly behind - start catchup immediately
+        let initial_wait = if blocks_behind > 2 {
+            // More than 2 blocks behind - start catchup immediately
             tracing::info!(
-                "⚡ {} blocks behind - starting immediate TSDC catchup (>3 blocks threshold)",
+                "⚡ {} blocks behind - starting immediate TSDC catchup (>2 blocks threshold)",
                 blocks_behind
             );
             0
         } else if blocks_behind > 0 && time_since_expected >= catchup_delay_threshold {
-            // Few blocks behind AND 5+ minutes past when block should have been produced
+            // 1-2 blocks behind AND 5+ minutes past when block should have been produced
             // Start catchup immediately - normal production had its chance
             tracing::info!(
                 "⚡ {} blocks behind, {}s past expected block time - starting immediate TSDC catchup",
@@ -893,7 +893,7 @@ async fn main() {
             );
             0
         } else if blocks_behind > 0 {
-            // 1-3 blocks behind but still within the 5-minute grace period
+            // Exactly 1 block behind and within the 5-minute grace period
             // Wait a bit longer to give normal production a chance
             let remaining_grace = catchup_delay_threshold - time_since_expected;
             tracing::info!(
@@ -957,9 +957,9 @@ async fn main() {
                     let catchup_delay_threshold = 300; // 5 minutes
 
                     // Smart catchup trigger:
-                    // - If many blocks behind (>3): Catch up immediately
-                    // - If few blocks behind (1-3): Use 5-minute grace period
-                    let should_catchup = blocks_behind > 3
+                    // - If many blocks behind (>2): Catch up immediately
+                    // - If 1 block behind: Use 5-minute grace period
+                    let should_catchup = blocks_behind > 2
                         || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
 
                     // Allow single-node bootstrap during initial catchup (height 0)
