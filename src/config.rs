@@ -84,6 +84,10 @@ pub struct NetworkConfig {
     /// IPs to permanently blacklist (will not connect to or accept connections from)
     #[serde(default)]
     pub blacklisted_peers: Vec<String>,
+    /// IPs to whitelist (exempt from rate limiting and bans)
+    /// Typically used for trusted masternodes or infrastructure nodes
+    #[serde(default)]
+    pub whitelisted_peers: Vec<String>,
 }
 
 impl NetworkConfig {
@@ -261,6 +265,7 @@ impl Config {
                 enable_peer_discovery: true,
                 bootstrap_peers: vec![],
                 blacklisted_peers: vec![],
+                whitelisted_peers: vec![],
             },
             rpc: RpcConfig {
                 enabled: true,

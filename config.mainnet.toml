@@ -21,6 +21,9 @@ bootstrap_peers = [
     "seed1.time-coin.io:24000",
     "seed2.time-coin.io:24000",
 ]
+# IPs to whitelist (exempt from rate limiting and bans)
+# Useful for trusted masternodes or infrastructure nodes
+#whitelisted_peers = []
 
 [rpc]
 # RPC API settings

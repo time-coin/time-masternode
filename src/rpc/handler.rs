@@ -23,6 +23,7 @@ pub struct RpcHandler {
     registry: Arc<MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
     attestation_system: Arc<HeartbeatAttestationSystem>,
+    blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     start_time: SystemTime,
     network: NetworkType,
     mempool: Arc<tokio::sync::RwLock<HashMap<[u8; 32], Transaction>>>,
@@ -36,6 +37,7 @@ impl RpcHandler {
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
         attestation_system: Arc<HeartbeatAttestationSystem>,
+        blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     ) -> Self {
         Self {
             consensus,
@@ -43,6 +45,7 @@ impl RpcHandler {
             registry,
             blockchain,
             attestation_system,
+            blacklist,
             start_time: SystemTime::now(),
             network,
             mempool: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
@@ -93,6 +96,10 @@ impl RpcHandler {
             },
             "gettransactionfinality" => self.get_transaction_finality(&params_array).await,
             "waittransactionfinality" => self.wait_transaction_finality(&params_array).await,
+            "getwhitelist" => self.get_whitelist().await,
+            "addwhitelist" => self.add_whitelist(&params_array).await,
+            "removewhitelist" => self.remove_whitelist(&params_array).await,
+            "getblacklist" => self.get_blacklist().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -1079,5 +1086,80 @@ impl RpcHandler {
             // Wait a bit before checking again
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
+    }
+
+    /// Get whitelist info (list of whitelisted IPs)
+    async fn get_whitelist(&self) -> Result<Value, RpcError> {
+        let bl = self.blacklist.read().await;
+        let (_, _, _, whitelist_count) = bl.stats();
+
+        Ok(json!({
+            "count": whitelist_count,
+            "info": "Whitelisted IPs are exempt from rate limiting and bans. Use 'addwhitelist <ip>' to add."
+        }))
+    }
+
+    /// Add IP to whitelist
+    async fn add_whitelist(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let ip_str = params.first().and_then(|v| v.as_str()).ok_or(RpcError {
+            code: -32602,
+            message: "IP address parameter required".to_string(),
+        })?;
+
+        let ip_addr = ip_str.parse::<std::net::IpAddr>().map_err(|_| RpcError {
+            code: -32602,
+            message: format!("Invalid IP address: {}", ip_str),
+        })?;
+
+        let mut bl = self.blacklist.write().await;
+        let was_whitelisted = bl.is_whitelisted(ip_addr);
+
+        if was_whitelisted {
+            Ok(json!({
+                "result": "already_whitelisted",
+                "ip": ip_str,
+                "message": "IP is already whitelisted"
+            }))
+        } else {
+            bl.add_to_whitelist(ip_addr, "Added via RPC");
+            Ok(json!({
+                "result": "success",
+                "ip": ip_str,
+                "message": "IP added to whitelist"
+            }))
+        }
+    }
+
+    /// Remove IP from whitelist
+    async fn remove_whitelist(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let ip_str = params.first().and_then(|v| v.as_str()).ok_or(RpcError {
+            code: -32602,
+            message: "IP address parameter required".to_string(),
+        })?;
+
+        let _ip_addr = ip_str.parse::<std::net::IpAddr>().map_err(|_| RpcError {
+            code: -32602,
+            message: format!("Invalid IP address: {}", ip_str),
+        })?;
+
+        // Note: We don't implement removal to prevent accidental removal of masternodes
+        // Whitelisting is permanent by design
+        Ok(json!({
+            "result": "not_supported",
+            "message": "Whitelist removal not supported. Whitelisting is permanent by design to protect masternode connections."
+        }))
+    }
+
+    /// Get blacklist statistics
+    async fn get_blacklist(&self) -> Result<Value, RpcError> {
+        let bl = self.blacklist.read().await;
+        let (permanent, temporary, violations, whitelist) = bl.stats();
+
+        Ok(json!({
+            "permanent_bans": permanent,
+            "temporary_bans": temporary,
+            "active_violations": violations,
+            "whitelisted": whitelist
+        }))
     }
 }

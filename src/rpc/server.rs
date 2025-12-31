@@ -53,6 +53,7 @@ pub struct RpcServer {
 }
 
 impl RpcServer {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         addr: &str,
         consensus: Arc<ConsensusEngine>,
@@ -61,6 +62,7 @@ impl RpcServer {
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
         attestation_system: Arc<HeartbeatAttestationSystem>,
+        blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
         let handler = Arc::new(RpcHandler::new(
@@ -70,6 +72,7 @@ impl RpcServer {
             registry,
             blockchain,
             attestation_system,
+            blacklist,
         ));
 
         Ok(Self { listener, handler })

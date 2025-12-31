@@ -1425,47 +1425,6 @@ async fn main() {
 
     println!("🌐 Starting P2P network server...");
 
-    // Start RPC server
-    let rpc_consensus = consensus_engine.clone();
-    let rpc_utxo = utxo_mgr.clone();
-    let rpc_registry = registry.clone();
-    let rpc_blockchain = blockchain.clone();
-    let rpc_addr_clone = rpc_addr.clone();
-    let rpc_network = network_type;
-    let rpc_shutdown_token = shutdown_token.clone();
-    let rpc_attestation = attestation_system.clone();
-
-    let rpc_handle = tokio::spawn(async move {
-        match RpcServer::new(
-            &rpc_addr_clone,
-            rpc_consensus,
-            rpc_utxo,
-            rpc_network,
-            rpc_registry,
-            rpc_blockchain,
-            rpc_attestation,
-        )
-        .await
-        {
-            Ok(mut server) => {
-                tokio::select! {
-                    _ = rpc_shutdown_token.cancelled() => {
-                        tracing::debug!("🛑 RPC server shutting down gracefully");
-                    }
-                    result = server.run() => {
-                        if let Err(e) = result {
-                            eprintln!("RPC server error: {}", e);
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("  ❌ Failed to start RPC server: {}", e);
-            }
-        }
-    });
-    shutdown_manager.register_task(rpc_handle);
-
     // Periodic status report - logs every 5 minutes at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
@@ -1532,6 +1491,33 @@ async fn main() {
     .await
     {
         Ok(mut server) => {
+            // Load whitelisted peers from config (if any)
+            if !config.network.whitelisted_peers.is_empty() {
+                let mut blacklist_guard = server.blacklist.write().await;
+                let mut whitelisted_count = 0;
+
+                for ip_str in &config.network.whitelisted_peers {
+                    if let Ok(ip_addr) = ip_str.parse::<std::net::IpAddr>() {
+                        blacklist_guard.add_to_whitelist(ip_addr, "From config");
+                        whitelisted_count += 1;
+                    } else {
+                        tracing::warn!("⚠️  Invalid whitelisted IP in config: {}", ip_str);
+                    }
+                }
+                drop(blacklist_guard);
+
+                println!(
+                    "  ✅ Loaded {} whitelisted peer(s) from config",
+                    whitelisted_count
+                );
+                println!();
+            }
+
+            // Masternodes will be whitelisted dynamically as they are discovered via:
+            // 1. MasternodeAnnouncement messages (when they announce themselves)
+            // 2. MasternodesResponse messages (when we receive GetMasternodes replies)
+            // This happens automatically in server.rs message handlers
+
             // Give registry access to network broadcast channel
             registry
                 .set_broadcast_channel(server.tx_notifier.clone())
@@ -1547,6 +1533,49 @@ async fn main() {
                 .await;
 
             println!("  ✅ Network server listening on {}", p2p_addr);
+
+            // Start RPC server with access to blacklist
+            let rpc_consensus = consensus_engine.clone();
+            let rpc_utxo = utxo_mgr.clone();
+            let rpc_registry = registry.clone();
+            let rpc_blockchain = blockchain.clone();
+            let rpc_addr_clone = rpc_addr.clone();
+            let rpc_network = network_type;
+            let rpc_shutdown_token = shutdown_token.clone();
+            let rpc_attestation = attestation_system.clone();
+            let rpc_blacklist = server.blacklist.clone();
+
+            let rpc_handle = tokio::spawn(async move {
+                match RpcServer::new(
+                    &rpc_addr_clone,
+                    rpc_consensus,
+                    rpc_utxo,
+                    rpc_network,
+                    rpc_registry,
+                    rpc_blockchain,
+                    rpc_attestation,
+                    rpc_blacklist,
+                )
+                .await
+                {
+                    Ok(mut server) => {
+                        tokio::select! {
+                            _ = rpc_shutdown_token.cancelled() => {
+                                tracing::debug!("🛑 RPC server shutting down gracefully");
+                            }
+                            result = server.run() => {
+                                if let Err(e) = result {
+                                    eprintln!("RPC server error: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  ❌ Failed to start RPC server: {}", e);
+                    }
+                }
+            });
+            shutdown_manager.register_task(rpc_handle);
 
             // Now create network client for outbound connections
             let network_client = network::client::NetworkClient::new(

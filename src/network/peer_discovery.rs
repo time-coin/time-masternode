@@ -7,6 +7,10 @@
 //! The API returns IP addresses without ports. The default port is
 //! determined by the network type (24100 for testnet, 24000 for mainnet).
 //!
+//! Note: Masternodes are discovered via P2P protocol (GetMasternodes message),
+//! not through a separate API endpoint. The /api/peers endpoint returns all
+//! peers, which may include masternodes.
+//!
 //! Note: This module appears as "dead code" in library checks because it's
 //! only used by the binary (main.rs).
 

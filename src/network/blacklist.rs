@@ -15,6 +15,8 @@ pub struct IPBlacklist {
     temp_blacklist: HashMap<IpAddr, (Instant, String)>,
     /// Violation tracking: IP -> (violation_count, last_violation_time)
     violations: HashMap<IpAddr, (u32, Instant)>,
+    /// Whitelisted IPs (exempt from all bans and rate limits) - typically masternodes
+    whitelist: HashMap<IpAddr, String>,
 }
 
 impl IPBlacklist {
@@ -23,11 +25,37 @@ impl IPBlacklist {
             permanent_blacklist: HashMap::new(),
             temp_blacklist: HashMap::new(),
             violations: HashMap::new(),
+            whitelist: HashMap::new(),
         }
+    }
+
+    /// Add an IP to the whitelist (exempt from all bans and rate limits)
+    pub fn add_to_whitelist(&mut self, ip: IpAddr, reason: &str) {
+        self.whitelist.insert(ip, reason.to_string());
+        // Remove any existing bans or violations for whitelisted IPs
+        self.permanent_blacklist.remove(&ip);
+        self.temp_blacklist.remove(&ip);
+        self.violations.remove(&ip);
+        tracing::info!("✅ Added {} to whitelist: {}", ip, reason);
+    }
+
+    /// Check if an IP is whitelisted
+    pub fn is_whitelisted(&self, ip: IpAddr) -> bool {
+        self.whitelist.contains_key(&ip)
+    }
+
+    /// Get whitelist count
+    pub fn whitelist_count(&self) -> usize {
+        self.whitelist.len()
     }
 
     /// Check if an IP is currently blacklisted
     pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
+        // Whitelisted IPs are never blacklisted
+        if self.is_whitelisted(ip) {
+            return None;
+        }
+
         // Check permanent blacklist
         if let Some(reason) = self.permanent_blacklist.get(&ip) {
             return Some(format!("Permanently banned: {}", reason));
@@ -50,6 +78,16 @@ impl IPBlacklist {
     /// Record a violation for an IP
     /// Returns true if the IP should be disconnected (auto-banned)
     pub fn record_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
+        // Whitelisted IPs are exempt from violations
+        if self.is_whitelisted(ip) {
+            tracing::debug!(
+                "⚪ Ignoring violation for whitelisted IP {}: {}",
+                ip,
+                reason
+            );
+            return false;
+        }
+
         let now = Instant::now();
 
         // Get or create violation record
@@ -124,11 +162,12 @@ impl IPBlacklist {
 
     /// Get statistics
     #[allow(dead_code)]
-    pub fn stats(&self) -> (usize, usize, usize) {
+    pub fn stats(&self) -> (usize, usize, usize, usize) {
         (
             self.permanent_blacklist.len(),
             self.temp_blacklist.len(),
             self.violations.len(),
+            self.whitelist.len(),
         )
     }
 }

@@ -20,6 +20,14 @@ enable_peer_discovery = true
 bootstrap_peers = []
 # IPs to permanently blacklist (will not connect to or accept connections from)
 #blacklisted_peers = ["165.232.154.150", "178.128.199.144"]
+# IPs to whitelist (exempt from rate limiting and bans)
+# Useful for trusted masternodes or infrastructure nodes
+# These peers are automatically exempt from:
+# - Rate limiting (>100 requests/minute)
+# - Blacklist bans (violation strikes)
+# - Connection limits
+# Note: Masternodes are automatically whitelisted when discovered via P2P protocol
+#whitelisted_peers = ["1.2.3.4", "5.6.7.8"]
 
 [rpc]
 # RPC API settings

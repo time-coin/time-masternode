@@ -741,7 +741,16 @@ async fn handle_peer(
                                             tracing::info!("✅ Registered masternode {} (total: {})", peer_ip, count);
 
                                             // Add masternode IP (without port) to peer_manager for P2P connections
-                                            peer_manager.add_peer(peer_ip).await;
+                                            peer_manager.add_peer(peer_ip.clone()).await;
+
+                                            // Whitelist the masternode IP (exempt from bans/rate limits)
+                                            if let Ok(mn_ip) = peer_ip.parse::<IpAddr>() {
+                                                let mut bl = blacklist.write().await;
+                                                if !bl.is_whitelisted(mn_ip) {
+                                                    bl.add_to_whitelist(mn_ip, "Announced masternode");
+                                                    tracing::info!("🛡️  Whitelisted masternode {}", peer_ip);
+                                                }
+                                            }
                                         },
                                         Err(e) => {
                                             tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);
@@ -789,6 +798,7 @@ async fn handle_peer(
                                 NetworkMessage::MasternodesResponse(masternodes) => {
                                     tracing::info!("📥 Received MasternodesResponse from {} with {} masternode(s)", peer.addr, masternodes.len());
                                     let mut registered = 0;
+                                    let mut whitelisted = 0;
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
@@ -806,10 +816,20 @@ async fn handle_peer(
                                         // Register each masternode from the response
                                         if masternode_registry.register(masternode, mn_data.reward_address.clone()).await.is_ok() {
                                             registered += 1;
+
+                                            // Whitelist the masternode IP (exempt from bans/rate limits)
+                                            if let Ok(mn_ip) = mn_data.address.parse::<IpAddr>() {
+                                                let mut bl = blacklist.write().await;
+                                                if !bl.is_whitelisted(mn_ip) {
+                                                    bl.add_to_whitelist(mn_ip, "Discovered masternode");
+                                                    whitelisted += 1;
+                                                }
+                                            }
                                         }
                                     }
                                     if registered > 0 {
-                                        tracing::info!("✓ Registered {} masternode(s) from peer exchange with {}", registered, peer.addr);
+                                        tracing::info!("✓ Registered {} masternode(s) from peer exchange with {} ({} whitelisted)",
+                                            registered, peer.addr, whitelisted);
                                     }
                                 }
                                 NetworkMessage::BlockInventory(block_height) => {
