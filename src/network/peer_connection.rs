@@ -723,119 +723,21 @@ impl PeerConnection {
                                 // Trigger reorg if peer has longer chain
                                 if end_height > our_height {
                                     info!(
-                                        "📊 Peer has longer chain ({} > {}), initiating reorganization",
+                                        "📊 Peer has longer chain ({} > {}), requesting full chain for reorganization",
                                         end_height, our_height
                                     );
 
-                                    // Find common ancestor by checking backwards
-                                    let mut common_ancestor = start_height.saturating_sub(1);
-                                    let search_limit = common_ancestor.saturating_sub(100); // Don't go back more than 100 blocks
-
-                                    while common_ancestor > search_limit && common_ancestor > 0 {
-                                        if let Ok(our_block) = blockchain.get_block(common_ancestor)
-                                        {
-                                            // Check if any of the incoming blocks matches this height
-                                            let potential_match = blocks
-                                                .iter()
-                                                .find(|b| b.header.height == common_ancestor);
-                                            if let Some(peer_block) = potential_match {
-                                                if our_block.hash() == peer_block.hash() {
-                                                    // Found common ancestor!
-                                                    info!(
-                                                        "✅ Found common ancestor at height {}",
-                                                        common_ancestor
-                                                    );
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        common_ancestor = common_ancestor.saturating_sub(1);
-                                    }
-
-                                    // Collect blocks after common ancestor, sorted by height
-                                    let mut reorg_blocks: Vec<Block> = blocks
-                                        .iter()
-                                        .filter(|b| b.header.height > common_ancestor)
-                                        .cloned()
-                                        .collect();
-                                    reorg_blocks.sort_by_key(|b| b.header.height);
-
-                                    // Check if we have all blocks needed (must be contiguous)
-                                    let need_full_chain = if reorg_blocks.is_empty() {
-                                        true
-                                    } else {
-                                        let first_height =
-                                            reorg_blocks.first().unwrap().header.height;
-                                        let last_height =
-                                            reorg_blocks.last().unwrap().header.height;
-
-                                        // Must start from common_ancestor + 1
-                                        if first_height != common_ancestor + 1 {
-                                            info!(
-                                                "🔍 Missing blocks: need to start from {}, but first block is {}",
-                                                common_ancestor + 1,
-                                                first_height
-                                            );
-                                            true
-                                        // Must have all blocks up to at least end_height
-                                        } else if last_height < end_height {
-                                            info!(
-                                                "🔍 Incomplete chain: have up to {}, need up to {}",
-                                                last_height, end_height
-                                            );
-                                            true
-                                        // Check for gaps in the sequence
-                                        } else {
-                                            let has_gaps = reorg_blocks.windows(2).any(|w| {
-                                                w[1].header.height != w[0].header.height + 1
-                                            });
-                                            if has_gaps {
-                                                info!("🔍 Detected gaps in block sequence");
-                                            }
-                                            has_gaps
-                                        }
-                                    };
-
-                                    if need_full_chain {
-                                        // Need to request complete chain from common ancestor
-                                        info!(
-                                            "📤 Requesting full chain from {} to {} for reorganization",
-                                            common_ancestor + 1,
-                                            end_height
-                                        );
-                                        let msg = NetworkMessage::GetBlocks(
-                                            common_ancestor + 1,
-                                            end_height + 100,
-                                        );
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request reorg chain: {}", e);
-                                        }
-                                        return Ok(());
-                                    }
-
-                                    // Perform reorganization
+                                    // To find the common ancestor, we need to request blocks going backwards
+                                    // Start by requesting a range that includes blocks we have and blocks we don't
+                                    let search_start = our_height.saturating_sub(100);
                                     info!(
-                                        "🔄 Reorganizing from height {} with {} blocks",
-                                        common_ancestor,
-                                        reorg_blocks.len()
+                                        "📤 Requesting blocks {} to {} for reorganization",
+                                        search_start, end_height
                                     );
-
-                                    match blockchain
-                                        .reorganize_to_chain(common_ancestor, reorg_blocks)
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            info!(
-                                                "✅ [{:?}] Chain reorganization successful",
-                                                self.direction
-                                            );
-                                        }
-                                        Err(e) => {
-                                            error!(
-                                                "❌ [{:?}] Chain reorganization failed: {}",
-                                                self.direction, e
-                                            );
-                                        }
+                                    let msg =
+                                        NetworkMessage::GetBlocks(search_start, end_height + 100);
+                                    if let Err(e) = self.send_message(&msg).await {
+                                        warn!("Failed to request reorg chain: {}", e);
                                     }
                                     return Ok(());
                                 }
@@ -843,7 +745,146 @@ impl PeerConnection {
                         }
                     }
 
-                    // Apply blocks sequentially (no fork detected in first block)
+                    // Check if we have overlapping blocks - find common ancestor
+                    let mut common_ancestor: Option<u64> = None;
+                    let mut all_fork_blocks = Vec::new();
+
+                    // If we received blocks that overlap with our chain, find the common ancestor
+                    if start_height <= our_height {
+                        info!("🔍 Checking for common ancestor (overlap detected: peer blocks {}-{}, we have {})",
+                            start_height, end_height, our_height);
+
+                        // Check blocks from the start to find where they match
+                        for block in blocks.iter() {
+                            if block.header.height <= our_height {
+                                if let Ok(our_block) = blockchain.get_block(block.header.height) {
+                                    if our_block.hash() == block.hash() {
+                                        // This block matches - potential common ancestor
+                                        common_ancestor = Some(block.header.height);
+                                        info!(
+                                            "✅ Found matching block at height {}",
+                                            block.header.height
+                                        );
+                                    } else if common_ancestor.is_some() {
+                                        // We had a match earlier, but now this doesn't match
+                                        // This means we have a fork after the common ancestor
+                                        warn!("🔀 Fork detected at height {}: our hash {} vs incoming {}",
+                                            block.header.height,
+                                            hex::encode(&our_block.hash()[..8]),
+                                            hex::encode(&block.hash()[..8]));
+                                        all_fork_blocks.push(block.clone());
+                                        break;
+                                    } else {
+                                        // First block doesn't match - we need to go back further
+                                        warn!("🔀 Fork detected at height {}: our hash {} vs incoming {}",
+                                            block.header.height,
+                                            hex::encode(&our_block.hash()[..8]),
+                                            hex::encode(&block.hash()[..8]));
+                                    }
+                                }
+                            }
+                        }
+
+                        // If peer has longer chain and we found a common ancestor, reorganize
+                        if let Some(ancestor) = common_ancestor {
+                            if end_height > our_height {
+                                info!(
+                                    "📊 Peer has longer chain ({} > {}) with common ancestor at {}",
+                                    end_height, our_height, ancestor
+                                );
+
+                                // Collect all blocks after common ancestor
+                                let mut reorg_blocks: Vec<Block> = blocks
+                                    .iter()
+                                    .filter(|b| b.header.height > ancestor)
+                                    .cloned()
+                                    .collect();
+                                reorg_blocks.sort_by_key(|b| b.header.height);
+
+                                if !reorg_blocks.is_empty() {
+                                    let first_new = reorg_blocks.first().unwrap().header.height;
+                                    let last_new = reorg_blocks.last().unwrap().header.height;
+
+                                    // Check if we have a complete chain
+                                    if first_new == ancestor + 1 && last_new > our_height {
+                                        // Check for gaps
+                                        let has_gaps = reorg_blocks
+                                            .windows(2)
+                                            .any(|w| w[1].header.height != w[0].header.height + 1);
+
+                                        if !has_gaps {
+                                            info!("🔄 Reorganizing from height {} with {} blocks ({}-{})",
+                                                ancestor, reorg_blocks.len(), first_new, last_new);
+
+                                            match blockchain
+                                                .reorganize_to_chain(ancestor, reorg_blocks)
+                                                .await
+                                            {
+                                                Ok(_) => {
+                                                    info!(
+                                                        "✅ [{:?}] Chain reorganization successful",
+                                                        self.direction
+                                                    );
+                                                    return Ok(());
+                                                }
+                                                Err(e) => {
+                                                    error!(
+                                                        "❌ [{:?}] Chain reorganization failed: {}",
+                                                        self.direction, e
+                                                    );
+                                                }
+                                            }
+                                        } else {
+                                            info!("🔍 Detected gaps in block sequence, requesting complete chain");
+                                            let msg = NetworkMessage::GetBlocks(
+                                                ancestor + 1,
+                                                end_height + 100,
+                                            );
+                                            if let Err(e) = self.send_message(&msg).await {
+                                                warn!("Failed to request complete chain: {}", e);
+                                            }
+                                            return Ok(());
+                                        }
+                                    } else {
+                                        info!("🔍 Incomplete chain (first={}, last={}, need from {} to at least {}), requesting more",
+                                            first_new, last_new, ancestor + 1, our_height + 1);
+                                        let msg = NetworkMessage::GetBlocks(
+                                            ancestor + 1,
+                                            end_height + 100,
+                                        );
+                                        if let Err(e) = self.send_message(&msg).await {
+                                            warn!("Failed to request complete chain: {}", e);
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        } else if start_height <= our_height {
+                            // No common ancestor found in the overlapping range
+                            warn!(
+                                "❌ No common ancestor found in range {}-{} (our height: {})",
+                                start_height,
+                                end_height.min(our_height),
+                                our_height
+                            );
+
+                            // Request blocks from further back
+                            if end_height > our_height {
+                                let search_start = start_height.saturating_sub(100);
+                                info!(
+                                    "📤 Requesting blocks from {} to find common ancestor",
+                                    search_start
+                                );
+                                let msg = NetworkMessage::GetBlocks(search_start, end_height + 100);
+                                if let Err(e) = self.send_message(&msg).await {
+                                    warn!("Failed to request blocks for ancestor search: {}", e);
+                                }
+                                return Ok(());
+                            }
+                        }
+                    }
+
+                    // Apply blocks sequentially (no fork detected in first block or reorganization failed)
                     let mut added = 0;
                     let mut skipped = 0;
                     let mut fork_detected_at = None;
