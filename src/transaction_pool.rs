@@ -49,6 +49,12 @@ pub struct TransactionPool {
     pending_bytes: AtomicUsize,
 }
 
+impl Default for TransactionPool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionPool {
     pub fn new() -> Self {
         Self {

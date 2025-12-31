@@ -305,6 +305,12 @@ pub struct PrepareVoteAccumulator {
     votes: DashMap<Hash256, Vec<(String, u64)>>,
 }
 
+impl Default for PrepareVoteAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PrepareVoteAccumulator {
     pub fn new() -> Self {
         Self {
@@ -352,6 +358,12 @@ impl PrepareVoteAccumulator {
 pub struct PrecommitVoteAccumulator {
     /// block_hash -> Vec<(voter_id, weight)>
     votes: DashMap<Hash256, Vec<(String, u64)>>,
+}
+
+impl Default for PrecommitVoteAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PrecommitVoteAccumulator {

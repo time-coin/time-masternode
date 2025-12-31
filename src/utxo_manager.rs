@@ -38,6 +38,12 @@ pub struct UTXOStateManager {
     pub utxo_states: DashMap<OutPoint, UTXOState>,
 }
 
+impl Default for UTXOStateManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UTXOStateManager {
     pub fn new() -> Self {
         use crate::storage::InMemoryUtxoStorage;
@@ -396,12 +402,6 @@ impl UTXOStateManager {
             add_count
         );
         Ok(())
-    }
-}
-
-impl Default for UTXOStateManager {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

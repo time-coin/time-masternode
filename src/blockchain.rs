@@ -32,6 +32,27 @@ const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
 // Chain work constants - each block adds work based on validator count
 const BASE_WORK_PER_BLOCK: u128 = 1_000_000;
 
+// Checkpoint system - hardcoded block hashes to prevent deep reorgs
+// Format: (height, block_hash)
+const MAINNET_CHECKPOINTS: &[(u64, &str)] = &[
+    // Genesis block (placeholder - update with actual mainnet genesis hash)
+    (
+        0,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    // Add checkpoints every 1000 blocks as network grows
+    // Example: (1000, "actual_hash_at_block_1000"),
+];
+
+const TESTNET_CHECKPOINTS: &[(u64, &str)] = &[
+    // Genesis block (placeholder - update with actual testnet genesis hash)
+    (
+        0,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    ),
+    // Testnet checkpoints will be added as the network matures
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct GenesisBlock {
@@ -49,11 +70,24 @@ pub struct ChainWorkEntry {
     pub cumulative_work: u128,
 }
 
+/// Reorganization event metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReorgMetrics {
+    pub timestamp: i64,
+    pub from_height: u64,
+    pub to_height: u64,
+    pub common_ancestor: u64,
+    pub blocks_removed: u64,
+    pub blocks_added: u64,
+    pub txs_to_replay: usize,
+    pub duration_ms: u64,
+}
+
 pub struct Blockchain {
     storage: sled::Db,
     consensus: Arc<ConsensusEngine>,
     masternode_registry: Arc<MasternodeRegistry>,
-    utxo_manager: Arc<UTXOStateManager>,
+    pub utxo_manager: Arc<UTXOStateManager>,
     current_height: Arc<RwLock<u64>>,
     network_type: NetworkType,
     is_syncing: Arc<RwLock<bool>>,
@@ -61,6 +95,8 @@ pub struct Blockchain {
     peer_registry: Arc<RwLock<Option<Arc<PeerConnectionRegistry>>>>,
     /// Cumulative chain work for longest-chain-by-work rule
     cumulative_work: Arc<RwLock<u128>>,
+    /// Recent reorganization events (for monitoring and debugging)
+    reorg_history: Arc<RwLock<Vec<ReorgMetrics>>>,
 }
 
 impl Blockchain {
@@ -82,6 +118,7 @@ impl Blockchain {
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
             cumulative_work: Arc::new(RwLock::new(0)),
+            reorg_history: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -876,6 +913,10 @@ impl Blockchain {
             ));
         }
 
+        // Checkpoint validation: verify block hash matches checkpoint if this is a checkpoint height
+        let block_hash = block.hash();
+        self.validate_checkpoint(block.header.height, &block_hash)?;
+
         // Additional timestamp validation: check if too far in past
         // Skip this check during sync (when we're behind) or for genesis blocks
         // During sync, we're catching up with blocks that are legitimately old
@@ -1221,8 +1262,67 @@ impl Blockchain {
         None
     }
 
+    /// Get checkpoints for the current network
+    fn get_checkpoints(&self) -> &'static [(u64, &'static str)] {
+        match self.network_type {
+            NetworkType::Mainnet => MAINNET_CHECKPOINTS,
+            NetworkType::Testnet => TESTNET_CHECKPOINTS,
+        }
+    }
+
+    /// Check if a height is a checkpoint
+    pub fn is_checkpoint(&self, height: u64) -> bool {
+        self.get_checkpoints().iter().any(|(h, _)| *h == height)
+    }
+
+    /// Validate that a block matches a checkpoint
+    pub fn validate_checkpoint(&self, height: u64, block_hash: &[u8; 32]) -> Result<(), String> {
+        for (checkpoint_height, checkpoint_hash_str) in self.get_checkpoints() {
+            if *checkpoint_height == height {
+                let expected_hash = hex::decode(checkpoint_hash_str)
+                    .map_err(|e| format!("Invalid checkpoint hash: {}", e))?;
+
+                if expected_hash.len() != 32 {
+                    return Err(format!(
+                        "Checkpoint hash has wrong length: {}",
+                        expected_hash.len()
+                    ));
+                }
+
+                let expected_hash_array: [u8; 32] = expected_hash
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "Failed to convert checkpoint hash")?;
+
+                if block_hash != &expected_hash_array {
+                    return Err(format!(
+                        "Checkpoint validation failed at height {}: expected {}, got {}",
+                        height,
+                        checkpoint_hash_str,
+                        hex::encode(block_hash)
+                    ));
+                }
+
+                tracing::info!("✅ Checkpoint validated at height {}", height);
+                return Ok(());
+            }
+        }
+
+        // Not a checkpoint, validation passes
+        Ok(())
+    }
+
+    /// Find the highest checkpoint at or below the given height
+    pub fn find_last_checkpoint_before(&self, height: u64) -> Option<u64> {
+        self.get_checkpoints()
+            .iter()
+            .filter(|(h, _)| *h <= height)
+            .map(|(h, _)| *h)
+            .max()
+    }
+
     /// Rollback the chain to a specific height
-    /// This removes all blocks above the target height
+    /// This removes all blocks above the target height and reverts UTXO changes
     pub async fn rollback_to_height(&self, target_height: u64) -> Result<u64, String> {
         let current = *self.current_height.read().await;
 
@@ -1231,6 +1331,16 @@ impl Blockchain {
         }
 
         let blocks_to_remove = current - target_height;
+
+        // Safety check: don't allow rollback past checkpoints
+        if let Some(last_checkpoint) = self.find_last_checkpoint_before(current) {
+            if target_height < last_checkpoint {
+                return Err(format!(
+                    "Cannot rollback past checkpoint at height {} (attempting rollback to {})",
+                    last_checkpoint, target_height
+                ));
+            }
+        }
 
         // Safety check: don't allow massive rollbacks
         if blocks_to_remove > MAX_REORG_DEPTH {
@@ -1255,7 +1365,55 @@ impl Blockchain {
             target_height
         );
 
-        // Remove blocks from storage (highest first)
+        // Step 1: Rollback UTXOs for each block (in reverse order)
+        // Note: Full UTXO rollback requires storing spent UTXOs or reconstructing from chain
+        // For now, we remove outputs created by rolled-back blocks
+        let mut utxo_rollback_count = 0;
+        for height in (target_height + 1..=current).rev() {
+            if let Ok(block) = self.get_block_by_height(height).await {
+                // Remove outputs created by transactions in this block
+                for tx in block.transactions.iter() {
+                    let txid = tx.txid();
+                    for (vout, _output) in tx.outputs.iter().enumerate() {
+                        let outpoint = OutPoint {
+                            txid,
+                            vout: vout as u32,
+                        };
+                        if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
+                            tracing::debug!(
+                                "Could not remove UTXO {:?} at height {}: {}",
+                                outpoint,
+                                height,
+                                e
+                            );
+                        } else {
+                            utxo_rollback_count += 1;
+                        }
+                    }
+
+                    // TODO: Restore UTXOs that were spent by this transaction
+                    // This requires either:
+                    // 1. Keeping a rollback journal of spent UTXOs
+                    // 2. Re-scanning the chain from genesis to target_height
+                    // For now, we log that this is incomplete
+                    if !tx.inputs.is_empty() && tx.inputs[0].previous_output.vout != u32::MAX {
+                        // Not a coinbase transaction
+                        tracing::debug!(
+                            "⚠️  UTXO restoration for spent inputs not fully implemented (tx {} at height {})",
+                            hex::encode(&txid[..8]),
+                            height
+                        );
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "🔄 Rolled back {} UTXO changes (removed outputs from rolled-back blocks)",
+            utxo_rollback_count
+        );
+
+        // Step 2: Remove blocks from storage (highest first)
         for height in (target_height + 1..=current).rev() {
             let key = format!("block_{}", height);
             if let Err(e) = self.storage.remove(key.as_bytes()) {
@@ -1263,7 +1421,7 @@ impl Blockchain {
             }
         }
 
-        // Update chain height
+        // Step 3: Update chain height
         let height_key = "chain_height".as_bytes();
         let height_bytes = bincode::serialize(&target_height).map_err(|e| e.to_string())?;
         self.storage
@@ -1274,8 +1432,9 @@ impl Blockchain {
         *self.current_height.write().await = target_height;
 
         tracing::info!(
-            "✅ Rollback complete: removed {} blocks, now at height {}",
+            "✅ Rollback complete: removed {} blocks, rolled back {} UTXOs, now at height {}",
             blocks_to_remove,
+            utxo_rollback_count,
             target_height
         );
 
@@ -1696,6 +1855,7 @@ impl Blockchain {
         common_ancestor: u64,
         new_blocks: Vec<Block>,
     ) -> Result<(), String> {
+        let start_time = std::time::Instant::now();
         let current = *self.current_height.read().await;
 
         if new_blocks.is_empty() {
@@ -1704,11 +1864,13 @@ impl Blockchain {
 
         let first_new = new_blocks.first().unwrap().header.height;
         let last_new = new_blocks.last().unwrap().header.height;
+        let blocks_to_add = new_blocks.len() as u64;
 
-        tracing::info!(
-            "🔄 Reorganizing chain: rollback {} -> {}, then apply blocks {} -> {}",
+        tracing::warn!(
+            "⚠️  REORG INITIATED: rollback {} -> {}, then apply {} blocks ({} -> {})",
             current,
             common_ancestor,
+            blocks_to_add,
             first_new,
             last_new
         );
@@ -1791,7 +1953,28 @@ impl Blockchain {
         *self.cumulative_work.write().await = ancestor_work;
 
         // Step 2: Apply new blocks in order (already validated)
+        let mut removed_txs: Vec<Transaction> = Vec::new();
+        let mut added_txs: Vec<Transaction> = Vec::new();
+
+        // Collect transactions from rolled-back blocks for mempool replay
+        for height in (common_ancestor + 1..=current).rev() {
+            if let Ok(block) = self.get_block_by_height(height).await {
+                // Store non-coinbase transactions from rolled-back blocks
+                for tx in block.transactions.iter().skip(1) {
+                    // Skip coinbase (first tx)
+                    removed_txs.push(tx.clone());
+                }
+            }
+        }
+
+        // Apply new blocks
         for block in new_blocks.into_iter() {
+            // Track transactions added in new chain
+            for tx in block.transactions.iter().skip(1) {
+                // Skip coinbase
+                added_txs.push(tx.clone());
+            }
+
             if let Err(e) = self.add_block(block.clone()).await {
                 tracing::error!(
                     "❌ Failed to apply block {} during reorg: {}",
@@ -1807,10 +1990,57 @@ impl Blockchain {
 
         let new_height = *self.current_height.read().await;
         let new_work = *self.cumulative_work.read().await;
-        tracing::info!(
-            "✅ Reorganization complete: new height {}, cumulative work {}",
+
+        // Identify transactions to replay to mempool
+        // These are transactions that were in the old chain but not in the new chain
+        let added_txids: std::collections::HashSet<_> =
+            added_txs.iter().map(|tx| tx.txid()).collect();
+        let txs_to_replay: Vec<_> = removed_txs
+            .into_iter()
+            .filter(|tx| !added_txids.contains(&tx.txid()))
+            .collect();
+
+        if !txs_to_replay.is_empty() {
+            tracing::info!(
+                "🔄 {} transactions need mempool replay after reorg",
+                txs_to_replay.len()
+            );
+            // Note: Actual mempool replay requires access to TransactionPool
+            // This would be done by the caller with access to the mempool:
+            // for tx in txs_to_replay { mempool.add_pending(tx, calculate_fee(&tx))?; }
+        }
+
+        let duration_ms = start_time.elapsed().as_millis() as u64;
+
+        // Record reorganization metrics
+        let metrics = ReorgMetrics {
+            timestamp: chrono::Utc::now().timestamp(),
+            from_height: current,
+            to_height: new_height,
+            common_ancestor,
+            blocks_removed: current - common_ancestor,
+            blocks_added: blocks_to_add,
+            txs_to_replay: txs_to_replay.len(),
+            duration_ms,
+        };
+
+        self.reorg_history.write().await.push(metrics.clone());
+
+        // Keep only last 100 reorg events
+        {
+            let mut history = self.reorg_history.write().await;
+            let history_len = history.len();
+            if history_len > 100 {
+                history.drain(0..history_len - 100);
+            }
+        }
+
+        tracing::warn!(
+            "✅ REORG COMPLETE: new height {}, cumulative work {}, {} txs need replay, took {}ms",
             new_height,
-            new_work
+            new_work,
+            txs_to_replay.len(),
+            duration_ms
         );
 
         Ok(())
@@ -2022,6 +2252,19 @@ impl Clone for Blockchain {
             peer_manager: self.peer_manager.clone(),
             peer_registry: self.peer_registry.clone(),
             cumulative_work: self.cumulative_work.clone(),
+            reorg_history: self.reorg_history.clone(),
         }
+    }
+}
+
+impl Blockchain {
+    /// Get reorganization history for monitoring
+    pub async fn get_reorg_history(&self) -> Vec<ReorgMetrics> {
+        self.reorg_history.read().await.clone()
+    }
+
+    /// Get most recent reorganization event
+    pub async fn get_last_reorg(&self) -> Option<ReorgMetrics> {
+        self.reorg_history.read().await.last().cloned()
     }
 }

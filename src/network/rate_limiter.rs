@@ -12,6 +12,12 @@ pub struct RateLimiter {
     last_cleanup: Instant,
 }
 
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateLimiter {
     /// Create new rate limiter with Phase 2.2 security limits
     pub fn new() -> Self {
