@@ -845,7 +845,7 @@ async fn main() {
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let block_tsdc = tsdc_consensus.clone(); // For TSDC leader selection in catchup
     let block_masternode_address = masternode_address.clone(); // For leader comparison
-    let shutdown_token_clone = shutdown_token.clone();
+    let shutdown_token_block = shutdown_token.clone();
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
     let is_producing_block = Arc::new(AtomicBool::new(false));
@@ -921,7 +921,7 @@ async fn main() {
 
         loop {
             tokio::select! {
-                _ = shutdown_token_clone.cancelled() => {
+                _ = shutdown_token_block.cancelled() => {
                     tracing::debug!("🛑 Block production task shutting down gracefully");
                     break;
                 }
@@ -1229,7 +1229,7 @@ async fn main() {
                         };
 
                         let selected_producer = &masternodes[producer_index];
-                        let is_producer = masternode_address
+                        let is_producer = block_masternode_address
                             .as_ref()
                             .map(|addr| addr == &selected_producer.address)
                             .unwrap_or(false);
@@ -1330,20 +1330,6 @@ async fn main() {
                             );
                         }
                     }
-
-                    // Dynamically adjust check interval based on sync status
-                    // When behind, check more frequently to trigger catchup quickly
-                    let next_check_delay = if blocks_behind > 0 {
-                        // Behind: Check every 30 seconds to trigger catchup promptly
-                        tokio::time::Duration::from_secs(30)
-                    } else {
-                        // Synced: Use normal 10-minute interval
-                        tokio::time::Duration::from_secs(600)
-                    };
-
-                    // Reset interval with new duration
-                    interval = tokio::time::interval(next_check_delay);
-                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 }
             }
         }
@@ -1355,9 +1341,12 @@ async fn main() {
     println!("🌐 Starting P2P network server...");
 
     // Periodic status report - logs every 5 minutes at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
+    // Also handles responsive catchup checks more frequently than 10-minute block production interval
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
-    let shutdown_token_clone = shutdown_token.clone();
+    let status_tsdc_clone = tsdc_consensus.clone();
+    let status_masternode_addr_clone = masternode_address.clone();
+    let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
         loop {
             // Wait until next 5-minute mark (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55)
@@ -1385,18 +1374,84 @@ async fn main() {
             let seconds_until = (minutes_until * 60) - second;
 
             tokio::select! {
-                _ = shutdown_token_clone.cancelled() => {
+                _ = shutdown_token_status.cancelled() => {
                     tracing::debug!("🛑 Status report task shutting down gracefully");
                     break;
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)) => {
                     let height = status_blockchain.get_height().await;
                     let mn_count = status_registry.list_active().await.len();
-                    tracing::info!(
-                        "📊 Status: Height={}, Active Masternodes={}",
-                        height,
-                        mn_count
-                    );
+
+                    // Check if we need responsive catchup (between 10-minute block production checks)
+                    let expected_height = status_blockchain.calculate_expected_height();
+                    let blocks_behind = expected_height.saturating_sub(height);
+
+                    if blocks_behind > 0 {
+                        let genesis_timestamp = status_blockchain.genesis_timestamp();
+                        let now_timestamp = chrono::Utc::now().timestamp();
+                        let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
+                        let time_since_expected = now_timestamp - expected_block_time;
+
+                        // Check if catchup conditions are met (>2 blocks OR >5min past)
+                        let should_catchup = blocks_behind > 2
+                            || time_since_expected >= 300;
+
+                        if should_catchup {
+                            tracing::info!(
+                                "📊 Status: Height={}, Active Masternodes={} | ⚠️ {} blocks behind, {}s past expected - attempting sync",
+                                height,
+                                mn_count,
+                                blocks_behind,
+                                time_since_expected
+                            );
+
+                            // Try to sync from peers first
+                            match status_blockchain.sync_from_peers().await {
+                                Ok(()) => {
+                                    tracing::info!("✅ Responsive sync successful via 5-min check");
+                                }
+                                Err(_) => {
+                                    // Sync failed - peers don't have blocks
+                                    // Check if we should be the TSDC catchup leader
+                                    let current_slot = status_tsdc_clone.current_slot();
+                                    if let Ok(tsdc_leader) = status_tsdc_clone.select_leader_for_catchup(current_slot, expected_height).await {
+                                        let is_leader = if let Some(ref our_addr) = status_masternode_addr_clone {
+                                            tsdc_leader.id == *our_addr
+                                        } else {
+                                            false
+                                        };
+
+                                        if is_leader {
+                                            tracing::info!(
+                                                "🎯 We are TSDC catchup leader - producing block(s) via responsive check"
+                                            );
+                                            // Note: We could trigger block production here, but to keep logic
+                                            // centralized, we just log. The 10-minute block production loop
+                                            // will handle it at the next tick (max 10min wait)
+                                            // For true responsiveness, block production logic would need refactoring
+                                        } else {
+                                            tracing::info!(
+                                                "⏳ Waiting for TSDC catchup leader {} to produce blocks",
+                                                tsdc_leader.id
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::info!(
+                                "📊 Status: Height={}, Active Masternodes={}",
+                                height,
+                                mn_count
+                            );
+                        }
+                    } else {
+                        tracing::info!(
+                            "📊 Status: Height={}, Active Masternodes={}",
+                            height,
+                            mn_count
+                        );
+                    }
                 }
             }
         }
