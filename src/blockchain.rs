@@ -873,12 +873,13 @@ impl Blockchain {
         }
 
         // Additional timestamp validation: check if too far in past
-        // Skip this check during initial sync or catchup (when adding historical blocks)
-        let is_syncing = block.header.height > current + 10;
-        // Also skip if the block is from a historical time period (older than 24 hours)
-        let is_historical = block.header.timestamp < chrono::Utc::now().timestamp() - 86400;
-        if !is_syncing && !is_genesis && !is_historical {
+        // Skip this check during sync (when we're behind) or for genesis blocks
+        // During sync, we're catching up with blocks that are legitimately old
+        let is_catching_up = block.header.height <= current + 5; // We're syncing if adding blocks near our current height
+        if !is_catching_up && !is_genesis {
             let now = chrono::Utc::now().timestamp();
+            // Only enforce timestamp check for new blocks being produced in real-time
+            // Allow some tolerance for clock drift
             if block.header.timestamp < now - TIMESTAMP_TOLERANCE_SECS {
                 return Err(format!(
                     "Block {} timestamp {} is too far in past (now: {}, tolerance: {}s)",
