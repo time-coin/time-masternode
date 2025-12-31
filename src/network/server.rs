@@ -347,8 +347,8 @@ async fn handle_peer(
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let connection_start = std::time::Instant::now();
     let (reader, writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut writer = Some(BufWriter::new(writer));
+    let mut reader = BufReader::with_capacity(1024 * 1024, reader); // 1MB buffer
+    let mut writer = Some(BufWriter::with_capacity(2 * 1024 * 1024, writer)); // 2MB buffer
     let mut line = String::new();
     let mut failed_parse_count = 0;
     let mut handshake_done = false;

@@ -148,7 +148,10 @@ impl PeerConnection {
             peer_ip,
             direction: ConnectionDirection::Outbound,
             reader: BufReader::with_capacity(1024 * 1024, read_half), // 1MB buffer for large block responses
-            writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
+            writer: Arc::new(Mutex::new(BufWriter::with_capacity(
+                2 * 1024 * 1024,
+                write_half,
+            ))), // 2MB buffer for large block sends
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
@@ -178,7 +181,10 @@ impl PeerConnection {
             peer_ip,
             direction: ConnectionDirection::Inbound,
             reader: BufReader::with_capacity(1024 * 1024, read_half), // 1MB buffer for large block responses
-            writer: Arc::new(Mutex::new(BufWriter::new(write_half))),
+            writer: Arc::new(Mutex::new(BufWriter::with_capacity(
+                2 * 1024 * 1024,
+                write_half,
+            ))), // 2MB buffer for large block sends
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
