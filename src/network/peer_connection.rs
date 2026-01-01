@@ -939,61 +939,75 @@ impl PeerConnection {
                             self.direction, fork_height, self.peer_ip
                         );
 
-                        // Check if we're stuck in a loop - track consecutive fork detections
+                        // For whitelisted peers, aggressively resolve the fork
+                        // For non-whitelisted peers, track and eventually disconnect
                         let mut tracker = self.fork_loop_tracker.write().await;
 
-                        let should_disconnect = if let Some((last_height, count, last_seen)) =
-                            *tracker
-                        {
-                            // Same fork height detected recently
-                            if last_height == fork_height
-                                && last_seen.elapsed() < std::time::Duration::from_secs(30)
+                        if is_whitelisted {
+                            // AGGRESSIVE FORK RESOLUTION for whitelisted peers
+                            // Don't track loops - just keep trying to resolve
+                            info!(
+                                "🔄 [{:?}] Fork with whitelisted peer {} at height {} - aggressively resolving",
+                                self.direction, self.peer_ip, fork_height
+                            );
+                            *tracker = None; // Clear any loop tracking
+                            drop(tracker);
+
+                            // Request their full chain from before the fork point
+                            let request_from = fork_height.saturating_sub(10);
+                            let request_to = end_height + 10;
+
+                            info!(
+                                "🔄 [{:?}] Requesting blocks {}-{} from whitelisted {} for aggressive fork resolution",
+                                self.direction, request_from, request_to, self.peer_ip
+                            );
+
+                            let msg = NetworkMessage::GetBlocks(request_from, request_to);
+                            if let Err(e) = self.send_message(&msg).await {
+                                warn!("Failed to request fork resolution blocks: {}", e);
+                            }
+
+                            // Continue processing - don't wait
+                        } else {
+                            // Non-whitelisted: track fork loops and disconnect if stuck
+                            let should_disconnect = if let Some((last_height, count, last_seen)) =
+                                *tracker
                             {
-                                let new_count = count + 1;
-                                if new_count > 5 {
-                                    // Only disconnect non-whitelisted peers
-                                    if is_whitelisted {
-                                        warn!(
-                                            "⚠️ [{:?}] Fork loop at height {} from whitelisted peer {} (attempt {}) - keeping connection",
-                                            self.direction, fork_height, self.peer_ip, new_count
-                                        );
-                                        *tracker =
-                                            Some((fork_height, 1, std::time::Instant::now())); // Reset
-                                        false
-                                    } else {
+                                if last_height == fork_height
+                                    && last_seen.elapsed() < std::time::Duration::from_secs(30)
+                                {
+                                    let new_count = count + 1;
+                                    if new_count > 5 {
                                         error!(
-                                            "❌ [{:?}] Fork resolution loop for non-whitelisted peer {} at height {} (attempt {})",
+                                            "❌ [{:?}] Fork loop for non-whitelisted {} at height {} (attempt {})",
                                             self.direction, self.peer_ip, fork_height, new_count
                                         );
                                         true
+                                    } else {
+                                        *tracker = Some((
+                                            fork_height,
+                                            new_count,
+                                            std::time::Instant::now(),
+                                        ));
+                                        false
                                     }
                                 } else {
-                                    info!(
-                                        "🔀 [{:?}] Fork at height {} detected {} times from {}, continuing sync",
-                                        self.direction, fork_height, new_count, self.peer_ip
-                                    );
-                                    *tracker =
-                                        Some((fork_height, new_count, std::time::Instant::now()));
+                                    *tracker = Some((fork_height, 1, std::time::Instant::now()));
                                     false
                                 }
                             } else {
-                                // Different height or too much time passed, reset
                                 *tracker = Some((fork_height, 1, std::time::Instant::now()));
                                 false
+                            };
+
+                            drop(tracker);
+
+                            if should_disconnect {
+                                return Err(format!(
+                                    "Fork loop at height {} - peer on incompatible fork",
+                                    fork_height
+                                ));
                             }
-                        } else {
-                            // First detection
-                            *tracker = Some((fork_height, 1, std::time::Instant::now()));
-                            false
-                        };
-
-                        drop(tracker);
-
-                        if should_disconnect {
-                            return Err(format!(
-                                "Fork resolution loop at height {} - peer on incompatible fork",
-                                fork_height
-                            ));
                         }
 
                         // Request peer's current height to make accurate comparison
@@ -1164,62 +1178,55 @@ impl PeerConnection {
                         // Reset invalid counter on successful block
                         *self.invalid_block_count.write().await = 0;
                     }
-                    Ok(false) => {
-                        // Block was skipped - increment invalid counter
+                    Ok(false) | Err(_) => {
+                        // Block was skipped or had error - likely a fork
                         let mut count = self.invalid_block_count.write().await;
                         *count += 1;
 
-                        warn!(
-                            "⏭️ [{:?}] Skipped announced block {} from {} (invalid count: {})",
-                            self.direction, block_height, self.peer_ip, *count
-                        );
-
-                        // Whitelisted peers (from time-coin.io) are never disconnected for sync issues
-                        // Non-whitelisted peers get disconnected after repeated failures
-                        if *count >= 5 && !is_whitelisted {
-                            error!(
-                                "🚫 [{:?}] Non-whitelisted peer {} sent {} invalid blocks - disconnecting",
-                                self.direction, self.peer_ip, *count
-                            );
-                            return Err(format!(
-                                "Peer {} sent {} invalid blocks",
-                                self.peer_ip, *count
-                            ));
-                        } else if *count >= 20 && is_whitelisted {
-                            // Log but don't disconnect whitelisted peers
+                        if is_whitelisted {
+                            // AGGRESSIVE FORK RESOLUTION for whitelisted peers
+                            // These are trusted masternodes - we need to sync with them
                             warn!(
-                                "⚠️ [{:?}] Whitelisted peer {} has {} invalid blocks - keeping connection for sync",
-                                self.direction, self.peer_ip, *count
+                                "🔀 [{:?}] Whitelisted peer {} block {} rejected (count: {}) - triggering fork resolution",
+                                self.direction, self.peer_ip, block_height, *count
                             );
-                            *count = 10; // Reset to avoid overflow
-                        }
-                    }
-                    Err(e) => {
-                        // Block validation error - also increment counter
-                        let mut count = self.invalid_block_count.write().await;
-                        *count += 1;
 
-                        warn!(
-                            "⏭️ [{:?}] Skipped announced block {} from {} (error: {}, invalid count: {})",
-                            self.direction, block_height, self.peer_ip, e, *count
-                        );
+                            // Request their chain to compare and potentially reorg
+                            // Start from a few blocks before where we diverge
+                            let request_from = our_height.saturating_sub(5);
+                            let request_to = block_height.max(our_height) + 10;
 
-                        // Same whitelist logic for errors
-                        if *count >= 5 && !is_whitelisted {
-                            error!(
-                                "🚫 [{:?}] Non-whitelisted peer {} has {} errors - disconnecting",
-                                self.direction, self.peer_ip, *count
+                            info!(
+                                "🔄 [{:?}] Requesting blocks {}-{} from whitelisted peer {} for fork resolution",
+                                self.direction, request_from, request_to, self.peer_ip
                             );
-                            return Err(format!(
-                                "Peer {} sent {} invalid blocks: {}",
-                                self.peer_ip, *count, e
-                            ));
-                        } else if *count >= 20 && is_whitelisted {
+
+                            let msg = NetworkMessage::GetBlocks(request_from, request_to);
+                            if let Err(e) = self.send_message(&msg).await {
+                                warn!("Failed to request fork resolution blocks: {}", e);
+                            }
+
+                            // Reset counter after triggering resolution
+                            if *count >= 5 {
+                                *count = 0;
+                            }
+                        } else {
+                            // Non-whitelisted peers get disconnected after repeated failures
                             warn!(
-                                "⚠️ [{:?}] Whitelisted peer {} has {} errors - keeping connection",
-                                self.direction, self.peer_ip, *count
+                                "⏭️ [{:?}] Skipped block {} from non-whitelisted {} (count: {})",
+                                self.direction, block_height, self.peer_ip, *count
                             );
-                            *count = 10;
+
+                            if *count >= 5 {
+                                error!(
+                                    "🚫 [{:?}] Non-whitelisted peer {} sent {} invalid blocks - disconnecting",
+                                    self.direction, self.peer_ip, *count
+                                );
+                                return Err(format!(
+                                    "Peer {} sent {} invalid blocks",
+                                    self.peer_ip, *count
+                                ));
+                            }
                         }
                     }
                 }
