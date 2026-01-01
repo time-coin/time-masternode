@@ -1,8 +1,11 @@
+pub mod anomaly_detection;
 pub mod blacklist;
+pub mod block_optimization;
 pub mod client;
 pub mod connection_manager;
 pub mod connection_state;
 pub mod dedup_filter;
+pub mod fee_prediction;
 pub mod message;
 pub mod message_handler;
 pub mod peer_connection;
