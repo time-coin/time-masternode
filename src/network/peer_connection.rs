@@ -1335,6 +1335,65 @@ impl PeerConnection {
                     self.direction, self.peer_ip, peer_height, our_height
                 );
             }
+            NetworkMessage::ChainTipResponse { height, hash } => {
+                // Compare peer's chain tip with ours for fork detection
+                let our_height = blockchain.get_height().await;
+                let our_hash = blockchain.get_block_hash(our_height).unwrap_or([0u8; 32]);
+
+                // Store peer height
+                *self.peer_height.write().await = Some(*height);
+                peer_registry.set_peer_height(&self.peer_ip, *height).await;
+
+                if *height == our_height {
+                    // Same height - check if same hash (on same chain)
+                    if *hash != our_hash {
+                        // FORK DETECTED - same height but different blocks!
+                        warn!(
+                            "🔀 [{:?}] FORK with {} at height {}: our {} vs their {}",
+                            self.direction,
+                            self.peer_ip,
+                            height,
+                            hex::encode(&our_hash[..8]),
+                            hex::encode(&hash[..8])
+                        );
+
+                        // Request blocks to determine which chain to follow
+                        let request_from = height.saturating_sub(10);
+                        info!(
+                            "🔄 [{:?}] Requesting blocks {}-{} from {} for fork resolution",
+                            self.direction,
+                            request_from,
+                            height + 5,
+                            self.peer_ip
+                        );
+                        let msg = NetworkMessage::GetBlocks(request_from, *height + 5);
+                        if let Err(e) = self.send_message(&msg).await {
+                            warn!("Failed to request fork resolution blocks: {}", e);
+                        }
+                    } else {
+                        debug!(
+                            "✅ [{:?}] Peer {} on same chain at height {}",
+                            self.direction, self.peer_ip, height
+                        );
+                    }
+                } else if *height > our_height {
+                    // Peer is ahead - we might need to sync
+                    info!(
+                        "📈 [{:?}] Peer {} ahead at height {} (we have {}), requesting blocks",
+                        self.direction, self.peer_ip, height, our_height
+                    );
+                    let msg = NetworkMessage::GetBlocks(our_height + 1, *height + 1);
+                    if let Err(e) = self.send_message(&msg).await {
+                        warn!("Failed to request sync blocks: {}", e);
+                    }
+                } else {
+                    // We're ahead - peer might need to sync from us
+                    debug!(
+                        "📉 [{:?}] Peer {} behind at height {} (we have {})",
+                        self.direction, self.peer_ip, height, our_height
+                    );
+                }
+            }
             NetworkMessage::MasternodeAnnouncement {
                 address,
                 reward_address,

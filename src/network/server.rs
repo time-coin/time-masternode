@@ -653,6 +653,14 @@ async fn handle_peer(
                                     let reply = NetworkMessage::BlockHeightResponse(height);
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
+                                NetworkMessage::GetChainTip => {
+                                    let height = blockchain.get_height().await;
+                                    let hash = blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
+                                    tracing::debug!("📥 Received GetChainTip from {}, responding with height {} hash {}",
+                                        peer.addr, height, hex::encode(&hash[..8]));
+                                    let reply = NetworkMessage::ChainTipResponse { height, hash };
+                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
+                                }
                                 NetworkMessage::GetPendingTransactions => {
                                     // Get pending transactions from mempool
                                     let pending_txs = blockchain.get_pending_transactions();

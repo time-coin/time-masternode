@@ -10,6 +10,13 @@ pub enum NetworkMessage {
     GenesisHashResponse(Hash256),
     GetBlockHeight,
     BlockHeightResponse(u64),
+    /// Get chain tip info for fork detection (height + hash)
+    GetChainTip,
+    /// Chain tip response with height and hash for fork comparison
+    ChainTipResponse {
+        height: u64,
+        hash: Hash256,
+    },
     GetBlocks(u64, u64), // (start_height, end_height)
     BlocksResponse(Vec<Block>),
     // Genesis coordination
@@ -189,6 +196,8 @@ impl NetworkMessage {
             NetworkMessage::GenesisHashResponse(_) => "GenesisHashResponse",
             NetworkMessage::GetBlockHeight => "GetBlockHeight",
             NetworkMessage::BlockHeightResponse(_) => "BlockHeightResponse",
+            NetworkMessage::GetChainTip => "GetChainTip",
+            NetworkMessage::ChainTipResponse { .. } => "ChainTipResponse",
             NetworkMessage::GetBlocks(_, _) => "GetBlocks",
             NetworkMessage::BlocksResponse(_) => "BlocksResponse",
             NetworkMessage::RequestGenesis => "RequestGenesis",
@@ -262,6 +271,7 @@ impl NetworkMessage {
             self,
             NetworkMessage::GenesisHashResponse(_)
                 | NetworkMessage::BlockHeightResponse(_)
+                | NetworkMessage::ChainTipResponse { .. }
                 | NetworkMessage::BlocksResponse(_)
                 | NetworkMessage::Ack { .. }
                 | NetworkMessage::UTXOStateResponse(_)

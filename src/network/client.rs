@@ -443,6 +443,31 @@ impl NetworkClient {
                         sleep(Duration::from_millis(100)).await;
                     }
                 }
+
+                // PHASE 4: Periodic chain tip comparison for fork detection
+                // Query all connected peers for their chain tip and check for forks
+                let our_height = blockchain.get_height().await;
+                if our_height > 0 {
+                    let our_hash = blockchain.get_block_hash(our_height).unwrap_or([0u8; 32]);
+
+                    // Send GetChainTip to all connected peers
+                    let connected_peers = peer_registry.get_connected_peers().await;
+                    if !connected_peers.is_empty() {
+                        tracing::debug!(
+                            "🔍 Chain tip check: our height {} hash {}, querying {} peers",
+                            our_height,
+                            hex::encode(&our_hash[..8]),
+                            connected_peers.len()
+                        );
+
+                        for peer_ip in connected_peers.iter() {
+                            let msg = crate::network::message::NetworkMessage::GetChainTip;
+                            if let Err(e) = peer_registry.send_to_peer(peer_ip, msg).await {
+                                tracing::debug!("Failed to send GetChainTip to {}: {}", peer_ip, e);
+                            }
+                        }
+                    }
+                }
             }
         });
     }
