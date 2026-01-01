@@ -333,7 +333,7 @@ impl TSCDConsensus {
 
         // If no masternodes pass the heartbeat filter at genesis, fall back to all active
         // masternodes. This handles the edge case where no heartbeats have been exchanged yet.
-        let masternodes = if masternodes.is_empty() && target_height <= 1 {
+        let mut masternodes = if masternodes.is_empty() && target_height <= 1 {
             tracing::warn!(
                 "⚠️  No masternodes with recent heartbeat at genesis - using all {} active masternodes",
                 all_masternodes.len()
@@ -349,6 +349,11 @@ impl TSCDConsensus {
                 heartbeat_window
             )));
         }
+
+        // CRITICAL: Sort masternodes deterministically by address so all nodes
+        // select the same leader. Without sorting, different nodes may have
+        // masternodes in different orders, leading to different leader selections.
+        masternodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
         // CRITICAL FIX: Use target_height as slot for deterministic leader selection
         // Previously used wall-clock based slot which caused rotating leadership during catchup
