@@ -1356,7 +1356,7 @@ impl PeerConnection {
                     };
 
                     if masternode_registry
-                        .register(masternode, mn_data.reward_address.clone())
+                        .register_internal(masternode, mn_data.reward_address.clone(), false)
                         .await
                         .is_ok()
                     {
@@ -1531,7 +1531,7 @@ impl PeerConnection {
                     };
 
                     if masternode_registry
-                        .register(masternode, mn_data.reward_address.clone())
+                        .register_internal(masternode, mn_data.reward_address.clone(), false)
                         .await
                         .is_ok()
                     {

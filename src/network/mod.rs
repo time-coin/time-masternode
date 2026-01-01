@@ -8,6 +8,7 @@ pub mod message_handler;
 pub mod peer_connection;
 pub mod peer_connection_registry;
 pub mod peer_discovery;
+pub mod peer_scoring;
 pub mod rate_limiter;
 pub mod secure_transport;
 pub mod server;

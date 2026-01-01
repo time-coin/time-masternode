@@ -95,6 +95,8 @@ pub struct Blockchain {
     peer_registry: Arc<RwLock<Option<Arc<PeerConnectionRegistry>>>>,
     connection_manager:
         Arc<RwLock<Option<Arc<crate::network::connection_manager::ConnectionManager>>>>,
+    /// AI-based peer scoring for intelligent peer selection
+    peer_scoring: Arc<crate::network::peer_scoring::PeerScoringSystem>,
     /// Cumulative chain work for longest-chain-by-work rule
     cumulative_work: Arc<RwLock<u128>>,
     /// Recent reorganization events (for monitoring and debugging)
@@ -120,6 +122,7 @@ impl Blockchain {
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
             connection_manager: Arc::new(RwLock::new(None)),
+            peer_scoring: Arc::new(crate::network::peer_scoring::PeerScoringSystem::new()),
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
         }
@@ -499,43 +502,16 @@ impl Blockchain {
             // The genesis block should be the canonical one loaded from genesis.testnet.json
             // If peers have a different chain, they need to restart with the new genesis
 
-            // Find the best peer to sync from by querying all peers for their chain height
-            // Request blocks near current height to check who has the longest chain
-            let mut best_peer: Option<String> = None;
-            let mut best_peer_height = current;
-
-            // Request a sample of blocks near our current height
-            let sample_start = current.saturating_sub(5); // Check 5 blocks back
-            let sample_end = current + 10; // And 10 blocks ahead
-
-            for peer in &connected_peers {
-                // Query blocks around our current height to see who's ahead
-                let req = NetworkMessage::GetBlocks(sample_start, sample_end);
-                if peer_registry.send_to_peer(peer, req).await.is_ok() {
-                    // Give peer a moment to respond
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-                    // Check if we got any new blocks (this is a heuristic)
-                    let now_height = *self.current_height.read().await;
-                    if now_height > best_peer_height {
-                        best_peer = Some(peer.clone());
-                        best_peer_height = now_height;
-                    }
-                }
-            }
-
-            let mut sync_peer = if let Some(peer) = best_peer {
-                tracing::info!(
-                    "📡 Selected best peer for sync: {} (appears to have height > {})",
-                    peer,
-                    best_peer_height
-                );
-                peer
-            } else {
-                // Fallback to first peer if we couldn't determine best
-                tracing::warn!("⚠️  Could not determine best peer, using first available");
-                connected_peers.first().ok_or("No peers available")?.clone()
-            };
+            // Use AI to select the best peer based on historical performance
+            let mut sync_peer =
+                if let Some(ai_peer) = self.peer_scoring.select_best_peer(&connected_peers).await {
+                    tracing::info!("🤖 [AI] Selected peer for sync: {} (AI-scored)", ai_peer);
+                    ai_peer
+                } else {
+                    // Fallback if AI can't decide
+                    tracing::warn!("⚠️  AI couldn't select peer, using first available");
+                    connected_peers.first().ok_or("No peers available")?.clone()
+                };
 
             // Sync loop - keep requesting batches until caught up or timeout
             let sync_start = std::time::Instant::now();
@@ -582,12 +558,23 @@ impl Blockchain {
 
                     // Check if we made progress
                     if now_height > last_height {
+                        let blocks_received = now_height - last_height;
+                        let response_time = batch_start_time.elapsed();
+
                         tracing::info!(
-                            "📈 Block sync progress: {} → {} from {}",
+                            "📈 Block sync progress: {} → {} from {} ({} blocks in {:.2}s)",
                             last_height,
                             now_height,
-                            sync_peer
+                            sync_peer,
+                            blocks_received,
+                            response_time.as_secs_f64()
                         );
+
+                        // Record AI success: peer delivered blocks
+                        self.peer_scoring
+                            .record_success(&sync_peer, response_time, blocks_received * 1000)
+                            .await;
+
                         last_height = now_height;
                         made_progress = true;
                     }
@@ -600,6 +587,9 @@ impl Blockchain {
 
                 // If no progress after request, try a different peer with exponential backoff
                 if !made_progress {
+                    // Record AI failure: peer didn't deliver
+                    self.peer_scoring.record_failure(&sync_peer).await;
+
                     tracing::warn!(
                         "⚠️  No progress after requesting blocks {}-{} from {} (timeout after 30s)",
                         batch_start,
@@ -610,17 +600,20 @@ impl Blockchain {
                     // Try up to 5 different peers with exponential backoff before giving up
                     let mut tried_peers = vec![sync_peer.clone()];
                     for attempt in 2..=5 {
-                        // Find a peer we haven't tried yet
-                        let alternate_peer = connected_peers
+                        // Use AI to select next best peer (excluding already tried)
+                        let remaining_peers: Vec<String> = connected_peers
                             .iter()
-                            .find(|p| !tried_peers.contains(p))
-                            .cloned();
+                            .filter(|p| !tried_peers.contains(p))
+                            .cloned()
+                            .collect();
 
-                        if let Some(alt_peer) = alternate_peer {
+                        if let Some(alt_peer) =
+                            self.peer_scoring.select_best_peer(&remaining_peers).await
+                        {
                             // Exponential backoff: 20s, 30s, 40s, 50s
                             let retry_timeout_secs = 10 + (attempt * 10);
                             tracing::info!(
-                                "🔄 Trying alternate peer {} (attempt {}, timeout {}s)",
+                                "🤖 [AI] Trying alternate peer {} (attempt {}, timeout {}s)",
                                 alt_peer,
                                 attempt,
                                 retry_timeout_secs
@@ -633,7 +626,8 @@ impl Blockchain {
                                     alt_peer,
                                     e
                                 );
-                                tried_peers.push(alt_peer);
+                                tried_peers.push(alt_peer.clone());
+                                self.peer_scoring.record_failure(&alt_peer).await;
                                 continue;
                             }
 
@@ -646,10 +640,25 @@ impl Blockchain {
                                 let retry_height = *self.current_height.read().await;
 
                                 if retry_height > last_height {
+                                    let blocks_received = retry_height - last_height;
+                                    let response_time = retry_start.elapsed();
+
                                     tracing::info!(
-                                        "✅ Alternate peer {} responded with blocks!",
-                                        alt_peer
+                                        "✅ [AI] Alternate peer {} delivered {} blocks in {:.2}s!",
+                                        alt_peer,
+                                        blocks_received,
+                                        response_time.as_secs_f64()
                                     );
+
+                                    // Record AI success
+                                    self.peer_scoring
+                                        .record_success(
+                                            &alt_peer,
+                                            response_time,
+                                            blocks_received * 1000,
+                                        )
+                                        .await;
+
                                     last_height = retry_height;
                                     made_progress = true;
                                     sync_peer = alt_peer.clone(); // Switch to working peer
@@ -660,6 +669,7 @@ impl Blockchain {
                             if made_progress {
                                 break; // Got blocks, continue with this peer
                             } else {
+                                self.peer_scoring.record_failure(&alt_peer).await;
                                 tracing::warn!(
                                     "⚠️  Peer {} did not respond within {}s",
                                     alt_peer,
@@ -2383,6 +2393,7 @@ impl Clone for Blockchain {
             peer_manager: self.peer_manager.clone(),
             peer_registry: self.peer_registry.clone(),
             connection_manager: self.connection_manager.clone(),
+            peer_scoring: self.peer_scoring.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
         }

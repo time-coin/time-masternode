@@ -192,6 +192,21 @@ impl MasternodeRegistry {
         masternode: Masternode,
         reward_address: String,
     ) -> Result<(), RegistryError> {
+        self.register_internal(masternode, reward_address, true)
+            .await
+    }
+
+    /// Register a masternode with control over activation
+    ///
+    /// `should_activate`: if true, mark as active when registering/updating
+    ///                    if false, only update info but don't change active status
+    ///                    (used for peer exchange to avoid marking offline nodes as active)
+    pub async fn register_internal(
+        &self,
+        masternode: Masternode,
+        reward_address: String,
+        should_activate: bool,
+    ) -> Result<(), RegistryError> {
         // Validate collateral
         let required = match masternode.tier {
             MasternodeTier::Free => 0,
@@ -213,8 +228,14 @@ impl MasternodeRegistry {
         // If already registered, update heartbeat (treat as heartbeat)
         if let Some(existing) = nodes.get_mut(&masternode.address) {
             let time_since_last = now - existing.last_heartbeat;
-            existing.last_heartbeat = now;
-            if !existing.is_active {
+
+            // Only update last_heartbeat if should_activate is true (direct connection/heartbeat)
+            // For peer exchange, we don't update heartbeat time
+            if should_activate {
+                existing.last_heartbeat = now;
+            }
+
+            if !existing.is_active && should_activate {
                 existing.is_active = true;
                 existing.uptime_start = now;
                 info!(
@@ -225,7 +246,7 @@ impl MasternodeRegistry {
                     time_since_last,
                     now
                 );
-            } else {
+            } else if should_activate {
                 tracing::debug!(
                     "♻️  Heartbeat from {} - Tier: {:?}, Last seen: {}s ago, Active at: {}, Now: {}",
                     masternode.address,
@@ -253,7 +274,7 @@ impl MasternodeRegistry {
             last_heartbeat: now,
             uptime_start: now,
             total_uptime: 0,
-            is_active: true,
+            is_active: should_activate, // Only mark as active if explicitly requested
         };
 
         // Persist to disk

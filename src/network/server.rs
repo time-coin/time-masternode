@@ -814,7 +814,7 @@ async fn handle_peer(
                                             registered_at: now,
                                         };
                                         // Register each masternode from the response
-                                        if masternode_registry.register(masternode, mn_data.reward_address.clone()).await.is_ok() {
+                                        if masternode_registry.register_internal(masternode, mn_data.reward_address.clone(), false).await.is_ok() {
                                             registered += 1;
 
                                             // Whitelist the masternode IP (exempt from bans/rate limits)
