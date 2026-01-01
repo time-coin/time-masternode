@@ -1293,9 +1293,6 @@ async fn main() {
                                                 block.header.height
                                             );
                                         }
-
-                                        // Network propagation delay - not too fast, not too slow
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                                     }
                                     Err(e) => {
                                         // Check if error is due to timestamp in future
