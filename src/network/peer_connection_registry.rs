@@ -67,6 +67,8 @@ pub struct PeerConnectionRegistry {
     #[allow(clippy::type_complexity)]
     tsdc_block_cache: Arc<RwLock<Option<Arc<DashMap<[u8; 32], Block>>>>>,
     tsdc_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
+    // Blacklist reference for checking whitelist status
+    blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -90,7 +92,27 @@ impl PeerConnectionRegistry {
             tsdc_consensus: Arc::new(RwLock::new(None)),
             tsdc_block_cache: Arc::new(RwLock::new(None)),
             tsdc_broadcast: Arc::new(RwLock::new(None)),
+            blacklist: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set blacklist reference (called once after server initialization)
+    pub async fn set_blacklist(
+        &self,
+        blacklist: Arc<RwLock<crate::network::blacklist::IPBlacklist>>,
+    ) {
+        *self.blacklist.write().await = Some(blacklist);
+    }
+
+    /// Check if a peer IP is whitelisted (trusted masternode from time-coin.io)
+    pub async fn is_whitelisted(&self, peer_ip: &str) -> bool {
+        let ip_only = extract_ip(peer_ip);
+        if let Ok(ip_addr) = ip_only.parse::<IpAddr>() {
+            if let Some(blacklist) = self.blacklist.read().await.as_ref() {
+                return blacklist.read().await.is_whitelisted(ip_addr);
+            }
+        }
+        false
     }
 
     /// Set TSDC consensus resources (called once after server initialization)

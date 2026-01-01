@@ -824,8 +824,8 @@ async fn main() {
     // Start background NTP time synchronization
     time_sync.start_sync_task();
 
-    // Peer discovery
-    if config.network.enable_peer_discovery {
+    // Peer discovery - save discovered peers for whitelisting later
+    let discovered_peer_ips: Vec<String> = if config.network.enable_peer_discovery {
         let discovery_url = network_type.peer_discovery_url();
         println!("🔍 Discovering peers from {}...", discovery_url);
         let discovery =
@@ -843,7 +843,12 @@ async fn main() {
             println!("     ... and {} more", discovered_peers.len() - 3);
         }
         println!();
-    }
+
+        // Collect IPs for whitelisting (these are from time-coin.io, so trusted)
+        discovered_peers.iter().map(|p| p.address.clone()).collect()
+    } else {
+        Vec::new()
+    };
 
     // Start block production timer (every 10 minutes)
     let block_registry = registry.clone();
@@ -1593,10 +1598,31 @@ async fn main() {
                 println!();
             }
 
-            // Masternodes will be whitelisted dynamically as they are discovered via:
-            // 1. MasternodeAnnouncement messages (when they announce themselves)
-            // 2. MasternodesResponse messages (when we receive GetMasternodes replies)
-            // This happens automatically in server.rs message handlers
+            // Whitelist peers discovered from time-coin.io (these are trusted)
+            if !discovered_peer_ips.is_empty() {
+                let mut blacklist_guard = server.blacklist.write().await;
+                let mut whitelisted_count = 0;
+
+                for ip_str in &discovered_peer_ips {
+                    if let Ok(ip_addr) = ip_str.parse::<std::net::IpAddr>() {
+                        if !blacklist_guard.is_whitelisted(ip_addr) {
+                            blacklist_guard.add_to_whitelist(ip_addr, "From time-coin.io");
+                            whitelisted_count += 1;
+                        }
+                    }
+                }
+                drop(blacklist_guard);
+
+                if whitelisted_count > 0 {
+                    println!(
+                        "  ✅ Whitelisted {} peer(s) from time-coin.io",
+                        whitelisted_count
+                    );
+                }
+            }
+
+            // NOTE: Masternodes announced via P2P are NOT auto-whitelisted.
+            // Only peers from time-coin.io and config are trusted.
 
             // Give registry access to network broadcast channel
             registry
@@ -1610,6 +1636,11 @@ async fn main() {
                     server.block_cache.clone(),
                     server.tx_notifier.clone(),
                 )
+                .await;
+
+            // Share blacklist with peer connection registry for whitelist checks
+            peer_connection_registry
+                .set_blacklist(server.blacklist.clone())
                 .await;
 
             println!("  ✅ Network server listening on {}", p2p_addr);

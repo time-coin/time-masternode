@@ -659,7 +659,7 @@ impl PeerConnection {
     async fn handle_message_with_blockchain(
         &self,
         line: &str,
-        _peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
         masternode_registry: &Arc<crate::masternode_registry::MasternodeRegistry>,
         blockchain: &Arc<Blockchain>,
     ) -> Result<(), String> {
@@ -667,6 +667,9 @@ impl PeerConnection {
         if line.is_empty() {
             return Ok(());
         }
+
+        // Check if this peer is whitelisted (trusted masternode from time-coin.io)
+        let is_whitelisted = peer_registry.is_whitelisted(&self.peer_ip).await;
 
         let message: NetworkMessage =
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
@@ -945,19 +948,28 @@ impl PeerConnection {
                             // Same fork height detected recently
                             if last_height == fork_height
                                 && last_seen.elapsed() < std::time::Duration::from_secs(30)
-                            // Increased from 10s
                             {
                                 let new_count = count + 1;
                                 if new_count > 5 {
-                                    // Increased from 3 to allow more resolution attempts
-                                    error!(
-                                        "❌ [{:?}] Fork resolution loop detected for {} at height {} (attempt {}). Peer on incompatible fork.",
-                                        self.direction, self.peer_ip, fork_height, new_count
-                                    );
-                                    true
+                                    // Only disconnect non-whitelisted peers
+                                    if is_whitelisted {
+                                        warn!(
+                                            "⚠️ [{:?}] Fork loop at height {} from whitelisted peer {} (attempt {}) - keeping connection",
+                                            self.direction, fork_height, self.peer_ip, new_count
+                                        );
+                                        *tracker =
+                                            Some((fork_height, 1, std::time::Instant::now())); // Reset
+                                        false
+                                    } else {
+                                        error!(
+                                            "❌ [{:?}] Fork resolution loop for non-whitelisted peer {} at height {} (attempt {})",
+                                            self.direction, self.peer_ip, fork_height, new_count
+                                        );
+                                        true
+                                    }
                                 } else {
-                                    warn!(
-                                        "⚠️ [{:?}] Fork at height {} detected {} times in 30s from {}",
+                                    info!(
+                                        "🔀 [{:?}] Fork at height {} detected {} times from {}, continuing sync",
                                         self.direction, fork_height, new_count, self.peer_ip
                                     );
                                     *tracker =
@@ -979,7 +991,7 @@ impl PeerConnection {
 
                         if should_disconnect {
                             return Err(format!(
-                                "Fork resolution loop detected at height {} - peer may be on incompatible fork",
+                                "Fork resolution loop at height {} - peer on incompatible fork",
                                 fork_height
                             ));
                         }
@@ -1162,22 +1174,24 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, *count
                         );
 
-                        // Allow some tolerance for fork situations before disconnecting
-                        // Fork resolution may resolve the issue - only disconnect after repeated failures
-                        if *count >= 5 {
+                        // Whitelisted peers (from time-coin.io) are never disconnected for sync issues
+                        // Non-whitelisted peers get disconnected after repeated failures
+                        if *count >= 5 && !is_whitelisted {
                             error!(
-                                "🚫 [{:?}] Peer {} sent {} invalid blocks - disconnecting",
+                                "🚫 [{:?}] Non-whitelisted peer {} sent {} invalid blocks - disconnecting",
                                 self.direction, self.peer_ip, *count
                             );
                             return Err(format!(
                                 "Peer {} sent {} invalid blocks",
                                 self.peer_ip, *count
                             ));
-                        } else {
-                            info!(
-                                "🔀 [{:?}] Peer {} may be on different fork (invalid count: {}), allowing fork resolution",
+                        } else if *count >= 20 && is_whitelisted {
+                            // Log but don't disconnect whitelisted peers
+                            warn!(
+                                "⚠️ [{:?}] Whitelisted peer {} has {} invalid blocks - keeping connection for sync",
                                 self.direction, self.peer_ip, *count
                             );
+                            *count = 10; // Reset to avoid overflow
                         }
                     }
                     Err(e) => {
@@ -1190,21 +1204,22 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, e, *count
                         );
 
-                        // Allow some tolerance - fork resolution may fix this
-                        if *count >= 5 {
+                        // Same whitelist logic for errors
+                        if *count >= 5 && !is_whitelisted {
                             error!(
-                                "🚫 [{:?}] Peer {} sent {} invalid blocks - disconnecting",
+                                "🚫 [{:?}] Non-whitelisted peer {} has {} errors - disconnecting",
                                 self.direction, self.peer_ip, *count
                             );
                             return Err(format!(
                                 "Peer {} sent {} invalid blocks: {}",
                                 self.peer_ip, *count, e
                             ));
-                        } else {
-                            info!(
-                                "🔀 [{:?}] Peer {} validation error (count: {}), allowing fork resolution",
+                        } else if *count >= 20 && is_whitelisted {
+                            warn!(
+                                "⚠️ [{:?}] Whitelisted peer {} has {} errors - keeping connection",
                                 self.direction, self.peer_ip, *count
                             );
+                            *count = 10;
                         }
                     }
                 }
@@ -1300,7 +1315,7 @@ impl PeerConnection {
                 *self.peer_height.write().await = Some(*peer_height);
 
                 // Also store in peer registry for fork detection
-                _peer_registry
+                peer_registry
                     .set_peer_height(&self.peer_ip, *peer_height)
                     .await;
 
@@ -1392,7 +1407,7 @@ impl PeerConnection {
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
                 let context = MessageContext {
                     blockchain: Arc::clone(blockchain),
-                    peer_registry: Arc::clone(_peer_registry),
+                    peer_registry: Arc::clone(peer_registry),
                     masternode_registry: Arc::clone(masternode_registry),
                     consensus: None, // Not needed for GetMasternodes
                     block_cache: None,
@@ -1413,7 +1428,7 @@ impl PeerConnection {
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
                 let context = MessageContext {
                     blockchain: Arc::clone(blockchain),
-                    peer_registry: Arc::clone(_peer_registry),
+                    peer_registry: Arc::clone(peer_registry),
                     masternode_registry: Arc::clone(masternode_registry),
                     consensus: None, // Not needed for GetBlocks
                     block_cache: None,
@@ -1437,11 +1452,11 @@ impl PeerConnection {
 
                 // Get TSDC resources from peer registry
                 let (consensus, block_cache, broadcast_tx) =
-                    _peer_registry.get_tsdc_resources().await;
+                    peer_registry.get_tsdc_resources().await;
 
                 let context = MessageContext {
                     blockchain: Arc::clone(blockchain),
-                    peer_registry: Arc::clone(_peer_registry),
+                    peer_registry: Arc::clone(peer_registry),
                     masternode_registry: Arc::clone(masternode_registry),
                     consensus,
                     block_cache,
