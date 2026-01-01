@@ -949,14 +949,14 @@ impl Blockchain {
             deterministic_timestamp
         };
 
-        // Determine if we're in catchup mode - either explicitly (target_height provided)
-        // or implicitly (more than 10 blocks behind)
-        let is_catchup_mode = target_height.is_some() || blocks_behind > 10;
+        // Use relaxed masternode selection when catching up (any blocks behind)
+        // or when explicitly producing catchup blocks (target_height provided)
+        // This avoids "No masternodes available" errors during catchup when
+        // connection status may be fluctuating due to rapid block production
+        let use_relaxed_selection = target_height.is_some() || blocks_behind > 0;
 
-        let masternodes = if is_catchup_mode {
+        let masternodes = if use_relaxed_selection {
             // Catchup mode - use all ACTIVE masternodes (skip connection check)
-            // During rapid catchup, connection status may fluctuate, but we still
-            // want to distribute rewards to active masternodes
             let active_mns = self.masternode_registry.list_active().await;
             tracing::debug!(
                 "📊 Block {} (CATCHUP): using {} active masternodes for reward distribution",
