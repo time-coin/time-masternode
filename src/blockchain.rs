@@ -97,6 +97,8 @@ pub struct Blockchain {
         Arc<RwLock<Option<Arc<crate::network::connection_manager::ConnectionManager>>>>,
     /// AI-based peer scoring for intelligent peer selection
     peer_scoring: Arc<crate::network::peer_scoring::PeerScoringSystem>,
+    /// AI-powered fork resolution
+    fork_resolver: Arc<crate::ai::fork_resolver::ForkResolver>,
     /// Cumulative chain work for longest-chain-by-work rule
     cumulative_work: Arc<RwLock<u128>>,
     /// Recent reorganization events (for monitoring and debugging)
@@ -124,6 +126,11 @@ impl Blockchain {
             }
         };
 
+        // Initialize AI fork resolver
+        let fork_resolver = Arc::new(crate::ai::fork_resolver::ForkResolver::new(Arc::new(
+            storage.clone(),
+        )));
+
         Self {
             storage,
             consensus,
@@ -136,6 +143,7 @@ impl Blockchain {
             peer_registry: Arc::new(RwLock::new(None)),
             connection_manager: Arc::new(RwLock::new(None)),
             peer_scoring,
+            fork_resolver,
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
         }
@@ -2363,12 +2371,13 @@ impl Blockchain {
         });
     }
 
-    /// Automatic fork resolution: given competing blocks, choose the longest chain
-    /// Returns true if we should accept the new blocks (they extend a longer chain)
+    /// AI-powered fork resolution with fallback to traditional rules
+    /// Returns true if we should accept the new blocks (they extend a better chain)
     pub async fn should_accept_fork(
         &self,
         competing_blocks: &[Block],
         peer_claimed_height: u64,
+        peer_ip: &str,
     ) -> Result<bool, String> {
         if competing_blocks.is_empty() {
             return Ok(false);
@@ -2384,6 +2393,70 @@ impl Blockchain {
             peer_claimed_height
         );
 
+        // Get chain work for both chains
+        let our_chain_work = *self.cumulative_work.read().await;
+
+        // Calculate peer's chain work (estimate based on blocks we have)
+        let peer_chain_work = self
+            .estimate_peer_chain_work(competing_blocks, peer_claimed_height)
+            .await;
+
+        // Gather supporting peer information
+        let supporting_peers = self
+            .gather_supporting_peers(our_height, peer_claimed_height)
+            .await;
+
+        // Find common ancestor
+        let common_ancestor = self.find_fork_common_ancestor(competing_blocks).await;
+
+        // Use AI to make decision
+        let ai_resolution = self
+            .fork_resolver
+            .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
+                our_height,
+                our_chain_work,
+                peer_height: peer_claimed_height,
+                peer_chain_work,
+                peer_ip: peer_ip.to_string(),
+                supporting_peers,
+                common_ancestor,
+            })
+            .await;
+
+        tracing::info!(
+            "🤖 AI fork resolution: {} peer chain (confidence: {:.1}%, risk: {:?})",
+            if ai_resolution.accept_peer_chain {
+                "ACCEPT"
+            } else {
+                "REJECT"
+            },
+            ai_resolution.confidence * 100.0,
+            ai_resolution.risk_level
+        );
+
+        // If confidence is low or risk is high, fall back to traditional rules
+        if ai_resolution.confidence < 0.3
+            || matches!(
+                ai_resolution.risk_level,
+                crate::ai::fork_resolver::RiskLevel::Critical
+            )
+        {
+            tracing::warn!("⚠️ Low confidence or critical risk, using traditional fork resolution");
+            return self
+                .traditional_fork_resolution(our_height, peer_claimed_height, competing_blocks)
+                .await;
+        }
+
+        Ok(ai_resolution.accept_peer_chain)
+    }
+
+    /// Traditional fork resolution (fallback when AI confidence is low)
+    async fn traditional_fork_resolution(
+        &self,
+        our_height: u64,
+        peer_claimed_height: u64,
+        competing_blocks: &[Block],
+    ) -> Result<bool, String> {
         // Rule 1: Longest chain wins
         if peer_claimed_height > our_height {
             tracing::info!(
@@ -2420,6 +2493,112 @@ impl Blockchain {
         }
 
         Ok(false)
+    }
+
+    /// Estimate peer's chain work based on blocks we've seen
+    async fn estimate_peer_chain_work(&self, blocks: &[Block], peer_height: u64) -> u128 {
+        // Start with our common work up to the fork point
+        let fork_point = if !blocks.is_empty() {
+            blocks.first().unwrap().header.height
+        } else {
+            peer_height
+        };
+
+        let mut work = if fork_point > 0 {
+            self.get_chain_work_at_height(fork_point - 1)
+                .await
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Add work for peer's chain
+        let blocks_on_peer_chain = peer_height - fork_point + 1;
+        work += BASE_WORK_PER_BLOCK * blocks_on_peer_chain as u128;
+
+        work
+    }
+
+    /// Gather information about which peers support which chain
+    async fn gather_supporting_peers(
+        &self,
+        _our_height: u64,
+        _peer_height: u64,
+    ) -> Vec<(String, u64, u128)> {
+        let mut supporting_peers = Vec::new();
+
+        // Get peer information from registry
+        if let Some(registry) = self.peer_registry.read().await.as_ref() {
+            let peers = registry.get_connected_peers().await;
+            for peer in peers {
+                if let Some(height) = registry.get_peer_height(&peer).await {
+                    // Estimate chain work for this peer
+                    let chain_work = BASE_WORK_PER_BLOCK * height as u128;
+                    supporting_peers.push((peer, height, chain_work));
+                }
+            }
+        }
+
+        supporting_peers
+    }
+
+    /// Find common ancestor between our chain and competing blocks (for fork resolution)
+    async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> u64 {
+        if competing_blocks.is_empty() {
+            return 0;
+        }
+
+        let fork_start = competing_blocks.first().unwrap().header.height;
+
+        // Start checking from the block before the fork
+        if fork_start == 0 {
+            return 0;
+        }
+
+        for height in (0..fork_start).rev() {
+            if let Ok(our_block) = self.get_block(height) {
+                // Find if any competing block builds on this
+                for comp_block in competing_blocks {
+                    if comp_block.header.height == height + 1
+                        && comp_block.header.previous_hash == our_block.hash()
+                    {
+                        return height;
+                    }
+                }
+
+                // If competing blocks start after this height, it's likely the ancestor
+                if competing_blocks.iter().all(|b| b.header.height > height) {
+                    return height;
+                }
+            }
+        }
+
+        0
+    }
+
+    /// Get chain work at a specific height
+    async fn get_chain_work_at_height(&self, height: u64) -> Result<u128, String> {
+        // For now, estimate based on height
+        // In the future, this could store actual cumulative work
+        Ok(BASE_WORK_PER_BLOCK * height as u128)
+    }
+
+    /// Update fork outcome for AI learning
+    pub async fn update_fork_outcome(&self, fork_height: u64, was_correct: bool) {
+        let outcome = if was_correct {
+            crate::ai::fork_resolver::ForkOutcome::CorrectChoice
+        } else {
+            crate::ai::fork_resolver::ForkOutcome::WrongChoice
+        };
+
+        self.fork_resolver
+            .update_fork_outcome(fork_height, outcome)
+            .await;
+    }
+
+    /// Get AI fork resolver statistics
+    pub async fn get_fork_resolver_stats(&self) -> crate::ai::fork_resolver::ForkResolverStats {
+        self.fork_resolver.get_statistics().await
     }
 
     /// Validate that our chain hasn't gotten ahead of the network time schedule
@@ -2474,6 +2653,7 @@ impl Clone for Blockchain {
             peer_registry: self.peer_registry.clone(),
             connection_manager: self.connection_manager.clone(),
             peer_scoring: self.peer_scoring.clone(),
+            fork_resolver: self.fork_resolver.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
         }

@@ -1,14 +1,20 @@
 pub mod anomaly_detector;
+pub mod fork_resolver;
 pub mod network_optimizer;
 pub mod peer_selector;
 pub mod predictive_sync;
+pub mod resource_manager;
 pub mod transaction_analyzer;
+pub mod transaction_validator;
 
 pub use anomaly_detector::AnomalyDetector;
+pub use fork_resolver::ForkResolver;
 pub use network_optimizer::NetworkOptimizer;
 pub use peer_selector::AIPeerSelector;
 pub use predictive_sync::PredictiveSync;
+pub use resource_manager::{AllocationStrategy, ResourceManager};
 pub use transaction_analyzer::TransactionAnalyzer;
+pub use transaction_validator::AITransactionValidator;
 
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;

@@ -327,8 +327,13 @@ async fn main() {
     println!("✓ Ready to process transactions\n");
 
     // Initialize ConsensusEngine
-    let consensus_engine = Arc::new(ConsensusEngine::new(vec![], utxo_mgr.clone()));
-    tracing::info!("✓ Consensus engine initialized");
+    let mut consensus_engine = ConsensusEngine::new(vec![], utxo_mgr.clone());
+
+    // Enable AI validation using the same db as block storage
+    consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
+
+    let consensus_engine = Arc::new(consensus_engine);
+    tracing::info!("✓ Consensus engine initialized with AI validation");
 
     // Initialize TSDC consensus engine with masternode registry
     let tsdc_consensus = Arc::new(TSCDConsensus::with_masternode_registry(

@@ -205,6 +205,154 @@ if let Some(pred) = predictor.predict_next_block(current_height) {
 
 ---
 
+### 6. AI Transaction Validator (`ai/transaction_validator.rs`)
+
+**Purpose**: Uses AI to detect spam, anomalous patterns, and malicious transactions before they enter the mempool.
+
+**How it works**:
+- Analyzes transaction features in real-time
+- Learns normal patterns per address/output
+- Detects anomalies using multiple heuristics:
+  - Dust outputs (spam indicator)
+  - Excessive output count (potential spam)
+  - Abnormal fee-to-value ratios
+  - Rapid-fire transaction patterns
+  - Sudden value deviations from learned patterns
+- Calculates spam score (0.0-1.0)
+- Blocks transactions exceeding threshold (default 0.8)
+
+**Detection Heuristics**:
+1. **Dust Detection**: Flags outputs < 1000 satoshis
+2. **Excessive Outputs**: Flags transactions with >100 outputs
+3. **Low Fee Ratio**: Flags fee < 0.01% of transaction value
+4. **Value Deviation**: Learns average values per address, flags 10x deviations
+5. **Rapid Transactions**: Flags addresses sending multiple txs within 10 seconds
+
+**Key Methods**:
+- `validate_with_ai(tx)` - Analyze transaction for spam/anomalies
+- `get_metrics()` - Get validation statistics
+- `get_pattern(address)` - View learned pattern for address
+- `adjust_threshold(new_threshold)` - Tune spam sensitivity
+
+**Storage**: Persists learned patterns in memory (extendable to sled)
+
+**Example Usage**:
+```rust
+// Initialize (done automatically in ConsensusEngine)
+let validator = AITransactionValidator::new(db.clone());
+
+// Validate transaction (called during consensus validation)
+validator.validate_with_ai(&transaction).await?;
+
+// Check metrics
+let metrics = validator.get_metrics();
+info!("AI Validation: {} total, {} spam blocked, {} anomalies",
+      metrics.total_validated, metrics.spam_detected, metrics.anomalies_detected);
+
+// View learned pattern
+if let Some(pattern) = validator.get_pattern(&address) {
+    info!("Address {} pattern: avg_value={}, spam_score={:.2}",
+          address, pattern.avg_value, pattern.spam_score);
+}
+```
+
+**Integration**: Automatically enabled in `ConsensusEngine::validate_transaction()` - runs before traditional validation rules.
+
+---
+
+### 7. AI Fork Resolver (`ai/fork_resolver.rs`)
+
+**Purpose**: Uses machine learning to intelligently resolve blockchain forks by analyzing multiple factors and learning from historical outcomes.
+
+**How it works**:
+- Analyzes chain work differences (40% weight)
+- Evaluates network consensus from peer data (30% weight)
+- Assesses peer reliability history (15% weight)
+- Examines historical fork patterns (10% weight)
+- Evaluates fork depth and risk (5% weight)
+- Combines factors into confidence score (0.0-1.0)
+- Falls back to traditional rules if confidence is low or risk is critical
+
+**Key Methods**:
+- `resolve_fork(params)` - Make intelligent fork decision with confidence
+- `update_fork_outcome(height, outcome)` - Learn from fork results
+- `update_peer_reliability(peer, was_correct, caused_split)` - Track peer accuracy
+- `get_statistics()` - Get fork resolution performance metrics
+
+**Fork Resolution Factors**:
+1. **Chain Work** (40%): Prefers chain with more cumulative work
+2. **Network Consensus** (30%): Majority of peers' chain preference
+3. **Peer Reliability** (15%): Historical accuracy of source peer
+4. **Historical Patterns** (10%): Similar fork outcomes in the past
+5. **Fork Depth** (5%): Depth of fork affects confidence & risk
+
+**Risk Levels**:
+- **Low**: Standard fork, high confidence
+- **Medium**: Some uncertainty, moderate risk
+- **High**: Significant uncertainty or deep fork
+- **Critical**: Falls back to traditional longest-chain rule
+
+**Example Usage**:
+```rust
+// Initialize (already done in Blockchain)
+let fork_resolver = ForkResolver::new(db.clone());
+
+// Resolve fork (called automatically by blockchain)
+let resolution = fork_resolver.resolve_fork(ForkResolutionParams {
+    our_height: 4388,
+    our_chain_work: 4_388_000_000,
+    peer_height: 4390,
+    peer_chain_work: 4_390_000_000,
+    peer_ip: "178.128.199.144".to_string(),
+    supporting_peers: vec![
+        ("64.91.241.10".to_string(), 4390, 4_390_000_000),
+        ("165.84.215.117".to_string(), 4388, 4_388_000_000),
+    ],
+    common_ancestor: 4353,
+}).await;
+
+info!("Fork decision: {}, confidence: {:.1}%, risk: {:?}",
+    if resolution.accept_peer_chain { "ACCEPT" } else { "REJECT" },
+    resolution.confidence * 100.0,
+    resolution.risk_level
+);
+
+// After fork is resolved, update the outcome for learning
+fork_resolver.update_fork_outcome(4388, ForkOutcome::CorrectChoice).await;
+
+// Update peer reliability
+fork_resolver.update_peer_reliability("178.128.199.144", true, false).await;
+
+// Get statistics
+let stats = fork_resolver.get_statistics().await;
+info!("Fork resolution stats: {} total, {:.1}% accuracy",
+    stats.total_forks,
+    (stats.correct_decisions as f64 / stats.total_forks.max(1) as f64) * 100.0
+);
+```
+
+**Learning Process**:
+1. Node encounters fork
+2. AI analyzes multiple factors  
+3. Makes decision with confidence score
+4. Records decision in history
+5. Later, outcome is determined (correct/wrong/split)
+6. AI learns from outcome
+7. Future decisions become smarter
+
+**Benefits**:
+- Reduces incorrect fork choices
+- Learns network-specific patterns
+- Identifies unreliable peers
+- Prevents network splits
+- Adapts to changing conditions
+
+**Storage**: Persists to sled database:
+- `ai_fork_history` - Historical fork events and outcomes
+- `ai_peer_fork_reliability` - Per-peer fork accuracy tracking
+
+---
+
 ## Configuration
 
 Add AI settings to `config.toml`:

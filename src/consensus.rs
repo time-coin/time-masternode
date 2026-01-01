@@ -1004,6 +1004,7 @@ pub struct ConsensusEngine {
     pub state_notifier: Arc<StateNotifier>,
     pub avalanche: Arc<AvalancheConsensus>,
     pub finality_proof_mgr: Arc<FinalityProofManager>,
+    pub ai_validator: Option<Arc<crate::ai::AITransactionValidator>>,
 }
 
 impl ConsensusEngine {
@@ -1021,7 +1022,13 @@ impl ConsensusEngine {
             state_notifier: Arc::new(StateNotifier::new()),
             avalanche: Arc::new(avalanche),
             finality_proof_mgr: Arc::new(FinalityProofManager::new(1)), // chain_id = 1 for mainnet
+            ai_validator: None,
         }
+    }
+
+    pub fn enable_ai_validation(&mut self, db: Arc<sled::Db>) {
+        self.ai_validator = Some(Arc::new(crate::ai::AITransactionValidator::new(db)));
+        tracing::info!("🤖 AI transaction validation enabled");
     }
 
     pub fn set_identity(
@@ -1068,6 +1075,11 @@ impl ConsensusEngine {
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
+        // 0. AI-powered validation first (if enabled)
+        if let Some(ai_validator) = &self.ai_validator {
+            ai_validator.validate_with_ai(tx).await?;
+        }
+
         // 1. Check transaction size limit
         let tx_size = bincode::serialize(tx)
             .map_err(|e| format!("Failed to serialize transaction: {}", e))?

@@ -1085,8 +1085,8 @@ async fn handle_peer(
                                                                     peer.addr, end_height, our_height
                                                                 );
 
-                                                                // Check if we should accept this fork (longest chain wins)
-                                                                match blockchain.should_accept_fork(blocks, end_height).await {
+                                                                // Check if we should accept this fork (AI-powered decision)
+                                                                match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
                                                                         // Accept the fork - request more blocks to get the full chain
                                                                         let search_start = check_height.saturating_sub(10);
@@ -1134,8 +1134,8 @@ async fn handle_peer(
                                                                     check_height, peer.addr, end_height, our_height
                                                                 );
 
-                                                                // Check if we should accept this fork
-                                                                match blockchain.should_accept_fork(blocks, end_height).await {
+                                                                // Check if we should accept this fork (AI-powered decision)
+                                                                match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
                                                                         // Find common ancestor
                                                                         let common_ancestor = check_height - 1;
