@@ -876,14 +876,28 @@ impl PeerConnection {
                                 our_height
                             );
 
-                            // Request blocks from further back
+                            // Deep fork - peer has longer chain but no common ancestor
                             if end_height > our_height {
+                                // If we've gone back very far (200+ blocks) and still no match,
+                                // this is likely a fundamental chain divergence
+                                if start_height < 100 || (our_height - start_height) > 200 {
+                                    error!(
+                                        "🚨 Deep fork detected: No common ancestor after {} blocks. Peer chain is longer ({} vs {}). Manual intervention may be needed.",
+                                        our_height - start_height,
+                                        end_height,
+                                        our_height
+                                    );
+                                    // For now, stop trying - admin needs to decide which chain is correct
+                                    return Ok(());
+                                }
+
+                                // Try going back further
                                 let search_start = start_height.saturating_sub(100);
                                 info!(
-                                    "📤 Requesting blocks from {} to find common ancestor",
+                                    "📤 Deep fork: Requesting blocks from {} to find common ancestor",
                                     search_start
                                 );
-                                let msg = NetworkMessage::GetBlocks(search_start, end_height + 100);
+                                let msg = NetworkMessage::GetBlocks(search_start, end_height + 10);
                                 if let Err(e) = self.send_message(&msg).await {
                                     warn!("Failed to request blocks for ancestor search: {}", e);
                                 }
