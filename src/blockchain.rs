@@ -2409,8 +2409,11 @@ impl Blockchain {
         // Find common ancestor
         let common_ancestor = self.find_fork_common_ancestor(competing_blocks).await;
 
-        // Use AI to make decision
-        let ai_resolution = self
+        // Get peer's tip timestamp for future-block validation
+        let peer_tip_timestamp = competing_blocks.last().map(|b| b.header.timestamp);
+
+        // Use fork resolver to make decision
+        let resolution = self
             .fork_resolver
             .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
                 our_height,
@@ -2420,34 +2423,12 @@ impl Blockchain {
                 peer_ip: peer_ip.to_string(),
                 supporting_peers,
                 common_ancestor,
+                peer_tip_timestamp,
             })
             .await;
 
-        tracing::info!(
-            "🤖 AI fork resolution: {} peer chain (confidence: {:.1}%, risk: {:?})",
-            if ai_resolution.accept_peer_chain {
-                "ACCEPT"
-            } else {
-                "REJECT"
-            },
-            ai_resolution.confidence * 100.0,
-            ai_resolution.risk_level
-        );
-
-        // If confidence is low or risk is high, fall back to traditional rules
-        if ai_resolution.confidence < 0.3
-            || matches!(
-                ai_resolution.risk_level,
-                crate::ai::fork_resolver::RiskLevel::Critical
-            )
-        {
-            tracing::warn!("⚠️ Low confidence or critical risk, using traditional fork resolution");
-            return self
-                .traditional_fork_resolution(our_height, peer_claimed_height, competing_blocks)
-                .await;
-        }
-
-        Ok(ai_resolution.accept_peer_chain)
+        // Simple rule: if peer has higher valid height, accept
+        Ok(resolution.accept_peer_chain)
     }
 
     /// Traditional fork resolution (fallback when AI confidence is low)

@@ -1030,6 +1030,8 @@ impl PeerConnection {
                             "✅ [{:?}] Synced {} blocks from {} (skipped {})",
                             self.direction, added, self.peer_ip, skipped
                         );
+                        // Reset invalid counter on successful sync - peer is cooperating
+                        *self.invalid_block_count.write().await = 0;
                     } else if skipped > 0 {
                         warn!(
                             "⚠️ [{:?}] All {} blocks skipped from {}",
@@ -1160,16 +1162,22 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, *count
                         );
 
-                        // If peer sends invalid blocks, they're on a fork - disconnect immediately
-                        if *count >= 1 {
+                        // Allow some tolerance for fork situations before disconnecting
+                        // Fork resolution may resolve the issue - only disconnect after repeated failures
+                        if *count >= 5 {
                             error!(
-                                "🚫 [{:?}] Peer {} is on a fork (sent invalid block) - disconnecting",
-                                self.direction, self.peer_ip
+                                "🚫 [{:?}] Peer {} sent {} invalid blocks - disconnecting",
+                                self.direction, self.peer_ip, *count
                             );
                             return Err(format!(
-                                "Peer {} sent invalid block - likely on a fork",
-                                self.peer_ip
+                                "Peer {} sent {} invalid blocks",
+                                self.peer_ip, *count
                             ));
+                        } else {
+                            info!(
+                                "🔀 [{:?}] Peer {} may be on different fork (invalid count: {}), allowing fork resolution",
+                                self.direction, self.peer_ip, *count
+                            );
                         }
                     }
                     Err(e) => {
@@ -1182,13 +1190,21 @@ impl PeerConnection {
                             self.direction, block_height, self.peer_ip, e, *count
                         );
 
-                        // Check for fork immediately on error
-                        if *count >= 1 {
+                        // Allow some tolerance - fork resolution may fix this
+                        if *count >= 5 {
                             error!(
-                                "🚫 [{:?}] Peer {} sent invalid block - disconnecting",
-                                self.direction, self.peer_ip
+                                "🚫 [{:?}] Peer {} sent {} invalid blocks - disconnecting",
+                                self.direction, self.peer_ip, *count
                             );
-                            return Err(format!("Peer {} sent invalid block: {}", self.peer_ip, e));
+                            return Err(format!(
+                                "Peer {} sent {} invalid blocks: {}",
+                                self.peer_ip, *count, e
+                            ));
+                        } else {
+                            info!(
+                                "🔀 [{:?}] Peer {} validation error (count: {}), allowing fork resolution",
+                                self.direction, self.peer_ip, *count
+                            );
                         }
                     }
                 }

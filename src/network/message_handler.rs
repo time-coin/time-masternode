@@ -502,11 +502,40 @@ impl MessageHandler {
                             self.direction, current_height
                         );
                     } else if block.header.height > current_height {
+                        let block_height = block.header.height; // Store height before move
                         if let Err(e) = context.blockchain.add_block(block).await {
-                            warn!(
-                                "[{}] Failed to add finalized block to blockchain: {}",
-                                self.direction, e
-                            );
+                            // Check if this is a height mismatch (gap) error
+                            if e.contains("Block height mismatch") {
+                                let gap = block_height - current_height;
+                                warn!(
+                                    "[{}] ⚠️ Block height gap detected: expected {}, got {} (gap: {})",
+                                    self.direction, current_height + 1, block_height, gap
+                                );
+
+                                // Trigger automatic sync to fill the gap
+                                info!(
+                                    "📥 Requesting missing blocks {}-{} from {}",
+                                    current_height + 1,
+                                    block_height - 1,
+                                    self.peer_ip
+                                );
+
+                                let sync_msg =
+                                    NetworkMessage::GetBlocks(current_height + 1, block_height - 1);
+
+                                if let Err(send_err) = context
+                                    .peer_registry
+                                    .send_to_peer(&self.peer_ip, sync_msg)
+                                    .await
+                                {
+                                    warn!("Failed to request missing blocks: {}", send_err);
+                                }
+                            } else {
+                                warn!(
+                                    "[{}] Failed to add finalized block to blockchain: {}",
+                                    self.direction, e
+                                );
+                            }
                         } else {
                             info!(
                                 "✅ [{}] Added finalized block {} to blockchain",
