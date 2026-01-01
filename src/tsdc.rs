@@ -811,15 +811,9 @@ impl TSCDConsensus {
         block: &Block,
         _proposer_id: &str,
     ) -> Result<u64, TSCDError> {
-        // Block subsidy (in TIME coins, smallest unit)
-        // Formula: 100 * (1 + ln(height)) - from Protocol §10
-        let height = block.header.height;
-        let block_subsidy = if height == 0 {
-            10_000_000_000 // Genesis block: 100 TIME = 10B smallest units
-        } else {
-            let ln_height = (height as f64).ln();
-            (100_000_000.0 * (1.0 + ln_height)) as u64
-        };
+        // Block subsidy: constant 100 TIME per block
+        const BLOCK_REWARD_SATOSHIS: u64 = 100 * 100_000_000; // 100 TIME
+        let block_subsidy = BLOCK_REWARD_SATOSHIS;
 
         // Transaction fees (sum of all tx fees)
         let tx_fees: u64 = block.transactions.iter().map(|tx| tx.fee_amount()).sum();
@@ -828,7 +822,7 @@ impl TSCDConsensus {
 
         tracing::debug!(
             "💰 Block {} rewards - subsidy: {}, fees: {}, total: {}",
-            height,
+            block.header.height,
             block_subsidy,
             tx_fees,
             total_proposer_reward

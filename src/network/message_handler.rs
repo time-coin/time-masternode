@@ -477,21 +477,16 @@ impl MessageHandler {
                     );
 
                     // 4. Emit finalization event
-                    // Calculate reward
-                    let height = block.header.height;
-                    let ln_height = if height == 0 {
-                        0.0
-                    } else {
-                        (height as f64).ln()
-                    };
-                    let block_subsidy = (100_000_000.0 * (1.0 + ln_height)) as u64;
+                    // Calculate reward - constant 100 TIME per block
+                    const BLOCK_REWARD_SATOSHIS: u64 = 100 * 100_000_000; // 100 TIME
+                    let block_subsidy = BLOCK_REWARD_SATOSHIS;
                     let tx_fees: u64 = block.transactions.iter().map(|tx| tx.fee_amount()).sum();
                     let total_reward = block_subsidy + tx_fees;
 
                     info!(
                         "💰 [{}] Block {} rewards - subsidy: {}, fees: {}, total: {:.2} TIME",
                         self.direction,
-                        height,
+                        block.header.height,
                         block_subsidy / 100_000_000,
                         tx_fees / 100_000_000,
                         total_reward as f64 / 100_000_000.0
