@@ -302,25 +302,52 @@ impl TSCDConsensus {
             }
         };
 
-        // Filter to only recently active masternodes (received heartbeat in last 60 seconds)
+        // Filter to only recently active masternodes (received heartbeat within window)
         // This ensures we don't wait for offline/disconnected nodes
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // GENESIS BOOTSTRAP FIX: At genesis level (target_height <= 1), use a much more
+        // lenient heartbeat window (5 minutes instead of 60 seconds). During initial network
+        // formation, nodes may not have established heartbeat patterns yet due to:
+        // 1. Network connections still being established
+        // 2. HeartbeatBroadcast messages not yet exchanged between peers
+        // 3. Race condition between 120s startup delay and 60s heartbeat interval
+        // Using a longer window ensures a leader can be selected to bootstrap the network.
+        let heartbeat_window = if target_height <= 1 {
+            300 // 5 minutes for genesis-level catchup (bootstrap tolerance)
+        } else {
+            60 // 60 seconds for normal catchup (strict liveness check)
+        };
+
         let masternodes: Vec<_> = all_masternodes
+            .clone()
             .into_iter()
             .filter(|mn| {
                 let time_since_heartbeat = now.saturating_sub(mn.last_heartbeat);
-                time_since_heartbeat < 60 // Only include nodes with heartbeat in last 60s
+                time_since_heartbeat < heartbeat_window
             })
             .collect();
 
+        // If no masternodes pass the heartbeat filter at genesis, fall back to all active
+        // masternodes. This handles the edge case where no heartbeats have been exchanged yet.
+        let masternodes = if masternodes.is_empty() && target_height <= 1 {
+            tracing::warn!(
+                "⚠️  No masternodes with recent heartbeat at genesis - using all {} active masternodes",
+                all_masternodes.len()
+            );
+            all_masternodes
+        } else {
+            masternodes
+        };
+
         if masternodes.is_empty() {
-            return Err(TSCDError::ConfigError(
-                "No recently active masternodes (none with heartbeat in last 60s)".to_string(),
-            ));
+            return Err(TSCDError::ConfigError(format!(
+                "No recently active masternodes (none with heartbeat in last {}s)",
+                heartbeat_window
+            )));
         }
 
         // CRITICAL FIX: Use target_height as slot for deterministic leader selection
