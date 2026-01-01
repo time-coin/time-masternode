@@ -854,6 +854,14 @@ async fn main() {
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
 
+        // Track catchup leader timeout
+        // Maps expected_height -> (leader_id, selection_timestamp)
+        let mut catchup_leader_tracker: std::collections::HashMap<
+            u64,
+            (String, std::time::Instant),
+        > = std::collections::HashMap::new();
+        let leader_timeout = std::time::Duration::from_secs(60); // 60 seconds for leader to respond
+
         // Give a moment for initial peer connections and masternode discovery
         // before checking if we're behind (prevents false immediate catchup trigger)
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
@@ -1089,13 +1097,40 @@ async fn main() {
                         // for deterministic leader selection. The slot parameter is NOT used
                         // (ignored internally) to ensure ALL nodes agree on the same leader
                         // regardless of when they check, preventing rotating leadership deadlock.
-                        let tsdc_leader = match block_tsdc.select_leader_for_catchup(0, expected_height).await {
+                        //
+                        // LEADER TIMEOUT: If the primary leader doesn't respond within timeout,
+                        // select a backup leader to prevent network stalls.
+                        let mut attempt = 0u64;
+
+                        // Check if we have a tracked leader for this height
+                        if let Some((tracked_leader_id, selection_time)) = catchup_leader_tracker.get(&expected_height) {
+                            // Check if leader has timed out
+                            if selection_time.elapsed() > leader_timeout {
+                                tracing::warn!(
+                                    "⚠️  Catchup leader {} timed out after {:?} - selecting backup leader",
+                                    tracked_leader_id,
+                                    selection_time.elapsed()
+                                );
+                                // Increment attempt to select next leader
+                                attempt = 1;
+                                // Remove from tracker so we can track the new leader
+                                catchup_leader_tracker.remove(&expected_height);
+                            }
+                        }
+
+                        // Select leader with attempt offset (0 = primary, 1+ = backups)
+                        let tsdc_leader = match block_tsdc.select_leader_for_catchup(attempt, expected_height).await {
                             Ok(leader) => leader,
                             Err(e) => {
                                 tracing::warn!("⚠️  Cannot select TSDC catchup leader: {}", e);
                                 continue;
                             }
                         };
+
+                        // Track this leader selection if not already tracked
+                        catchup_leader_tracker.entry(expected_height).or_insert_with(|| {
+                            (tsdc_leader.id.clone(), std::time::Instant::now())
+                        });
 
                         // Check if we are the selected leader for this catchup operation
                         let is_catchup_leader = if let Some(ref our_addr) = block_masternode_address {
@@ -1227,10 +1262,14 @@ async fn main() {
                             // Release block production lock
                             is_producing.store(false, Ordering::SeqCst);
 
+                            // Clear catchup leader tracker for completed heights
+                            let final_height = block_blockchain.get_height().await;
+                            catchup_leader_tracker.retain(|&height, _| height > final_height);
+
                             tracing::info!(
                                 "✅ Catchup complete: produced {} blocks, height now: {}",
                                 catchup_produced,
-                                block_blockchain.get_height().await
+                                final_height
                             );
                     } else {
                         // Either at expected height or behind but within 5-minute grace period

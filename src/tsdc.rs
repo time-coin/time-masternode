@@ -283,9 +283,13 @@ impl TSCDConsensus {
     /// Select leader for catchup based on target height (deterministic across all nodes)
     /// This version uses target_height instead of chain_head to ensure all nodes agree
     /// on the leader even when their local chains differ during catchup
+    ///
+    /// The `attempt` parameter allows selecting backup leaders:
+    /// - attempt 0: Primary leader
+    /// - attempt 1+: Backup leaders (in case primary is offline)
     pub async fn select_leader_for_catchup(
         &self,
-        _slot: u64,
+        attempt: u64,
         target_height: u64,
     ) -> Result<TSCDValidator, TSCDError> {
         // Get masternodes from registry
@@ -312,6 +316,7 @@ impl TSCDConsensus {
         hasher.update(b"catchup_leader_selection");
         hasher.update(deterministic_slot.to_le_bytes());
         hasher.update(target_height.to_le_bytes());
+        hasher.update(attempt.to_le_bytes()); // Include attempt for backup leader selection
 
         let hash: [u8; 32] = hasher.finalize().into();
 
@@ -326,9 +331,10 @@ impl TSCDConsensus {
 
         // Log leader selection details for debugging
         tracing::debug!(
-            "Catchup leader selection for deterministic slot {} (target height {}): leader_index={}/{}, selected={}",
+            "Catchup leader selection for deterministic slot {} (target height {}, attempt {}): leader_index={}/{}, selected={}",
             deterministic_slot,
             target_height,
+            attempt,
             leader_index,
             masternodes.len(),
             masternode.masternode.address
