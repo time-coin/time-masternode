@@ -1013,8 +1013,21 @@ async fn main() {
                         // First, try to sync from peers
                         match block_blockchain.sync_from_peers().await {
                             Ok(()) => {
-                                tracing::info!("✅ Sync complete");
-                                continue; // Synced successfully, check again next tick
+                                // Re-check height after sync - only skip catchup if we actually caught up
+                                let new_height = block_blockchain.get_height().await;
+                                let new_expected = block_blockchain.calculate_expected_height();
+                                if new_height >= new_expected {
+                                    tracing::info!("✅ Sync complete - caught up to height {}", new_height);
+                                    continue; // Actually caught up, check again next tick
+                                }
+                                // Sync returned Ok but we're still behind - peers also at genesis
+                                // Fall through to catchup block production
+                                tracing::info!(
+                                    "✅ Sync complete but still {} blocks behind (height {} < expected {}) - initiating catchup block production",
+                                    new_expected.saturating_sub(new_height),
+                                    new_height,
+                                    new_expected
+                                );
                             }
                             Err(e) => {
                                 tracing::warn!("⚠️  Sync from peers failed: {}", e);
