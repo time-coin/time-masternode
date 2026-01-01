@@ -111,6 +111,19 @@ impl Blockchain {
         utxo_manager: Arc<UTXOStateManager>,
         network_type: NetworkType,
     ) -> Self {
+        // Initialize AI peer scoring with persistent storage
+        let peer_scoring = match crate::network::peer_scoring::PeerScoringSystem::new(&storage) {
+            Ok(scoring) => Arc::new(scoring),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to initialize AI peer scoring with persistence: {}. Using fallback.",
+                    e
+                );
+                // Fallback: create without persistence (shouldn't happen but be safe)
+                Arc::new(crate::network::peer_scoring::PeerScoringSystem::new(&storage).unwrap())
+            }
+        };
+
         Self {
             storage,
             consensus,
@@ -122,7 +135,7 @@ impl Blockchain {
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
             connection_manager: Arc::new(RwLock::new(None)),
-            peer_scoring: Arc::new(crate::network::peer_scoring::PeerScoringSystem::new()),
+            peer_scoring,
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
         }

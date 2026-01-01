@@ -3,26 +3,29 @@
 //! Learns from historical peer performance to intelligently select
 //! the best peers for sync operations. Uses machine learning principles
 //! without requiring heavy ML frameworks.
+//!
+//! Data is persisted to disk using sled database for learning across restarts.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-/// Statistics tracked for each peer
-#[derive(Debug, Clone)]
+/// Statistics tracked for each peer (serializable for disk storage)
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerPerformanceStats {
     /// Number of successful requests
     pub successful_requests: u64,
     /// Number of failed requests
     pub failed_requests: u64,
-    /// Recent response times (rolling window of last 10)
-    pub response_times: Vec<Duration>,
-    /// When peer was last successfully contacted
-    pub last_success: Option<Instant>,
-    /// When peer last failed
-    pub last_failure: Option<Instant>,
+    /// Recent response times in milliseconds (rolling window of last 10)
+    pub response_times_ms: Vec<u64>,
+    /// When peer was last successfully contacted (unix timestamp)
+    pub last_success_timestamp: Option<u64>,
+    /// When peer last failed (unix timestamp)
+    pub last_failure_timestamp: Option<u64>,
     /// Total bytes received from this peer
     pub bytes_received: u64,
     /// Number of times peer was selected
@@ -36,9 +39,9 @@ impl Default for PeerPerformanceStats {
         Self {
             successful_requests: 0,
             failed_requests: 0,
-            response_times: Vec::new(),
-            last_success: None,
-            last_failure: None,
+            response_times_ms: Vec::new(),
+            last_success_timestamp: None,
+            last_failure_timestamp: None,
             bytes_received: 0,
             times_selected: 0,
             reliability_score: 0.5, // Start neutral
@@ -49,11 +52,12 @@ impl Default for PeerPerformanceStats {
 impl PeerPerformanceStats {
     /// Calculate average response time
     pub fn avg_response_time(&self) -> Duration {
-        if self.response_times.is_empty() {
+        if self.response_times_ms.is_empty() {
             return Duration::from_secs(10); // Default penalty
         }
-        let sum: Duration = self.response_times.iter().sum();
-        sum / self.response_times.len() as u32
+        let sum_ms: u64 = self.response_times_ms.iter().sum();
+        let avg_ms = sum_ms / self.response_times_ms.len() as u64;
+        Duration::from_millis(avg_ms)
     }
 
     /// Calculate success rate (0.0 - 1.0)
@@ -67,9 +71,13 @@ impl PeerPerformanceStats {
 
     /// Calculate recency bonus (how recently was peer successful)
     pub fn recency_score(&self) -> f64 {
-        match self.last_success {
-            Some(instant) => {
-                let age = instant.elapsed().as_secs();
+        match self.last_success_timestamp {
+            Some(timestamp) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let age = now.saturating_sub(timestamp);
                 // Exponential decay: 1.0 at 0s, 0.5 at 300s, approaches 0
                 (-(age as f64) / 300.0).exp()
             }
@@ -79,9 +87,13 @@ impl PeerPerformanceStats {
 
     /// Calculate failure penalty (recent failures hurt score)
     pub fn failure_penalty(&self) -> f64 {
-        match self.last_failure {
-            Some(instant) => {
-                let age = instant.elapsed().as_secs();
+        match self.last_failure_timestamp {
+            Some(timestamp) => {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                let age = now.saturating_sub(timestamp);
                 if age < 60 {
                     // Recent failure: 0.5 penalty decaying over 60s
                     0.5 * (1.0 - age as f64 / 60.0)
@@ -96,13 +108,19 @@ impl PeerPerformanceStats {
     /// Record a successful request
     pub fn record_success(&mut self, response_time: Duration, bytes: u64) {
         self.successful_requests += 1;
-        self.last_success = Some(Instant::now());
+        self.last_success_timestamp = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
         self.bytes_received += bytes;
 
         // Keep rolling window of 10 most recent response times
-        self.response_times.push(response_time);
-        if self.response_times.len() > 10 {
-            self.response_times.remove(0);
+        let response_ms = response_time.as_millis() as u64;
+        self.response_times_ms.push(response_ms);
+        if self.response_times_ms.len() > 10 {
+            self.response_times_ms.remove(0);
         }
 
         // Update reliability score
@@ -112,7 +130,12 @@ impl PeerPerformanceStats {
     /// Record a failed request
     pub fn record_failure(&mut self) {
         self.failed_requests += 1;
-        self.last_failure = Some(Instant::now());
+        self.last_failure_timestamp = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
 
         // Update reliability score
         self.update_reliability_score();
@@ -150,17 +173,17 @@ impl PeerPerformanceStats {
         };
 
         // Feature 5: Consistency (low variance in response times)
-        let consistency_score = if self.response_times.len() > 2 {
-            let avg = self.avg_response_time();
+        let consistency_score = if self.response_times_ms.len() > 2 {
+            let avg = self.avg_response_time().as_millis() as f64;
             let variance: f64 = self
-                .response_times
+                .response_times_ms
                 .iter()
                 .map(|t| {
-                    let diff = t.as_secs_f64() - avg.as_secs_f64();
+                    let diff = *t as f64 - avg;
                     diff * diff
                 })
                 .sum::<f64>()
-                / self.response_times.len() as f64;
+                / self.response_times_ms.len() as f64;
 
             // Low variance = high consistency score
             1.0 / (1.0 + variance.sqrt())
@@ -181,17 +204,77 @@ impl PeerPerformanceStats {
     }
 }
 
-/// AI-based peer scoring system
+/// AI-based peer scoring system with persistent storage
 pub struct PeerScoringSystem {
-    /// Performance stats per peer (IP address)
+    /// Performance stats per peer (IP address) - in-memory cache
     stats: Arc<RwLock<HashMap<String, PeerPerformanceStats>>>,
+    /// Persistent storage
+    storage: sled::Tree,
 }
 
 impl PeerScoringSystem {
-    pub fn new() -> Self {
-        Self {
-            stats: Arc::new(RwLock::new(HashMap::new())),
+    pub fn new(db: &sled::Db) -> Result<Self, String> {
+        let storage = db
+            .open_tree("peer_scores")
+            .map_err(|e| format!("Failed to open peer_scores tree: {}", e))?;
+
+        // Load existing data from disk
+        let mut stats_map = HashMap::new();
+        for result in storage.iter() {
+            match result {
+                Ok((key, value)) => {
+                    let peer_ip = String::from_utf8_lossy(&key).to_string();
+                    match bincode::deserialize::<PeerPerformanceStats>(&value) {
+                        Ok(stats) => {
+                            debug!(
+                                "📂 Loaded AI scores for peer: {} (score: {:.3})",
+                                peer_ip, stats.reliability_score
+                            );
+                            stats_map.insert(peer_ip, stats);
+                        }
+                        Err(e) => {
+                            warn!("Failed to deserialize peer stats for {}: {}", peer_ip, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to load peer score from disk: {}", e);
+                }
+            }
         }
+
+        info!("🤖 [AI] Loaded {} peer scores from disk", stats_map.len());
+
+        Ok(Self {
+            stats: Arc::new(RwLock::new(stats_map)),
+            storage,
+        })
+    }
+
+    /// Save a peer's stats to disk
+    async fn save_to_disk(&self, peer_ip: &str, stats: &PeerPerformanceStats) {
+        match bincode::serialize(stats) {
+            Ok(bytes) => {
+                if let Err(e) = self.storage.insert(peer_ip.as_bytes(), bytes) {
+                    warn!("Failed to save peer stats to disk for {}: {}", peer_ip, e);
+                } else {
+                    debug!("💾 Saved AI scores for peer: {}", peer_ip);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to serialize peer stats for {}: {}", peer_ip, e);
+            }
+        }
+    }
+
+    /// Flush all pending writes to disk
+    pub async fn flush(&self) -> Result<(), String> {
+        self.storage
+            .flush_async()
+            .await
+            .map_err(|e| format!("Failed to flush peer scores: {}", e))?;
+        debug!("💾 Flushed all peer scores to disk");
+        Ok(())
     }
 
     /// Record a successful request to a peer
@@ -201,31 +284,45 @@ impl PeerScoringSystem {
         response_time: Duration,
         bytes_received: u64,
     ) {
-        let mut stats = self.stats.write().await;
-        let peer_stats = stats.entry(peer_ip.to_string()).or_default();
-        peer_stats.record_success(response_time, bytes_received);
+        let peer_stats = {
+            let mut stats = self.stats.write().await;
+            let peer_stats = stats.entry(peer_ip.to_string()).or_default();
+            peer_stats.record_success(response_time, bytes_received);
 
-        debug!(
-            "📊 Peer {} performance updated: success_rate={:.2}, avg_time={:.2}s, score={:.3}",
-            peer_ip,
-            peer_stats.success_rate(),
-            peer_stats.avg_response_time().as_secs_f64(),
-            peer_stats.reliability_score
-        );
+            debug!(
+                "📊 Peer {} performance updated: success_rate={:.2}, avg_time={:.2}s, score={:.3}",
+                peer_ip,
+                peer_stats.success_rate(),
+                peer_stats.avg_response_time().as_secs_f64(),
+                peer_stats.reliability_score
+            );
+
+            peer_stats.clone()
+        };
+
+        // Save to disk (async, doesn't block)
+        self.save_to_disk(peer_ip, &peer_stats).await;
     }
 
     /// Record a failed request to a peer
     pub async fn record_failure(&self, peer_ip: &str) {
-        let mut stats = self.stats.write().await;
-        let peer_stats = stats.entry(peer_ip.to_string()).or_default();
-        peer_stats.record_failure();
+        let peer_stats = {
+            let mut stats = self.stats.write().await;
+            let peer_stats = stats.entry(peer_ip.to_string()).or_default();
+            peer_stats.record_failure();
 
-        debug!(
-            "📊 Peer {} failure recorded: success_rate={:.2}, score={:.3}",
-            peer_ip,
-            peer_stats.success_rate(),
-            peer_stats.reliability_score
-        );
+            debug!(
+                "📊 Peer {} failure recorded: success_rate={:.2}, score={:.3}",
+                peer_ip,
+                peer_stats.success_rate(),
+                peer_stats.reliability_score
+            );
+
+            peer_stats.clone()
+        };
+
+        // Save to disk (async, doesn't block)
+        self.save_to_disk(peer_ip, &peer_stats).await;
     }
 
     /// Record that a peer was selected (for exploration/exploitation balance)
@@ -310,17 +407,17 @@ impl PeerScoringSystem {
             .collect()
     }
 
-    /// Clear statistics for a peer (when they disconnect)
+    /// Clear statistics for a peer (when they disconnect permanently)
     pub async fn clear_peer(&self, peer_ip: &str) {
         let mut stats = self.stats.write().await;
         stats.remove(peer_ip);
-        debug!("🧹 Cleared stats for peer: {}", peer_ip);
-    }
-}
 
-impl Default for PeerScoringSystem {
-    fn default() -> Self {
-        Self::new()
+        // Also remove from disk
+        if let Err(e) = self.storage.remove(peer_ip.as_bytes()) {
+            warn!("Failed to remove peer {} from disk: {}", peer_ip, e);
+        }
+
+        debug!("🧹 Cleared stats for peer: {}", peer_ip);
     }
 }
 
@@ -328,9 +425,16 @@ impl Default for PeerScoringSystem {
 mod tests {
     use super::*;
 
+    fn create_test_system() -> PeerScoringSystem {
+        // Create temporary database for testing
+        let config = sled::Config::new().temporary(true);
+        let db = config.open().unwrap();
+        PeerScoringSystem::new(&db).unwrap()
+    }
+
     #[tokio::test]
     async fn test_peer_scoring_basic() {
-        let system = PeerScoringSystem::new();
+        let system = create_test_system();
 
         // Record successes for peer A
         system
@@ -352,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_selection() {
-        let system = PeerScoringSystem::new();
+        let system = create_test_system();
 
         // Make peer_a clearly better
         for _ in 0..5 {
