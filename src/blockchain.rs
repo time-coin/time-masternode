@@ -486,6 +486,24 @@ impl Blockchain {
     ///
     /// NOTE: If peers don't have blocks, they'll be produced on TSDC schedule
     pub async fn sync_from_peers(&self) -> Result<(), String> {
+        // Check if already syncing - prevent concurrent syncs
+        {
+            let mut is_syncing = self.is_syncing.write().await;
+            if *is_syncing {
+                tracing::debug!("⏭️  Sync already in progress, skipping duplicate request");
+                return Ok(());
+            }
+            *is_syncing = true;
+        }
+
+        // Ensure we reset the sync flag when done
+        let _guard = scopeguard::guard((), |_| {
+            let is_syncing = self.is_syncing.clone();
+            tokio::spawn(async move {
+                *is_syncing.write().await = false;
+            });
+        });
+
         let mut current = *self.current_height.read().await;
         let time_expected = self.calculate_expected_height();
 
