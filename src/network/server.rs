@@ -1083,42 +1083,19 @@ async fn handle_peer(
                                                                 // Check if we should accept this fork
                                                                 match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
-                                                                        // Accept the fork - reorg immediately
-                                                                        // Common ancestor is our current tip (check_height)
-                                                                        // because the incoming block's prev_hash doesn't match
-                                                                        let common_ancestor = check_height;
+                                                                        // Accept the fork - need to find true common ancestor
+                                                                        // Since block's previous_hash doesn't match our chain,
+                                                                        // we must search backwards to find where chains diverged
 
-                                                                        // Filter to only blocks after our current height
-                                                                        let reorg_blocks: Vec<_> = blocks.iter()
-                                                                            .filter(|b| b.header.height > common_ancestor)
-                                                                            .cloned()
-                                                                            .collect();
-
-                                                                        if reorg_blocks.is_empty() {
-                                                                            // Need to request the diverged blocks
-                                                                            tracing::info!(
-                                                                                "✅ Accepting fork from {}, requesting blocks from height {}",
-                                                                                peer.addr, common_ancestor + 1
-                                                                            );
-                                                                            let msg = NetworkMessage::GetBlocks(common_ancestor + 1, end_height + 1);
-                                                                            if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
-                                                                                tracing::warn!("Failed to request fork blocks: {}", e);
-                                                                            }
-                                                                            continue;
-                                                                        }
-
+                                                                        // Request more blocks going backwards to find common ancestor
+                                                                        let search_start = check_height.saturating_sub(100);
                                                                         tracing::info!(
-                                                                            "✅ Accepting fork: reorganizing from height {} with {} blocks",
-                                                                            common_ancestor, reorg_blocks.len()
+                                                                            "✅ Accepting fork from {}, requesting blocks {}-{} to find common ancestor",
+                                                                            peer.addr, search_start, end_height
                                                                         );
-
-                                                                        match blockchain.reorganize_to_chain(common_ancestor, reorg_blocks).await {
-                                                                            Ok(()) => {
-                                                                                tracing::info!("✅ Chain reorganization successful");
-                                                                            }
-                                                                            Err(e) => {
-                                                                                tracing::error!("❌ Chain reorganization failed: {}", e);
-                                                                            }
+                                                                        let msg = NetworkMessage::GetBlocks(search_start, end_height + 1);
+                                                                        if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
+                                                                            tracing::warn!("Failed to request fork blocks: {}", e);
                                                                         }
                                                                         continue;
                                                                     }
