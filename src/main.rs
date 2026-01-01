@@ -1031,74 +1031,96 @@ async fn main() {
                                     tracing::info!("✅ Sync complete - caught up to height {}", new_height);
                                     continue; // Actually caught up, check again next tick
                                 }
-                                // Sync returned Ok but we're still behind - peers also at genesis
-                                // Fall through to catchup block production
+                                // Sync returned Ok but we're still behind - continue to verify peers don't have longer chains
                                 tracing::info!(
-                                    "✅ Sync complete but still {} blocks behind (height {} < expected {}) - initiating catchup block production",
+                                    "✅ Sync complete but still {} blocks behind (height {} < expected {}) - verifying no peer has longer chain",
                                     new_expected.saturating_sub(new_height),
                                     new_height,
                                     new_expected
                                 );
                             }
                             Err(e) => {
-                                tracing::warn!("⚠️  Sync from peers failed: {}", e);
-                                // Continue to catchup block production - peers may also be behind
+                                tracing::warn!("⚠️  Sync from peers failed: {} - verifying no peer has longer chain", e);
                             }
                         }
 
-                        // Before producing catchup blocks, check if any peer has a longer chain
-                        // If so, we should NOT produce blocks as it may create a fork
+                        // CRITICAL: Before producing catchup blocks, thoroughly verify that NO peer has a longer chain
+                        // This prevents creating forks when valid longer chains exist but haven't been synced yet
                         let connected_peers = block_peer_registry.get_connected_peers().await;
 
-                        // CRITICAL: If no peers are connected at all, do NOT produce catchup blocks
-                        // This prevents creating a fork when the node is isolated
+                        // If no peers connected, do NOT produce catchup blocks (prevents isolated fork)
                         if connected_peers.is_empty() {
                             tracing::warn!("⚠️  No connected peers - waiting for connections before producing catchup blocks");
                             continue;
                         }
 
-                        tracing::info!("📡 Connected peers available for catchup check: {}", connected_peers.len());
+                        // Query ALL peers for their chain heights and check if any have longer chains
+                        tracing::info!("🔍 Querying {} peer(s) for chain heights before catchup", connected_peers.len());
 
-                        let mut peer_has_longer_chain = false;
+                        let mut current_height_check = block_blockchain.get_height().await;
+                        let probe_start = current_height_check + 1;
+                        let probe_end = expected_height + 100;
 
-                        if !connected_peers.is_empty() {
-                            // Query peers for their heights by requesting blocks beyond our height
-                            let probe_start = current_height + 1;
-                            let probe_end = expected_height + 100; // Check well beyond expected
-                            let get_blocks = NetworkMessage::GetBlocks(probe_start, probe_end);
-
-                            for peer_ip in &connected_peers {
-                                let _ = block_peer_registry.send_to_peer(peer_ip, get_blocks.clone()).await;
-                            }
-
-                            // Wait longer for responses (10 seconds) to give peers time to respond
-                            // and for TSDC consensus to finalize any blocks in progress
-                            // This prevents premature catchup when blocks are being finalized
-                            tracing::info!("⏳ Waiting 10 seconds for peer responses and TSDC consensus before starting catchup...");
-                            let wait_start = tokio::time::Instant::now();
-                            let wait_duration = tokio::time::Duration::from_secs(10);
-
-                            while wait_start.elapsed() < wait_duration {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                                // Check if our height increased (meaning a peer sent us blocks)
-                                let new_height = block_blockchain.get_height().await;
-                                if new_height > current_height {
-                                    peer_has_longer_chain = true;
-                                    tracing::info!(
-                                        "✅ Received blocks from peer(s) ({} > {}), canceling catchup",
-                                        new_height, current_height
-                                    );
-                                    break;
-                                }
-                            }
-
-                            if !peer_has_longer_chain {
-                                tracing::info!(
-                                    "⏸️  No blocks received after 10s wait - all peers also behind"
-                                );
+                        // Send GetBlocks requests to all peers
+                        for peer_ip in &connected_peers {
+                            let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
+                            if let Err(e) = block_peer_registry.send_to_peer(peer_ip, msg).await {
+                                tracing::warn!("Failed to query peer {} for chain height: {}", peer_ip, e);
                             }
                         }
+
+                        // Wait up to 15 seconds for responses and continuously check if we receive blocks
+                        // This gives peers ample time to respond with their longer chains
+                        tracing::info!("⏳ Waiting up to 15 seconds for peer chain responses...");
+                        let wait_start = tokio::time::Instant::now();
+                        let wait_duration = tokio::time::Duration::from_secs(15);
+                        let mut received_blocks_from_peer = false;
+
+                        while wait_start.elapsed() < wait_duration {
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                            let new_height = block_blockchain.get_height().await;
+                            if new_height > current_height_check {
+                                received_blocks_from_peer = true;
+                                let new_expected = block_blockchain.calculate_expected_height();
+
+                                tracing::info!(
+                                    "✅ Received blocks from peer(s): {} → {} (expected: {})",
+                                    current_height_check, new_height, new_expected
+                                );
+
+                                // If we're now at or ahead of expected height, we're caught up
+                                if new_height >= new_expected {
+                                    tracing::info!("✅ Fully synced to height {}, no catchup needed", new_height);
+                                    break;
+                                }
+
+                                // Update check height and keep waiting - peer might have more blocks
+                                current_height_check = new_height;
+                            }
+                        }
+
+                        // If we received ANY blocks from peers, don't produce catchup blocks yet
+                        // Instead, loop back and try sync_from_peers() again
+                        if received_blocks_from_peer {
+                            let final_height = block_blockchain.get_height().await;
+                            let final_expected = block_blockchain.calculate_expected_height();
+
+                            if final_height >= final_expected {
+                                tracing::info!("✅ Sync complete after peer response, height: {}", final_height);
+                                continue;
+                            }
+
+                            tracing::info!(
+                                "📥 Received blocks from peer(s) but still behind ({} < {}) - retrying sync",
+                                final_height, final_expected
+                            );
+                            continue; // Loop back to try sync_from_peers() again
+                        }
+
+                        tracing::info!(
+                            "⏸️  No blocks received after 15s wait - peers confirmed at similar or lower height"
+                        );
 
                         // REVISED APPROACH: Use TSDC consensus for coordinated catchup
                         //

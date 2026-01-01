@@ -1909,7 +1909,8 @@ impl Blockchain {
                 }
 
                 // Different block at same height - this is a fork!
-                tracing::warn!(
+                // Log at debug level to avoid spam when processing many fork blocks
+                tracing::debug!(
                     "🔀 Fork detected at height {}: our hash {} vs incoming {}",
                     block_height,
                     hex::encode(&existing.hash()[..8]),
@@ -2429,6 +2430,81 @@ impl Blockchain {
 
         // Simple rule: if peer has higher valid height, accept
         Ok(resolution.accept_peer_chain)
+    }
+
+    /// Early fork evaluation with minimal information
+    /// Called when we detect a fork but don't have complete block data yet
+    /// Returns: (should_investigate, confidence_message)
+    pub async fn should_investigate_fork(
+        &self,
+        fork_height: u64,
+        peer_claimed_height: u64,
+        peer_ip: &str,
+    ) -> (bool, String) {
+        let our_height = self.get_height().await;
+
+        // If peer has significantly longer chain, investigate
+        if peer_claimed_height > our_height + 10 {
+            return (
+                true,
+                format!(
+                    "Peer chain is significantly longer ({} vs {})",
+                    peer_claimed_height, our_height
+                ),
+            );
+        }
+
+        // If fork is very recent (within last 10 blocks), investigate
+        if our_height - fork_height < 10 {
+            return (
+                true,
+                format!(
+                    "Recent fork at {} (current height {})",
+                    fork_height, our_height
+                ),
+            );
+        }
+
+        // Use AI fork resolver with minimal information
+        let our_chain_work = *self.cumulative_work.read().await;
+
+        // Estimate peer work based on claimed height
+        let estimated_peer_work = self
+            .estimate_peer_chain_work(&[], peer_claimed_height)
+            .await;
+
+        // Gather supporting peer information
+        let supporting_peers = self
+            .gather_supporting_peers(our_height, peer_claimed_height)
+            .await;
+
+        let resolution = self
+            .fork_resolver
+            .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
+                our_height,
+                our_chain_work,
+                peer_height: peer_claimed_height,
+                peer_chain_work: estimated_peer_work,
+                peer_ip: peer_ip.to_string(),
+                supporting_peers,
+                common_ancestor: fork_height.saturating_sub(1),
+                peer_tip_timestamp: None, // Unknown at this stage
+            })
+            .await;
+
+        let message = if resolution.accept_peer_chain {
+            format!(
+                "AI recommends investigating (confidence: {:.0}%)",
+                resolution.confidence * 100.0
+            )
+        } else {
+            format!(
+                "AI recommends skipping (confidence: {:.0}%)",
+                resolution.confidence * 100.0
+            )
+        };
+
+        (resolution.accept_peer_chain, message)
     }
 
     /// Traditional fork resolution (fallback when AI confidence is low)
