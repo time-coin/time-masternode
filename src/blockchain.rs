@@ -265,11 +265,6 @@ impl Blockchain {
         let current_height = *self.current_height.read().await;
         let mut missing_blocks = Vec::new();
 
-        if current_height == 0 {
-            // No blocks yet or just genesis - nothing to verify
-            return vec![];
-        }
-
         tracing::info!(
             "🔍 Verifying blockchain integrity (checking blocks 0-{})...",
             current_height
