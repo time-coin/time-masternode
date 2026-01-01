@@ -1547,9 +1547,22 @@ async fn handle_peer(
                                 }
 
                                 if json_objects.len() > 1 {
-                                    tracing::info!("📦 Split {} concatenated JSON objects from {}, discarding to prevent processing duplicates", json_objects.len(), peer.addr);
-                                    // Don't count as failed parse - this is a transport issue during high sync
-                                    // The messages will be resent if needed
+                                    // Verify each split object is valid JSON
+                                    let mut valid_count = 0;
+                                    for json_obj in &json_objects {
+                                        if serde_json::from_str::<NetworkMessage>(json_obj).is_ok() {
+                                            valid_count += 1;
+                                        }
+                                    }
+
+                                    tracing::debug!(
+                                        "📦 Split {} concatenated JSON objects from {} ({} valid, will be processed by peer connection handler)",
+                                        json_objects.len(),
+                                        peer.addr,
+                                        valid_count
+                                    );
+                                    // Don't count as failed parse - these are valid messages that got concatenated
+                                    // They will be processed correctly by the peer_connection.rs handler
                                 } else {
                                     failed_parse_count += 1;
                                     tracing::warn!("❌ Failed to parse message from {} (appears concatenated but couldn't split properly)", peer.addr);
