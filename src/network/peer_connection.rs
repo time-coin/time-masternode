@@ -923,16 +923,26 @@ impl PeerConnection {
                                 );
                             }
 
-                            // Deep fork - peer has longer chain but no common ancestor yet
-                            if end_height > our_height {
+                            // Deep fork - peer has longer OR EQUAL chain but no common ancestor yet
+                            if end_height >= our_height {
                                 // Keep searching back to genesis if needed
                                 if start_height > 0 {
                                     // Go back another 100 blocks (or to genesis if closer)
                                     let search_start = start_height.saturating_sub(100);
-                                    info!(
-                                        "📤 Deep fork: Searching back to block {} for common ancestor (will reorg to peer height {})",
-                                        search_start, end_height
-                                    );
+
+                                    if end_height > our_height {
+                                        info!(
+                                            "📤 Deep fork: Searching back to block {} for common ancestor (will reorg to peer height {})",
+                                            search_start, end_height
+                                        );
+                                    } else {
+                                        // Same height - need deterministic tiebreaker
+                                        info!(
+                                            "📤 Same-height fork: Searching back to block {} for common ancestor (heights equal: {})",
+                                            search_start, our_height
+                                        );
+                                    }
+
                                     // Request from search point to PEER'S height (not ours) so we get blocks to reorg with
                                     let msg =
                                         NetworkMessage::GetBlocks(search_start, end_height + 1);
@@ -1118,7 +1128,7 @@ impl PeerConnection {
                             peer_tip_height
                         };
 
-                        // Check if peer has a longer chain using their tip height
+                        // Check if peer has a longer chain OR same height (need tiebreaker)
                         if peer_tip_height > our_height {
                             info!(
                                 "📊 [{:?}] Peer {} has longer chain ({} > {}) with fork at {}. Blocks were skipped - will retry sync.",
@@ -1127,9 +1137,17 @@ impl PeerConnection {
                             // Don't disconnect - fork resolution already attempted earlier (lines 755-842)
                             // If it didn't succeed, we may need more blocks or peer needs to catch up
                             // Natural sync process will continue requesting blocks
+                        } else if peer_tip_height == our_height {
+                            // Same height fork - use deterministic tiebreaker
+                            warn!(
+                                "⚠️ [{:?}] Peer {} has same height fork ({} == {}) at block {}. Need deterministic resolution.",
+                                self.direction, self.peer_ip, peer_tip_height, our_height, fork_height
+                            );
+                            // Fork resolution will use hash comparison to deterministically choose
+                            // This happens in the fork detection code earlier (lines 773-893)
                         } else {
                             warn!(
-                                "⚠️ [{:?}] Peer {} has fork but not longer chain (peer: {}, ours: {}), ignoring",
+                                "⚠️ [{:?}] Peer {} has fork but shorter chain (peer: {}, ours: {}), ignoring",
                                 self.direction, self.peer_ip, peer_tip_height, our_height
                             );
                         }
