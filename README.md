@@ -11,6 +11,10 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
 - **Instant Finality**: <1 second transaction confirmation via Avalanche Snowball consensus
 - **Verifiable Finality Proofs**: Objective proof of transaction finality usable by all nodes and light clients
 - **Deterministic Checkpointing**: 10-minute blocks with TSDC (Time-Scheduled Deterministic Consensus)
+- **AI-Powered Peer Selection**: Machine learning-based peer scoring for optimal sync performance
+  - Learns peer reliability from historical performance
+  - Persistent knowledge across restarts
+  - Automatic optimization without configuration
 - **Leaderless Consensus**: No BFT voting rounds or global committees
 - **Stake-Weighted Sampling**: Sybil resistance via collateral-based peer selection
 - **UTXO State Machine**: Advanced state tracking (Unspent → Locked → Sampling → Finalized → Archived)
