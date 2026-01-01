@@ -843,10 +843,10 @@ impl PeerConnection {
                                                 }
                                             }
                                         } else {
-                                            info!("🔍 Detected gaps in block sequence, requesting complete chain");
+                                            info!("🔍 Detected gaps in block sequence, requesting complete chain from {}", first_new);
                                             let msg = NetworkMessage::GetBlocks(
-                                                ancestor + 1,
-                                                end_height + 100,
+                                                first_new,
+                                                end_height + 1,
                                             );
                                             if let Err(e) = self.send_message(&msg).await {
                                                 warn!("Failed to request complete chain: {}", e);
@@ -856,10 +856,10 @@ impl PeerConnection {
                                     } else {
                                         info!("🔍 Incomplete chain (first={}, last={}, need from {} to at least {}), requesting more",
                                             first_new, last_new, ancestor + 1, our_height + 1);
-                                        let msg = NetworkMessage::GetBlocks(
-                                            ancestor + 1,
-                                            end_height + 100,
-                                        );
+                                        // Request from where we left off, not from the beginning
+                                        let next_needed = last_new + 1;
+                                        let msg =
+                                            NetworkMessage::GetBlocks(next_needed, end_height + 1);
                                         if let Err(e) = self.send_message(&msg).await {
                                             warn!("Failed to request complete chain: {}", e);
                                         }
@@ -876,32 +876,34 @@ impl PeerConnection {
                                 our_height
                             );
 
-                            // Deep fork - peer has longer chain but no common ancestor
+                            // Deep fork - peer has longer chain but no common ancestor yet
                             if end_height > our_height {
-                                // If we've gone back very far (200+ blocks) and still no match,
-                                // this is likely a fundamental chain divergence
-                                if start_height < 100 || (our_height - start_height) > 200 {
-                                    error!(
-                                        "🚨 Deep fork detected: No common ancestor after {} blocks. Peer chain is longer ({} vs {}). Manual intervention may be needed.",
-                                        our_height - start_height,
-                                        end_height,
-                                        our_height
+                                // Keep searching back to genesis if needed
+                                if start_height > 0 {
+                                    // Go back another 100 blocks (or to genesis if closer)
+                                    let search_start = start_height.saturating_sub(100);
+                                    info!(
+                                        "📤 Deep fork: Searching back to block {} for common ancestor (will reorg to peer height {})",
+                                        search_start, end_height
                                     );
-                                    // For now, stop trying - admin needs to decide which chain is correct
+                                    // Request from search point to PEER'S height (not ours) so we get blocks to reorg with
+                                    let msg =
+                                        NetworkMessage::GetBlocks(search_start, end_height + 1);
+                                    if let Err(e) = self.send_message(&msg).await {
+                                        warn!(
+                                            "Failed to request blocks for ancestor search: {}",
+                                            e
+                                        );
+                                    }
                                     return Ok(());
+                                } else {
+                                    // Reached genesis with no match - genesis blocks are different!
+                                    error!(
+                                        "🚨 CRITICAL: Genesis blocks don't match with peer {}! This node is on a different network.",
+                                        self.peer_ip
+                                    );
+                                    return Err("Genesis mismatch - different network".to_string());
                                 }
-
-                                // Try going back further
-                                let search_start = start_height.saturating_sub(100);
-                                info!(
-                                    "📤 Deep fork: Requesting blocks from {} to find common ancestor",
-                                    search_start
-                                );
-                                let msg = NetworkMessage::GetBlocks(search_start, end_height + 10);
-                                if let Err(e) = self.send_message(&msg).await {
-                                    warn!("Failed to request blocks for ancestor search: {}", e);
-                                }
-                                return Ok(());
                             }
                         }
                     }
