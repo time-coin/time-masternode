@@ -855,10 +855,10 @@ async fn main() {
         let is_producing = is_producing_block_clone;
 
         // Track catchup leader timeout
-        // Maps expected_height -> (leader_id, selection_timestamp)
+        // Maps expected_height -> (leader_id, selection_timestamp, attempt_number)
         let mut catchup_leader_tracker: std::collections::HashMap<
             u64,
-            (String, std::time::Instant),
+            (String, std::time::Instant, u64),
         > = std::collections::HashMap::new();
         let leader_timeout = std::time::Duration::from_secs(60); // 60 seconds for leader to respond
 
@@ -1103,18 +1103,22 @@ async fn main() {
                         let mut attempt = 0u64;
 
                         // Check if we have a tracked leader for this height
-                        if let Some((tracked_leader_id, selection_time)) = catchup_leader_tracker.get(&expected_height) {
+                        if let Some((tracked_leader_id, selection_time, previous_attempt)) = catchup_leader_tracker.get(&expected_height) {
                             // Check if leader has timed out
                             if selection_time.elapsed() > leader_timeout {
                                 tracing::warn!(
-                                    "⚠️  Catchup leader {} timed out after {:?} - selecting backup leader",
+                                    "⚠️  Catchup leader {} timed out after {:?} - selecting backup leader (attempt {})",
                                     tracked_leader_id,
-                                    selection_time.elapsed()
+                                    selection_time.elapsed(),
+                                    previous_attempt + 1
                                 );
-                                // Increment attempt to select next leader
-                                attempt = 1;
+                                // Increment attempt to select next leader in rotation
+                                attempt = previous_attempt + 1;
                                 // Remove from tracker so we can track the new leader
                                 catchup_leader_tracker.remove(&expected_height);
+                            } else {
+                                // Leader hasn't timed out yet, keep the same attempt
+                                attempt = *previous_attempt;
                             }
                         }
 
@@ -1129,7 +1133,7 @@ async fn main() {
 
                         // Track this leader selection if not already tracked
                         catchup_leader_tracker.entry(expected_height).or_insert_with(|| {
-                            (tsdc_leader.id.clone(), std::time::Instant::now())
+                            (tsdc_leader.id.clone(), std::time::Instant::now(), attempt)
                         });
 
                         // Check if we are the selected leader for this catchup operation

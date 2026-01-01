@@ -293,7 +293,7 @@ impl TSCDConsensus {
         target_height: u64,
     ) -> Result<TSCDValidator, TSCDError> {
         // Get masternodes from registry
-        let masternodes = match &self.masternode_registry {
+        let all_masternodes = match &self.masternode_registry {
             Some(registry) => registry.list_active().await,
             None => {
                 return Err(TSCDError::ConfigError(
@@ -302,8 +302,25 @@ impl TSCDConsensus {
             }
         };
 
+        // Filter to only recently active masternodes (received heartbeat in last 60 seconds)
+        // This ensures we don't wait for offline/disconnected nodes
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let masternodes: Vec<_> = all_masternodes
+            .into_iter()
+            .filter(|mn| {
+                let time_since_heartbeat = now.saturating_sub(mn.last_heartbeat);
+                time_since_heartbeat < 60 // Only include nodes with heartbeat in last 60s
+            })
+            .collect();
+
         if masternodes.is_empty() {
-            return Err(TSCDError::ConfigError("No active masternodes".to_string()));
+            return Err(TSCDError::ConfigError(
+                "No recently active masternodes (none with heartbeat in last 60s)".to_string(),
+            ));
         }
 
         // CRITICAL FIX: Use target_height as slot for deterministic leader selection
