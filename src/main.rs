@@ -1,4 +1,5 @@
 pub mod address;
+pub mod ai;
 pub mod avalanche;
 pub mod block;
 pub mod blockchain;
