@@ -285,7 +285,7 @@ impl TSCDConsensus {
     /// on the leader even when their local chains differ during catchup
     pub async fn select_leader_for_catchup(
         &self,
-        slot: u64,
+        _slot: u64,
         target_height: u64,
     ) -> Result<TSCDValidator, TSCDError> {
         // Get masternodes from registry
@@ -302,13 +302,16 @@ impl TSCDConsensus {
             return Err(TSCDError::ConfigError("No active masternodes".to_string()));
         }
 
-        // Deterministic leader selection based on slot and target height
-        // Using target_height ensures all nodes agree on leader even if their
-        // local chain_head differs (common during catchup scenarios)
+        // CRITICAL FIX: Use target_height as slot for deterministic leader selection
+        // Previously used wall-clock based slot which caused rotating leadership during catchup
+        // causing deadlock where nodes kept waiting for different leaders as time progressed.
+        // Now all nodes will consistently select the same leader based on the target height.
+        let deterministic_slot = target_height;
+
         let mut hasher = Sha256::new();
         hasher.update(b"catchup_leader_selection");
-        hasher.update(slot.to_le_bytes());
-        hasher.update(target_height.to_le_bytes()); // All nodes agree on expected height
+        hasher.update(deterministic_slot.to_le_bytes());
+        hasher.update(target_height.to_le_bytes());
 
         let hash: [u8; 32] = hasher.finalize().into();
 
@@ -323,8 +326,8 @@ impl TSCDConsensus {
 
         // Log leader selection details for debugging
         tracing::debug!(
-            "Catchup leader selection for slot {} (target height {}): leader_index={}/{}, selected={}",
-            slot,
+            "Catchup leader selection for deterministic slot {} (target height {}): leader_index={}/{}, selected={}",
+            deterministic_slot,
             target_height,
             leader_index,
             masternodes.len(),

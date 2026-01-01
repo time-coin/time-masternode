@@ -1084,12 +1084,12 @@ async fn main() {
                         // - No solo block production (prevents forks)
                         // - Deterministic and predictable
 
-                        // Determine catchup leader using TSDC for current slot
+                        // Determine catchup leader using TSDC for expected_height
                         // CRITICAL: Use select_leader_for_catchup() which uses expected_height
-                        // instead of chain_head to ensure ALL nodes agree on the same leader
-                        // even when their local chains differ during catchup
-                        let current_slot = block_tsdc.current_slot();
-                        let tsdc_leader = match block_tsdc.select_leader_for_catchup(current_slot, expected_height).await {
+                        // for deterministic leader selection. The slot parameter is NOT used
+                        // (ignored internally) to ensure ALL nodes agree on the same leader
+                        // regardless of when they check, preventing rotating leadership deadlock.
+                        let tsdc_leader = match block_tsdc.select_leader_for_catchup(0, expected_height).await {
                             Ok(leader) => leader,
                             Err(e) => {
                                 tracing::warn!("⚠️  Cannot select TSDC catchup leader: {}", e);
@@ -1116,8 +1116,8 @@ async fn main() {
                         }
 
                         tracing::info!(
-                            "🎯 SELECTED AS CATCHUP LEADER for slot {} (via TSDC consensus)",
-                            current_slot
+                            "🎯 SELECTED AS CATCHUP LEADER for height {} (via TSDC consensus)",
+                            expected_height
                         );
 
                         // We are the leader - produce catchup blocks with TSDC coordination
@@ -1447,8 +1447,8 @@ async fn main() {
                                 Err(_) => {
                                     // Sync failed - peers don't have blocks
                                     // Check if we should be the TSDC catchup leader
-                                    let current_slot = status_tsdc_clone.current_slot();
-                                    if let Ok(tsdc_leader) = status_tsdc_clone.select_leader_for_catchup(current_slot, expected_height).await {
+                                    // Use deterministic leader selection based only on expected_height
+                                    if let Ok(tsdc_leader) = status_tsdc_clone.select_leader_for_catchup(0, expected_height).await {
                                         let is_leader = if let Some(ref our_addr) = status_masternode_addr_clone {
                                             tsdc_leader.id == *our_addr
                                         } else {
