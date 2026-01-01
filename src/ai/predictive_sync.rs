@@ -20,7 +20,7 @@ pub struct SyncPrediction {
 }
 
 pub struct PredictiveSync {
-    db: Arc<Db>,
+    _db: Arc<Db>,
     block_history: Arc<RwLock<VecDeque<BlockTimingData>>>,
     min_samples: usize,
 }
@@ -28,7 +28,7 @@ pub struct PredictiveSync {
 impl PredictiveSync {
     pub fn new(db: Arc<Db>, min_samples: usize) -> Result<Self, AppError> {
         let predictor = Self {
-            db,
+            _db: db,
             block_history: Arc::new(RwLock::new(VecDeque::with_capacity(500))),
             min_samples,
         };

@@ -23,7 +23,7 @@ pub struct OptimizationSuggestion {
 }
 
 pub struct NetworkOptimizer {
-    db: Arc<Db>,
+    _db: Arc<Db>,
     metrics_history: Arc<RwLock<VecDeque<NetworkMetrics>>>,
     suggestions: Arc<RwLock<Vec<OptimizationSuggestion>>>,
     min_samples: usize,
@@ -32,7 +32,7 @@ pub struct NetworkOptimizer {
 impl NetworkOptimizer {
     pub fn new(db: Arc<Db>, min_samples: usize) -> Result<Self, AppError> {
         Ok(Self {
-            db,
+            _db: db,
             metrics_history: Arc::new(RwLock::new(VecDeque::with_capacity(1000))),
             suggestions: Arc::new(RwLock::new(Vec::new())),
             min_samples,

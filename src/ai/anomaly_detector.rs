@@ -32,7 +32,7 @@ pub enum AnomalySeverity {
 }
 
 pub struct AnomalyDetector {
-    db: Arc<Db>,
+    _db: Arc<Db>,
     events: Arc<RwLock<VecDeque<NetworkEvent>>>,
     threshold: f64,
     min_samples: usize,
@@ -42,7 +42,7 @@ pub struct AnomalyDetector {
 impl AnomalyDetector {
     pub fn new(db: Arc<Db>, threshold: f64, min_samples: usize) -> Result<Self, AppError> {
         let detector = Self {
-            db,
+            _db: db,
             events: Arc::new(RwLock::new(VecDeque::with_capacity(1000))),
             threshold,
             min_samples,

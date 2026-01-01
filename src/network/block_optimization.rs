@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 /// Maximum block size in bytes
-const MAX_BLOCK_SIZE: u64 = 1_000_000; // 1MB
+const _MAX_BLOCK_SIZE: u64 = 1_000_000; // 1MB
 
 /// Block optimization statistics
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -26,7 +26,7 @@ pub struct OptimizationStats {
 #[derive(Debug, Clone)]
 struct ScoredTransaction {
     tx: Transaction,
-    fee_per_byte: f64,
+    _fee_per_byte: f64,
     priority_score: f64,
     size: u64,
 }
@@ -124,7 +124,7 @@ impl BlockOptimizer {
 
             scored.push(ScoredTransaction {
                 tx,
-                fee_per_byte,
+                _fee_per_byte: fee_per_byte,
                 priority_score,
                 size,
             });
@@ -152,12 +152,7 @@ impl BlockOptimizer {
         let pattern_score = self.calculate_pattern_score(tx).await;
 
         // Combine weighted features
-        let base_score = fee_score * 0.6
-            + absolute_fee_score * 0.2
-            + dependency_score * 0.1
-            + pattern_score * 0.1;
-
-        base_score
+        fee_score * 0.6 + absolute_fee_score * 0.2 + dependency_score * 0.1 + pattern_score * 0.1
     }
 
     /// Calculate dependency score (prefer independent txs)
@@ -339,7 +334,7 @@ mod tests {
         BlockOptimizer::new(&db).unwrap()
     }
 
-    fn create_test_tx(fee: u64, outputs: usize) -> Transaction {
+    fn create_test_tx(_fee: u64, outputs: usize) -> Transaction {
         Transaction {
             version: 1,
             inputs: vec![TxInput {
@@ -366,7 +361,7 @@ mod tests {
         let optimizer = create_test_optimizer();
 
         // Create transactions with different fees
-        let mut mempool = vec![
+        let mempool = vec![
             create_test_tx(10, 1),   // Low fee
             create_test_tx(100, 1),  // High fee
             create_test_tx(50, 1),   // Medium fee
