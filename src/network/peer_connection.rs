@@ -821,25 +821,44 @@ impl PeerConnection {
                                             .any(|w| w[1].header.height != w[0].header.height + 1);
 
                                         if !has_gaps {
-                                            info!("🔄 Reorganizing from height {} with {} blocks ({}-{})",
-                                                ancestor, reorg_blocks.len(), first_new, last_new);
-
+                                            // Use AI fork resolver to decide if we should accept this fork
                                             match blockchain
-                                                .reorganize_to_chain(ancestor, reorg_blocks)
+                                                .should_accept_fork(
+                                                    &reorg_blocks,
+                                                    end_height,
+                                                    &self.peer_ip,
+                                                )
                                                 .await
                                             {
-                                                Ok(_) => {
-                                                    info!(
-                                                        "✅ [{:?}] Chain reorganization successful",
-                                                        self.direction
-                                                    );
+                                                Ok(true) => {
+                                                    info!("🔄 Fork resolution: ACCEPT peer chain, reorganizing from height {} with {} blocks ({}-{})",
+                                                        ancestor, reorg_blocks.len(), first_new, last_new);
+
+                                                    match blockchain
+                                                        .reorganize_to_chain(ancestor, reorg_blocks)
+                                                        .await
+                                                    {
+                                                        Ok(_) => {
+                                                            info!(
+                                                                "✅ [{:?}] Chain reorganization successful",
+                                                                self.direction
+                                                            );
+                                                            return Ok(());
+                                                        }
+                                                        Err(e) => {
+                                                            error!(
+                                                                "❌ [{:?}] Chain reorganization failed: {}",
+                                                                self.direction, e
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Ok(false) => {
+                                                    info!("❌ Fork resolution: REJECT peer chain, keeping our chain");
                                                     return Ok(());
                                                 }
                                                 Err(e) => {
-                                                    error!(
-                                                        "❌ [{:?}] Chain reorganization failed: {}",
-                                                        self.direction, e
-                                                    );
+                                                    warn!("⚠️ Fork resolution error: {}", e);
                                                 }
                                             }
                                         } else {
