@@ -536,7 +536,7 @@ impl Blockchain {
             // Use AI to select the best peer based on historical performance
             let mut sync_peer =
                 if let Some(ai_peer) = self.peer_scoring.select_best_peer(&connected_peers).await {
-                    tracing::info!("🤖 [AI] Selected peer for sync: {} (AI-scored)", ai_peer);
+                    tracing::debug!("✓ AI peer selection returned: {}", ai_peer);
                     ai_peer
                 } else {
                     // Fallback if AI can't decide
@@ -548,6 +548,13 @@ impl Blockchain {
             let sync_start = std::time::Instant::now();
             let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
             let starting_height = current;
+
+            tracing::debug!(
+                "📍 Starting sync loop: current={}, expected={}, timeout={}s",
+                current,
+                time_expected,
+                max_sync_time.as_secs()
+            );
 
             while current < time_expected && sync_start.elapsed() < max_sync_time {
                 // Request next batch of blocks
