@@ -721,9 +721,9 @@ async fn main() {
             }
         }
 
-        // STEP 3: Start fork detection BEFORE syncing (run immediately then every 5 min)
+        // STEP 3: Start fork detection BEFORE syncing (run immediately then every 1 min)
         Blockchain::start_chain_comparison_task(blockchain_init.clone());
-        tracing::info!("✓ Fork detection task started (checks immediately, then every 5 minutes)");
+        tracing::info!("✓ Fork detection task started (checks immediately, then every 1 minute)");
 
         // Run initial fork detection before syncing
         tracing::info!("🔍 Running initial fork detection...");

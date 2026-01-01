@@ -1410,14 +1410,37 @@ impl PeerConnection {
                     .set_peer_height(&self.peer_ip, *peer_height)
                     .await;
 
-                // Log the peer's height but don't automatically sync
-                // Fork detection happens centrally in compare_chain_with_peers()
                 let our_height = blockchain.get_height().await;
 
-                debug!(
-                    "📊 [{:?}] Peer {} reported height {} (we have {})",
-                    self.direction, self.peer_ip, peer_height, our_height
-                );
+                // If peer has higher height, request blocks to verify and potentially sync
+                if *peer_height > our_height {
+                    info!(
+                        "📈 [{:?}] Peer {} reported higher height {} (we have {}), requesting blocks for verification",
+                        self.direction, self.peer_ip, peer_height, our_height
+                    );
+
+                    // Request blocks starting from our height to verify chain
+                    let msg = NetworkMessage::GetBlocks(our_height, *peer_height + 1);
+                    if let Err(e) = self.send_message(&msg).await {
+                        warn!("Failed to request verification blocks: {}", e);
+                    }
+                } else if *peer_height == our_height {
+                    // Same height - should verify we're on the same chain
+                    // Request the tip block to compare hashes
+                    debug!(
+                        "🔍 [{:?}] Peer {} at same height {}, requesting tip for verification",
+                        self.direction, self.peer_ip, peer_height
+                    );
+                    let msg = NetworkMessage::GetBlocks(*peer_height, *peer_height + 1);
+                    if let Err(e) = self.send_message(&msg).await {
+                        debug!("Failed to request tip verification: {}", e);
+                    }
+                } else {
+                    debug!(
+                        "📊 [{:?}] Peer {} at lower height {} (we have {})",
+                        self.direction, self.peer_ip, peer_height, our_height
+                    );
+                }
             }
             NetworkMessage::ChainTipResponse { height, hash } => {
                 // Compare peer's chain tip with ours for fork detection

@@ -2358,7 +2358,7 @@ impl Blockchain {
     /// Start periodic chain comparison task
     pub fn start_chain_comparison_task(blockchain: Arc<Blockchain>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60)); // Every 1 minute
 
             loop {
                 interval.tick().await;
@@ -2366,8 +2366,28 @@ impl Blockchain {
                 let our_height = blockchain.get_height().await;
                 tracing::debug!("🔍 Periodic chain check: our height = {}", our_height);
 
-                // Query peers for their heights
-                blockchain.compare_chain_with_peers().await;
+                // Query peers for their heights and check for forks
+                if let Some((consensus_height, consensus_peer)) =
+                    blockchain.compare_chain_with_peers().await
+                {
+                    tracing::info!(
+                        "🔀 Periodic fork detection: consensus height {} > our height {}, syncing from {}",
+                        consensus_height,
+                        our_height,
+                        consensus_peer
+                    );
+
+                    // Trigger sync from the consensus peer
+                    if let Err(e) = blockchain.sync_from_specific_peer(&consensus_peer).await {
+                        tracing::warn!(
+                            "⚠️  Failed to sync from consensus peer {} during periodic check: {}",
+                            consensus_peer,
+                            e
+                        );
+                    } else {
+                        tracing::info!("✅ Periodic chain sync completed from {}", consensus_peer);
+                    }
+                }
             }
         });
     }
