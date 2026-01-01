@@ -499,8 +499,20 @@ impl Blockchain {
             });
         });
 
-        let mut current = *self.current_height.read().await;
+        let current = *self.current_height.read().await;
         let time_expected = self.calculate_expected_height();
+
+        // Debug logging for genesis timestamp issue
+        let now = chrono::Utc::now().timestamp();
+        let genesis_ts = self.genesis_timestamp();
+        tracing::debug!(
+            "🔍 Sync calculation: current={}, time_expected={}, now={}, genesis={}, elapsed={}",
+            current,
+            time_expected,
+            now,
+            genesis_ts,
+            now - genesis_ts
+        );
 
         if current >= time_expected {
             tracing::info!("✓ Blockchain synced (height: {})", current);
@@ -545,7 +557,7 @@ impl Blockchain {
             let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
             let starting_height = current;
 
-            tracing::debug!(
+            tracing::info!(
                 "📍 Starting sync loop: current={}, expected={}, timeout={}s",
                 current,
                 time_expected,

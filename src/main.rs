@@ -862,9 +862,9 @@ async fn main() {
         > = std::collections::HashMap::new();
         let leader_timeout = std::time::Duration::from_secs(60); // 60 seconds for leader to respond
 
-        // Give a moment for initial peer connections and masternode discovery
-        // before checking if we're behind (prevents false immediate catchup trigger)
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // Give time for initial blockchain sync to complete before starting block production
+        // This prevents race conditions where both init sync and production loop call sync_from_peers()
+        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
 
         // Time-based catchup trigger: Check if we're behind schedule
         // Use time rather than block count to determine when to trigger catchup
