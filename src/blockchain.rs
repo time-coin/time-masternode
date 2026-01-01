@@ -499,7 +499,7 @@ impl Blockchain {
             });
         });
 
-        let current = *self.current_height.read().await;
+        let mut current = *self.current_height.read().await;
         let time_expected = self.calculate_expected_height();
 
         // Debug logging for genesis timestamp issue
