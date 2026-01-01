@@ -2433,6 +2433,10 @@ impl Blockchain {
         // Get peer's tip timestamp for future-block validation
         let peer_tip_timestamp = competing_blocks.last().map(|b| b.header.timestamp);
 
+        // Get tip hashes for deterministic tiebreaker
+        let our_tip_hash = self.get_block_hash(our_height).ok();
+        let peer_tip_hash = competing_blocks.last().map(|b| b.hash());
+
         // Use fork resolver to make decision
         let resolution = self
             .fork_resolver
@@ -2445,6 +2449,8 @@ impl Blockchain {
                 supporting_peers,
                 common_ancestor,
                 peer_tip_timestamp,
+                our_tip_hash,
+                peer_tip_hash,
             })
             .await;
 
@@ -2498,6 +2504,10 @@ impl Blockchain {
             .gather_supporting_peers(our_height, peer_claimed_height)
             .await;
 
+        // Get tip hashes for tiebreaker (may not be available in early investigation)
+        let our_tip_hash = self.get_block_hash(our_height).ok();
+        let peer_tip_hash = None; // Not available during early investigation
+
         let resolution = self
             .fork_resolver
             .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
@@ -2509,6 +2519,8 @@ impl Blockchain {
                 supporting_peers,
                 common_ancestor: fork_height.saturating_sub(1),
                 peer_tip_timestamp: None, // Unknown at this stage
+                our_tip_hash,
+                peer_tip_hash,
             })
             .await;
 

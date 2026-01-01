@@ -27,6 +27,10 @@ pub struct ForkResolutionParams {
     pub common_ancestor: u64,
     /// Timestamp of peer's tip block (for future-block validation)
     pub peer_tip_timestamp: Option<i64>,
+    /// Our tip block hash (for deterministic tiebreaker)
+    pub our_tip_hash: Option<[u8; 32]>,
+    /// Peer's tip block hash (for deterministic tiebreaker)
+    pub peer_tip_hash: Option<[u8; 32]>,
 }
 
 /// Fork resolution decision with confidence score
@@ -130,30 +134,93 @@ impl ForkResolver {
         }
 
         // Rule 2: Highest valid block height wins
-        let accept = params.peer_height > params.our_height;
-        let confidence = if accept {
+        let mut accept = params.peer_height > params.our_height;
+        let confidence;
+
+        if params.peer_height > params.our_height {
             // Higher confidence the bigger the height difference
             let diff = params.peer_height - params.our_height;
-            (0.6 + (diff as f64 * 0.1).min(0.4)).min(1.0)
+            confidence = (0.6 + (diff as f64 * 0.1).min(0.4)).min(1.0);
         } else if params.peer_height == params.our_height {
-            0.5 // Tie - could go either way
+            // SAME HEIGHT - need deterministic tiebreaker
+            // Rule 2a: Compare chain work (accumulated difficulty)
+            if params.peer_chain_work > params.our_chain_work {
+                accept = true;
+                confidence = 0.7;
+                reasoning.push(format!(
+                    "ACCEPT: Same height ({}) but peer has more chain work ({} > {})",
+                    params.our_height, params.peer_chain_work, params.our_chain_work
+                ));
+            } else if params.peer_chain_work < params.our_chain_work {
+                accept = false;
+                confidence = 0.7;
+                reasoning.push(format!(
+                    "REJECT: Same height ({}) but our chain has more work ({} > {})",
+                    params.our_height, params.our_chain_work, params.peer_chain_work
+                ));
+            } else {
+                // Rule 2b: Chain work is also equal - use tip hash as tiebreaker
+                // Lexicographically smallest hash wins (deterministic across all nodes)
+                if let (Some(our_hash), Some(peer_hash)) =
+                    (params.our_tip_hash, params.peer_tip_hash)
+                {
+                    // Compare hashes byte by byte
+                    match peer_hash.cmp(&our_hash) {
+                        std::cmp::Ordering::Less => {
+                            // Peer hash is smaller - peer wins
+                            accept = true;
+                            confidence = 0.9; // High confidence - deterministic
+                            reasoning.push(format!(
+                                "ACCEPT: Same height ({}), same work, peer hash {} < our hash {} (deterministic tiebreaker)",
+                                params.our_height,
+                                hex::encode(&peer_hash[..8]),
+                                hex::encode(&our_hash[..8])
+                            ));
+                        }
+                        std::cmp::Ordering::Greater => {
+                            // Our hash is smaller - we win
+                            accept = false;
+                            confidence = 0.9; // High confidence - deterministic
+                            reasoning.push(format!(
+                                "REJECT: Same height ({}), same work, our hash {} < peer hash {} (deterministic tiebreaker)",
+                                params.our_height,
+                                hex::encode(&our_hash[..8]),
+                                hex::encode(&peer_hash[..8])
+                            ));
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // Identical blocks - no fork, just keep ours
+                            accept = false;
+                            confidence = 1.0;
+                            reasoning.push(format!(
+                                "REJECT: Identical chains at height {} (same hash: {})",
+                                params.our_height,
+                                hex::encode(&our_hash[..8])
+                            ));
+                        }
+                    }
+                } else {
+                    // Hashes not available - fall back to keeping our chain
+                    accept = false;
+                    confidence = 0.5; // Low confidence - not deterministic
+                    reasoning.push(format!(
+                        "REJECT: Same height ({}), same work, but tip hashes unavailable - keeping our chain",
+                        params.our_height
+                    ));
+                }
+            }
         } else {
             // Our chain is longer
             let diff = params.our_height - params.peer_height;
-            (0.6 + (diff as f64 * 0.1).min(0.4)).min(1.0)
-        };
+            confidence = (0.6 + (diff as f64 * 0.1).min(0.4)).min(1.0);
+        }
 
-        if accept {
+        if accept && params.peer_height > params.our_height {
             reasoning.push(format!(
                 "ACCEPT: Peer has higher block height ({} > {})",
                 params.peer_height, params.our_height
             ));
-        } else if params.peer_height == params.our_height {
-            reasoning.push(format!(
-                "REJECT: Same height ({}), keeping our chain",
-                params.our_height
-            ));
-        } else {
+        } else if !accept && params.our_height > params.peer_height {
             reasoning.push(format!(
                 "REJECT: Our chain is longer ({} > {})",
                 params.our_height, params.peer_height
