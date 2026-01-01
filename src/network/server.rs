@@ -1188,6 +1188,21 @@ async fn handle_peer(
                                                             tracing::info!("📊 Fork detected but our chain is same/longer, keeping ours");
                                                             continue;
                                                         }
+                                                    } else if common_ancestor.is_none() && start_height <= our_height {
+                                                        // No fork OR common ancestor found in the overlapping range
+                                                        // This means we need to search further back
+                                                        // The peer connection should detect this and request earlier blocks
+                                                        if start_height > 0 {
+                                                            tracing::warn!(
+                                                                "❌ No common ancestor found in range {}-{} (our height: {}). Peer should send earlier blocks to find common ancestor.",
+                                                                start_height, end_height.min(our_height), our_height
+                                                            );
+                                                        } else {
+                                                            tracing::error!(
+                                                                "❌ No common ancestor found even at genesis! Chains may be incompatible. Peer {}, our height: {}",
+                                                                peer.addr, our_height
+                                                            );
+                                                        }
                                                     }
                                                     // No fork detected in overlapping region - blocks match, continue to normal processing
                                                 }

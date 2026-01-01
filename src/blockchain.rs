@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{info, warn};
 
 const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
@@ -1465,6 +1466,11 @@ impl Blockchain {
     /// Find the common ancestor between our chain and a peer's chain
     /// peer_hashes: Vec of (height, hash) from peer, ordered by height descending
     pub async fn find_common_ancestor(&self, peer_hashes: &[(u64, [u8; 32])]) -> Option<u64> {
+        if peer_hashes.is_empty() {
+            return None;
+        }
+
+        // First, check all the provided peer hashes
         for (height, peer_hash) in peer_hashes {
             if *height == 0 {
                 return Some(0); // Genesis is always common
@@ -1477,14 +1483,32 @@ impl Blockchain {
             }
         }
 
-        // Check genesis
-        if let Ok(our_genesis) = self.get_block(0) {
-            if !peer_hashes.is_empty() {
-                // If we got here, chains diverge before the earliest peer hash
-                // Fall back to genesis
-                return Some(0);
+        // If no match found in provided hashes, keep going back through our chain
+        // to find the common ancestor. Start from the lowest provided peer hash.
+        let lowest_peer_height = peer_hashes.iter().map(|(h, _)| *h).min().unwrap_or(0);
+
+        info!(
+            "No common ancestor found in provided hashes, searching backwards from height {}",
+            lowest_peer_height
+        );
+
+        // Walk backwards from the lowest peer height to genesis
+        for height in (0..lowest_peer_height).rev() {
+            if let Ok(_our_hash) = self.get_block_hash(height) {
+                // Check if peer has this block (we'd need to query, but for now just check what we have)
+                // Since we don't have all peer hashes, continue walking back
+                // The safest fallback is genesis if we can't find a common point
+                if height == 0 {
+                    info!("Reached genesis block, using as common ancestor");
+                    return Some(0);
+                }
             }
-            let _ = our_genesis; // Genesis exists
+        }
+
+        // Genesis should always exist as the common ancestor
+        if self.get_block(0).is_ok() {
+            info!("Falling back to genesis as common ancestor");
+            return Some(0);
         }
 
         None
@@ -2632,6 +2656,7 @@ impl Blockchain {
     }
 
     /// Find common ancestor between our chain and competing blocks (for fork resolution)
+    /// This method keeps going back through the chain until a common ancestor is found.
     async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> u64 {
         if competing_blocks.is_empty() {
             return 0;
@@ -2644,24 +2669,52 @@ impl Blockchain {
             return 0;
         }
 
+        info!(
+            "Finding common ancestor for fork starting at height {}",
+            fork_start
+        );
+
+        // Walk backwards through our chain to find where it connects to competing blocks
         for height in (0..fork_start).rev() {
             if let Ok(our_block) = self.get_block(height) {
-                // Find if any competing block builds on this
+                let our_hash = our_block.hash();
+
+                // Check if any competing block directly builds on this block
                 for comp_block in competing_blocks {
                     if comp_block.header.height == height + 1
-                        && comp_block.header.previous_hash == our_block.hash()
+                        && comp_block.header.previous_hash == our_hash
                     {
+                        info!("Found common ancestor at height {} (competing block {} builds on our block)", 
+                              height, comp_block.header.height);
+                        return height;
+                    }
+
+                    // Also check if this competing block IS at this height and matches
+                    if comp_block.header.height == height && comp_block.hash() == our_hash {
+                        info!("Found common ancestor at height {} (exact match)", height);
                         return height;
                     }
                 }
 
-                // If competing blocks start after this height, it's likely the ancestor
+                // If all competing blocks start after this height, this is likely the ancestor
                 if competing_blocks.iter().all(|b| b.header.height > height) {
+                    info!(
+                        "Found common ancestor at height {} (all competing blocks are after this)",
+                        height
+                    );
                     return height;
                 }
+            } else {
+                // If we can't find our block at this height, keep going back
+                warn!(
+                    "Could not find our block at height {} while searching for common ancestor",
+                    height
+                );
             }
         }
 
+        // If we made it here, genesis (height 0) is the common ancestor
+        info!("Reached genesis block as common ancestor");
         0
     }
 

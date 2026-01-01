@@ -29,14 +29,14 @@ impl RateLimiter {
                 ("subscribe".to_string(), (Duration::from_secs(60), 10)), // 10 subs/min
                 ("vote".to_string(), (Duration::from_secs(1), 100)), // 100 votes/sec
                 ("block".to_string(), (Duration::from_secs(1), 10)), // 10 blocks/sec
-                ("get_blocks".to_string(), (Duration::from_secs(10), 20)), // 20 GetBlocks/10sec (allows fork resolution)
-                ("get_peers".to_string(), (Duration::from_secs(60), 5)),   // 5 GetPeers/min
+                ("get_blocks".to_string(), (Duration::from_secs(10), 100)), // 100 GetBlocks/10sec - generous for fork resolution
+                ("get_peers".to_string(), (Duration::from_secs(60), 5)),    // 5 GetPeers/min
                 (
                     "masternode_announce".to_string(),
                     (Duration::from_secs(60), 3),
                 ), // 3 announcements/min - allows reconnection scenarios
-                ("ping".to_string(), (Duration::from_secs(10), 2)),        // 2 pings/10sec
-                ("general".to_string(), (Duration::from_secs(1), 100)),    // 100 general msgs/sec
+                ("ping".to_string(), (Duration::from_secs(10), 2)),         // 2 pings/10sec
+                ("general".to_string(), (Duration::from_secs(1), 100)),     // 100 general msgs/sec
             ]
             .into(),
             counters: HashMap::new(),

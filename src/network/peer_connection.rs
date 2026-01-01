@@ -744,10 +744,11 @@ impl PeerConnection {
                                             self.peer_ip, reason
                                         );
 
-                                        // To find the common ancestor, we need to request blocks going backwards
-                                        let search_start = our_height.saturating_sub(100);
+                                        // To find the common ancestor, request blocks from genesis
+                                        // This ensures we find the common ancestor even in deep forks
+                                        let search_start = 0;
                                         info!(
-                                            "📤 Requesting blocks {} to {} for reorganization",
+                                            "📤 Requesting blocks {} to {} for reorganization (searching from genesis)",
                                             search_start, end_height
                                         );
                                         let msg = NetworkMessage::GetBlocks(
@@ -802,6 +803,7 @@ impl PeerConnection {
                                         all_fork_blocks.push(block.clone());
                                         break;
                                     } else {
+                                        // No common ancestor found yet - keep searching backwards
                                         // Track first mismatch but don't spam logs for each block
                                         if first_mismatch_height.is_none() {
                                             first_mismatch_height = Some(block.header.height);
@@ -927,19 +929,20 @@ impl PeerConnection {
                             if end_height >= our_height {
                                 // Keep searching back to genesis if needed
                                 if start_height > 0 {
-                                    // Go back another 100 blocks (or to genesis if closer)
-                                    let search_start = start_height.saturating_sub(100);
+                                    // Go back further - always search all the way to genesis
+                                    // This ensures we find the common ancestor even in deep forks
+                                    let search_start = 0; // Always go to genesis to find common ancestor
 
                                     if end_height > our_height {
                                         info!(
-                                            "📤 Deep fork: Searching back to block {} for common ancestor (will reorg to peer height {})",
-                                            search_start, end_height
+                                            "📤 Deep fork detected: No common ancestor found. Searching back to block {} (from {}) for common ancestor (will reorg to peer height {})",
+                                            search_start, start_height, end_height
                                         );
                                     } else {
                                         // Same height - need deterministic tiebreaker
                                         info!(
-                                            "📤 Same-height fork: Searching back to block {} for common ancestor (heights equal: {})",
-                                            search_start, our_height
+                                            "📤 Same-height fork: No common ancestor found. Searching back to block {} (from {}) for common ancestor (heights equal: {})",
+                                            search_start, start_height, our_height
                                         );
                                     }
 
