@@ -14,7 +14,7 @@ use tracing::{info, warn};
 const FORK_HISTORY_KEY: &str = "ai_fork_history";
 const PEER_FORK_RELIABILITY_KEY: &str = "ai_peer_fork_reliability";
 const MAX_FORK_HISTORY: usize = 1000;
-const TIMESTAMP_TOLERANCE_SECS: i64 = 900; // ±15 minutes tolerance for future blocks
+const TIMESTAMP_TOLERANCE_SECS: i64 = 0; // No tolerance for future blocks
 
 /// Parameters for fork resolution
 pub struct ForkResolutionParams {
