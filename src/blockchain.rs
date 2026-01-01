@@ -521,6 +521,7 @@ impl Blockchain {
         );
 
         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+            tracing::debug!("✓ Peer registry available, checking connected peers");
             // Get all connected peers
             let connected_peers = peer_registry.get_connected_peers().await;
 
@@ -749,6 +750,8 @@ impl Blockchain {
                     );
                 }
             }
+        } else {
+            tracing::warn!("⚠️  Peer registry not available - cannot sync from peers");
         }
 
         let final_height = *self.current_height.read().await;
