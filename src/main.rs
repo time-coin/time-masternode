@@ -1227,7 +1227,7 @@ async fn main() {
                                 continue;
                             }
 
-                            match block_blockchain.produce_block().await {
+                            match block_blockchain.produce_block_at_height(Some(target_height)).await {
                                     Ok(block) => {
                                         // Add block to our chain
                                         if let Err(e) = block_blockchain.add_block(block.clone()).await {

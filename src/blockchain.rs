@@ -792,6 +792,13 @@ impl Blockchain {
 
     /// Produce a block for the current TSDC slot
     pub async fn produce_block(&self) -> Result<Block, String> {
+        self.produce_block_at_height(None).await
+    }
+
+    pub async fn produce_block_at_height(
+        &self,
+        target_height: Option<u64>,
+    ) -> Result<Block, String> {
         use crate::block::genesis::GenesisBlock;
 
         // Check if genesis block exists
@@ -856,9 +863,28 @@ impl Blockchain {
             *self.current_height.write().await = current_height;
         }
 
-        let prev_hash = self.get_block_hash(current_height)?;
+        // Determine the height to produce
+        let next_height = if let Some(target) = target_height {
+            // Catchup mode: produce block at specific height
+            if target <= current_height {
+                return Err(format!(
+                    "Cannot produce block at height {}: already have block at height {}",
+                    target, current_height
+                ));
+            }
+            if target > current_height + 1 {
+                return Err(format!(
+                    "Cannot produce block at height {}: missing blocks between {} and {}",
+                    target, current_height, target
+                ));
+            }
+            target
+        } else {
+            // Normal mode: produce next block
+            current_height + 1
+        };
 
-        let next_height = current_height + 1;
+        let prev_hash = self.get_block_hash(current_height)?;
 
         // Calculate deterministic timestamp based on block schedule
         let deterministic_timestamp =
