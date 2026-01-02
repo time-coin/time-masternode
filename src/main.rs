@@ -369,6 +369,29 @@ async fn main() {
         }
     }
 
+    // Validate chain integrity on startup and auto-heal if needed
+    match blockchain.validate_chain_integrity().await {
+        Ok(corrupt_blocks) => {
+            if !corrupt_blocks.is_empty() {
+                tracing::error!(
+                    "❌ Chain integrity check failed: {} corrupt blocks detected",
+                    corrupt_blocks.len()
+                );
+                // Delete corrupt blocks to trigger re-sync
+                if let Err(e) = blockchain.delete_corrupt_blocks(&corrupt_blocks).await {
+                    tracing::error!("❌ Failed to delete corrupt blocks: {}", e);
+                } else {
+                    tracing::info!("✅ Corrupt blocks deleted - will re-sync from peers");
+                }
+            } else {
+                tracing::info!("✅ Chain integrity validation passed");
+            }
+        }
+        Err(e) => {
+            tracing::error!("❌ Chain integrity validation error: {}", e);
+        }
+    }
+
     // Create shared peer connection registry for both client and server
     let peer_connection_registry = Arc::new(PeerConnectionRegistry::new());
 
@@ -779,6 +802,48 @@ async fn main() {
                         if let Err(e) = blockchain_for_genesis.initialize_genesis().await {
                             tracing::debug!("Genesis not ready yet: {}", e);
                         }
+                    }
+                }
+            }
+        });
+
+        // Start periodic chain integrity check (every 10 minutes at block time)
+        let blockchain_for_integrity = blockchain_init.clone();
+        tokio::spawn(async move {
+            // Wait for initial sync to complete
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+            loop {
+                // Run integrity check every 10 minutes (block time)
+                tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+
+                tracing::debug!("🔍 Running periodic chain integrity check...");
+                match blockchain_for_integrity.validate_chain_integrity().await {
+                    Ok(corrupt_blocks) => {
+                        if !corrupt_blocks.is_empty() {
+                            tracing::error!(
+                                "❌ CORRUPTION DETECTED: {} corrupt blocks found: {:?}",
+                                corrupt_blocks.len(),
+                                corrupt_blocks
+                            );
+                            // Auto-heal: delete corrupt blocks to trigger re-sync
+                            if let Err(e) = blockchain_for_integrity
+                                .delete_corrupt_blocks(&corrupt_blocks)
+                                .await
+                            {
+                                tracing::error!("❌ Failed to delete corrupt blocks: {}", e);
+                            } else {
+                                tracing::info!(
+                                    "🔧 Auto-healing: deleted {} corrupt blocks, will re-sync from peers",
+                                    corrupt_blocks.len()
+                                );
+                            }
+                        } else {
+                            tracing::debug!("✅ Chain integrity check passed");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Chain integrity check error: {}", e);
                     }
                 }
             }

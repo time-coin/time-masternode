@@ -1034,8 +1034,20 @@ impl PeerConnection {
                 // FOURTH: Try to add blocks sequentially if no fork handling triggered
                 let mut added = 0;
                 let mut skipped = 0;
+                let mut corrupt_blocks = 0;
 
                 for block in blocks {
+                    // Validate block has non-zero previous_hash (except genesis at height 0)
+                    if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
+                        warn!(
+                            "⚠️ [{:?}] Peer {} sent corrupt block {} with zero previous_hash - skipping",
+                            self.direction, self.peer_ip, block.header.height
+                        );
+                        corrupt_blocks += 1;
+                        skipped += 1;
+                        continue;
+                    }
+
                     match blockchain.add_block_with_fork_handling(block.clone()).await {
                         Ok(true) => added += 1,
                         Ok(false) => skipped += 1,
@@ -1046,6 +1058,14 @@ impl PeerConnection {
                             skipped += 1;
                         }
                     }
+                }
+
+                // If too many corrupt blocks, disconnect this peer
+                if corrupt_blocks > 5 {
+                    return Err(format!(
+                        "Peer {} sent {} corrupt blocks - disconnecting",
+                        self.peer_ip, corrupt_blocks
+                    ));
                 }
 
                 if added > 0 {

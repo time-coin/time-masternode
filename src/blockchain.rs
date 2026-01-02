@@ -1152,6 +1152,38 @@ impl Blockchain {
 
     /// Add a block to the chain
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
+        // CRITICAL: Verify block integrity before adding
+        // Check 1: Non-genesis blocks must have non-zero previous_hash
+        if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
+            tracing::error!(
+                "❌ CORRUPT BLOCK DETECTED: Block {} has zero previous_hash",
+                block.header.height
+            );
+            return Err(format!(
+                "Block {} has zero previous_hash - corrupt data rejected",
+                block.header.height
+            ));
+        }
+
+        // Check 2: Verify previous hash chain (if not genesis)
+        if block.header.height > 0 {
+            if let Ok(prev_block) = self.get_block(block.header.height - 1) {
+                let expected_prev_hash = prev_block.hash();
+                if block.header.previous_hash != expected_prev_hash {
+                    tracing::error!(
+                        "❌ CORRUPT BLOCK DETECTED: Block {} previous_hash chain broken: expected {}, got {}",
+                        block.header.height,
+                        hex::encode(&expected_prev_hash[..8]),
+                        hex::encode(&block.header.previous_hash[..8])
+                    );
+                    return Err(format!(
+                        "Block {} previous_hash doesn't match previous block hash",
+                        block.header.height
+                    ));
+                }
+            }
+        }
+
         // Validate block height is sequential
         let current = *self.current_height.read().await;
 
@@ -3188,6 +3220,140 @@ impl Blockchain {
             return 0;
         }
         ((current_time - genesis_time) / BLOCK_TIME_SECONDS) as u64
+    }
+
+    /// Validate blockchain integrity and detect corrupt blocks
+    /// Returns list of corrupt block heights that need resyncing
+    pub async fn validate_chain_integrity(&self) -> Result<Vec<u64>, String> {
+        let current_height = self.get_height().await;
+        let mut corrupt_blocks = Vec::new();
+
+        tracing::info!(
+            "🔍 Validating blockchain integrity (0-{})...",
+            current_height
+        );
+
+        // Check each block for basic integrity
+        for height in 0..=current_height {
+            match self.get_block(height) {
+                Ok(block) => {
+                    // Check 1: Non-genesis blocks must have non-zero previous_hash
+                    if height > 0 && block.header.previous_hash == [0u8; 32] {
+                        tracing::error!(
+                            "❌ CORRUPT BLOCK {}: zero previous_hash for non-genesis block",
+                            height
+                        );
+                        corrupt_blocks.push(height);
+                        continue;
+                    }
+
+                    // Check 2: Height in header matches actual height
+                    if block.header.height != height {
+                        tracing::error!(
+                            "❌ CORRUPT BLOCK {}: header height mismatch (expected {}, got {})",
+                            height,
+                            height,
+                            block.header.height
+                        );
+                        corrupt_blocks.push(height);
+                        continue;
+                    }
+
+                    // Check 3: Previous hash chain is valid (if not first block)
+                    if height > 0 {
+                        match self.get_block(height - 1) {
+                            Ok(prev_block) => {
+                                let expected_prev_hash = prev_block.hash();
+                                if block.header.previous_hash != expected_prev_hash {
+                                    tracing::error!(
+                                        "❌ CORRUPT BLOCK {}: previous_hash doesn't match block {} hash",
+                                        height,
+                                        height - 1
+                                    );
+                                    tracing::error!(
+                                        "   Expected: {}, Got: {}",
+                                        hex::encode(&expected_prev_hash[..8]),
+                                        hex::encode(&block.header.previous_hash[..8])
+                                    );
+                                    corrupt_blocks.push(height);
+                                    continue;
+                                }
+                            }
+                            Err(_) => {
+                                tracing::error!(
+                                    "❌ MISSING BLOCK {}, but have block {}",
+                                    height - 1,
+                                    height
+                                );
+                                corrupt_blocks.push(height - 1);
+                            }
+                        }
+                    }
+
+                    // Check 4: Merkle root matches transactions
+                    let computed_merkle =
+                        crate::block::types::calculate_merkle_root(&block.transactions);
+                    if computed_merkle != block.header.merkle_root {
+                        tracing::error!("❌ CORRUPT BLOCK {}: merkle root mismatch", height);
+                        corrupt_blocks.push(height);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to load block at height {}: {}", height, e);
+                    corrupt_blocks.push(height);
+                }
+            }
+        }
+
+        if corrupt_blocks.is_empty() {
+            tracing::info!("✅ Blockchain integrity validation passed");
+            Ok(Vec::new())
+        } else {
+            tracing::error!(
+                "❌ Found {} corrupt blocks: {:?}",
+                corrupt_blocks.len(),
+                corrupt_blocks
+            );
+            // Automatically trigger self-healing
+            tracing::warn!("🔧 Corrupt blocks detected - marking for deletion to trigger re-sync");
+            Ok(corrupt_blocks)
+        }
+    }
+
+    /// Delete corrupt blocks to trigger re-sync from peers
+    pub async fn delete_corrupt_blocks(&self, corrupt_heights: &[u64]) -> Result<(), String> {
+        if corrupt_heights.is_empty() {
+            return Ok(());
+        }
+
+        tracing::warn!(
+            "🔧 Deleting {} corrupt blocks to trigger re-sync",
+            corrupt_heights.len()
+        );
+
+        for height in corrupt_heights {
+            let key = format!("block_{}", height);
+            if let Err(e) = self.storage.remove(key.as_bytes()) {
+                tracing::warn!("Failed to delete corrupt block {}: {}", height, e);
+            } else {
+                tracing::info!("🗑️  Deleted corrupt block {}", height);
+            }
+        }
+
+        // Update chain height to lowest deleted block - 1
+        if let Some(&min_height) = corrupt_heights.iter().min() {
+            if min_height > 0 {
+                let new_height = min_height - 1;
+                *self.current_height.write().await = new_height;
+                tracing::info!(
+                    "📉 Rolled back chain height to {} (lowest corrupt block was {})",
+                    new_height,
+                    min_height
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
