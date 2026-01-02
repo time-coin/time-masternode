@@ -382,12 +382,12 @@ impl PeerConnection {
 
             if is_whitelisted {
                 warn!(
-                    "⚠️ [{:?}] Whitelisted peer {} unresponsive after {} missed pongs - resetting state but keeping connection",
+                    "⚠️ [{:?}] Whitelisted peer {} unresponsive after {} missed pongs - resetting counter but keeping connection",
                     self.direction, self.peer_ip, state.missed_pongs
                 );
                 // Reset the missed pongs counter for whitelisted peers
+                // Don't clear pending_pings - let them expire naturally to avoid mismatches
                 state.missed_pongs = 0;
-                state.pending_pings.clear();
                 false
             } else {
                 warn!(
@@ -1059,6 +1059,36 @@ impl PeerConnection {
                         "⚠️ [{:?}] All {} blocks skipped from {}",
                         self.direction, skipped, self.peer_ip
                     );
+                    
+                    // If this is the consensus peer and all blocks were skipped, we need fork resolution
+                    if skipped == block_count && peer_tip > our_height + 50 {
+                        // Check if this peer is on consensus chain
+                        let connected_peers = peer_registry.get_connected_peers().await;
+                        let mut supporting_peers_count = 0;
+                        let mut total_peers_with_height = 0;
+                        
+                        for peer_ip in &connected_peers {
+                            if let Some(height) = peer_registry.get_peer_height(peer_ip).await {
+                                total_peers_with_height += 1;
+                                if (height as i64 - peer_tip as i64).abs() <= 10 {
+                                    supporting_peers_count += 1;
+                                }
+                            }
+                        }
+                        
+                        if total_peers_with_height > 0 && (supporting_peers_count as f64 / total_peers_with_height as f64) >= 0.5 {
+                            warn!(
+                                "🔀 All blocks skipped from consensus peer {}. Starting fork resolution from block {}.",
+                                self.peer_ip, start_height
+                            );
+                            // Trigger block-1 search to find common ancestor
+                            let check_height = start_height.saturating_sub(1);
+                            let msg = NetworkMessage::GetBlocks(check_height, check_height + 1);
+                            if let Err(e) = self.send_message(&msg).await {
+                                warn!("Failed to request block for fork resolution: {}", e);
+                            }
+                        }
+                    }
                 }
             }
             NetworkMessage::BlockInventory(block_height) => {
