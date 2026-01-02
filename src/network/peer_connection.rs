@@ -365,8 +365,10 @@ impl PeerConnection {
                     nonce
                 );
             } else {
-                warn!(
-                    "⚠️ [{:?}] Pong NOT MATCHED from {} (nonce: {}), pending: {:?}",
+                // If we have pending pings but wrong nonce, could be cross-connection mixing
+                // This happens when both inbound and outbound connections exist to same peer
+                debug!(
+                    "🔀 [{:?}] Pong nonce mismatch from {} (got: {}, expected one of: {:?}) - possibly duplicate connection",
                     self.direction,
                     self.peer_ip,
                     nonce,
