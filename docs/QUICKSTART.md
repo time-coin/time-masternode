@@ -1,6 +1,6 @@
 # Quick Start Guide - TIME Coin Testnet Deployment
 
-**Last Updated:** December 23, 2024  
+**Last Updated:** January 2, 2026  
 **Status:** ✅ Production Ready
 
 ---
@@ -35,45 +35,71 @@ ls -lh target/release/timed
 -rwxr-xr-x 1 user group 25M Dec 23 03:00 timed
 ```
 
-### 2. Testnet Configuration
+### 2. Configuration
 
-Create `config.toml`:
+The configuration file is automatically created in:
+- **Linux/Mac:** `~/.timecoin/config.toml` (testnet: `~/.timecoin/testnet/config.toml`)
+- **Windows:** `%APPDATA%\timecoin\config.toml` (testnet: `%APPDATA%\timecoin\testnet\config.toml`)
+
+You can also specify a custom config file with `--config` flag.
+
+**Basic testnet config.toml:**
 
 ```toml
 [node]
-network = "testnet"
-data_dir = "./data_testnet"
-log_level = "info"
+name = "TIME Coin Node"
+version = "1.0.0"
+network = "testnet"  # or "mainnet"
 
 [network]
-p2p_bind = "0.0.0.0:24100"
-rpc_bind = "127.0.0.1:24101"
+listen_address = "0.0.0.0"  # Auto-uses port 24100 for testnet
 max_peers = 50
 enable_peer_discovery = true
-bootstrap_peers = [
-    "seed1.time-coin.io:24100",
-    "seed2.time-coin.io:24100"
-]
+bootstrap_peers = []  # Add seed nodes if available
+
+[rpc]
+enabled = true
+listen_address = "127.0.0.1"  # Auto-uses port 24101 for testnet
+
+[storage]
+backend = "sled"
+data_dir = ""  # Auto-configured: ~/.timecoin/testnet/
+cache_size_mb = 256
+
+[consensus]
+use_genesis_file = true
+genesis_file = "genesis.testnet.json"
+
+[logging]
+level = "info"
+format = "pretty"
+output = "stdout"
+file_path = "./logs/testnet-node.log"
 
 [masternode]
 enabled = false  # Set to true if running a masternode
+tier = "free"
 
-[block]
-block_time_seconds = 600  # 10 minutes
+[security]
+enable_rate_limiting = true
+enable_message_signing = true
 ```
 
 ### 3. Run Node
 
 ```bash
-# Testnet
+# Using default config location (~/.timecoin/testnet/config.toml)
+./target/release/timed
+
+# Or specify custom config
 ./target/release/timed --config config.toml
 
 # Expected output
-2024-12-23T03:00:00Z  INFO  timecoin: Starting TIME Coin Node v0.1.0
-2024-12-23T03:00:00Z  INFO  consensus: Initializing Avalanche + TSDC consensus
-2024-12-23T03:00:00Z  INFO  network: Starting network server on 0.0.0.0:24100
-2024-12-23T03:00:00Z  INFO  network: Starting network client
-2024-12-23T03:00:00Z  INFO  network: 🔌 Connecting to peers...
+Jan 02 01:00:00 timed[12345]:  INFO 🚀 Starting TIME Coin Node v1.0.0
+Jan 02 01:00:00 timed[12345]:  INFO 📁 Data directory: /home/user/.timecoin/testnet
+Jan 02 01:00:00 timed[12345]:  INFO 🌐 Network: testnet (P2P: 0.0.0.0:24100, RPC: 127.0.0.1:24101)
+Jan 02 01:00:00 timed[12345]:  INFO 🔌 Network server started
+Jan 02 01:00:00 timed[12345]:  INFO ⚡ Consensus engine initialized
 ```
 
 ### 4. Verify Node is Running
@@ -114,23 +140,30 @@ wallet_address = "tcoin1q2wndu3zk0l0w6hlmlxl7l4c3q0aql5p0r9rqe"
 
 ### 2. Configure Masternode
 
-Edit `config.toml`:
+Edit config file (`~/.timecoin/testnet/config.toml`):
 
 ```toml
 [masternode]
 enabled = true
-tier = "Free"  # Free, Bronze, Silver, or Gold
-wallet_address = "your_wallet_address_here"
+tier = "free"  # Options: free, bronze, silver, gold
+collateral_txid = ""  # Leave empty for free tier
 ```
+
+**Tier Requirements:**
+- **free**: No collateral, can receive rewards, cannot vote
+- **bronze**: 1,000 TIME collateral, 1,000x rewards, voting enabled
+- **silver**: 10,000 TIME collateral, 10,000x rewards, voting enabled  
+- **gold**: 100,000 TIME collateral, 100,000x rewards, voting enabled
 
 ### 3. Run as Masternode
 
 ```bash
-./target/release/timed --config config.toml
+./target/release/timed
 
 # Expected output
-2024-12-23T03:00:00Z  INFO  masternode: 🎯 Registered as Free tier masternode
-2024-12-23T03:00:00Z  INFO  masternode: Broadcasting masternode announcement to peers
+Jan 02 01:00:00 timed[12345]:  INFO 🎯 Masternode enabled: free tier
+Jan 02 01:00:00 timed[12345]:  INFO 📡 Broadcasting masternode announcement
+Jan 02 01:00:00 timed[12345]:  INFO ✅ Registered as active masternode
 ```
 
 ---
@@ -157,12 +190,17 @@ curl http://localhost:24101/rpc \
 
 ### View Logs
 
-```bash
-# Real-time logs
-tail -f timecoin.log
+Logs are written to the location specified in config or stdout by default:
 
-# Grep for errors
-grep "ERROR\|WARN" timecoin.log
+```bash
+# If output = "file" in config
+tail -f ./logs/testnet-node.log
+
+# Filter for errors/warnings
+grep "ERROR\|WARN" ./logs/testnet-node.log
+
+# View in real-time with journalctl (systemd service)
+journalctl -u timed -f
 ```
 
 ---
@@ -174,13 +212,17 @@ grep "ERROR\|WARN" timecoin.log
 ```toml
 [node]
 network = "testnet"
-data_dir = "./data_node1"
 
 [network]
-p2p_bind = "0.0.0.0:24100"
-rpc_bind = "127.0.0.1:24101"
-external_address = "192.168.1.100:24100"  # Your IP
-bootstrap_peers = []  # No peers to connect to
+listen_address = "0.0.0.0"  # Port 24100
+external_address = "192.168.1.100"  # Your public IP
+bootstrap_peers = []
+
+[rpc]
+listen_address = "127.0.0.1"  # Port 24101
+
+[storage]
+data_dir = "./data_node1"
 ```
 
 Run:
@@ -193,12 +235,16 @@ Run:
 ```toml
 [node]
 network = "testnet"
-data_dir = "./data_node2"
 
 [network]
-p2p_bind = "0.0.0.0:24102"
-rpc_bind = "127.0.0.1:24103"
-bootstrap_peers = ["192.168.1.100:24100"]  # Connect to Node 1
+listen_address = "0.0.0.0:24102"
+bootstrap_peers = ["192.168.1.100:24100"]
+
+[rpc]
+listen_address = "127.0.0.1:24103"
+
+[storage]
+data_dir = "./data_node2"
 ```
 
 Run:
@@ -332,8 +378,8 @@ max_block_size_kb = 2048  # Default: 1024
 ### Reduce Log Verbosity
 
 ```toml
-[node]
-log_level = "warn"  # Options: debug, info, warn, error
+[logging]
+level = "warn"  # Options: trace, debug, info, warn, error
 ```
 
 ---
@@ -381,5 +427,5 @@ log_level = "warn"  # Options: debug, info, warn, error
 
 **Ready to launch! Happy validating! 🚀**
 
-*Generated: December 23, 2024*  
+*Generated: January 2, 2026*  
 *For latest updates, see [CHANGELOG.md](CHANGELOG.md)*
