@@ -370,15 +370,32 @@ impl PeerConnection {
     }
 
     /// Check if connection should be closed due to timeout
-    async fn should_disconnect(&self) -> bool {
+    async fn should_disconnect(
+        &self,
+        peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
+    ) -> bool {
         let mut state = self.ping_state.write().await;
 
         if state.check_timeout(Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT) {
-            warn!(
-                "⚠️ [{:?}] Peer {} unresponsive after {} missed pongs",
-                self.direction, self.peer_ip, state.missed_pongs
-            );
-            true
+            // Check if this is a whitelisted peer before disconnecting
+            let is_whitelisted = peer_registry.is_whitelisted(&self.peer_ip).await;
+
+            if is_whitelisted {
+                warn!(
+                    "⚠️ [{:?}] Whitelisted peer {} unresponsive after {} missed pongs - resetting state but keeping connection",
+                    self.direction, self.peer_ip, state.missed_pongs
+                );
+                // Reset the missed pongs counter for whitelisted peers
+                state.missed_pongs = 0;
+                state.pending_pings.clear();
+                false
+            } else {
+                warn!(
+                    "⚠️ [{:?}] Peer {} unresponsive after {} missed pongs",
+                    self.direction, self.peer_ip, state.missed_pongs
+                );
+                true
+            }
         } else {
             false
         }
@@ -472,7 +489,7 @@ impl PeerConnection {
 
                 // Check for timeout
                 _ = timeout_check.tick() => {
-                    if self.should_disconnect().await {
+                    if self.should_disconnect(&peer_registry).await {
                         error!("❌ [{:?}] Disconnecting {} due to timeout",
                                self.direction, self.peer_ip);
                         break;
@@ -577,7 +594,7 @@ impl PeerConnection {
 
                 // Check for timeout
                 _ = timeout_check.tick() => {
-                    if self.should_disconnect().await {
+                    if self.should_disconnect(&peer_registry).await {
                         error!("❌ [{:?}] Disconnecting {} due to timeout",
                                self.direction, self.peer_ip);
                         break;
@@ -684,7 +701,7 @@ impl PeerConnection {
 
                 // Check for timeout
                 _ = timeout_check.tick() => {
-                    if self.should_disconnect().await {
+                    if self.should_disconnect(&peer_registry).await {
                         error!("❌ [{:?}] Disconnecting {} due to timeout",
                                self.direction, self.peer_ip);
                         break;
@@ -752,12 +769,7 @@ impl PeerConnection {
 
                 info!(
                     "📥 [{:?}] Received {} blocks (height {}-{}) from {} (our height: {})",
-                    self.direction,
-                    block_count,
-                    start_height,
-                    end_height,
-                    self.peer_ip,
-                    our_height
+                    self.direction, block_count, start_height, end_height, self.peer_ip, our_height
                 );
 
                 // CONSENSUS CHECK: If we're significantly behind, verify this peer is on consensus chain
@@ -765,11 +777,11 @@ impl PeerConnection {
                 if peer_tip > our_height + 50 {
                     // Get all connected peers
                     let connected_peers = peer_registry.get_connected_peers().await;
-                    
+
                     // Count how many peers have similar height to this peer (consensus check)
                     let mut supporting_peers_count = 0;
                     let mut total_peers_with_height = 0;
-                    
+
                     for peer_ip in &connected_peers {
                         if let Some(height) = peer_registry.get_peer_height(peer_ip).await {
                             total_peers_with_height += 1;
@@ -779,9 +791,11 @@ impl PeerConnection {
                             }
                         }
                     }
-                    
+
                     // If less than 50% of peers agree with this peer, it's not canonical
-                    if total_peers_with_height > 0 && (supporting_peers_count as f64 / total_peers_with_height as f64) < 0.5 {
+                    if total_peers_with_height > 0
+                        && (supporting_peers_count as f64 / total_peers_with_height as f64) < 0.5
+                    {
                         info!(
                             "📊 Peer {} NOT on consensus chain ({}/{} peers agree at height {}). Deferring to periodic consensus.",
                             self.peer_ip, supporting_peers_count, total_peers_with_height, peer_tip
@@ -799,7 +813,7 @@ impl PeerConnection {
                         }
                         return Ok(());
                     }
-                    
+
                     info!(
                         "✅ Peer {} IS on consensus chain ({}/{} peers agree at height {}). Proceeding with fork resolution.",
                         self.peer_ip, supporting_peers_count, total_peers_with_height, peer_tip
@@ -826,7 +840,12 @@ impl PeerConnection {
 
                 // SECOND: If we found common ancestor with longer chain, try to reorganize
                 if let Some(ancestor) = common_ancestor {
-                    let peer_tip_height = self.peer_height.read().await.unwrap_or(end_height).max(end_height);
+                    let peer_tip_height = self
+                        .peer_height
+                        .read()
+                        .await
+                        .unwrap_or(end_height)
+                        .max(end_height);
 
                     if peer_tip_height > our_height {
                         info!(
@@ -857,14 +876,19 @@ impl PeerConnection {
                             .collect();
                         reorg_blocks.sort_by_key(|b| b.header.height);
 
-                        if reorg_blocks.is_empty() || reorg_blocks.last().unwrap().header.height < peer_tip_height {
+                        if reorg_blocks.is_empty()
+                            || reorg_blocks.last().unwrap().header.height < peer_tip_height
+                        {
                             // Need more blocks - request from ancestor to peer tip
                             let request_start = if reorg_blocks.is_empty() {
                                 ancestor + 1
                             } else {
                                 reorg_blocks.last().unwrap().header.height + 1
                             };
-                            info!("📤 Requesting blocks {}-{} for complete chain", request_start, peer_tip_height);
+                            info!(
+                                "📤 Requesting blocks {}-{} for complete chain",
+                                request_start, peer_tip_height
+                            );
                             let msg = NetworkMessage::GetBlocks(request_start, peer_tip_height + 1);
                             if let Err(e) = self.send_message(&msg).await {
                                 warn!("Failed to request blocks: {}", e);
@@ -873,9 +897,14 @@ impl PeerConnection {
                         }
 
                         // Check for gaps in blocks
-                        let has_gaps = reorg_blocks.windows(2).any(|w| w[1].header.height != w[0].header.height + 1);
+                        let has_gaps = reorg_blocks
+                            .windows(2)
+                            .any(|w| w[1].header.height != w[0].header.height + 1);
                         if has_gaps || reorg_blocks.first().unwrap().header.height != ancestor + 1 {
-                            info!("📤 Detected gaps, requesting complete chain from {}", ancestor + 1);
+                            info!(
+                                "📤 Detected gaps, requesting complete chain from {}",
+                                ancestor + 1
+                            );
                             let msg = NetworkMessage::GetBlocks(ancestor + 1, peer_tip_height + 1);
                             if let Err(e) = self.send_message(&msg).await {
                                 warn!("Failed to request blocks: {}", e);
@@ -884,10 +913,16 @@ impl PeerConnection {
                         }
 
                         // We have complete chain - decide if we should reorganize
-                        match blockchain.should_accept_fork(&reorg_blocks, peer_tip_height, &self.peer_ip).await {
+                        match blockchain
+                            .should_accept_fork(&reorg_blocks, peer_tip_height, &self.peer_ip)
+                            .await
+                        {
                             Ok(true) => {
-                                info!("🔄 Reorganizing to peer chain from height {} with {} blocks",
-                                    ancestor, reorg_blocks.len());
+                                info!(
+                                    "🔄 Reorganizing to peer chain from height {} with {} blocks",
+                                    ancestor,
+                                    reorg_blocks.len()
+                                );
                                 match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
                                     Ok(_) => {
                                         info!("✅ Chain reorganization successful");
@@ -913,10 +948,15 @@ impl PeerConnection {
 
                 // THIRD: Only if no common ancestor found (either in this batch OR in tracker), do block-1 search
                 let tracker = self.fork_resolution_tracker.read().await;
-                let already_have_ancestor = tracker.as_ref().and_then(|t| t.common_ancestor).is_some();
+                let already_have_ancestor =
+                    tracker.as_ref().and_then(|t| t.common_ancestor).is_some();
                 drop(tracker);
-                
-                if common_ancestor.is_none() && !already_have_ancestor && start_height > 0 && start_height <= our_height {
+
+                if common_ancestor.is_none()
+                    && !already_have_ancestor
+                    && start_height > 0
+                    && start_height <= our_height
+                {
                     if let Ok(our_block) = blockchain.get_block(start_height) {
                         let incoming_hash = blocks[0].hash();
                         let our_hash = our_block.hash();
@@ -952,19 +992,26 @@ impl PeerConnection {
                                     // Same height - duplicate response, don't increment
                                 } else {
                                     // New fork
-                                    *tracker = Some(ForkResolutionAttempt::new(start_height, end_height));
+                                    *tracker =
+                                        Some(ForkResolutionAttempt::new(start_height, end_height));
                                 }
                             } else {
                                 // First attempt
-                                *tracker = Some(ForkResolutionAttempt::new(start_height, end_height));
+                                *tracker =
+                                    Some(ForkResolutionAttempt::new(start_height, end_height));
                             }
 
                             // Safety check - only reject if chains are truly incompatible (>2000 blocks)
                             if search_depth > 2000 {
-                                error!("🚨 Searched back {} blocks - chains incompatible", search_depth);
+                                error!(
+                                    "🚨 Searched back {} blocks - chains incompatible",
+                                    search_depth
+                                );
                                 *tracker = None;
                                 drop(tracker);
-                                return Err("Deep fork >2000 blocks - chains incompatible".to_string());
+                                return Err(
+                                    "Deep fork >2000 blocks - chains incompatible".to_string()
+                                );
                             }
 
                             drop(tracker);
@@ -1002,12 +1049,16 @@ impl PeerConnection {
                 }
 
                 if added > 0 {
-                    info!("✅ [{:?}] Synced {} blocks from {} (skipped {})",
-                        self.direction, added, self.peer_ip, skipped);
+                    info!(
+                        "✅ [{:?}] Synced {} blocks from {} (skipped {})",
+                        self.direction, added, self.peer_ip, skipped
+                    );
                     *self.invalid_block_count.write().await = 0;
                 } else if skipped > 0 {
-                    warn!("⚠️ [{:?}] All {} blocks skipped from {}",
-                        self.direction, skipped, self.peer_ip);
+                    warn!(
+                        "⚠️ [{:?}] All {} blocks skipped from {}",
+                        self.direction, skipped, self.peer_ip
+                    );
                 }
             }
             NetworkMessage::BlockInventory(block_height) => {
@@ -1280,7 +1331,9 @@ impl PeerConnection {
                     );
 
                     // CONSENSUS CHECK: Determine canonical peer before requesting blocks
-                    if let Some((consensus_height, consensus_peer)) = blockchain.compare_chain_with_peers().await {
+                    if let Some((consensus_height, consensus_peer)) =
+                        blockchain.compare_chain_with_peers().await
+                    {
                         if consensus_height > our_height {
                             if self.peer_ip == consensus_peer {
                                 info!(
@@ -1301,7 +1354,10 @@ impl PeerConnection {
                         }
                     } else {
                         // Fallback: No consensus found, request from this peer anyway
-                        debug!("No consensus found, requesting blocks from {}", self.peer_ip);
+                        debug!(
+                            "No consensus found, requesting blocks from {}",
+                            self.peer_ip
+                        );
                         let msg = NetworkMessage::GetBlocks(our_height, *peer_height + 1);
                         if let Err(e) = self.send_message(&msg).await {
                             warn!("Failed to request verification blocks: {}", e);
@@ -1556,8 +1612,9 @@ impl PeerConnection {
             NetworkMessage::Ping { nonce, timestamp } => {
                 self.handle_ping(*nonce, *timestamp).await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong { .. } => {
+                // Pong is handled separately in message_loop - don't duplicate processing
+                return Ok(());
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,
@@ -1678,8 +1735,9 @@ impl PeerConnection {
             NetworkMessage::Ping { nonce, timestamp } => {
                 self.handle_ping(*nonce, *timestamp).await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong { .. } => {
+                // Pong is handled separately in message_loop - don't duplicate processing
+                return Ok(());
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,
@@ -1808,9 +1866,10 @@ impl PeerConnection {
                     }
                 }
 
-                // Check for timeout
+                // Check for timeout (simplified for dead code method)
                 _ = timeout_check.tick() => {
-                    if self.should_disconnect().await {
+                    let mut state = self.ping_state.write().await;
+                    if state.check_timeout(Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT) {
                         error!("❌ [{:?}] Disconnecting {} due to timeout",
                                self.direction, self.peer_ip);
                         break;
@@ -1841,8 +1900,9 @@ impl PeerConnection {
             NetworkMessage::Ping { nonce, timestamp } => {
                 self.handle_ping(*nonce, *timestamp).await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong { .. } => {
+                // Pong is handled separately in message_loop - don't duplicate processing
+                return Ok(());
             }
             _ => {
                 // Other message types are handled by peer_registry or other handlers
