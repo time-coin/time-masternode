@@ -744,17 +744,17 @@ impl PeerConnection {
                                             self.peer_ip, reason
                                         );
 
-                                        // To find the common ancestor, request blocks from genesis
-                                        // This ensures we find the common ancestor even in deep forks
-                                        let search_start = 0;
+                                        // Search backwards from fork point to find common ancestor
+                                        // Request a window of blocks before the fork point
+                                        let search_window = 100u64;
+                                        let search_start =
+                                            start_height.saturating_sub(search_window);
                                         info!(
-                                            "📤 Requesting blocks {} to {} for reorganization (searching from genesis)",
-                                            search_start, end_height
+                                            "📤 Requesting blocks {}-{} for fork resolution (searching backwards from fork at {})",
+                                            search_start, end_height, start_height
                                         );
-                                        let msg = NetworkMessage::GetBlocks(
-                                            search_start,
-                                            end_height + 100,
-                                        );
+                                        let msg =
+                                            NetworkMessage::GetBlocks(search_start, end_height + 1);
                                         if let Err(e) = self.send_message(&msg).await {
                                             warn!("Failed to request reorg chain: {}", e);
                                         }
@@ -977,18 +977,18 @@ impl PeerConnection {
                                         .to_string());
                                 }
 
-                                // Haven't searched from genesis yet - request from 0
+                                // Haven't searched from genesis yet - request from 0 as last resort
                                 let search_start = 0;
 
                                 if end_height > our_height {
                                     info!(
-                                        "📤 Deep fork detected: No common ancestor found in range {}-{}. Searching from genesis for common ancestor (will reorg to peer height {})",
+                                        "📤 Deep fork: No common ancestor in range {}-{}. Falling back to genesis search for common ancestor (will reorg to peer height {})",
                                         start_height, end_height.min(our_height), end_height
                                     );
                                 } else {
                                     // Same height - need deterministic tiebreaker
                                     info!(
-                                        "📤 Same-height fork: No common ancestor found in range {}-{}. Searching from genesis for common ancestor (heights equal: {})",
+                                        "📤 Same-height fork: No common ancestor in range {}-{}. Falling back to genesis search for common ancestor (heights equal: {})",
                                         start_height, end_height.min(our_height), our_height
                                     );
                                 }
