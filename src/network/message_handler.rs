@@ -324,10 +324,24 @@ impl MessageHandler {
         block: Block,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
+        let block_height = block.header.height;
+
         info!(
             "📦 [{}] Received TSDC block proposal at height {} from {}",
-            self.direction, block.header.height, self.peer_ip
+            self.direction, block_height, self.peer_ip
         );
+
+        // Validate: Only accept proposals for the next block (current + 1)
+        let our_height = context.blockchain.get_height().await;
+        let expected_height = our_height + 1;
+
+        if block_height != expected_height {
+            debug!(
+                "⏭️ [{}] Rejecting block proposal at height {} (expected {})",
+                self.direction, block_height, expected_height
+            );
+            return Ok(None);
+        }
 
         // Get consensus engine or return error
         let consensus = context
@@ -376,10 +390,12 @@ impl MessageHandler {
                         receivers.saturating_sub(1)
                     );
                 }
-                Err(e) => {
-                    warn!(
-                        "[{}] Failed to broadcast prepare vote: {}",
-                        self.direction, e
+                Err(_) => {
+                    // Channel closed - no active receivers (peers not ready yet)
+                    // This is not critical, just log at debug level
+                    debug!(
+                        "[{}] No active peers to broadcast prepare vote (channel closed)",
+                        self.direction
                     );
                 }
             }
@@ -456,7 +472,17 @@ impl MessageHandler {
                     signature: vec![],
                 };
 
-                let _ = broadcast_tx.send(precommit_vote);
+                match broadcast_tx.send(precommit_vote) {
+                    Ok(_) => {
+                        debug!("[{}] Broadcast precommit vote", self.direction);
+                    }
+                    Err(_) => {
+                        debug!(
+                            "[{}] No active peers to broadcast precommit vote (channel closed)",
+                            self.direction
+                        );
+                    }
+                }
             }
         }
 
