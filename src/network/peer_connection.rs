@@ -959,19 +959,7 @@ impl PeerConnection {
                                 *tracker = Some(ForkResolutionAttempt::new(start_height, end_height));
                             }
 
-                            // Safety check - deep forks should be handled by consensus mechanism
-                            // Allow searching back at least 2x the batch size (200 blocks)
-                            if search_depth > 200 {
-                                warn!(
-                                    "🚨 Fork too deep ({} blocks) - stopping block-1 search. Waiting for consensus sync.",
-                                    search_depth
-                                );
-                                *tracker = None;
-                                drop(tracker);
-                                // Don't return error - just stop searching and let consensus mechanism handle it
-                                return Ok(());
-                            }
-
+                            // Safety check - only reject if chains are truly incompatible (>2000 blocks)
                             if search_depth > 2000 {
                                 error!("🚨 Searched back {} blocks - chains incompatible", search_depth);
                                 *tracker = None;
