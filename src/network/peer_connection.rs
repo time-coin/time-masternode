@@ -1012,65 +1012,68 @@ impl PeerConnection {
                                     let first_new = reorg_blocks.first().unwrap().header.height;
                                     let last_new = reorg_blocks.last().unwrap().header.height;
 
-                                    // Check if we have a complete chain
-                                    if first_new == ancestor + 1 && last_new > our_height {
-                                        // Check for gaps
-                                        let has_gaps = reorg_blocks
-                                            .windows(2)
-                                            .any(|w| w[1].header.height != w[0].header.height + 1);
+                                    // Check for gaps in the blocks we received
+                                    let has_gaps = reorg_blocks
+                                        .windows(2)
+                                        .any(|w| w[1].header.height != w[0].header.height + 1);
 
-                                        if !has_gaps {
-                                            // Use AI fork resolver to decide if we should accept this fork
-                                            match blockchain
-                                                .should_accept_fork(
-                                                    &reorg_blocks,
-                                                    peer_tip_height,
-                                                    &self.peer_ip,
-                                                )
-                                                .await
-                                            {
-                                                Ok(true) => {
-                                                    info!("🔄 Fork resolution: ACCEPT peer chain, reorganizing from height {} with {} blocks ({}-{})",
+                                    // Check if we have a valid chain starting from ancestor
+                                    if first_new == ancestor + 1 && !has_gaps {
+                                        // Use AI fork resolver to decide if we should accept this fork
+                                        match blockchain
+                                            .should_accept_fork(
+                                                &reorg_blocks,
+                                                peer_tip_height,
+                                                &self.peer_ip,
+                                            )
+                                            .await
+                                        {
+                                            Ok(true) => {
+                                                info!("🔄 Fork resolution: ACCEPT peer chain, reorganizing from height {} with {} blocks ({}-{})",
                                                         ancestor, reorg_blocks.len(), first_new, last_new);
 
-                                                    match blockchain
-                                                        .reorganize_to_chain(ancestor, reorg_blocks)
-                                                        .await
-                                                    {
-                                                        Ok(_) => {
-                                                            info!(
+                                                match blockchain
+                                                    .reorganize_to_chain(ancestor, reorg_blocks)
+                                                    .await
+                                                {
+                                                    Ok(_) => {
+                                                        info!(
                                                                 "✅ [{:?}] Chain reorganization successful",
                                                                 self.direction
                                                             );
-                                                            return Ok(());
-                                                        }
-                                                        Err(e) => {
-                                                            error!(
+                                                        return Ok(());
+                                                    }
+                                                    Err(e) => {
+                                                        error!(
                                                                 "❌ [{:?}] Chain reorganization failed: {}",
                                                                 self.direction, e
                                                             );
-                                                        }
                                                     }
                                                 }
-                                                Ok(false) => {
-                                                    info!("❌ Fork resolution: REJECT peer chain, keeping our chain");
-                                                    return Ok(());
-                                                }
-                                                Err(e) => {
-                                                    warn!("⚠️ Fork resolution error: {}", e);
-                                                }
                                             }
-                                        } else {
-                                            info!("🔍 Detected gaps in block sequence, requesting complete chain from {}", first_new);
-                                            let msg = NetworkMessage::GetBlocks(
-                                                first_new,
-                                                peer_tip_height + 1,
-                                            );
-                                            if let Err(e) = self.send_message(&msg).await {
-                                                warn!("Failed to request complete chain: {}", e);
+                                            Ok(false) => {
+                                                info!("❌ Fork resolution: REJECT peer chain, keeping our chain");
+                                                return Ok(());
                                             }
-                                            return Ok(());
+                                            Err(e) => {
+                                                warn!("⚠️ Fork resolution error: {}", e);
+                                            }
                                         }
+                                    } else if first_new != ancestor + 1 || has_gaps {
+                                        // Either doesn't start from ancestor or has gaps
+                                        if has_gaps {
+                                            info!("🔍 Detected gaps in block sequence, requesting complete chain from {}", first_new);
+                                        } else {
+                                            info!("🔍 Chain doesn't start from ancestor (first={}, expected={}), requesting from ancestor", first_new, ancestor + 1);
+                                        }
+                                        let msg = NetworkMessage::GetBlocks(
+                                            ancestor + 1,
+                                            peer_tip_height + 1,
+                                        );
+                                        if let Err(e) = self.send_message(&msg).await {
+                                            warn!("Failed to request complete chain: {}", e);
+                                        }
+                                        return Ok(());
                                     } else {
                                         // Incomplete chain - need to request more blocks
                                         // Calculate how many more blocks we need to reach peer tip
