@@ -133,7 +133,8 @@ impl NetworkClient {
 
                 tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
 
-                if connection_manager.is_connected(&ip) {
+                // Check if already connected in connection_manager OR peer_registry
+                if connection_manager.is_connected(&ip) || peer_registry.is_connected(&ip) {
                     tracing::debug!("Already connected to masternode {}", ip);
                     masternode_connections += 1;
                     continue;
@@ -245,7 +246,7 @@ impl NetworkClient {
                         continue;
                     }
 
-                    if connection_manager.is_connected(ip) {
+                    if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
                         tracing::debug!("Already connected to {}", ip);
                         continue;
                     }
@@ -335,6 +336,7 @@ impl NetworkClient {
                     }
 
                     if !connection_manager.is_connected(ip)
+                        && !peer_registry.is_connected(ip)
                         && connection_manager.mark_connecting(ip)
                     {
                         tracing::info!(
@@ -407,7 +409,7 @@ impl NetworkClient {
                         }
 
                         // Check if already connected OR already connecting (prevents race condition)
-                        if connection_manager.is_connected(ip) {
+                        if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
                             continue;
                         }
 
@@ -567,7 +569,7 @@ fn spawn_connection_task(
             connection_manager.clear_reconnecting(&ip);
 
             // Check if already connected/connecting before reconnecting
-            if connection_manager.is_connected(&ip) {
+            if connection_manager.is_connected(&ip) || peer_registry.is_connected(&ip) {
                 tracing::debug!(
                     "{} Already connected to {} during reconnect, task exiting",
                     tag,

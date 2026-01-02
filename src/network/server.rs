@@ -424,18 +424,21 @@ async fn handle_peer(
 
                                         // NOW check for duplicate connections after handshake
                                         // This prevents race conditions where both peers connect simultaneously
-                                        let has_outbound = connection_manager.is_connected(&ip_str);
 
-                                        if has_outbound {
-                                            // We have an outbound connection to this peer
+                                        // Check both connection_manager AND peer_registry for existing connections
+                                        let has_outbound = connection_manager.is_connected(&ip_str);
+                                        let already_registered = peer_registry.is_connected(&ip_str);
+
+                                        if has_outbound || already_registered {
+                                            // We already have a connection to this peer
                                             // Use deterministic tie-breaking based on IP comparison
                                             let should_we_connect = connection_manager.should_connect_to(&ip_str);
 
                                             if should_we_connect {
                                                 // Our IP is higher, we should be the one connecting OUT
                                                 // So reject this INbound connection
-                                                tracing::debug!(
-                                                    "🔄 Rejecting duplicate inbound from {} after handshake (we should connect OUT to them)",
+                                                tracing::info!(
+                                                    "🔄 Rejecting duplicate inbound from {} (already have connection)",
                                                     peer.addr
                                                 );
                                                 // Send ACK first so client doesn't get "connection reset"
@@ -449,12 +452,13 @@ async fn handle_peer(
                                                 break; // Close connection gracefully
                                             }
                                             // Otherwise, accept this inbound and close the outbound
-                                            tracing::debug!(
-                                                "✅ Accepting inbound from {} (they should connect OUT, closing our outbound)",
+                                            tracing::info!(
+                                                "✅ Accepting inbound from {} and closing existing outbound",
                                                 peer.addr
                                             );
                                             // Close the outbound connection in favor of this inbound
                                             connection_manager.remove(&ip_str);
+                                            peer_registry.unregister_peer(&ip_str).await;
                                         }
 
                                         // Mark this inbound connection in both managers
