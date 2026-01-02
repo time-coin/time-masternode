@@ -895,7 +895,8 @@ impl PeerConnection {
                             }
 
                             // Safety check - deep forks should be handled by consensus mechanism
-                            if search_depth > 50 {
+                            // Allow searching back at least 2x the batch size (200 blocks)
+                            if search_depth > 200 {
                                 warn!(
                                     "🚨 Fork too deep ({} blocks) - stopping block-1 search. Waiting for consensus sync.",
                                     search_depth
