@@ -770,44 +770,63 @@ impl PeerConnection {
                                     hex::encode(&incoming_hash[..8])
                                 );
 
-                                // Consult AI fork resolver before requesting more blocks
-                                if end_height > our_height {
-                                    let (should_investigate, reason) = blockchain
-                                        .should_investigate_fork(
-                                            start_height,
-                                            end_height,
-                                            &self.peer_ip,
-                                        )
-                                        .await;
+                                // Track fork resolution attempts
+                                let mut tracker = self.fork_resolution_tracker.write().await;
+                                let search_depth = our_height.saturating_sub(start_height);
 
-                                    if should_investigate {
-                                        info!(
-                                            "🤖 AI Fork Resolver: investigating fork from {} - {}",
-                                            self.peer_ip, reason
+                                if let Some(ref mut attempt) = *tracker {
+                                    if attempt.should_give_up() {
+                                        error!(
+                                            "🚨 CRITICAL: Fork resolution failed after {} attempts (searched back {} blocks). Manual intervention required.",
+                                            attempt.attempt_count, search_depth
                                         );
-
-                                        // Search backwards from fork point to find common ancestor
-                                        // Request a window of blocks before the fork point
-                                        let search_window = 100u64;
-                                        let search_start =
-                                            start_height.saturating_sub(search_window);
-                                        info!(
-                                            "📤 Requesting blocks {}-{} for fork resolution (searching backwards from fork at {})",
-                                            search_start, end_height, start_height
-                                        );
-                                        let msg =
-                                            NetworkMessage::GetBlocks(search_start, end_height + 1);
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request reorg chain: {}", e);
-                                        }
-                                        return Ok(());
-                                    } else {
-                                        info!(
-                                            "🤖 AI Fork Resolver: skipping fork from {} - {}",
-                                            self.peer_ip, reason
-                                        );
-                                        return Ok(());
+                                        return Err("Fork resolution failed - too many attempts"
+                                            .to_string());
                                     }
+                                    attempt.increment();
+                                } else {
+                                    let peer_tip =
+                                        self.peer_height.read().await.unwrap_or(end_height);
+                                    *tracker =
+                                        Some(ForkResolutionAttempt::new(start_height, peer_tip));
+                                }
+                                drop(tracker);
+
+                                // Check if we've searched too far back
+                                if search_depth > 2000 {
+                                    error!(
+                                        "🚨 CRITICAL: Searched back {} blocks without finding common ancestor. Chains are incompatible.",
+                                        search_depth
+                                    );
+                                    return Err(
+                                        "Deep fork >2000 blocks - chains incompatible".to_string()
+                                    );
+                                }
+
+                                // Fork detected! Simply go back one block at a time to find common ancestor
+                                // Check the previous block
+                                if start_height > 0 {
+                                    let check_height = start_height - 1;
+                                    let attempt_num = self
+                                        .fork_resolution_tracker
+                                        .read()
+                                        .await
+                                        .as_ref()
+                                        .map(|a| a.attempt_count)
+                                        .unwrap_or(0);
+                                    info!(
+                                        "📤 Fork at height {}. Checking previous block at height {} (attempt #{}, searched back {} blocks)",
+                                        start_height, check_height, attempt_num, search_depth
+                                    );
+                                    let msg =
+                                        NetworkMessage::GetBlocks(check_height, check_height + 1);
+                                    if let Err(e) = self.send_message(&msg).await {
+                                        warn!("Failed to request block for fork resolution: {}", e);
+                                    }
+                                    return Ok(());
+                                } else {
+                                    error!("🚨 Fork at genesis block - chains are incompatible");
+                                    return Err("Fork at genesis - incompatible chains".to_string());
                                 }
                             }
                         }
