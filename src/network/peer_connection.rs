@@ -1085,7 +1085,7 @@ impl PeerConnection {
                                 let mut tracker = self.fork_resolution_tracker.write().await;
 
                                 // Determine how far back we've searched
-                                let search_depth = our_height - start_height;
+                                let search_depth = our_height.saturating_sub(start_height);
 
                                 if let Some(ref mut attempt) = *tracker {
                                     if attempt.should_give_up() {
@@ -1112,38 +1112,43 @@ impl PeerConnection {
 
                                 drop(tracker);
 
-                                // If we've searched back more than 1000 blocks without finding common ancestor,
+                                // If we've searched back more than 2000 blocks without finding common ancestor,
                                 // this is a critical divergence - likely wrong genesis or completely different chain
-                                if search_depth > 1000 {
+                                if search_depth > 2000 {
                                     error!(
                                         "🚨 CRITICAL: Searched back {} blocks (from {} to {}) without finding common ancestor with peer {}. Chains are fundamentally incompatible.",
                                         search_depth, our_height, start_height, self.peer_ip
                                     );
                                     return Err(
-                                        "Deep fork >1000 blocks - chains incompatible".to_string()
+                                        "Deep fork >2000 blocks - chains incompatible".to_string()
                                     );
                                 }
 
-                                // Search backwards in exponentially increasing windows
-                                // Start from where we last searched, go back another 100-500 blocks
-                                let next_search_start = start_height.saturating_sub(if start_height > 500 {
-                                    500
-                                } else {
-                                    100
-                                });
+                                // If we've reached genesis (block 0), chains are incompatible
+                                if start_height == 0 {
+                                    error!(
+                                        "🚨 CRITICAL: Searched all the way to genesis without finding common ancestor with peer {}. Chains are incompatible.",
+                                        self.peer_ip
+                                    );
+                                    return Err(
+                                        "No common ancestor at genesis - chains incompatible"
+                                            .to_string(),
+                                    );
+                                }
 
-                                let next_search_end = start_height;
+                                // Simple strategy: go back one block at a time
+                                // Check the previous block to see if it matches
+                                let check_height = start_height.saturating_sub(1);
 
                                 info!(
-                                    "📤 Fork detected: No common ancestor in range {}-{}. Searching backwards: requesting blocks {}-{}",
-                                    start_height, end_height.min(our_height), next_search_start, next_search_end
+                                    "📤 No common ancestor in range {}-{}. Checking previous block at height {}",
+                                    start_height, end_height.min(our_height), check_height
                                 );
 
-                                // Request the NEXT window backwards
-                                let msg =
-                                    NetworkMessage::GetBlocks(next_search_start, next_search_end);
+                                // Request just the one block before
+                                let msg = NetworkMessage::GetBlocks(check_height, check_height + 1);
                                 if let Err(e) = self.send_message(&msg).await {
-                                    warn!("Failed to request blocks for ancestor search: {}", e);
+                                    warn!("Failed to request block for ancestor search: {}", e);
                                 }
                                 return Ok(());
                             }
