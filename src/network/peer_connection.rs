@@ -1272,17 +1272,40 @@ impl PeerConnection {
 
                 let our_height = blockchain.get_height().await;
 
-                // If peer has higher height, request blocks to verify and potentially sync
+                // If peer has higher height, first determine canonical chain before requesting
                 if *peer_height > our_height {
                     info!(
-                        "📈 [{:?}] Peer {} reported higher height {} (we have {}), requesting blocks for verification",
+                        "📈 [{:?}] Peer {} reported higher height {} (we have {})",
                         self.direction, self.peer_ip, peer_height, our_height
                     );
 
-                    // Request blocks starting from our height to verify chain
-                    let msg = NetworkMessage::GetBlocks(our_height, *peer_height + 1);
-                    if let Err(e) = self.send_message(&msg).await {
-                        warn!("Failed to request verification blocks: {}", e);
+                    // CONSENSUS CHECK: Determine canonical peer before requesting blocks
+                    if let Some((consensus_height, consensus_peer)) = blockchain.compare_chain_with_peers().await {
+                        if consensus_height > our_height {
+                            if self.peer_ip == consensus_peer {
+                                info!(
+                                    "✅ Peer {} IS the canonical peer. Requesting blocks {}-{}",
+                                    self.peer_ip, our_height, peer_height
+                                );
+                                let msg = NetworkMessage::GetBlocks(our_height, *peer_height + 1);
+                                if let Err(e) = self.send_message(&msg).await {
+                                    warn!("Failed to request verification blocks: {}", e);
+                                }
+                            } else {
+                                info!(
+                                    "📊 Peer {} is not canonical peer (consensus: {}). Deferring to canonical sync.",
+                                    self.peer_ip, consensus_peer
+                                );
+                                // Don't request blocks from non-canonical peers
+                            }
+                        }
+                    } else {
+                        // Fallback: No consensus found, request from this peer anyway
+                        debug!("No consensus found, requesting blocks from {}", self.peer_ip);
+                        let msg = NetworkMessage::GetBlocks(our_height, *peer_height + 1);
+                        if let Err(e) = self.send_message(&msg).await {
+                            warn!("Failed to request verification blocks: {}", e);
+                        }
                     }
                 } else if *peer_height == our_height {
                     // Same height - should verify we're on the same chain
