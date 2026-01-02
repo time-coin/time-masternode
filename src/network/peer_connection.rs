@@ -81,10 +81,11 @@ impl PingState {
         self.last_ping_sent = Some(now);
         self.pending_pings.push((nonce, now));
 
-        // Keep only last 5 pings
-        if self.pending_pings.len() > 5 {
-            self.pending_pings.remove(0);
-        }
+        // Remove pings that have already timed out (older than 90 seconds)
+        // Don't arbitrarily limit to 5 - let timeout handle cleanup
+        const TIMEOUT: Duration = Duration::from_secs(90);
+        self.pending_pings
+            .retain(|(_, sent_time)| now.duration_since(*sent_time) <= TIMEOUT);
     }
 
     fn record_pong_received(&mut self, nonce: u64) -> bool {
@@ -2222,20 +2223,19 @@ mod tests {
     }
 
     #[test]
-    fn test_pending_pings_limit() {
+    fn test_pending_pings_timeout_cleanup() {
         let mut state = PingState::new();
 
-        // Send 7 pings (more than the limit of 5)
+        // Send 7 pings immediately - all should be kept since none have timed out
         for i in 1..=7 {
             state.record_ping_sent(i);
         }
 
-        // Should only keep last 5
-        assert_eq!(state.pending_pings.len(), 5);
+        // All pings should be kept since they're recent (within 90 second timeout)
+        assert_eq!(state.pending_pings.len(), 7);
 
-        // Oldest ping (1 and 2) should be removed
         let nonces: Vec<u64> = state.pending_pings.iter().map(|(n, _)| *n).collect();
-        assert_eq!(nonces, vec![3, 4, 5, 6, 7]);
+        assert_eq!(nonces, vec![1, 2, 3, 4, 5, 6, 7]);
     }
 
     #[test]
