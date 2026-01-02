@@ -355,17 +355,28 @@ impl PeerConnection {
             );
             Ok(())
         } else {
-            warn!(
-                "⚠️ [{:?}] Pong NOT MATCHED from {} (nonce: {}), pending: {:?}",
-                self.direction,
-                self.peer_ip,
-                nonce,
-                state
-                    .pending_pings
-                    .iter()
-                    .map(|(n, _)| n)
-                    .collect::<Vec<_>>()
-            );
+            // Check if this could be from a duplicate connection
+            // If we have no pending pings at all, this is likely from another connection instance
+            if state.pending_pings.is_empty() {
+                debug!(
+                    "🔀 [{:?}] Received pong from {} (nonce: {}) but no pending pings - likely duplicate connection or peer bug",
+                    self.direction,
+                    self.peer_ip,
+                    nonce
+                );
+            } else {
+                warn!(
+                    "⚠️ [{:?}] Pong NOT MATCHED from {} (nonce: {}), pending: {:?}",
+                    self.direction,
+                    self.peer_ip,
+                    nonce,
+                    state
+                        .pending_pings
+                        .iter()
+                        .map(|(n, _)| n)
+                        .collect::<Vec<_>>()
+                );
+            }
             Ok(())
         }
     }
