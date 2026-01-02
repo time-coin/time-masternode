@@ -54,7 +54,10 @@ impl ForkResolutionAttempt {
     }
 
     fn should_give_up(&self) -> bool {
-        self.attempt_count >= 5
+        // Only give up if we've searched back more than 2000 blocks (checked elsewhere)
+        // or if we've been trying for more than 5 minutes
+        let elapsed = self.last_attempt.elapsed();
+        elapsed.as_secs() > 300 // 5 minutes
     }
 
     fn increment(&mut self) {
@@ -871,12 +874,12 @@ impl PeerConnection {
                                     // We're searching backwards - increment
                                     if attempt.should_give_up() {
                                         error!(
-                                            "🚨 Fork resolution failed after {} attempts (searched {} blocks back)",
-                                            attempt.attempt_count, search_depth
+                                            "🚨 Fork resolution failed: timeout after {} seconds (searched {} blocks back)",
+                                            attempt.last_attempt.elapsed().as_secs(), search_depth
                                         );
                                         *tracker = None;
                                         drop(tracker);
-                                        return Err("Fork resolution failed - too many attempts".to_string());
+                                        return Err("Fork resolution failed - timeout".to_string());
                                     }
                                     attempt.increment();
                                     attempt.fork_height = start_height;
