@@ -1092,6 +1092,55 @@ impl PeerConnection {
                         self.direction, skipped, self.peer_ip
                     );
 
+                    // MINORITY FORK DETECTION: If we're significantly behind ALL peers, we might be on wrong fork
+                    if skipped == block_count && peer_tip > our_height + 100 {
+                        // Check if ALL connected peers are significantly ahead of us
+                        let connected_peers = peer_registry.get_connected_peers().await;
+                        let mut peers_ahead = 0;
+                        let mut total_peers_checked = 0;
+
+                        for peer_ip in &connected_peers {
+                            if let Some(height) = peer_registry.get_peer_height(peer_ip).await {
+                                total_peers_checked += 1;
+                                if height > our_height + 100 {
+                                    peers_ahead += 1;
+                                }
+                            }
+                        }
+
+                        // If ALL peers (100%) are significantly ahead, we're likely on wrong fork
+                        if total_peers_checked >= 2 && peers_ahead == total_peers_checked {
+                            error!(
+                                "❌ [{:?}] MINORITY FORK DETECTED: We're at {} but ALL {} peers are at {}+. We are on the wrong fork!",
+                                self.direction, our_height, total_peers_checked, our_height + 100
+                            );
+                            error!("🔧 Triggering rollback to find common ancestor with network");
+
+                            // Roll back 10 blocks to find common ancestor
+                            let rollback_to = our_height.saturating_sub(10);
+                            info!(
+                                "🔄 Attempting rollback to height {} to find common ancestor",
+                                rollback_to
+                            );
+
+                            if let Err(e) = blockchain.rollback_to_height(rollback_to).await {
+                                warn!("Failed to rollback to {}: {}", rollback_to, e);
+                            } else {
+                                // After rollback, request blocks from this height to see if we can sync
+                                let msg = NetworkMessage::GetBlocks(rollback_to, rollback_to + 50);
+                                if let Err(e) = self.send_message(&msg).await {
+                                    warn!("Failed to request blocks after rollback: {}", e);
+                                } else {
+                                    info!(
+                                        "✅ Rolled back to height {}, requesting re-sync",
+                                        rollback_to
+                                    );
+                                }
+                            }
+                            return Ok(());
+                        }
+                    }
+
                     // If this is the consensus peer and all blocks were skipped, we need fork resolution
                     if skipped == block_count && peer_tip > our_height + 50 {
                         // Check if this peer is on consensus chain
