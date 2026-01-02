@@ -724,685 +724,244 @@ impl PeerConnection {
                 self.handle_pong(*nonce, *timestamp).await?;
             }
             NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
-                // Handle block sync response - THIS IS THE KEY ADDITION
+                // SIMPLIFIED FORK RESOLUTION - delegates to blockchain layer
                 let block_count = blocks.len();
                 if block_count == 0 {
                     debug!(
                         "📥 [{:?}] Received empty blocks response from {}",
                         self.direction, self.peer_ip
                     );
-                } else {
-                    let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
-                    let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
-                    let our_height = blockchain.get_height().await;
+                    return Ok(());
+                }
 
-                    // Update our knowledge of peer's height only if this is higher than what we know
-                    // Don't downgrade peer_height based on partial block responses
-                    let current_known = self.peer_height.read().await;
-                    if current_known.is_none()
-                        || (current_known.is_some() && current_known.unwrap() < end_height)
-                    {
-                        *self.peer_height.write().await = Some(end_height);
-                    }
-                    drop(current_known);
+                let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
+                let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
+                let our_height = blockchain.get_height().await;
 
-                    info!(
-                        "📥 [{:?}] Received {} blocks (height {}-{}) from {} (our height: {})",
-                        self.direction,
-                        block_count,
-                        start_height,
-                        end_height,
-                        self.peer_ip,
-                        our_height
-                    );
+                // Update our knowledge of peer's height
+                let current_known = self.peer_height.read().await;
+                if current_known.is_none()
+                    || (current_known.is_some() && current_known.unwrap() < end_height)
+                {
+                    *self.peer_height.write().await = Some(end_height);
+                }
+                drop(current_known);
 
-                    // Check if first block matches what we have (fork detection)
-                    if start_height > 0 && start_height <= our_height {
-                        if let Ok(our_block) = blockchain.get_block(start_height) {
-                            let incoming_hash = blocks[0].hash();
-                            let our_hash = our_block.hash();
+                info!(
+                    "📥 [{:?}] Received {} blocks (height {}-{}) from {} (our height: {})",
+                    self.direction,
+                    block_count,
+                    start_height,
+                    end_height,
+                    self.peer_ip,
+                    our_height
+                );
 
-                            if incoming_hash != our_hash {
-                                warn!(
-                                    "🔀 Fork detected at height {}: our {} vs peer {}",
-                                    start_height,
-                                    hex::encode(&our_hash[..8]),
-                                    hex::encode(&incoming_hash[..8])
-                                );
+                // SIMPLE FORK DETECTION: Check if first block matches what we have
+                if start_height > 0 && start_height <= our_height {
+                    if let Ok(our_block) = blockchain.get_block(start_height) {
+                        let incoming_hash = blocks[0].hash();
+                        let our_hash = our_block.hash();
 
-                                // Track fork resolution attempts
-                                let mut tracker = self.fork_resolution_tracker.write().await;
-                                let search_depth = our_height.saturating_sub(start_height);
+                        if incoming_hash != our_hash {
+                            warn!(
+                                "🔀 Fork detected at height {}: our {} vs peer {}",
+                                start_height,
+                                hex::encode(&our_hash[..8]),
+                                hex::encode(&incoming_hash[..8])
+                            );
 
-                                let should_continue = if let Some(ref mut attempt) = *tracker {
-                                    // Check if this is the same fork height we're already working on
-                                    if attempt.fork_height == start_height {
-                                        // Same height - don't increment, this is a duplicate response
-                                        true
-                                    } else if start_height < attempt.fork_height {
-                                        // We've moved to an earlier block - this is progress, increment
-                                        if attempt.should_give_up() {
-                                            error!(
-                                                "🚨 CRITICAL: Fork resolution failed after {} attempts (searched back {} blocks). Manual intervention required.",
-                                                attempt.attempt_count, search_depth
-                                            );
-                                            false
-                                        } else {
-                                            attempt.increment();
-                                            attempt.fork_height = start_height; // Update to new height
-                                            true
-                                        }
-                                    } else {
-                                        // start_height > attempt.fork_height means we received a response for a newer block
-                                        // This shouldn't happen in normal flow, treat as new fork
-                                        *tracker = Some(ForkResolutionAttempt::new(
-                                            start_height,
-                                            self.peer_height.read().await.unwrap_or(end_height),
-                                        ));
-                                        true
-                                    }
-                                } else {
-                                    // First attempt
-                                    let peer_tip =
-                                        self.peer_height.read().await.unwrap_or(end_height);
-                                    *tracker =
-                                        Some(ForkResolutionAttempt::new(start_height, peer_tip));
-                                    true
-                                };
-                                drop(tracker);
+                            // Track attempts to prevent infinite loops
+                            let mut tracker = self.fork_resolution_tracker.write().await;
+                            let search_depth = our_height.saturating_sub(start_height);
 
-                                if !should_continue {
-                                    return Err(
-                                        "Fork resolution failed - too many attempts".to_string()
-                                    );
-                                }
-
-                                // Check if we've searched too far back
-                                if search_depth > 2000 {
-                                    error!(
-                                        "🚨 CRITICAL: Searched back {} blocks without finding common ancestor. Chains are incompatible.",
-                                        search_depth
-                                    );
-                                    return Err(
-                                        "Deep fork >2000 blocks - chains incompatible".to_string()
-                                    );
-                                }
-
-                                // Fork detected! Simply go back one block at a time to find common ancestor
-                                // Check the previous block
-                                if start_height > 0 {
-                                    let check_height = start_height - 1;
-                                    let attempt_num = self
-                                        .fork_resolution_tracker
-                                        .read()
-                                        .await
-                                        .as_ref()
-                                        .map(|a| a.attempt_count)
-                                        .unwrap_or(0);
-                                    info!(
-                                        "📤 Fork at height {}. Checking previous block at height {} (attempt #{}, searched back {} blocks)",
-                                        start_height, check_height, attempt_num, search_depth
-                                    );
-                                    let msg =
-                                        NetworkMessage::GetBlocks(check_height, check_height + 1);
-                                    if let Err(e) = self.send_message(&msg).await {
-                                        warn!("Failed to request block for fork resolution: {}", e);
-                                    }
-                                    return Ok(());
-                                } else {
-                                    error!("🚨 Fork at genesis block - chains are incompatible");
-                                    return Err("Fork at genesis - incompatible chains".to_string());
-                                }
-                            }
-                        }
-                    }
-
-                    // Check if we have overlapping blocks - find common ancestor
-                    let mut common_ancestor: Option<u64> = None;
-                    let mut all_fork_blocks = Vec::new();
-
-                    // If we received blocks that overlap with our chain, find the common ancestor
-                    if start_height <= our_height {
-                        info!("🔍 Checking for common ancestor (overlap detected: peer blocks {}-{}, we have {})",
-                            start_height, end_height, our_height);
-
-                        let mut first_mismatch_height = None;
-                        let mut matching_count = 0u64;
-                        let mut first_match_height: Option<u64> = None;
-
-                        // Check blocks from the start to find where they match
-                        for block in blocks.iter() {
-                            if block.header.height <= our_height {
-                                if let Ok(our_block) = blockchain.get_block(block.header.height) {
-                                    if our_block.hash() == block.hash() {
-                                        // This block matches - potential common ancestor
-                                        common_ancestor = Some(block.header.height);
-                                        matching_count += 1;
-                                        if first_match_height.is_none() {
-                                            first_match_height = Some(block.header.height);
-                                        }
-                                    } else if common_ancestor.is_some() {
-                                        // We had a match earlier, but now this doesn't match
-                                        // This means we have a fork after the common ancestor
-                                        info!("🔀 Fork detected at height {}: our hash {} vs incoming {}",
-                                            block.header.height,
-                                            hex::encode(&our_block.hash()[..8]),
-                                            hex::encode(&block.hash()[..8]));
-                                        all_fork_blocks.push(block.clone());
-                                        break;
-                                    } else {
-                                        // No common ancestor found yet - keep searching backwards
-                                        // Track first mismatch but don't spam logs for each block
-                                        if first_mismatch_height.is_none() {
-                                            first_mismatch_height = Some(block.header.height);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Log a summary of matching blocks instead of each one
-                        if matching_count > 0 {
-                            if let (Some(first), Some(last)) = (first_match_height, common_ancestor)
-                            {
-                                if matching_count > 5 {
-                                    debug!(
-                                        "✅ Found {} matching blocks (heights {}-{})",
-                                        matching_count, first, last
-                                    );
-                                } else {
-                                    info!(
-                                        "✅ Found {} matching blocks (heights {}-{})",
-                                        matching_count, first, last
-                                    );
-                                }
-                            }
-                        }
-
-                        // If peer has longer chain and we found a common ancestor, reorganize
-                        if let Some(ancestor) = common_ancestor {
-                            // Get peer's actual tip height (may be higher than end_height of this batch)
-                            let peer_tip_height = self
-                                .peer_height
-                                .read()
-                                .await
-                                .unwrap_or(end_height)
-                                .max(end_height);
-
-                            if peer_tip_height > our_height {
-                                // Check fork resolution tracker - prevent infinite loops
-                                let mut tracker = self.fork_resolution_tracker.write().await;
-
-                                let should_attempt = if let Some(ref mut attempt) = *tracker {
-                                    if attempt.is_same_fork(ancestor, peer_tip_height) {
-                                        if attempt.should_give_up() {
-                                            error!(
-                                                "🚨 CRITICAL: Fork resolution failed after {} attempts at height {} with peer {}. Manual intervention required.",
-                                                attempt.attempt_count, ancestor, self.peer_ip
-                                            );
-                                            error!(
-                                                "💡 To resolve: Stop node, delete blockchain data, and resync from genesis or restore from trusted backup."
-                                            );
-                                            return Err(format!(
-                                                "Fork resolution failed after {} attempts - giving up",
-                                                attempt.attempt_count
-                                            ));
-                                        }
-                                        attempt.increment();
-                                        attempt.common_ancestor = Some(ancestor);
-                                        info!(
-                                            "🔄 Fork resolution attempt #{} for fork at height {} (common ancestor: {})",
-                                            attempt.attempt_count, ancestor, ancestor
-                                        );
-                                        true
-                                    } else {
-                                        // Different fork, reset tracker
-                                        *tracker = Some(ForkResolutionAttempt::new(
-                                            ancestor,
-                                            peer_tip_height,
-                                        ));
-                                        true
-                                    }
-                                } else {
-                                    // First attempt
-                                    *tracker =
-                                        Some(ForkResolutionAttempt::new(ancestor, peer_tip_height));
-                                    true
-                                };
-
-                                drop(tracker);
-
-                                if !should_attempt {
-                                    return Err("Fork resolution aborted".to_string());
-                                }
-
-                                info!(
-                                    "📊 Peer has longer chain ({} > {}) with common ancestor at {}",
-                                    peer_tip_height, our_height, ancestor
-                                );
-
-                                // Collect all blocks after common ancestor
-                                let mut reorg_blocks: Vec<Block> = blocks
-                                    .iter()
-                                    .filter(|b| b.header.height > ancestor)
-                                    .cloned()
-                                    .collect();
-                                reorg_blocks.sort_by_key(|b| b.header.height);
-
-                                if reorg_blocks.is_empty() {
-                                    // We found a common ancestor but received no blocks after it
-                                    // This means we need to request blocks after the ancestor
-                                    if peer_tip_height > ancestor {
-                                        debug!(
-                                            "🔍 Found common ancestor at {}, requesting blocks {}-{}",
-                                            ancestor,
-                                            ancestor + 1,
-                                            peer_tip_height
-                                        );
-                                        let msg = NetworkMessage::GetBlocks(
-                                            ancestor + 1,
-                                            peer_tip_height + 1,
-                                        );
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request blocks after ancestor: {}", e);
-                                        }
-                                        return Ok(());
-                                    }
-                                } else if !reorg_blocks.is_empty() {
-                                    let first_new = reorg_blocks.first().unwrap().header.height;
-                                    let last_new = reorg_blocks.last().unwrap().header.height;
-
-                                    // Check for gaps in the blocks we received
-                                    let has_gaps = reorg_blocks
-                                        .windows(2)
-                                        .any(|w| w[1].header.height != w[0].header.height + 1);
-
-                                    // Check if we have a valid chain starting from ancestor
-                                    if first_new == ancestor + 1 && !has_gaps {
-                                        // Use AI fork resolver to decide if we should accept this fork
-                                        match blockchain
-                                            .should_accept_fork(
-                                                &reorg_blocks,
-                                                peer_tip_height,
-                                                &self.peer_ip,
-                                            )
-                                            .await
-                                        {
-                                            Ok(true) => {
-                                                info!("🔄 Fork resolution: ACCEPT peer chain, reorganizing from height {} with {} blocks ({}-{})",
-                                                        ancestor, reorg_blocks.len(), first_new, last_new);
-
-                                                match blockchain
-                                                    .reorganize_to_chain(ancestor, reorg_blocks)
-                                                    .await
-                                                {
-                                                    Ok(_) => {
-                                                        info!(
-                                                                "✅ [{:?}] Chain reorganization successful",
-                                                                self.direction
-                                                            );
-                                                        return Ok(());
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                                "❌ [{:?}] Chain reorganization failed: {}",
-                                                                self.direction, e
-                                                            );
-                                                    }
-                                                }
-                                            }
-                                            Ok(false) => {
-                                                info!("❌ Fork resolution: REJECT peer chain, keeping our chain");
-                                                return Ok(());
-                                            }
-                                            Err(e) => {
-                                                warn!("⚠️ Fork resolution error: {}", e);
-                                            }
-                                        }
-                                    } else if first_new != ancestor + 1 || has_gaps {
-                                        // Either doesn't start from ancestor or has gaps
-                                        if has_gaps {
-                                            info!("🔍 Detected gaps in block sequence, requesting complete chain from {}", first_new);
-                                        } else {
-                                            info!("🔍 Chain doesn't start from ancestor (first={}, expected={}), requesting from ancestor", first_new, ancestor + 1);
-                                        }
-                                        let msg = NetworkMessage::GetBlocks(
-                                            ancestor + 1,
-                                            peer_tip_height + 1,
-                                        );
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request complete chain: {}", e);
-                                        }
-                                        return Ok(());
-                                    } else {
-                                        // Incomplete chain - need to request more blocks
-                                        // Calculate how many more blocks we need to reach peer tip
-                                        let blocks_needed = peer_tip_height - last_new;
-
-                                        // If we already have a common ancestor and received partial chain,
-                                        // request the ENTIRE remaining chain in larger batches
-                                        info!(
-                                            "🔍 Incomplete chain (first={}, last={}, need {} more blocks to reach peer tip {})",
-                                            first_new, last_new, blocks_needed, peer_tip_height
-                                        );
-
-                                        // Request next batch of blocks (up to 500 at a time to avoid huge requests)
-                                        let next_needed = last_new + 1;
-                                        let batch_size = 500u64;
-                                        let next_end =
-                                            (next_needed + batch_size).min(peer_tip_height + 1);
-
-                                        info!(
-                                            "📤 Requesting blocks {}-{} (batch of {} blocks)",
-                                            next_needed,
-                                            next_end,
-                                            next_end - next_needed
-                                        );
-
-                                        let msg = NetworkMessage::GetBlocks(next_needed, next_end);
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request complete chain: {}", e);
-                                        }
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                        } else if start_height <= our_height {
-                            // No common ancestor found in the overlapping range
-                            if let Some(first_height) = first_mismatch_height {
-                                warn!(
-                                    "❌ No common ancestor found in range {}-{} (our height: {}, fork starts at {})",
-                                    start_height,
-                                    end_height.min(our_height),
-                                    our_height,
-                                    first_height
-                                );
-                            } else {
-                                warn!(
-                                    "❌ No common ancestor found in range {}-{} (our height: {})",
-                                    start_height,
-                                    end_height.min(our_height),
-                                    our_height
-                                );
-                            }
-
-                            // Deep fork - peer has longer OR EQUAL chain but no common ancestor yet
-                            if end_height >= our_height {
-                                // Check fork resolution tracker to prevent infinite loops
-                                let mut tracker = self.fork_resolution_tracker.write().await;
-
-                                // Determine how far back we've searched
-                                let search_depth = our_height.saturating_sub(start_height);
-
-                                if let Some(ref mut attempt) = *tracker {
+                            // Check if we should give up
+                            if let Some(ref mut attempt) = *tracker {
+                                if start_height < attempt.fork_height {
+                                    // We're searching backwards - increment
                                     if attempt.should_give_up() {
                                         error!(
-                                            "🚨 CRITICAL: Fork resolution failed after {} attempts. No common ancestor found searching back {} blocks from height {}.",
-                                            attempt.attempt_count, search_depth, our_height
+                                            "🚨 Fork resolution failed after {} attempts (searched {} blocks back)",
+                                            attempt.attempt_count, search_depth
                                         );
-                                        error!(
-                                            "💡 Your chain has diverged from the network. Manual intervention required: delete blockchain data and resync from genesis."
-                                        );
-                                        return Err(
-                                            "Fork resolution failed - no common ancestor found"
-                                                .to_string(),
-                                        );
+                                        *tracker = None;
+                                        drop(tracker);
+                                        return Err("Fork resolution failed - too many attempts".to_string());
                                     }
                                     attempt.increment();
+                                    attempt.fork_height = start_height;
+                                } else if start_height == attempt.fork_height {
+                                    // Same height - duplicate response, don't increment
                                 } else {
-                                    // First attempt
-                                    let peer_tip =
-                                        self.peer_height.read().await.unwrap_or(end_height);
-                                    *tracker =
-                                        Some(ForkResolutionAttempt::new(start_height, peer_tip));
-                                }
-
-                                drop(tracker);
-
-                                // If we've searched back more than 2000 blocks without finding common ancestor,
-                                // this is a critical divergence - likely wrong genesis or completely different chain
-                                if search_depth > 2000 {
-                                    error!(
-                                        "🚨 CRITICAL: Searched back {} blocks (from {} to {}) without finding common ancestor with peer {}. Chains are fundamentally incompatible.",
-                                        search_depth, our_height, start_height, self.peer_ip
-                                    );
-                                    return Err(
-                                        "Deep fork >2000 blocks - chains incompatible".to_string()
-                                    );
-                                }
-
-                                // If we've reached genesis (block 0), chains are incompatible
-                                if start_height == 0 {
-                                    error!(
-                                        "🚨 CRITICAL: Searched all the way to genesis without finding common ancestor with peer {}. Chains are incompatible.",
-                                        self.peer_ip
-                                    );
-                                    return Err(
-                                        "No common ancestor at genesis - chains incompatible"
-                                            .to_string(),
-                                    );
-                                }
-
-                                // Simple strategy: go back one block at a time
-                                // Check the previous block to see if it matches
-                                let check_height = start_height.saturating_sub(1);
-
-                                info!(
-                                    "📤 No common ancestor in range {}-{}. Checking previous block at height {}",
-                                    start_height, end_height.min(our_height), check_height
-                                );
-
-                                // Request just the one block before
-                                let msg = NetworkMessage::GetBlocks(check_height, check_height + 1);
-                                if let Err(e) = self.send_message(&msg).await {
-                                    warn!("Failed to request block for ancestor search: {}", e);
-                                }
-                                return Ok(());
-                            }
-                        }
-                    }
-
-                    // Apply blocks sequentially (no fork detected in first block or reorganization failed)
-                    let mut added = 0;
-                    let mut skipped = 0;
-                    let mut fork_detected_at = None;
-                    let mut fork_blocks = Vec::new();
-
-                    for block in blocks {
-                        match blockchain.add_block_with_fork_handling(block.clone()).await {
-                            Ok(true) => added += 1,
-                            Ok(false) => skipped += 1,
-                            Err(e) => {
-                                // Check if this is a fork error
-                                if e.contains("Fork detected") {
-                                    if fork_detected_at.is_none() {
-                                        fork_detected_at = Some(block.header.height);
-                                    }
-                                    fork_blocks.push(block.clone());
-                                    // Only log first fork detection, not every block
-                                    if fork_blocks.len() == 1 {
-                                        warn!(
-                                            "🔀 [{:?}] Fork detected at block {}: {}",
-                                            self.direction, block.header.height, e
-                                        );
-                                    }
-                                } else {
-                                    // Log other errors
-                                    if skipped < 3 {
-                                        warn!(
-                                            "⏭️ [{:?}] Skipped block {}: {}",
-                                            self.direction, block.header.height, e
-                                        );
-                                    } else {
-                                        debug!(
-                                            "⏭️ [{:?}] Skipped block {}: {}",
-                                            self.direction, block.header.height, e
-                                        );
-                                    }
-                                }
-                                skipped += 1;
-                            }
-                        }
-                    }
-
-                    // If fork was detected during block application, try to reorganize instead of disconnecting
-                    if let Some(fork_height) = fork_detected_at {
-                        let last_fork_height = fork_blocks
-                            .last()
-                            .map(|b| b.header.height)
-                            .unwrap_or(fork_height);
-                        warn!(
-                            "🔀 [{:?}] Fork detected during block sync at height {} from {} ({} blocks affected: {}-{})",
-                            self.direction, fork_height, self.peer_ip, fork_blocks.len(), fork_height, last_fork_height
-                        );
-
-                        // For whitelisted peers, aggressively resolve the fork
-                        // For non-whitelisted peers, track and eventually disconnect
-                        let mut tracker = self.fork_loop_tracker.write().await;
-
-                        if is_whitelisted {
-                            // AGGRESSIVE FORK RESOLUTION for whitelisted peers
-                            // Consult AI before requesting blocks
-                            let (should_investigate, reason) = blockchain
-                                .should_investigate_fork(fork_height, end_height, &self.peer_ip)
-                                .await;
-
-                            if should_investigate {
-                                info!(
-                                    "🤖 [{:?}] AI Fork Resolver: investigating fork with whitelisted peer {} - {}",
-                                    self.direction, self.peer_ip, reason
-                                );
-
-                                *tracker = None; // Clear any loop tracking
-                                drop(tracker);
-
-                                // Request their full chain from before the fork point
-                                let request_from = fork_height.saturating_sub(10);
-                                let request_to = end_height + 10;
-
-                                info!(
-                                    "🔄 [{:?}] Requesting blocks {}-{} from whitelisted {} for fork resolution",
-                                    self.direction, request_from, request_to, self.peer_ip
-                                );
-
-                                let msg = NetworkMessage::GetBlocks(request_from, request_to);
-                                if let Err(e) = self.send_message(&msg).await {
-                                    warn!("Failed to request fork resolution blocks: {}", e);
+                                    // New fork
+                                    *tracker = Some(ForkResolutionAttempt::new(start_height, end_height));
                                 }
                             } else {
-                                info!(
-                                    "🤖 [{:?}] AI Fork Resolver: skipping fork with whitelisted peer {} - {}",
-                                    self.direction, self.peer_ip, reason
-                                );
-                                *tracker = None; // Clear tracking since we're intentionally skipping
-                                drop(tracker);
+                                // First attempt
+                                *tracker = Some(ForkResolutionAttempt::new(start_height, end_height));
                             }
 
-                            // Continue processing - don't wait
-                        } else {
-                            // Non-whitelisted: track fork loops and disconnect if stuck
-                            let should_disconnect = if let Some((last_height, count, last_seen)) =
-                                *tracker
-                            {
-                                if last_height == fork_height
-                                    && last_seen.elapsed() < std::time::Duration::from_secs(30)
-                                {
-                                    let new_count = count + 1;
-                                    if new_count > 5 {
-                                        error!(
-                                            "❌ [{:?}] Fork loop for non-whitelisted {} at height {} (attempt {})",
-                                            self.direction, self.peer_ip, fork_height, new_count
-                                        );
-                                        true
-                                    } else {
-                                        *tracker = Some((
-                                            fork_height,
-                                            new_count,
-                                            std::time::Instant::now(),
-                                        ));
-                                        false
-                                    }
-                                } else {
-                                    *tracker = Some((fork_height, 1, std::time::Instant::now()));
-                                    false
-                                }
-                            } else {
-                                *tracker = Some((fork_height, 1, std::time::Instant::now()));
-                                false
-                            };
+                            // Safety check
+                            if search_depth > 2000 {
+                                error!("🚨 Searched back {} blocks - chains incompatible", search_depth);
+                                *tracker = None;
+                                drop(tracker);
+                                return Err("Deep fork >2000 blocks - chains incompatible".to_string());
+                            }
 
                             drop(tracker);
 
-                            if should_disconnect {
-                                return Err(format!(
-                                    "Fork loop at height {} - peer on incompatible fork",
-                                    fork_height
-                                ));
+                            // SIMPLE STRATEGY: Go back one block at a time to find common ancestor
+                            if start_height > 0 {
+                                let check_height = start_height - 1;
+                                info!(
+                                    "📤 Fork at height {}. Checking previous block at height {} (searched {} blocks back)",
+                                    start_height, check_height, search_depth
+                                );
+                                let msg = NetworkMessage::GetBlocks(check_height, check_height + 1);
+                                if let Err(e) = self.send_message(&msg).await {
+                                    warn!("Failed to request block for fork resolution: {}", e);
+                                }
+                                return Ok(());
+                            } else {
+                                error!("🚨 Fork at genesis block - chains are incompatible");
+                                return Err("Fork at genesis - incompatible chains".to_string());
                             }
                         }
+                    }
+                }
 
-                        // Request peer's current height to make accurate comparison
-                        if let Err(e) = self.send_message(&NetworkMessage::GetBlockHeight).await {
-                            warn!("Failed to request peer height: {}", e);
-                        }
-
-                        // Get peer's last known height - wait a bit for the height response
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        let peer_tip_height = self.peer_height.read().await.unwrap_or(end_height);
-
-                        // If we still don't have accurate peer height, use blocks we received as estimate
-                        let peer_tip_height = if peer_tip_height == end_height
-                            && end_height < our_height
-                        {
-                            // Peer sent us a partial range, they likely have more
-                            // Estimate based on block timestamps or just assume they're ahead
-                            warn!(
-                                "⚠️ [{:?}] Using incomplete height info from peer {} (end: {}, ours: {})",
-                                self.direction, self.peer_ip, end_height, our_height
-                            );
-                            our_height + 10 // Conservative estimate - assume peer is ahead
-                        } else {
-                            peer_tip_height
-                        };
-
-                        // Check if peer has a longer chain OR same height (need tiebreaker)
-                        if peer_tip_height > our_height {
-                            info!(
-                                "📊 [{:?}] Peer {} has longer chain ({} > {}) with fork at {}. Blocks were skipped - will retry sync.",
-                                self.direction, self.peer_ip, peer_tip_height, our_height, fork_height
-                            );
-                            // Don't disconnect - fork resolution already attempted earlier (lines 755-842)
-                            // If it didn't succeed, we may need more blocks or peer needs to catch up
-                            // Natural sync process will continue requesting blocks
-                        } else if peer_tip_height == our_height {
-                            // Same height fork - use deterministic tiebreaker
-                            warn!(
-                                "⚠️ [{:?}] Peer {} has same height fork ({} == {}) at block {}. Need deterministic resolution.",
-                                self.direction, self.peer_ip, peer_tip_height, our_height, fork_height
-                            );
-                            // Fork resolution will use hash comparison to deterministically choose
-                            // This happens in the fork detection code earlier (lines 773-893)
-                        } else {
-                            warn!(
-                                "⚠️ [{:?}] Peer {} has fork but shorter chain (peer: {}, ours: {}), ignoring",
-                                self.direction, self.peer_ip, peer_tip_height, our_height
-                            );
+                // Check if we have matching blocks (common ancestor search)
+                let mut common_ancestor: Option<u64> = None;
+                if start_height <= our_height {
+                    // Find the last matching block in this batch
+                    for block in blocks.iter() {
+                        if block.header.height <= our_height {
+                            if let Ok(our_block) = blockchain.get_block(block.header.height) {
+                                if our_block.hash() == block.hash() {
+                                    common_ancestor = Some(block.header.height);
+                                } else if common_ancestor.is_some() {
+                                    // Found mismatch after common ancestor - this is the fork point
+                                    break;
+                                }
+                            }
                         }
                     }
+                }
 
-                    if added > 0 {
+                // If we found a common ancestor and peer has longer chain, reorganize
+                if let Some(ancestor) = common_ancestor {
+                    let peer_tip_height = self.peer_height.read().await.unwrap_or(end_height).max(end_height);
+
+                    if peer_tip_height > our_height {
                         info!(
-                            "✅ [{:?}] Synced {} blocks from {} (skipped {})",
-                            self.direction, added, self.peer_ip, skipped
+                            "📊 Peer has longer chain ({} > {}) with common ancestor at {}",
+                            peer_tip_height, our_height, ancestor
                         );
-                        // Reset invalid counter on successful sync - peer is cooperating
-                        *self.invalid_block_count.write().await = 0;
-                    } else if skipped > 0 {
-                        warn!(
-                            "⚠️ [{:?}] All {} blocks skipped from {}",
-                            self.direction, skipped, self.peer_ip
-                        );
+
+                        // Collect blocks after common ancestor
+                        let mut reorg_blocks: Vec<Block> = blocks
+                            .iter()
+                            .filter(|b| b.header.height > ancestor)
+                            .cloned()
+                            .collect();
+                        reorg_blocks.sort_by_key(|b| b.header.height);
+
+                        if reorg_blocks.is_empty() || reorg_blocks.last().unwrap().header.height < peer_tip_height {
+                            // Need more blocks - request from ancestor to peer tip
+                            let request_start = if reorg_blocks.is_empty() {
+                                ancestor + 1
+                            } else {
+                                reorg_blocks.last().unwrap().header.height + 1
+                            };
+                            info!("📤 Requesting blocks {}-{} for complete chain", request_start, peer_tip_height);
+                            let msg = NetworkMessage::GetBlocks(request_start, peer_tip_height + 1);
+                            if let Err(e) = self.send_message(&msg).await {
+                                warn!("Failed to request blocks: {}", e);
+                            }
+                            return Ok(());
+                        }
+
+                        // Check for gaps in blocks
+                        let has_gaps = reorg_blocks.windows(2).any(|w| w[1].header.height != w[0].header.height + 1);
+                        if has_gaps || reorg_blocks.first().unwrap().header.height != ancestor + 1 {
+                            info!("📤 Detected gaps, requesting complete chain from {}", ancestor + 1);
+                            let msg = NetworkMessage::GetBlocks(ancestor + 1, peer_tip_height + 1);
+                            if let Err(e) = self.send_message(&msg).await {
+                                warn!("Failed to request blocks: {}", e);
+                            }
+                            return Ok(());
+                        }
+
+                        // We have complete chain - decide if we should reorganize
+                        match blockchain.should_accept_fork(&reorg_blocks, peer_tip_height, &self.peer_ip).await {
+                            Ok(true) => {
+                                info!("🔄 Reorganizing to peer chain from height {} with {} blocks",
+                                    ancestor, reorg_blocks.len());
+                                match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
+                                    Ok(_) => {
+                                        info!("✅ Chain reorganization successful");
+                                        *self.fork_resolution_tracker.write().await = None;
+                                        return Ok(());
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Chain reorganization failed: {}", e);
+                                    }
+                                }
+                            }
+                            Ok(false) => {
+                                info!("❌ Keeping our chain - peer chain rejected");
+                                *self.fork_resolution_tracker.write().await = None;
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Fork resolution error: {}", e);
+                            }
+                        }
                     }
+                } else if start_height <= our_height {
+                    // No common ancestor in this batch - search backwards
+                    let search_depth = our_height.saturating_sub(start_height);
+                    if search_depth > 2000 {
+                        error!("🚨 No common ancestor found after searching {} blocks", search_depth);
+                        return Err("Deep fork - chains incompatible".to_string());
+                    }
+
+                    if start_height > 0 {
+                        let check_height = start_height.saturating_sub(1);
+                        info!("📤 No common ancestor in {}-{}, checking block {}", start_height, end_height.min(our_height), check_height);
+                        let msg = NetworkMessage::GetBlocks(check_height, check_height + 1);
+                        if let Err(e) = self.send_message(&msg).await {
+                            warn!("Failed to request block: {}", e);
+                        }
+                        return Ok(());
+                    }
+                }
+
+                // Try to add blocks sequentially
+                let mut added = 0;
+                let mut skipped = 0;
+
+                for block in blocks {
+                    match blockchain.add_block_with_fork_handling(block.clone()).await {
+                        Ok(true) => added += 1,
+                        Ok(false) => skipped += 1,
+                        Err(e) => {
+                            if skipped < 3 {
+                                warn!("⏭️ Skipped block {}: {}", block.header.height, e);
+                            }
+                            skipped += 1;
+                        }
+                    }
+                }
+
+                if added > 0 {
+                    info!("✅ [{:?}] Synced {} blocks from {} (skipped {})",
+                        self.direction, added, self.peer_ip, skipped);
+                    *self.invalid_block_count.write().await = 0;
+                } else if skipped > 0 {
+                    warn!("⚠️ [{:?}] All {} blocks skipped from {}",
+                        self.direction, skipped, self.peer_ip);
                 }
             }
             NetworkMessage::BlockInventory(block_height) => {
