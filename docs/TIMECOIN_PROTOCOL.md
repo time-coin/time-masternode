@@ -1,1127 +1,1064 @@
-# TIME Coin Protocol Specification
+# TIME Coin Protocol Specification (Improved)
+**Document:** `TIMECOIN_PROTOCOL.md`  
+**Version:** 6.0 (Avalanche Snowball + TSDC Checkpoints + Verifiable Finality Proofs)  
+**Last Updated:** January 2, 2026  
+**Status:** Implementation Spec (Normative)
 
-**Version:** 5.0 (TSDC + Avalanche Pure Hybrid)
-**Last Updated:** December 2024
-**Status:** Production Ready
+---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Protocol Architecture](#protocol-architecture)
-3. [Avalanche Consensus (Instant Finality)](#avalanche-consensus)
-4. [Time-Scheduled Deterministic Consensus (TSDC)](#tsdc)
-5. [Hybrid Integration](#hybrid-integration)
-6. [UTXO State Machine](#utxo-state-machine)
-7. [Masternode System](#masternode-system)
-8. [Heartbeat Attestation](#heartbeat-attestation)
-9. [Reward Distribution](#reward-distribution)
-10. [Network Protocol](#network-protocol)
-11. [Security Model](#security-model)
-12. [Implementation Details](#implementation-details)
+1. [Overview](#1-overview)
+2. [Design Goals and Non‑Goals](#2-design-goals-and-non-goals)
+3. [System Architecture](#3-system-architecture)
+4. [Cryptography and Identifiers](#4-cryptography-and-identifiers)
+5. [Masternodes, Weight, and Active Validator Set (AVS)](#5-masternodes-weight-and-active-validator-set-avs)
+6. [UTXO Model and Transaction Validity](#6-utxo-model-and-transaction-validity)
+7. [Avalanche Snowball Finality](#7-avalanche-snowball-finality)
+8. [Verifiable Finality Proofs (VFP)](#8-verifiable-finality-proofs-vfp)
+9. [Time-Scheduled Deterministic Consensus (TSDC) Checkpoint Blocks (Archival Chain)](#9-tsdc-checkpoint-blocks-archival-chain)
+10. [Rewards and Fees](#10-rewards-and-fees)
+11. [Network Protocol](#11-network-protocol)
+12. [Mempool and Pooling Rules](#12-mempool-and-pooling-rules)
+13. [Security Model](#13-security-model)
+14. [Configuration Defaults](#14-configuration-defaults)
+15. [Implementation Notes](#15-implementation-notes)
+16. [Cryptographic Bindings (NORMATIVE ADDITIONS)](#16-cryptographic-bindings-normative-additions)
+17. [Transaction and Staking UTXO Details](#17-transaction-and-staking-utxo-details)
+18. [Network Transport Layer (NORMATIVE)](#18-network-transport-layer-normative)
+19. [Genesis Block and Initial State (NORMATIVE)](#19-genesis-block-and-initial-state-normative)
+20. [Clock Synchronization Requirements (NORMATIVE)](#20-clock-synchronization-requirements-normative)
+21. [Light Client and SPV Support (OPTIONAL)](#21-light-client-and-spv-support-optional)
+22. [Error Recovery and Edge Cases (NORMATIVE)](#22-error-recovery-and-edge-cases-normative)
+23. [Address Format and Wallet Integration (NORMATIVE)](#23-address-format-and-wallet-integration-normative)
+24. [Mempool Management and Fee Estimation (NORMATIVE)](#24-mempool-management-and-fee-estimation-normative)
+25. [Economic Model (NORMATIVE)](#25-economic-model-normative)
+26. [Implementation Checklist](#26-implementation-checklist)
+27. [Test Vectors](#27-test-vectors)
 
 ---
 
-## Overview
+## 1. Overview
 
-TIME Coin is a next-generation blockchain protocol that separates **state finality** from **chain history**. It achieves this through a novel hybrid architecture:
+TIME Coin separates **state finality** from **historical checkpointing**:
 
-1.  **Avalanche Consensus (Transaction Layer)**: Provides sub-second, probabilistic instant finality for individual transactions using weighted subsampling.
-2.  **Time-Scheduled Deterministic Consensus (Block Layer)**: A deterministic, VRF-based mechanism that packages already-finalized transactions into archival checkpoints (blocks) every 10 minutes.
+- **Avalanche Snowball (Transaction Layer):** fast, leaderless, stake-weighted sampling that converges on a single winner among conflicting transactions. Nodes can provide **sub‑second local acceptance**.
+- **Verifiable Finality Proofs (VFP):** converts local probabilistic acceptance into an **objectively verifiable artifact** that any node can validate offline.
+- **TSDC (Block Layer):** deterministic, VRF-sortition checkpoint blocks every 10 minutes. Blocks are **archival** (history + reward events), not the source of transaction finality.
 
-Unlike traditional blockchains where transactions are finalized *by* blocks, TIME Coin transactions are finalized **before** block inclusion. Blocks serve strictly as historical checkpoints and reward distribution events.
-
-### Key Innovations
-
--   **Instant Settlement**: <1 second transaction finality via Avalanche Snowball.
--   **Deterministic Checkpointing**: Blocks produced exactly every 10 minutes via TSDC.
--   **Leaderless Finality**: No leaders involved in transaction confirmation; purely peer-to-peer.
--   **No BFT Stalls**: No global committees, no voting rounds, no halting.
--   **Pre-Block Finality**: State becomes immutable minutes before being written to a block.
--   **Stake-Weighted Sampling**: Sybil resistance provided by stake-weighted peer gossip.
+> **Terminology note:** **AVS** means **Active Validator Set** (eligible active masternodes). It is purely a protocol term.
 
 ---
 
-## Protocol Architecture
+## 2. Design Goals and Non‑Goals
 
-### System Components
+### 2.1 Goals
+1. **Fast settlement:** typical confirmation < 1s under healthy network conditions.
+2. **Leaderless transaction finality:** no global committee rounds for transaction acceptance.
+3. **Sybil resistance:** sampling influence proportional to stake weight.
+4. **Objective verification:** third parties can verify that a transaction reached finality using a compact proof (VFP).
+5. **Deterministic checkpoint schedule:** blocks every 600s aligned to wall clock.
+
+### 2.2 Non‑Goals
+- Deterministic BFT finality for transaction acceptance (TIME Coin uses probabilistic consensus + proofs).
+- A single globally agreed mempool set at all times.
+- “Blocks finalize transactions”; blocks only archive and distribute rewards.
+
+---
+
+## 3. System Architecture
+
+Two time scales:
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                   TIME Coin Node                          │
-├────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐ │
-│  │  Blockchain  │  │ UTXO Manager │  │ Consensus Engine │ │
-│  │   (Chain)    │◄─┤ (Lock/Unlock)│◄─┤ (TSDC+Avalanche) │ │
-│  └──────────────┘  └──────────────┘  └──────────────────┘ │
-│         ▲                 ▲                    ▲            │
-│         │                 │                    │            │
-│  ┌──────┴─────────────────┴────────────────────┴─────────┐ │
-│  │            P2P Network Layer                         │ │
-│  └──────────────────────────────────────────────────────┘ │
-│         ▲                                         ▲        │
-│         │                                         │        │
-│  ┌──────┴──────┐                        ┌────────┴─────┐  │
-│  │ Masternode  │                        │  VRF Leader  │  │
-│  │  Registry   │                        │  Selector    │  │
-│  └─────────────┘                        └──────────────┘  │
-└────────────────────────────────────────────────────────────┘
+Real-time (Transactions)
+Tx broadcast -> Avalanche sampling -> Local Accepted -> VFP assembled -> Globally Finalized
+
+Epoch-time (Blocks)
+Every 10 minutes -> TSDC checkpoint block archives globally-finalized txs + rewards
 ```
 
 ---
 
-## Time-Scheduled Deterministic Consensus (TSDC)
+## 4. Cryptography and Identifiers
 
-TSDC provides deterministic, clock-aligned leader election and block production without stalls.
+### 4.1 Chain ID
+All signed objects MUST include `chain_id` to prevent replay across networks.
 
-### Slot-Based Architecture
+### 4.2 Hashes
+- `Hash256`: 32-byte cryptographic hash (e.g., SHA-256d or BLAKE3; MUST be fixed by implementation).
+- `txid = H(serialized_tx)`
 
-**Time is divided into slots:**
-- Slot duration: **5 seconds** (configurable)
-- Each slot has exactly **one designated leader**
-- Slots are numbered: S₀, S₁, S₂, …
+### 4.3 Signatures
+- `Ed25519` signatures for node identity, heartbeats, attestations, and finality votes.
 
-**Formula:** `current_slot = ⌊current_time / 5⌋`
+### 4.4 VRF
+- VRF scheme MUST provide `(vrf_output, vrf_proof)` verifiable under a public key.
+- VRF input MUST bind to `prev_block_hash || slot_time || chain_id`.
 
-### Leader Selection via VRF
+---
 
-**Deterministic Leader:** For slot Sₖ:
-```
-L(Sₖ) = argmin(VRF(R || Sₖ, vᵢ.vrf_key)) for all validators vᵢ
-```
+## 5. Masternodes, Weight, and Active Validator Set (AVS)
+
+### 5.1 Masternode Identity
+A masternode has:
+- `mn_id` (derived from pubkey)
+- `pubkey`
+- `weight w` (tier-derived)
+- `vrf_pubkey` (may be same key)
+
+### 5.2 Tier Weights
+| Tier | Collateral (TIME) | Weight `w` |
+|------|-------------------|------------|
+| Free | 0 | 1 |
+| Bronze | 1,000 | 10 |
+| Silver | 10,000 | 100 |
+| Gold | 100,000 | 1,000 |
+
+### 5.3 Collateral Enforcement (MUST CHOOSE ONE)
+1. **On-chain staking UTXO (RECOMMENDED):** stake locked by a staking script; weight derived from locked amount and tier mapping.
+2. **Registry authority:** external registry signs membership updates (not trustless).
+
+This spec assumes **on-chain staking UTXO** unless explicitly configured otherwise.
+
+### 5.4 Active Validator Set (AVS)
+Only masternodes in the **AVS** may be:
+- sampled for Avalanche queries
+- counted for VFP weight thresholds
+- eligible to produce/compete for TSDC checkpoint blocks
+
+A masternode is **AVS-active** if:
+- It has a valid `SignedHeartbeat` within `HEARTBEAT_TTL` (default 180s), AND
+- That heartbeat has ≥ `WITNESS_MIN` attestations (default 3) from distinct AVS-active witnesses.
+
+Nodes MUST maintain and gossip AVS state.
+
+### 5.5 Stake-weighted sampling distribution
+Sampling MUST be stake-weighted over AVS:
+`P(i) = w_i / Σ_{j∈AVS} w_j`
+
+Sampling SHOULD be without replacement per poll.
+
+---
+
+## 6. UTXO Model and Transaction Validity
+
+### 6.1 UTXO States (per outpoint)
+- `Unspent`
+- `Locked(txid)` (local reservation)
+- `Spent(txid)` (by Globally Finalized tx)
+- `Archived(txid, height)` (spent + checkpointed)
+
+### 6.2 Transaction Validity Preconditions
+A node MUST treat a Tx as **invalid** (and vote `Invalid`) if:
+1. Syntax/format invalid
+2. Signature/script invalid
+3. Any input outpoint is unknown or not `Unspent` locally (or known `Spent/Archived`)
+4. Fee < `MIN_FEE`
+5. Fails policy limits (size, etc., if enabled)
+
+### 6.3 Conflict Sets
+For each input outpoint `o`, define a conflict set `C(o)` containing all txids spending `o`.
+
+Only one txid per outpoint may be Globally Finalized.
+
+---
+
+## 7. Avalanche Snowball Finality
+
+TIME Coin uses stake-weighted Snowball-style repeated sampling. The protocol is defined on **conflict sets** (double spends), while non-conflicting transactions converge trivially.
+
+### 7.1 Parameters
+- `k`: sample size (default 20)
+- `α`: successful poll threshold (default 14)
+- `β_local`: local acceptance threshold (default 20 consecutive successful polls)
+- `POLL_TIMEOUT`: default 200ms
+- `MAX_TXS_PER_QUERY`: default 64
+
+### 7.2 Responder Rule (Voting)
+On receiving a query for txid `X`, the responder returns `VoteResponse`:
+
+- `Valid` if `X` is locally valid AND responder currently prefers `X` for all its input conflict sets.
+- `Invalid` if `X` is locally invalid OR responder prefers a conflicting tx for any input.
+- `Unknown` if responder cannot evaluate (missing Tx data) or Tx not known.
+
+Responder MUST NOT return `Valid` for two conflicting txs for the same outpoint.
+
+### 7.3 Local Snowball State (per txid)
+Each node maintains:
+- `status[X] ∈ {Seen, Sampling, LocallyAccepted, GloballyFinalized, Rejected, Archived}`
+- `confidence[X]` (consecutive successful polls)
+- `counter[X]` (cumulative successful polls; RECOMMENDED)
+- Per outpoint preference `preferred_txid[o]`
+
+Tie-breakers MUST be deterministic (RECOMMENDED: lowest `txid` wins ties).
+
+### 7.4 Polling Loop (per txid)
+For txid `X` in `Sampling`:
+
+1. Select `k` masternodes from the AVS (stake-weighted).
+2. Send `SampleQuery` including `X` (batched allowed).
+3. Collect responses until timeout.
+4. Let `v = count(Valid votes for X)`.
+5. If `v ≥ α`:
+   - `counter[X] += 1`
+   - `confidence[X] += 1`
+   - Update `preferred_txid[o]` for each input outpoint `o` using `argmax(counter[t])` among known conflicts.
+6. Else:
+   - `confidence[X] = 0`
+
+### 7.5 Local Acceptance
+A node MUST set `status[X] = LocallyAccepted` if:
+- `confidence[X] ≥ β_local`, AND
+- `preferred_txid[o] == X` for all inputs.
+
+When a node locally accepts `X`, it MUST mark all conflicting txs for any input outpoint as `Rejected` locally.
+
+> **Wallet UX:** “Confirmed” MAY correspond to `LocallyAccepted` for sub‑second UX.  
+> **Protocol/objective finality:** requires VFP (`GloballyFinalized`).
+
+---
+
+## 8. Verifiable Finality Proofs (VFP)
+
+VFP turns local acceptance into an objectively verifiable proof that can be:
+- gossiped
+- stored
+- included (directly or by hash) in checkpoint blocks
+- validated by any node without replaying sampling history
+
+### 8.1 Finality Vote
+A **FinalityVote** is a signed statement:
+
+`FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, voter_mn_id, voter_weight, signature }`
 
 Where:
-- `R` = Epoch randomness (derived from previous finalized block hash)
-- `||` = Concatenation
-- `VRF()` = Verifiable Random Function (ed25519-based)
-- Ties broken by validator ID
+- `tx_hash_commitment = H(canonical_tx_bytes)` (canonical serialization MUST be specified)
+- `slot_index` is the slot when the vote is issued (prevents indefinite replay)
 
-**Guarantee:** Every slot has exactly one deterministic leader, known in advance.
+Signature covers all fields.
 
-### Block Production in Slot Sₖ
+**Eligibility:** A vote counts only if the voter is AVS-active in the referenced `slot_index` (see §8.4).
 
-1. **Leader L(Sₖ) forms block Bₖ:**
-   - `parent_hash` = chain_head (or last_finalized_block)
-   - `slot` = Sₖ
-   - `txs` = mempool entries (up to max size)
-   - `vrf_proof` = VRF(R || Sₖ, leader_vrf_key)
-   - `timestamp` = current_time
+### 8.2 VFP Definition
+A **VFP** for transaction `X` is:
 
-2. **Leader broadcasts PREPARE(Bₖ, vrf_proof)**
+`VFP(X) = { tx, slot_index, votes[] }`
 
-3. **Validators verify and sample:**
-   - Verify VRF proof
-   - Verify block structure
-   - If valid: broadcast PRECOMMIT(Bₖ, SIGNᵢ(Bₖ))
+Validity conditions:
+1. All `votes[]` signatures verify.
+2. All votes agree on `(chain_id, txid, tx_hash_commitment, slot_index)`.
+3. Voters are distinct (by `voter_mn_id`).
+4. Each voter is a member of the **AVS snapshot** for that `slot_index`.
+5. Sum of distinct voter weights `Σ w_i ≥ Q_finality(slot_index)`.
 
-### Handling Missing Leaders
+### 8.3 Finality threshold
+Let `total_AVS_weight(slot_index)` be the total weight of the AVS at that slot.
 
-**If no PREPARE(Bₖ) within slot duration:**
-- Slot Sₖ is treated as empty
-- Leader for S(ₖ₊₁) may set `parent_hash = last_valid_block`
-- Sets `prev_slot_reference = NULL` to indicate gap
+Default:
+- `Q_finality(slot_index) = 0.67 * total_AVS_weight(slot_index)` (rounded up)
 
-**Result:** Consensus continues without stall; forks resolve via finality.
+The network MUST use a single, agreed rounding rule.
 
----
+### 8.4 AVS snapshots
+Nodes MUST retain **AVS snapshots** by slot for at least `ASS_SNAPSHOT_RETENTION` slots (rename retained for historical compatibility; see defaults).
 
-## Avalanche Instant Finality
+An AVS snapshot MUST include:
+- member `mn_id`
+- `pubkey`
+- `weight`
+- (optional) `vrf_pubkey`
 
-Avalanche provides sub-second finality through weighted-majority sampling, replacing multi-round BFT voting.
+### 8.5 Assembling a VFP (How nodes obtain votes)
+Any node MAY request signed votes from peers. Recommended flow:
+- During normal `SampleQuery`, responders SHOULD include a `FinalityVote` when responding `Valid` (if requested).
+- The initiator accumulates unique votes over time until the threshold is met.
 
-### Avalanche Snowball Algorithm
+### 8.6 Global Finalization Rule
+A node MUST set `status[X] = GloballyFinalized` when it has a valid `VFP(X)`.
 
-Each validator runs a **Snowball instance** for each proposed block:
+A node MUST reject any conflicting tx `Y` spending any same outpoint once `X` is `GloballyFinalized`.
 
-```
-State Variables:
-  preference ∈ {Block_A, Block_B, …}  // Current preferred block
-  confidence : Integer                  // Finality counter
-  k : Integer                          // Sample size (default: 8)
-  β : Integer                          // Finality threshold (default: 20)
-```
-
-### Update Rule (Each Round)
-
-1. **Sample k peers** (stake-weighted): 
-   - Probability(selecting validator vᵢ) ∝ vᵢ.stake
-
-2. **Query sampled peers:** "What's your preference for this block?"
-
-3. **Count responses:**
-   - count_yes = peers preferring this block
-   - count_no = peers preferring other blocks
-
-4. **Update decision:**
-   - If count_yes > count_no AND count_yes > k/2:
-     - confidence += 1
-     - If confidence ≥ β: **Block is finalized**
-   - Else if count_no > count_yes:
-     - preference = other block
-     - confidence = 0
-
-5. **Repeat until finality or preference stabilizes**
-
-### Key Properties
-
-| Property | Value |
-|----------|-------|
-| Expected finality time | ~300ms for n=100 validators |
-| Communication per block | O(k log n) messages |
-| Safety threshold | >50% honest stake |
-| Liveness threshold | >50% honest stake + connectivity |
-| Byzantine resilience | <33% malicious validators |
-
-### Avalanche vs. Traditional BFT
-
-| Aspect | PBFT/BFT | Avalanche |
-|--------|----------|-----------|
-| Rounds needed | O(log n) | O(log log n) |
-| Finality time | 3-5 seconds | <1 second |
-| Communication | O(n²) | O(k log n) |
-| Scalability | ~100 validators | 1000+ validators |
-| Leader dependency | Critical | Low (sampling-based) |
+### 8.7 Catastrophic conflict
+If two conflicting transactions both obtain valid VFPs, the network’s safety assumptions have been violated. Clients SHOULD halt automatic finalization and surface an emergency condition. (Slashing/recovery is out of scope unless separately specified.)
 
 ---
 
-## Hybrid Integration: TSDC + Avalanche
+## 9. Time-Scheduled Deterministic Consensus (TSDC) Checkpoint Blocks (Archival Chain)
 
-### Consensus Flow
+Checkpoint blocks exist to:
+- checkpoint history
+- provide a reward schedule
+- compactly summarize finalized transactions
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Slot Sₖ Begins (Time t = k * 5 seconds)                    │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-        ┌──────────────▼──────────────┐
-        │ VRF Leader Selection        │
-        │ L(Sₖ) = argmin(VRF(...))   │
-        └──────────────┬──────────────┘
-                       │
-        ┌──────────────▼──────────────┐
-        │ Leader broadcasts PREPARE   │
-        │ Block Bₖ created            │
-        └──────────────┬──────────────┘
-                       │
-        ┌──────────────▼──────────────┐
-        │ Validators receive block    │
-        │ Verify structure & VRF      │
-        └──────────────┬──────────────┘
-                       │
-        ┌──────────────▼──────────────┐
-        │ Avalanche Sampling Begins   │
-        │ Query k sampled validators  │
-        └──────────────┬──────────────┘
-                       │
-           ┌───────────┴───────────┐
-           │                       │
-    ┌──────▼──────┐        ┌─────▼──────┐
-    │ confidence  │        │ confidence │
-    │ reaches β   │        │ < β after  │
-    │             │        │ timeout    │
-    └──────┬──────┘        └─────┬──────┘
-           │                     │
-    ┌──────▼──────┐        ┌─────▼──────┐
-    │ Block       │        │ Reject or  │
-    │ Finalized   │        │ Retry      │
-    │ <300ms      │        │ Next slot  │
-    └─────────────┘        └────────────┘
-```
+### 9.1 Slot Timing
+- `BLOCK_INTERVAL = 600s`
+- `slot_time = slot_index * 600`
 
-### Timeline
+### 9.2 Sortition (Deterministic Candidate Ranking)
+For each masternode `i` in the AVS at `slot_index`:
+- `score_i = VRF(prev_block_hash || slot_time || chain_id, sk_i)`
 
-- **t=0ms**: Slot begins; leader determined by VRF
-- **t=0-100ms**: Leader broadcasts block; validators sample
-- **t=100-300ms**: Avalanche rounds (typically 3-4 rounds)
-- **t=300ms**: Block finality reached (~300ms total)
-- **t=5000ms**: Next slot begins
+Lower `score_i` is better.
 
-### State Synchronization
+### 9.3 Canonical block selection (no timeout proofs)
+Any AVS-active masternode MAY publish a candidate block for the slot.
 
-1. **UTXO locks** are acquired when block receives >50% initial sampling
-2. **UTXO commits** happen when block reaches 2/3 stake finality
-3. **Rollback** occurs if block fails Avalanche (locks are released)
+Nodes select the canonical block for a slot by:
+1. Validity first
+2. Lowest `vrf_output` second
+3. Tie-breaker: lowest block hash
 
----
+This eliminates unverifiable “leader timeout” behavior.
 
-## UTXO State Machine
+### 9.4 Block Content
+A block MUST contain:
+- Header:
+  - `height`
+  - `slot_index`, `slot_time`
+  - `prev_block_hash`
+  - `producer_id`
+  - `vrf_output`, `vrf_proof`
+  - `finalized_root` (Merkle root over entries; REQUIRED)
+- Body:
+  - `entries[]` sorted lexicographically by `txid`
 
-TIME Coin implements a sophisticated UTXO lifecycle with lock/unlock/commit semantics for atomic safety.
+Each entry:
+`FinalizedEntry = { txid, vfp_hash }`
 
-### State Diagram
+Blocks MAY optionally include full `VFP` payloads; otherwise nodes fetch VFPs by hash.
 
-```
-    ┌─────────┐
-    │ Unspent │ ◄─── Initial state
-    └────┬────┘
-         │ lock_utxo(outpoint, txid)
-         ▼
-    ┌─────────┐
-    │  Locked │ ◄─── Prevents double-spend
-    └────┬────┘
-         │ Block enters Avalanche sampling
-         ▼
-┌──────────────┐
-│    Voting    │ ◄─── Sampled by other validators
-└──────┬───────┘
-       │
-       ├─── confidence ≥ β ────┐
-       │                       ▼
-       │              ┌────────────────┐
-       │              │   Finalized    │ ◄─── Instant finality!
-       │              │ commit_spend() │
-       │              └────────────────┘
-       │
-       └─── timeout ────► unlock_utxo() ────► Unspent
-```
+### 9.5 Block validity
+A node MUST accept a block only if:
+1. `prev_block_hash` matches the current canonical chain tip.
+2. VRF proof verifies and binds to `(prev_block_hash, slot_time, chain_id)`.
+3. `entries[]` are sorted and unique by txid.
+4. For every entry, the referenced VFP is available and valid OR retrievable (implementation may mark as “pending” until fetched).
+5. No two included transactions conflict (no outpoint is spent twice).
+6. All included transactions are `GloballyFinalized` by VFP and pass base validity checks.
 
-### State Transitions
-
-| Transition | Function | Condition |
-|-----------|----------|-----------|
-| Unspent → Locked | `lock_utxo()` | UTXO exists in storage |
-| Locked → Voting | Automatic | Block enters Avalanche |
-| Voting → Finalized | `commit_spend()` | confidence ≥ β |
-| Locked → Unspent | `unlock_utxo()` | Lock timeout OR tx rejected |
-| Finalized → [removed] | Storage cleanup | UTXO is spent; removed |
-
-### Implementation Details
-
-```rust
-#[derive(Debug, Clone)]
-pub enum UTXOState {
-    Unspent,
-    Locked {
-        txid: Hash256,
-        locked_at: i64,
-    },
-    Voted {
-        txid: Hash256,
-        votes_yes: usize,
-        votes_no: usize,
-    },
-    Finalized {
-        txid: Hash256,
-        block_height: u64,
-    },
-}
-
-pub struct UTXOStateManager {
-    storage: Arc<dyn UtxoStorage>,
-    utxo_states: DashMap<OutPoint, UTXOState>,
-}
-```
-
-### State Descriptions
-
-#### 1. Unspent
-- **Meaning**: UTXO is available for spending
-- **Conditions**: No active locks
-- **Transitions**: → Locked (when used as tx input)
-
-#### 2. Locked
-- **Meaning**: Reserved for a specific transaction
-- **Purpose**: Prevents double-spending at protocol level
-- **Metadata**: Locked by transaction ID
-- **Transitions**: 
-  - → SpentPending (tx broadcast)
-  - → Unspent (timeout/failure)
-
-#### 3. SpentPending
-- **Meaning**: Transaction broadcast, awaiting consensus
-- **Metadata**: Vote count, masternode votes
-- **Duration**: Typically 1-3 seconds
-- **Transitions**:
-  - → SpentFinalized (≥ 2/3 votes)
-  - → Unspent (< 2/3 votes or rejection)
-
-#### 4. SpentFinalized
-- **Meaning**: **Transaction irreversible** - instant finality achieved
-- **Guarantees**: 
-  - Cannot be double-spent
-  - Guaranteed inclusion in next block
-  - Full settlement complete
-- **Transitions**: → Confirmed (block inclusion)
-
-#### 5. Confirmed
-- **Meaning**: Included in blockchain block
-- **Purpose**: Permanent historical record
-- **No further transitions**: Final state
-
-### Atomic State Transitions
-
-All state changes are:
-- **Atomic**: Succeed completely or fail completely
-- **Broadcast**: All masternodes notified in real-time
-- **Synchronized**: Network maintains consistent state
-- **Auditable**: Full state history available
+### 9.6 Archival transition
+Upon block acceptance:
+- Each included tx becomes `Archived`.
+- UTXO updates are applied from the transaction content.
+- Rewards are applied according to §10.
 
 ---
 
-## Instant Finality
+## 10. Rewards and Fees
 
-### Transaction Lifecycle
+### 10.1 Reward event
+Rewards are created per checkpoint block.
 
-```
-Step 1: Submit Transaction
-    │
-    ├─ Validate inputs exist
-    ├─ Verify sufficient balance
-    └─ Lock input UTXOs (state: Locked)
-    │
-    ▼
-Step 2: Broadcast to Network
-    │
-    ├─ Send to all masternodes
-    ├─ UTXOs → SpentPending
-    └─ Vote request initiated
-    │
-    ▼
-Step 3: Masternode Voting (Parallel)
-    │
-    ├─ Masternode 1: Validate + Vote
-    ├─ Masternode 2: Validate + Vote
-    ├─ Masternode 3: Validate + Vote
-    └─ ... (all masternodes vote)
-    │
-    ▼
-Step 4: Consensus Decision
-    │
-    ├─ Count votes
-    ├─ Check quorum: need ⌈2n/3⌉ votes
-    │
-    ├─ IF votes ≥ quorum:
-    │   ├─ Input UTXOs → SpentFinalized
-    │   ├─ Create output UTXOs (Unspent)
-    │   └─ ✅ INSTANT FINALITY ACHIEVED
-    │
-    └─ IF votes < quorum:
-        ├─ Unlock input UTXOs → Unspent
-        └─ ❌ Transaction rejected
-    │
-    ▼
-Step 5: Block Inclusion (every 10 min)
-    │
-    ├─ Collect all finalized transactions
-    ├─ Build deterministic block
-    └─ UTXOs → Confirmed
-```
+### 10.2 Base reward
+`R = 100 * (1 + ln(N))`
 
-### Finality Guarantees
+`N` MUST be defined as one of:
+- `N = |AVS|` at the block’s `slot_index` (RECOMMENDED), or
+- total registered masternodes
 
-Once a transaction reaches **SpentFinalized**:
+All nodes MUST use the same definition.
 
-1. **Irreversible**: Cannot be rolled back
-2. **Guaranteed**: Will be in the next block
-3. **Settled**: Funds are fully transferred
-4. **Spendable**: New outputs can be spent immediately
+### 10.3 Fee accounting
+Fees are the sum of included archived transactions’ fees for the slot.
 
-### Performance
+### 10.4 Payout split
+- Producer: 10% of `(R + fees)`
+- AVS masternodes: 90% of `(R + fees)` distributed proportional to weight `w`
 
-- **Finality Time**: < 3 seconds (typically 1-2 seconds)
-- **Throughput**: Network bandwidth limited, not consensus limited
-- **Scalability**: O(n) with masternode count
-- **Latency**: Sub-second with 100 masternodes
+Payout MUST be represented as one or more on-chain reward transactions included in the checkpoint block (coinbase-style).
 
 ---
 
-## BFT Consensus
+## 11. Network Protocol
 
-TIME Coin uses Byzantine Fault Tolerant consensus adapted for UTXO-based transactions.
-
-### Quorum Requirements
-
-```
-Required Votes = ⌈2n/3⌉  (ceiling of 2/3 of total masternodes)
-
-Examples:
-- 3 masternodes: need 2 votes (67%)
-- 10 masternodes: need 7 votes (70%)
-- 100 masternodes: need 67 votes (67%)
-- 1000 masternodes: need 667 votes (67%)
-```
-
-### Voting Process
-
-#### 1. Transaction Validation
-
-Each masternode independently validates:
-- ✅ All input UTXOs exist
-- ✅ Input UTXOs are in correct state (Unspent or Locked)
-- ✅ Sum of inputs ≥ sum of outputs + fees
-- ✅ Signatures are valid (if signing enabled)
-- ✅ No double-spending attempts
-
-#### 2. Vote Casting
-
-```rust
-pub struct Vote {
-    pub txid: Hash256,
-    pub voter: String,          // Masternode address
-    pub approve: bool,           // true = approve, false = reject
-    pub timestamp: i64,
-    pub signature: Signature,    // Ed25519 signature
-}
-```
-
-#### 3. Vote Aggregation
-
-- Votes collected in real-time
-- Each masternode votes once per transaction
-- Votes are broadcast to all peers
-- System counts votes continuously
-
-#### 4. Consensus Determination
-
-```rust
-if approved_votes >= quorum {
-    finalize_transaction();  // Instant finality
-} else if total_votes >= total_masternodes {
-    reject_transaction();    // Not enough support
-} else {
-    continue_waiting();      // More votes needed
-}
-```
-
-### Byzantine Fault Tolerance
-
-- **Tolerance**: Up to ⌊n/3⌋ malicious masternodes
-- **Safety**: Cannot finalize invalid transactions
-- **Liveness**: Progress guaranteed with > 2/3 honest nodes
-- **Consistency**: All honest nodes agree on finalized state
-
-### Attack Resistance
-
-#### Double-Spend Attack
-**Attack**: Try to spend same UTXO twice  
-**Defense**: UTXO locking at protocol level, atomic state transitions  
-**Result**: Second transaction fails validation (UTXO already locked)
-
-#### Censorship Attack
-**Attack**: Malicious masternodes refuse to vote  
-**Defense**: Only need 2/3 honest nodes  
-**Result**: Transaction proceeds with honest votes
-
-#### Network Partition
-**Attack**: Split network into isolated groups  
-**Defense**: Time synchronization, gossip protocol  
-**Result**: Smaller partition cannot reach quorum, larger partition continues
-
----
-
-## Masternode System
-
-### Tier Structure
-
-| Tier | Collateral | Block Rewards | Governance | Weight | Governance Voting |
-|------|-----------|---------------|------------|--------|-------------------|
-| **Free** | 0 TIME | ✅ Yes | ✅ Yes | 100 | ❌ No |
-| **Bronze** | 1,000 TIME | ✅ Yes | ✅ Yes | 1,000 | ✅ Yes |
-| **Silver** | 10,000 TIME | ✅ Yes | ✅ Yes | 10,000 | ✅ Yes |
-| **Gold** | 100,000 TIME | ✅ Yes | ✅ Yes | 100,000 | ✅ Yes |
-
-### Free Tier Philosophy
-
-The **Free Tier** enables:
-- **Zero-barrier Entry**: Anyone can run a masternode
-- **Network Decentralization**: More nodes = more security
-- **Community Participation**: Contribute without capital
-- **BFT Consensus**: Full voting on transactions
-- **Economic Rewards**: Earn TIME for securing network
-
-**Limitation**: No governance voting to prevent Sybil attacks
-
-### Masternode Requirements
-
-#### Minimum Requirements (All Tiers)
-- **CPU**: 1 core
-- **RAM**: 2 GB
-- **Disk**: 10 GB SSD
-- **Network**: 100 Mbps, <100ms latency
-- **Uptime**: >95% recommended
-
-#### Setup Process
-
-1. **Install Node**:
-```bash
-cargo build --release
-```
-
-2. **Configure**:
-```toml
-[masternode]
-enabled = true
-tier = "free"  # or bronze/silver/gold
-wallet_address = "TIME1your_wallet_address_here"
-```
-
-3. **Start**:
-```bash
-./target/release/timed
-```
-
-4. **Verify**:
-```bash
-./target/release/time-cli masternode status
-```
-
-### Masternode Duties
-
-1. **Transaction Validation**: Vote on all transactions
-2. **Heartbeat Broadcasting**: Send signed heartbeat every 60 seconds
-3. **Witness Attestation**: Attest to other masternodes' heartbeats
-4. **Block Validation**: Verify deterministic blocks
-5. **Network Participation**: Maintain P2P connections
-6. **State Synchronization**: Keep UTXO set current
-
----
-
-## Heartbeat Attestation
-
-TIME Coin implements **peer-verified uptime** to prevent Sybil attacks and uptime fraud.
-
-### Problem Statement
-
-Traditional masternode systems allow self-reported uptime, enabling:
-- Fake nodes claiming historical uptime
-- Timestamp manipulation
-- Collusion to vouch for offline nodes
-- No cryptographic proof of availability
-
-### Solution: Cryptographic Attestation
-
-#### 1. Signed Heartbeats
-
-Every 60 seconds, each masternode broadcasts:
-
-```rust
-pub struct SignedHeartbeat {
-    pub masternode_address: String,
-    pub sequence_number: u64,        // Monotonically increasing
-    pub timestamp: i64,               // Unix timestamp
-    pub masternode_pubkey: VerifyingKey,  // Ed25519 public key
-    pub signature: Signature,         // Ed25519 signature
-}
-```
-
-**Security Properties**:
-- Non-forgeable (Ed25519 signatures)
-- Replay-resistant (sequence numbers)
-- Time-bound (3-minute validity window)
-- Self-verifying (any node can validate)
-
-#### 2. Witness Attestations
-
-When a masternode receives a heartbeat, it creates an attestation:
-
-```rust
-pub struct WitnessAttestation {
-    pub heartbeat_hash: [u8; 32],     // Hash of heartbeat
-    pub witness_address: String,
-    pub witness_pubkey: VerifyingKey,
-    pub witness_timestamp: i64,       // When witness saw it
-    pub signature: Signature,         // Witness signature
-}
-```
-
-#### 3. Verification Quorum
-
-A heartbeat is **verified** when:
-- ✅ Valid masternode signature
-- ✅ ≥ 3 independent witness attestations
-- ✅ All attestations valid
-- ✅ Timestamp within 3-minute window
-
-### Attack Resistance
-
-#### Sybil Attack
-**Attack**: Spin up fake nodes with claimed history  
-**Defense**: New nodes start at sequence 1, need 3+ real witnesses  
-**Result**: Cannot fake historical uptime
-
-#### Timestamp Manipulation
-**Attack**: Claim heartbeats from past/future  
-**Defense**: 3-minute validity window, monotonic sequences  
-**Result**: Old/future heartbeats rejected
-
-#### Collusion Attack
-**Attack**: Small group attests fake heartbeats  
-**Defense**: Need 3 witnesses, pseudo-random selection, public audit  
-**Result**: Expensive, easily detected
-
-#### Replay Attack
-**Attack**: Reuse old heartbeats  
-**Defense**: Strictly increasing sequence numbers  
-**Result**: Duplicates rejected
-
-### Cryptographic Primitives
-
-- **Signature Scheme**: Ed25519 (Curve25519)
-  - 128-bit security level
-  - 64-byte signatures, 32-byte keys
-  - ~60,000 signatures/sec verification
-- **Hash Function**: SHA-256
-- **Time Source**: NTP + consensus time
-
----
-
-## Block Production
-
-Blocks are produced **deterministically** every 10 minutes using clock-aligned timestamps.
-
-### Block Schedule
-
-```
-Block Height: 0,  1,  2,  3, ...
-Timestamp:    :00, :10, :20, :30, ... (minutes)
-
-Examples:
-Block 1: 2024-12-14 00:00:00 UTC
-Block 2: 2024-12-14 00:10:00 UTC
-Block 3: 2024-12-14 00:20:00 UTC
-```
-
-### Block Generation Algorithm
-
-```rust
-fn generate_block(height: u64, timestamp: i64) -> Block {
-    // 1. Get all finalized transactions
-    let transactions = get_finalized_transactions();
-    
-    // 2. Sort transactions by TXID (deterministic)
-    transactions.sort_by(|a, b| a.txid().cmp(&b.txid()));
-    
-    // 3. Calculate rewards
-    let rewards = calculate_rewards(
-        active_masternodes(),
-        base_reward + transaction_fees
-    );
-    
-    // 4. Build coinbase transaction
-    let coinbase = create_coinbase(height, rewards);
-    
-    // 5. Assemble block
-    let mut all_txs = vec![coinbase];
-    all_txs.extend(transactions);
-    
-    // 6. Calculate merkle root
-    let merkle_root = calculate_merkle_root(&all_txs);
-    
-    Block {
-        header: BlockHeader {
-            version: 1,
-            height,
-            previous_hash: get_block_hash(height - 1),
-            merkle_root,
-            timestamp,
-            block_reward: base_reward + fees,
-        },
-        transactions: all_txs,
-        masternode_rewards: rewards,
-    }
-}
-```
-
-### Deterministic Properties
-
-Every masternode produces **identical blocks** because:
-
-1. **Fixed Timestamp**: Clock-aligned to 10-minute intervals
-2. **Sorted Transactions**: Alphabetical by TXID
-3. **Sorted Masternodes**: Alphabetical by address
-4. **Deterministic Rewards**: Same calculation on all nodes
-5. **Merkle Root**: Calculated from sorted transactions
-
-### Block Validation
-
-```rust
-fn validate_block(block: &Block) -> bool {
-    // 1. Check timestamp alignment
-    if block.header.timestamp % 600 != 0 {
-        return false;
-    }
-    
-    // 2. Verify all transactions are finalized
-    for tx in &block.transactions[1..] {  // Skip coinbase
-        if !is_finalized(&tx.txid()) {
-            return false;
-        }
-    }
-    
-    // 3. Verify merkle root
-    if block.header.merkle_root != calculate_merkle_root(&block.transactions) {
-        return false;
-    }
-    
-    // 4. Verify reward distribution
-    if !verify_rewards(&block.masternode_rewards) {
-        return false;
-    }
-    
-    true
-}
-```
-
-### Fork Resolution
-
-If nodes generate different blocks (should never happen with correct implementation):
-
-1. Compare block hashes
-2. Query consensus from peers
-3. Adopt chain with most masternode agreement
-4. Rollback conflicting transactions
-5. Regenerate block
-
----
-
-## Reward Distribution
-
-### Base Block Reward (Logarithmic)
-
-```
-R = 100 × (1 + ln(n))
-
-Where:
-- R = Total block reward in TIME
-- n = Total active masternodes
-- ln = Natural logarithm
-```
-
-**Examples**:
-- 10 masternodes: ~330 TIME/block
-- 100 masternodes: ~560 TIME/block
-- 1,000 masternodes: ~790 TIME/block
-
-### Distribution Formula
-
-```
-Node Reward = (Total Block Reward × Node Weight) / Total Network Weight
-```
-
-### Weight Calculation
-
-```
-Free:   weight = 100
-Bronze: weight = 1,000
-Silver: weight = 10,000
-Gold:   weight = 100,000
-```
-
-### Example Distribution
-
-**Network**: 10 Free, 5 Bronze, 2 Silver, 1 Gold  
-**Block Reward**: 440 TIME
-
-```
-Total Weight = 10×100 + 5×1,000 + 2×10,000 + 1×100,000
-             = 1,000 + 5,000 + 20,000 + 100,000
-             = 126,000
-
-Free node:   (440 × 100) / 126,000 = 0.35 TIME
-Bronze node: (440 × 1,000) / 126,000 = 3.49 TIME
-Silver node: (440 × 10,000) / 126,000 = 34.92 TIME
-Gold node:   (440 × 100,000) / 126,000 = 349.21 TIME
-```
-
-### Special Case: Free Nodes Only
-
-If only Free tier masternodes exist, they share rewards equally (no weight penalty). This ensures network bootstrap viability.
-
-### Annual Returns
-
-Estimated APY (assuming 100% uptime, 100 masternodes):
-
-| Tier | Collateral | Est. Annual | Est. APY |
-|------|-----------|-------------|----------|
-| Free | 0 | Variable | N/A |
-| Bronze | 1,000 | ~183,000 | ~18,300% |
-| Silver | 10,000 | ~1,830,000 | ~18,300% |
-| Gold | 100,000 | ~18,300,000 | ~18,300% |
-
-*Note: Returns decrease as network grows and total supply increases*
-
----
-
-## Transaction Fees
-
-### Fee Structure
-
-- **Base Fee**: 0.1% of transaction amount
-- **Minimum**: 0.001 TIME (dust protection)
-- **Calculation**: `fee = inputs - outputs`
-
-### Examples
-
-| Amount | Fee (0.1%) |
-|--------|-----------|
-| 100 TIME | 0.1 TIME |
-| 1,000 TIME | 1.0 TIME |
-| 10,000 TIME | 10.0 TIME |
-
-### Fee Distribution
-
-All fees added to block reward and distributed proportionally by masternode weight.
-
-### Validation
-
-```rust
-let min_fee = outputs.sum() * 0.001;
-let actual_fee = inputs.sum() - outputs.sum();
-
-if actual_fee < min_fee {
-    return Err("Insufficient fee");
-}
-```
-
----
-
-## Network Protocol
-
-### Message Types
-
+### 11.1 Message Types (Wire)
 ```rust
 pub enum NetworkMessage {
-    // Handshake
-    Handshake { magic: [u8; 4], protocol_version: u32, network: String },
-    Ack { message_type: String },
-    
-    // Transactions
-    TransactionBroadcast(Transaction),
-    TransactionFinalized { txid: Hash256, votes: usize },
-    TransactionRejected { txid: Hash256, reason: String },
-    
+    // Tx propagation
+    TxBroadcast { tx: Transaction },
+
+    // Avalanche polling (batched)
+    SampleQuery {
+        chain_id: u32,
+        request_id: u64,
+        txids: Vec<Hash256>,
+        want_votes: bool, // request signed FinalityVotes for Valid responses
+    },
+    SampleResponse {
+        chain_id: u32,
+        request_id: u64,
+        responses: Vec<TxVoteBundle>,
+    },
+
+    // Finality proof gossip
+    VfpGossip { txid: Hash256, vfp: Vfp },
+
     // Blocks
-    BlockAnnouncement(Block),
-    GetBlockHeight,
-    BlockHeightResponse { height: u64 },
-    GetBlock { height: u64 },
-    BlockResponse(Option<Block>),
-    
-    // UTXO State
-    UTXOStateUpdate { outpoint: OutPoint, state: UTXOState },
-    GetUTXOState { outpoint: OutPoint },
-    UTXOStateResponse { outpoint: OutPoint, state: Option<UTXOState> },
-    
-    // Masternodes
-    MasternodeAnnouncement { address: String, reward_address: String, tier: MasternodeTier, public_key: VerifyingKey },
-    GetMasternodes,
-    MasternodesResponse(Vec<MasternodeAnnouncementData>),
-    
-    // Heartbeats
-    HeartbeatBroadcast(SignedHeartbeat),
-    HeartbeatAttestation(WitnessAttestation),
-    
-    // Peer Discovery
-    GetPeers,
-    PeersResponse(Vec<String>),
-    
-    // Consensus
-    Vote(Vote),
-    GetPendingTransactions,
-    PendingTransactionsResponse(Vec<Transaction>),
+    BlockBroadcast { block: Block },
+
+    // Liveness
+    Heartbeat { hb: SignedHeartbeat },
+    Attestation { att: WitnessAttestation },
+}
+
+pub struct TxVoteBundle {
+    pub txid: Hash256,
+    pub vote: VoteResponse, // Valid/Invalid/Unknown
+    pub finality_vote: Option<FinalityVote>, // present iff vote==Valid and want_votes==true
+}
+
+pub enum VoteResponse { Valid, Invalid, Unknown }
+```
+
+### 11.2 Anti-replay / validation
+All signed messages MUST include `chain_id` and a time/slot domain separator.
+
+Nodes SHOULD rate-limit:
+- polling requests per peer
+- VFP payload sizes
+- transaction relay
+
+---
+
+## 12. Mempool and Pooling Rules
+
+### 12.1 Pools
+Nodes maintain:
+- `SeenPool`: known but not sampling
+- `SamplingPool`: active in Snowball
+- `LocallyAcceptedPool`: fast-confirmed
+- `FinalizedPool`: has VFP (`GloballyFinalized`)
+- `ArchivedPool`: checkpointed
+
+### 12.2 Checkpoint inclusion eligibility
+Checkpoint blocks SHOULD include:
+- all `FinalizedPool` txs not yet archived,
+- subject to size limits.
+
+Blocks MUST NOT include `LocallyAccepted` txs lacking VFP.
+
+---
+
+## 13. Security Model
+
+### 13.1 Assumptions
+- A majority (by weight) of the AVS is honest (parameter-dependent).
+- Network connectivity allows representative sampling.
+- AVS membership/weights are correctly enforced (staking/registry + heartbeats + witnesses).
+
+### 13.2 Safety
+- `LocallyAccepted` is probabilistic (tuned by `k, α, β_local`).
+- `GloballyFinalized` is objective once a VFP with threshold weight is obtained.
+
+### 13.3 Liveness
+If honest weight dominates and the network is connected, honest transactions can gather VFP signatures and be checkpointed.
+
+---
+
+## 14. Configuration Defaults
+
+- `BLOCK_INTERVAL = 600s`
+- `AVALANCHE_K = 20`
+- `AVALANCHE_ALPHA = 14`
+- `AVALANCHE_BETA_LOCAL = 20`
+- `Q_FINALITY = 0.67 * total_AVS_weight(slot_index)`
+- `HEARTBEAT_PERIOD = 60s`
+- `HEARTBEAT_TTL = 180s`
+- `WITNESS_MIN = 3`
+- `POLL_TIMEOUT = 200ms`
+- `MAX_TXS_PER_QUERY = 64`
+- `MIN_FEE = 0.001 TIME`
+- `AVS_SNAPSHOT_RETENTION = 7 days worth of slots` (RECOMMENDED; exact number depends on `BLOCK_INTERVAL`)
+
+---
+
+## 15. Implementation Notes
+
+1. **AVS Snapshotting:** store AVS membership/weights by slot for verifying VFP voter eligibility.
+2. **Bandwidth:** VFPs can be large; prefer `vfp_hash` in blocks + fetch-on-demand.
+3. **Conflict handling:** treat conflicts per outpoint; when a VFP is accepted, prune all competing spends.
+4. **Archival chain reorg tolerance:** checkpoint blocks are archival; transaction finality comes from VFP. Reorgs should not affect finalized state unless you explicitly couple rewards/state to block order.
+5. **Canonical TX serialization:** MUST be specified precisely, since `tx_hash_commitment` is signed. (Do not reuse non-canonical encodings.)
+
+---
+
+## 16. Cryptographic Bindings (NORMATIVE ADDITIONS)
+
+### 16.1 Hash Function
+**REQUIREMENT:** This specification was written with algorithm-agnosticity. For production deployment, implementations MUST pin:
+
+```
+HASH_FUNCTION = BLAKE3-256
+Alternative for compatibility: SHA-256d (two rounds of SHA-256)
+```
+
+**Usage:** All cryptographic hashes (`txid`, `block_hash`, `tx_hash_commitment`, VRF input binding) MUST use the selected function consistently across all nodes.
+
+**Why BLAKE3 (not Ed25519)?**  
+BLAKE3 is a *hash function*, Ed25519 is a *signature scheme*. They serve different purposes:
+- Hash: Create deterministic content IDs (txid, block_hash)
+- Signature: Prove origin and integrity of messages
+
+See **CRYPTOGRAPHY_RATIONALE.md** for detailed explanation.
+
+### 16.2 VRF Scheme
+**REQUIREMENT:** VRF is used in §9 for TSDC sortition. The specification MUST pin a concrete VRF construction:
+
+```
+VRF_SCHEME = ECVRF-EDWARDS25519-SHA512-TAI (RFC 9381)
+Alternative: deterministic construction from Ed25519 private key
+```
+
+**Properties:**
+- Deterministic output given the same input (same privkey + input = same score)
+- Publicly verifiable proof from public key (anyone can verify)
+- Unpredictable to adversaries (only privkey holder knows score first)
+- Rankable (numeric output allows sorting; lowest wins)
+
+**Input binding (§9.2):**
+```
+vrf_input = H_BLAKE3(prev_block_hash || uint64_le(slot_time) || uint32_le(chain_id))
+(vrf_output, vrf_proof) = VRF_Prove(vrf_sk, vrf_input)
+```
+
+**Why VRF (not Ed25519 or BLAKE3 alone)?**  
+- Ed25519 signatures cannot be ranked (are just bytes, not sortition-ready)
+- BLAKE3 hashes are predictable to everyone (no privacy advantage from a privkey)
+- VRF combines: deterministic output + unpredictability + verifiability + rankability
+
+See **CRYPTOGRAPHY_RATIONALE.md** for detailed comparison.
+
+### 16.3 Canonical Transaction Serialization
+**REQUIREMENT:** Transaction serialization MUST be fully specified, as `tx_hash_commitment` (§8.1) is signed in finality votes.
+
+**Format:**
+```
+TxSerialization = {
+  version: u32_le,
+  input_count: varint,
+  inputs: TxInput[],
+  output_count: varint,
+  outputs: TxOutput[],
+  lock_time: u64_le,
+}
+
+TxInput = {
+  prev_txid: Hash256 (big-endian),
+  prev_index: u32_le,
+  script_length: varint,
+  script: bytes[],
+}
+
+TxOutput = {
+  value: u64_le,
+  script_length: varint,
+  script: bytes[],
+}
+
+varint = variable-length integer (little-endian, 1-9 bytes)
+```
+
+**Rules:**
+- Fields MUST be serialized in the above order.
+- No padding or alignment bytes.
+- Arrays ordered as specified; no reordering.
+- Hash computed as `txid = BLAKE3(canonical_bytes)`.
+
+---
+
+## 17. Transaction and Staking UTXO Details
+
+### 17.1 Transaction Format
+**Wire format:** See §16.3. This section elaborates on script semantics.
+
+### 17.2 Staking UTXO Script System (NORMATIVE)
+§5.3 references "on-chain staking UTXO" but requires detailed script semantics for implementation.
+
+**Staking Output Script (Lock Script):**
+```
+OP_STAKE <tier_id: u8> <pubkey: 33 bytes> <unlock_height: u32> <op_unlock: 1 byte>
+```
+
+**Semantics:**
+- `tier_id`: maps to tier weights (§5.2)
+- `pubkey`: node's Ed25519 public key (masternode identity)
+- `unlock_height`: earliest checkpoint block height at which stake can be withdrawn
+- `op_unlock`: control byte for future extension
+
+**Unlock/Withdrawal (Unlock Script):**
+```
+<signature: Ed25519Sig> <unlock_witness: bytes>
+```
+
+Must satisfy:
+1. Signature from `pubkey` is valid over the spending transaction
+2. Current checkpoint block height ≥ `unlock_height`
+
+**Stake Maturation:**
+- A staking output is **mature** once included in a checkpoint block.
+- A masternode may only join the AVS after stake maturity.
+- Weight corresponds to the locked amount's tier (§5.2).
+
+**Tier Changes:**
+- Require a new staking output to be created
+- Old stake must be withdrawn before new stake becomes active
+- AVS membership transitions enforce via heartbeat attestation grace period
+
+### 17.3 Regular Transaction Outputs (Non-Staking)
+```
+<value: u64_le> <lock_script>
+
+lock_script = {
+  OP_CHECKSIG <pubkey_hash: 20 bytes>
+  |
+  OP_MULTISIG <m: u8> <pubkey1> ... <pubkeyn> <n: u8>
+  |
+  OP_RETURN <data: bytes> (unspendable)
 }
 ```
 
-### Connection Flow
-
-```
-Client                                Server
-  │                                     │
-  ├──── TCP Connect ───────────────────►│
-  │                                     │
-  ├──── Handshake ─────────────────────►│
-  │                                     │
-  │◄─── Ack ─────────────────────────── │
-  │                                     │
-  ├──── MasternodeAnnouncement ────────►│  (if masternode)
-  │                                     │
-  │◄─── GetPeers ───────────────────────│
-  │                                     │
-  ├──── PeersResponse ─────────────────►│
-  │                                     │
-  │◄─── GetMasternodes ─────────────────│
-  │                                     │
-  ├──── MasternodesResponse ───────────►│
-  │                                     │
-  │      ... ongoing message exchange   │
-  │                                     │
-```
-
-### Peer Discovery
-
-1. Bootstrap from seed peers
-2. Request peer list: `GetPeers`
-3. Receive peer addresses: `PeersResponse`
-4. Connect to discovered peers
-5. Share peer list with others
-
-**Result**: Decentralized mesh network
-
-### Connection Management
-
-- **Max Peers**: Configurable (default 50)
-- **Duplicate Prevention**: Track both inbound and outbound
-- **Connection Limit**: Reject inbound if already have outbound
-- **Automatic Retry**: Exponential backoff for failed connections
-
 ---
 
-## Security Model
+## 18. Network Transport Layer (NORMATIVE)
 
-### Threat Model
-
-TIME Coin assumes:
-- **Network**: Partially synchronous
-- **Adversary**: Can control up to 33% of masternodes
-- **Byzantine Nodes**: May behave arbitrarily maliciously
-
-### Security Guarantees
-
-#### Safety
-- **No double-spends**: UTXO locking prevents protocol-level
-- **Finality**: Transactions cannot be reversed after 2/3 votes
-- **Consistency**: All honest nodes agree on finalized state
-
-#### Liveness
-- **Progress**: Network makes progress with >2/3 honest nodes
-- **Availability**: Services available even under attack
-- **Censorship Resistance**: Cannot prevent valid transactions
-
-#### Privacy
-- **Pseudonymous**: Addresses not linked to real identity
-- **UTXO Model**: Better privacy than account-based
-- **Network Privacy**: P2P gossip obscures origin
-
-### Attack Vectors & Mitigations
-
-#### 1. Double-Spend Attack
-**Mitigation**: UTXO locking, atomic state transitions, BFT consensus
-
-#### 2. Sybil Attack (Uptime Fraud)
-**Mitigation**: Peer-attested heartbeats, 3-witness quorum, Ed25519 signatures
-
-#### 3. 51% Attack
-**Mitigation**: Need 67% to compromise (BFT threshold), expensive collateral
-
-#### 4. Network Partition
-**Mitigation**: Time synchronization (NTP), gossip protocol, quorum requirements
-
-#### 5. Eclipse Attack
-**Mitigation**: Diverse peer connections, peer exchange protocol, seed nodes
-
-#### 6. DDoS Attack
-**Mitigation**: Rate limiting, IP blacklisting, connection limits
-
-#### 7. Replay Attack
-**Mitigation**: Sequence numbers, timestamps, nonce values
-
----
-
-## Implementation Details
-
-### Technology Stack
-
-- **Language**: Rust 2021 Edition
-- **Async Runtime**: Tokio
-- **Serialization**: Serde (JSON), Bincode (binary)
-- **Cryptography**: Ed25519-Dalek, SHA-256
-- **Storage**: Sled (embedded database)
-- **Networking**: TCP with async I/O
-
-### Performance Characteristics
-
-#### Measured Performance
-- **Transaction Processing**: ~1ms per tx
-- **BFT Consensus**: <10ms (3 masternodes)
-- **Block Generation**: <5ms
-- **Signature Verification**: ~16μs per signature
-- **Memory Usage**: ~50MB base + UTXO set
-
-#### Scalability
-- **Transaction Throughput**: 1,000+ TPS
-- **Consensus Latency**: <100ms (100 masternodes)
-- **UTXO Set**: O(n) growth with transactions
-- **Storage**: ~1MB per day
-
-### Code Structure
+### 18.1 Transport Protocol
+**REQUIREMENT:** Specify the transport medium for §11 messages.
 
 ```
-src/
-├── main.rs                    # Entry point
-├── types.rs                   # Core data structures
-├── utxo_manager.rs            # UTXO state machine
-├── consensus.rs               # BFT consensus engine
-├── blockchain.rs              # Blockchain storage
-├── masternode_registry.rs     # Masternode tracking
-├── heartbeat_attestation.rs   # Uptime verification
-├── peer_manager.rs            # Peer discovery
-├── wallet.rs                  # Wallet management
-├── address.rs                 # Address encoding
-├── bft_consensus.rs           # BFT coordination
-├── transaction_pool.rs        # Mempool management
-├── block/
-│   ├── types.rs              # Block structures
-│   ├── generator.rs          # Block production
-│   └── genesis.rs            # Genesis block
-├── network/
-│   ├── message.rs            # Protocol messages
-│   ├── server.rs             # P2P server
-│   ├── client.rs             # P2P client
-│   ├── connection_manager.rs # Connection tracking
-│   ├── rate_limiter.rs       # Rate limiting
-│   ├── blacklist.rs          # IP blacklist
-│   ├── tls.rs                # TLS encryption
-│   └── signed_message.rs     # Message signing
-├── rpc/
-│   ├── server.rs             # RPC server
-│   └── handler.rs            # RPC methods
-└── storage/
-    ├── mod.rs                # Storage trait
-    └── sled_storage.rs       # Sled implementation
+TRANSPORT_PROTOCOL = QUIC v1 (RFC 9000)
+Fallback: TCP with optional Noise Protocol handshake (Noise_NN_25519_ChaChaPoly_BLAKE2b)
 ```
 
-### Dependencies
+**Justification:**
+- QUIC provides connection multiplexing and modern TLS.
+- TCP fallback for compatibility; Noise adds encryption without TLS overhead.
 
-```toml
-tokio = { version = "1.38", features = ["full"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-ed25519-dalek = { version = "2.0", features = ["serde"] }
-sha2 = "0.10"
-sled = "0.34"
-chrono = "0.4"
+### 18.2 Message Framing
+All messages MUST be length-prefixed:
+
+```
+Frame = {
+  length: u32_be (network byte order, excludes this field),
+  message_type: u8,
+  payload: bytes[length - 1],
+}
+```
+
+**Max message size:** `4 MB`  
+**Connection limits:** `MAX_PEERS = 125` (inbound + outbound)
+
+### 18.3 Serialization Format
+**REQUIREMENT:** Pin message serialization.
+
+```
+SERIALIZATION_FORMAT = bincode v1.0 (or protobuf v3 for external APIs)
+- bincode: compact, deterministic, suitable for internal wire protocol
+- protobuf: forward-compatible, suitable for stable RPC APIs
+```
+
+Implementations MUST define a mapping from §11 Rust enums to wire bytes.
+
+### 18.4 Peer Discovery and Bootstrap
+**Bootstrap Process:**
+1. Node reads hardcoded bootstrap peer list (DNS seeds or IP addresses).
+2. Connects to bootstrap peers via QUIC/TCP.
+3. Requests `PeerListRequest` to discover additional peers.
+4. Maintains peer database; prefer geographic diversity and low latency.
+
+**DNS Seeds (REQUIRED for mainnet):**
+```
+seed1.timecoin.dev
+seed2.timecoin.dev
+seed3.timecoin.dev
+```
+
+(To be populated by network operators.)
+
+**Message Type:**
+```rust
+PeerListRequest { limit: u16 },
+PeerListResponse { peers: Vec<PeerInfo> },
+
+pub struct PeerInfo {
+    pub addr: IpAddr,
+    pub port: u16,
+    pub services: u32,  // bitmap: validator, full_node, light_client
+}
 ```
 
 ---
 
-## Conclusion
+## 19. Genesis Block and Initial State (NORMATIVE)
 
-TIME Coin Protocol represents a significant advancement in blockchain technology by combining:
+### 19.1 Genesis Block Format
+```rust
+pub struct GenesisBlock {
+    pub chain_id: u32,
+    pub timestamp: u64,  // Unix seconds
+    pub initial_utxos: Vec<UTXOEntry>,
+    pub initial_avs: Vec<InitialValidatorEntry>,
+}
 
-1. **Instant Finality**: Sub-3-second irreversible settlement
-2. **Zero-Barrier Entry**: Free tier masternodes
-3. **Cryptographic Security**: Peer-attested uptime, Ed25519 signatures
-4. **Deterministic Consensus**: Reproducible blocks, BFT voting
-5. **Fair Economics**: Proportional rewards, logarithmic supply
+pub struct UTXOEntry {
+    pub txid: Hash256,
+    pub output_index: u32,
+    pub value: u64,
+    pub script: bytes,
+}
 
-The protocol is production-ready and suitable for:
-- Point-of-sale payments
-- Real-time settlements
-- Micropayments
-- Financial applications
-- Decentralized applications (dApps)
+pub struct InitialValidatorEntry {
+    pub mn_id: Hash256,  // derived from pubkey hash
+    pub pubkey: [u8; 32],
+    pub vrf_pubkey: [u8; 32],
+    pub tier_weight: u16,
+}
+```
+
+### 19.2 Bootstrap Procedure (Chicken-Egg Problem)
+**Challenge:** AVS is required to validate, but AVS membership is on-chain.
+
+**Solution:**
+1. Genesis block specifies `initial_avs` set (pre-agreed by operators).
+2. Each initial validator MUST stake on-chain in the first few blocks.
+3. Once staking transaction is archived, stake becomes eligible.
+4. AVS membership is then enforced by heartbeat + witness attestation (§5.4).
+
+**Testnet Genesis (example):**
+```json
+{
+  "chain_id": 1,
+  "timestamp": 1703376000,
+  "initial_avs": [
+    {
+      "mn_id": "mn_1...",
+      "pubkey": "...",
+      "tier_weight": 100
+    }
+  ]
+}
+```
+
+### 19.3 Chain ID Assignment
+- **Mainnet:** `chain_id = 1`
+- **Testnet:** `chain_id = 2`
+- **Devnet:** `chain_id = 3`
+
+All signed objects (§8.1, §5.4) MUST include the correct `chain_id` to prevent replay attacks.
 
 ---
 
-## References
+## 20. Clock Synchronization Requirements (NORMATIVE)
 
-- Bitcoin UTXO Model: https://bitcoin.org/bitcoin.pdf
-- Tendermint BFT: https://tendermint.com/static/docs/tendermint.pdf
-- Ed25519 Signatures: https://ed25519.cr.yp.to/
-- Practical Byzantine Fault Tolerance: Castro & Liskov, OSDI 1999
+### 20.1 Wall-Clock Dependency
+TSDC (§9) relies on wall-clock time for slot alignment. Clocks MUST be synchronized to within a tight tolerance.
+
+```
+CLOCK_SYNC_REQUIREMENT = NTP v4 (RFC 5905) or GPS/PTP
+MAX_CLOCK_DRIFT = ±10 seconds (acceptable per node)
+```
+
+### 20.2 Slot Boundary Grace Period
+```
+SLOT_GRACE_PERIOD = 30 seconds
+- Blocks with slot_time in [current_slot - 30s, current_slot + 30s] are accepted
+- Prevents legitimate blocks from being rejected due to minor clock skew
+```
+
+### 20.3 Future Block Rejection
+```
+FUTURE_BLOCK_TOLERANCE = 5 seconds
+- Reject blocks with slot_time > now() + 5s
+- Defends against attacks by nodes with skewed clocks
+```
+
+### 20.4 NTP Configuration (Recommended)
+```
+# /etc/ntp.conf (Linux) or equivalent
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+server 2.pool.ntp.org iburst
+server 3.pool.ntp.org iburst
+
+# Ensure systemd-timesyncd or ntpd is running
+# Check: ntpq -p (or timedatectl status)
+```
 
 ---
 
-**For more information**:
-- GitHub: https://github.com/time-coin/timecoin
-- Documentation: https://github.com/time-coin/timecoin/tree/main/docs
-- Community: (Discord/Telegram links)
+## 21. Light Client and SPV Support (OPTIONAL)
+
+### 21.1 Light Client Model
+Clients that cannot run full validation (e.g., mobile wallets) MAY:
+- Verify transactions against **VFP** (§8) rather than replaying Snowball
+- Query trusted peers for AVS snapshots (§8.4)
+- Verify VFP signatures against AVS snapshot at transaction's `slot_index`
+
+### 21.2 Block Header Format for Light Clients
+```rust
+pub struct BlockHeader {
+    pub height: u64,
+    pub slot_index: u64,
+    pub slot_time: u64,
+    pub prev_block_hash: Hash256,
+    pub producer_id: Hash256,
+    pub vrf_output: [u8; 32],
+    pub vrf_proof: bytes,
+    pub finalized_root: Hash256,  // Merkle root of entries
+    pub timestamp_ms: u64,
+}
+```
+
+### 21.3 Merkle Proof for Entry Verification
+Light clients can verify that a specific `(txid, vfp_hash)` is included in a block:
+
+```rust
+pub struct EntryProof {
+    pub txid: Hash256,
+    pub vfp_hash: Hash256,
+    pub inclusion_path: Vec<Hash256>,  // Merkle path to finalized_root
+    pub leaf_index: u32,
+}
+
+// Verify: compute_merkle_root(txid || vfp_hash, inclusion_path, leaf_index) == block.finalized_root
+```
+
+### 21.4 Trust Model
+Light clients MUST:
+1. Trust the canonical **header chain** (validated via VRF sortition).
+2. Trust AVS snapshots returned by queried peers (or require multiple confirmations).
+3. Assume VFP signature verification is correct (standard Ed25519).
+
+---
+
+## 22. Error Recovery and Edge Cases (NORMATIVE)
+
+### 22.1 Conflicting VFPs
+**Issue (§8.7):** Two conflicting transactions both obtain valid VFPs.
+
+**Safety violation:** One or more AVS members produced signatures for conflicting transactions, or signatures were forged.
+
+**Recovery:**
+```
+ON_CONFLICTING_VFP:
+  1. Detect: compare (txid_A, vfp_A) vs (txid_B, vfp_B) for same input outpoint
+  2. Log: record both VFPs and all signatories as emergency event
+  3. Halt: stop automatic finalization for that outpoint
+  4. Surface: alert operators and light clients
+  5. (Future) Governance: require manual intervention or protocol upgrade
+     to slash dishonest validators if cryptographic proof of fraud exists
+```
+
+### 22.2 Network Partition Recovery
+**Scenario:** Network splits; subsets temporarily cannot reach each other.
+
+**Local behavior:**
+- Each partition continues local consensus and block production
+- Transactions finalize independently in each partition
+
+**Reconnection:**
+```
+ON_RECONNECTION:
+  1. Exchange block headers across partitions
+  2. Canonical chain = partition with highest cumulative AVS weight (sum of all blocks' producers' weight)
+  3. Minority partition rolls back uncommitted VFPs (§8.6)
+  4. Replay finalized transactions from majority onto minority's UTXO set
+```
+
+**Implementation note:** Requires persistent block storage and reorg logic.
+
+### 22.3 Orphan Transaction Handling
+**Scenario:** A transaction references an input UTXO that has not yet been checkpointed.
+
+**Behavior:**
+```
+ORPHAN_TXS:
+  1. Keep in separate orphan pool (max 1000 entries, by LRU)
+  2. When referenced UTXO is archived, retry orphan pool
+  3. If orphan not resolved after 72 hours, evict
+```
+
+### 22.4 AVS Membership Disputes
+**Scenario:** Node claims a masternode is AVS-active, but heartbeat attestations disagree.
+
+**Resolution:**
+```
+MEMBERSHIP_VERIFICATION:
+  - Require ≥ WITNESS_MIN (default 3) valid witness attestations
+  - If dispute, request attestations from multiple peers
+  - Canonical membership = result from peers with highest total weight
+  - Cache locally for 1 heartbeat period (60s)
+```
+
+---
+
+## 23. Address Format and Wallet Integration (NORMATIVE)
+
+### 23.1 Address Encoding
+```
+ADDRESS_FORMAT = bech32m (BIP 350)
+ADDRESS_PREFIX = "time1" (mainnet)
+ADDRESS_PREFIX = "timet" (testnet)
+```
+
+**Example address:** `time1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx`
+
+### 23.2 Address Generation
+```
+address = bech32m_encode("time1", RIPEMD160(SHA256(pubkey)))
+```
+
+### 23.3 Wallet RPC API (Recommended)
+Implementations SHOULD expose a JSON-RPC 2.0 interface:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "sendtransaction",
+  "params": { "tx": "<hex>" },
+  "id": 1
+}
+
+{
+  "jsonrpc": "2.0",
+  "method": "gettransaction",
+  "params": { "txid": "<hash>" },
+  "id": 2
+}
+
+{
+  "jsonrpc": "2.0",
+  "method": "getbalance",
+  "params": { "address": "<bech32>" },
+  "id": 3
+}
+```
+
+---
+
+## 24. Mempool Management and Fee Estimation (NORMATIVE)
+
+### 24.1 Mempool Size and Limits
+```
+MAX_MEMPOOL_SIZE = 300 MB
+MAX_ENTRIES_PER_BLOCK = 10,000
+MAX_BLOCK_SIZE = 2 MB
+EVICTION_POLICY = lowest_fee_rate_first
+```
+
+### 24.2 Transaction Expiry
+```
+TX_EXPIRY_PERIOD = 72 hours
+- Transactions not finalized within 72 hours are evicted from mempool
+- Prevents mempool bloat from stuck transactions
+```
+
+### 24.3 Fee Estimation
+Wallets should estimate fees based on:
+```
+fee_per_byte = median(fees_in_recent_finalized_txs / tx_size)
+// or dynamic algorithm observing mempool congestion
+```
+
+**Minimum fee:** `MIN_FEE = 0.001 TIME per transaction`
+
+---
+
+## 25. Economic Model (NORMATIVE)
+
+### 25.1 Initial Supply
+```
+INITIAL_SUPPLY = 0 (fair launch with no pre-mine)
+// Alternative: X TIME reserved for foundation (to be decided)
+```
+
+### 25.2 Reward Schedule
+```
+Per checkpoint block (§10):
+R = 100 * (1 + ln(N))
+where N = |AVS| at the block's slot_index
+```
+
+**Example rewards:**
+- N = 10: R ≈ 100 * (1 + 2.30) = 330 TIME
+- N = 100: R ≈ 100 * (1 + 4.61) = 561 TIME
+- N = 1000: R ≈ 100 * (1 + 6.91) = 791 TIME
+
+**Note:** Logarithmic growth has no hard cap. Consider governance discussion on whether a cap is desired.
+
+### 25.3 Reward Distribution
+- **Producer:** 10% of (R + tx_fees)
+- **AVS validators:** 90% of (R + tx_fees) proportional to weight
+
+See §10 for details.
+
+---
+
+## 26. Implementation Checklist
+
+Before shipping to mainnet, implementations MUST address:
+
+- [ ] Cryptographic primitives finalized (§16: BLAKE3, ECVRF, serialization)
+- [ ] Transaction format fully specified and tested (§17.3)
+- [ ] Staking script semantics implemented (§17.2)
+- [ ] Network transport, framing, and serialization defined (§18)
+- [ ] Peer discovery and bootstrap process working (§18.4)
+- [ ] Genesis block format and initialization tested (§19)
+- [ ] Clock synchronization verified (NTP running, offset < 10s) (§20)
+- [ ] Mempool eviction and fee estimation functioning (§24)
+- [ ] Conflicting VFP detection and logging in place (§22.1)
+- [ ] Network partition recovery tested (§22.2)
+- [ ] Address format and RPC API standardized (§23)
+- [ ] Reward calculation verified with test vectors (§25)
+- [ ] Block size and entry count limits enforced (§24.1)
+- [ ] Test vectors created for all cryptographic operations (§26)
+
+---
+
+## 27. Test Vectors
+
+All implementations MUST verify against the following test vectors (to be populated during implementation):
+
+```yaml
+test_vectors:
+  canonical_tx_serialization:
+    - input: { version: 1, inputs: [...], outputs: [...] }
+      output_hex: "..."
+      txid: "..."
+
+  vrf_output:
+    - sk: "..."
+      prev_block_hash: "..."
+      slot_time: 600
+      chain_id: 1
+      output: "..."
+      proof: "..."
+
+  finality_vote_signature:
+    - vote: { chain_id: 1, txid: "...", voter_mn_id: "..." }
+      signature: "..."
+      verification: true
+
+  vfp_threshold:
+    - avs_size: 10
+      avs_weight: 100
+      q_finality: 67
+      vote_weight: 68
+      valid: true
+
+  snowball_state_transitions:
+    - status: "Sampling"
+      confidence: 19
+      poll_result: "Valid"
+      expected_new_confidence: 20
+      expected_new_status: "LocallyAccepted"
+
+  block_validity:
+    - block_hash: "..."
+      vrf_proof_valid: true
+      entries_sorted: true
+      no_conflicts: true
+      valid: true
+```
+
+---
