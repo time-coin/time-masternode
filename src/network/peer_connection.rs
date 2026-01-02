@@ -781,6 +781,8 @@ impl PeerConnection {
                             start_height, end_height, our_height);
 
                         let mut first_mismatch_height = None;
+                        let mut matching_count = 0u64;
+                        let mut first_match_height: Option<u64> = None;
 
                         // Check blocks from the start to find where they match
                         for block in blocks.iter() {
@@ -789,14 +791,14 @@ impl PeerConnection {
                                     if our_block.hash() == block.hash() {
                                         // This block matches - potential common ancestor
                                         common_ancestor = Some(block.header.height);
-                                        info!(
-                                            "✅ Found matching block at height {}",
-                                            block.header.height
-                                        );
+                                        matching_count += 1;
+                                        if first_match_height.is_none() {
+                                            first_match_height = Some(block.header.height);
+                                        }
                                     } else if common_ancestor.is_some() {
                                         // We had a match earlier, but now this doesn't match
                                         // This means we have a fork after the common ancestor
-                                        debug!("🔀 Fork detected at height {}: our hash {} vs incoming {}",
+                                        info!("🔀 Fork detected at height {}: our hash {} vs incoming {}",
                                             block.header.height,
                                             hex::encode(&our_block.hash()[..8]),
                                             hex::encode(&block.hash()[..8]));
@@ -809,6 +811,24 @@ impl PeerConnection {
                                             first_mismatch_height = Some(block.header.height);
                                         }
                                     }
+                                }
+                            }
+                        }
+
+                        // Log a summary of matching blocks instead of each one
+                        if matching_count > 0 {
+                            if let (Some(first), Some(last)) = (first_match_height, common_ancestor)
+                            {
+                                if matching_count > 5 {
+                                    debug!(
+                                        "✅ Found {} matching blocks (heights {}-{})",
+                                        matching_count, first, last
+                                    );
+                                } else {
+                                    info!(
+                                        "✅ Found {} matching blocks (heights {}-{})",
+                                        matching_count, first, last
+                                    );
                                 }
                             }
                         }
