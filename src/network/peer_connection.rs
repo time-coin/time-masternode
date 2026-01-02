@@ -26,6 +26,43 @@ struct PingState {
     missed_pongs: u32,
 }
 
+/// Fork resolution attempt tracker
+#[derive(Debug, Clone)]
+struct ForkResolutionAttempt {
+    fork_height: u64,
+    attempt_count: u32,
+    last_attempt: std::time::Instant,
+    common_ancestor: Option<u64>,
+    peer_height: u64,
+}
+
+impl ForkResolutionAttempt {
+    fn new(fork_height: u64, peer_height: u64) -> Self {
+        Self {
+            fork_height,
+            attempt_count: 1,
+            last_attempt: std::time::Instant::now(),
+            common_ancestor: None,
+            peer_height,
+        }
+    }
+
+    fn is_same_fork(&self, fork_height: u64, peer_height: u64) -> bool {
+        // Consider it the same fork if heights are within 10 blocks
+        (self.fork_height as i64 - fork_height as i64).abs() <= 10
+            && (self.peer_height as i64 - peer_height as i64).abs() <= 10
+    }
+
+    fn should_give_up(&self) -> bool {
+        self.attempt_count >= 5
+    }
+
+    fn increment(&mut self) {
+        self.attempt_count += 1;
+        self.last_attempt = std::time::Instant::now();
+    }
+}
+
 impl PingState {
     fn new() -> Self {
         Self {
@@ -117,6 +154,9 @@ pub struct PeerConnection {
     /// Last known height of the peer (for fork resolution)
     peer_height: Arc<RwLock<Option<u64>>>,
 
+    /// Fork resolution attempt tracker
+    fork_resolution_tracker: Arc<RwLock<Option<ForkResolutionAttempt>>>,
+
     /// Fork loop detection: track consecutive fork detections at same height
     fork_loop_tracker: Arc<RwLock<Option<(u64, u32, std::time::Instant)>>>, // (height, count, last_seen)
 }
@@ -158,6 +198,7 @@ impl PeerConnection {
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
+            fork_resolution_tracker: Arc::new(RwLock::new(None)),
             fork_loop_tracker: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
@@ -192,6 +233,7 @@ impl PeerConnection {
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
+            fork_resolution_tracker: Arc::new(RwLock::new(None)),
             fork_loop_tracker: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
@@ -844,6 +886,52 @@ impl PeerConnection {
                                 .max(end_height);
 
                             if peer_tip_height > our_height {
+                                // Check fork resolution tracker - prevent infinite loops
+                                let mut tracker = self.fork_resolution_tracker.write().await;
+
+                                let should_attempt = if let Some(ref mut attempt) = *tracker {
+                                    if attempt.is_same_fork(ancestor, peer_tip_height) {
+                                        if attempt.should_give_up() {
+                                            error!(
+                                                "🚨 CRITICAL: Fork resolution failed after {} attempts at height {} with peer {}. Manual intervention required.",
+                                                attempt.attempt_count, ancestor, self.peer_ip
+                                            );
+                                            error!(
+                                                "💡 To resolve: Stop node, delete blockchain data, and resync from genesis or restore from trusted backup."
+                                            );
+                                            return Err(format!(
+                                                "Fork resolution failed after {} attempts - giving up",
+                                                attempt.attempt_count
+                                            ));
+                                        }
+                                        attempt.increment();
+                                        attempt.common_ancestor = Some(ancestor);
+                                        info!(
+                                            "🔄 Fork resolution attempt #{} for fork at height {} (common ancestor: {})",
+                                            attempt.attempt_count, ancestor, ancestor
+                                        );
+                                        true
+                                    } else {
+                                        // Different fork, reset tracker
+                                        *tracker = Some(ForkResolutionAttempt::new(
+                                            ancestor,
+                                            peer_tip_height,
+                                        ));
+                                        true
+                                    }
+                                } else {
+                                    // First attempt
+                                    *tracker =
+                                        Some(ForkResolutionAttempt::new(ancestor, peer_tip_height));
+                                    true
+                                };
+
+                                drop(tracker);
+
+                                if !should_attempt {
+                                    return Err("Fork resolution aborted".to_string());
+                                }
+
                                 info!(
                                     "📊 Peer has longer chain ({} > {}) with common ancestor at {}",
                                     peer_tip_height, our_height, ancestor
@@ -940,14 +1028,31 @@ impl PeerConnection {
                                             return Ok(());
                                         }
                                     } else {
-                                        info!("🔍 Incomplete chain (first={}, last={}, need from {} to at least {}), requesting more",
-                                            first_new, last_new, ancestor + 1, our_height + 1);
-                                        // Request from where we left off, not from the beginning
-                                        let next_needed = last_new + 1;
-                                        let msg = NetworkMessage::GetBlocks(
-                                            next_needed,
-                                            peer_tip_height + 1,
+                                        // Incomplete chain - need to request more blocks
+                                        // Calculate how many more blocks we need to reach peer tip
+                                        let blocks_needed = peer_tip_height - last_new;
+
+                                        // If we already have a common ancestor and received partial chain,
+                                        // request the ENTIRE remaining chain in larger batches
+                                        info!(
+                                            "🔍 Incomplete chain (first={}, last={}, need {} more blocks to reach peer tip {})",
+                                            first_new, last_new, blocks_needed, peer_tip_height
                                         );
+
+                                        // Request next batch of blocks (up to 500 at a time to avoid huge requests)
+                                        let next_needed = last_new + 1;
+                                        let batch_size = 500u64;
+                                        let next_end =
+                                            (next_needed + batch_size).min(peer_tip_height + 1);
+
+                                        info!(
+                                            "📤 Requesting blocks {}-{} (batch of {} blocks)",
+                                            next_needed,
+                                            next_end,
+                                            next_end - next_needed
+                                        );
+
+                                        let msg = NetworkMessage::GetBlocks(next_needed, next_end);
                                         if let Err(e) = self.send_message(&msg).await {
                                             warn!("Failed to request complete chain: {}", e);
                                         }
@@ -976,37 +1081,67 @@ impl PeerConnection {
 
                             // Deep fork - peer has longer OR EQUAL chain but no common ancestor yet
                             if end_height >= our_height {
-                                // If we've already searched starting from genesis (or very close to it),
-                                // and still no common ancestor, the chains are incompatible
-                                if start_height <= 10 && matching_count == 0 {
-                                    // We've searched from genesis/near-genesis and found NO matches at all
-                                    // This means the chains diverge at or before genesis - incompatible chains
-                                    error!(
-                                        "🚨 CRITICAL: No common ancestor found even when searching from genesis with peer {}! Found {} matches. Chains are incompatible.",
-                                        self.peer_ip, matching_count
-                                    );
-                                    return Err("No common ancestor found - chains incompatible"
-                                        .to_string());
-                                }
+                                // Check fork resolution tracker to prevent infinite loops
+                                let mut tracker = self.fork_resolution_tracker.write().await;
 
-                                // Haven't searched from genesis yet - request from 0 as last resort
-                                let search_start = 0;
+                                // Determine how far back we've searched
+                                let search_depth = our_height - start_height;
 
-                                if end_height > our_height {
-                                    info!(
-                                        "📤 Deep fork: No common ancestor in range {}-{}. Falling back to genesis search for common ancestor (will reorg to peer height {})",
-                                        start_height, end_height.min(our_height), end_height
-                                    );
+                                if let Some(ref mut attempt) = *tracker {
+                                    if attempt.should_give_up() {
+                                        error!(
+                                            "🚨 CRITICAL: Fork resolution failed after {} attempts. No common ancestor found searching back {} blocks from height {}.",
+                                            attempt.attempt_count, search_depth, our_height
+                                        );
+                                        error!(
+                                            "💡 Your chain has diverged from the network. Manual intervention required: delete blockchain data and resync from genesis."
+                                        );
+                                        return Err(
+                                            "Fork resolution failed - no common ancestor found"
+                                                .to_string(),
+                                        );
+                                    }
+                                    attempt.increment();
                                 } else {
-                                    // Same height - need deterministic tiebreaker
-                                    info!(
-                                        "📤 Same-height fork: No common ancestor in range {}-{}. Falling back to genesis search for common ancestor (heights equal: {})",
-                                        start_height, end_height.min(our_height), our_height
+                                    // First attempt
+                                    let peer_tip =
+                                        self.peer_height.read().await.unwrap_or(end_height);
+                                    *tracker =
+                                        Some(ForkResolutionAttempt::new(start_height, peer_tip));
+                                }
+
+                                drop(tracker);
+
+                                // If we've searched back more than 1000 blocks without finding common ancestor,
+                                // this is a critical divergence - likely wrong genesis or completely different chain
+                                if search_depth > 1000 {
+                                    error!(
+                                        "🚨 CRITICAL: Searched back {} blocks (from {} to {}) without finding common ancestor with peer {}. Chains are fundamentally incompatible.",
+                                        search_depth, our_height, start_height, self.peer_ip
+                                    );
+                                    return Err(
+                                        "Deep fork >1000 blocks - chains incompatible".to_string()
                                     );
                                 }
 
-                                // Request from genesis to PEER'S height so we get blocks to reorg with
-                                let msg = NetworkMessage::GetBlocks(search_start, end_height + 1);
+                                // Search backwards in exponentially increasing windows
+                                // Start from where we last searched, go back another 100-500 blocks
+                                let next_search_start = start_height.saturating_sub(if start_height > 500 {
+                                    500
+                                } else {
+                                    100
+                                });
+
+                                let next_search_end = start_height;
+
+                                info!(
+                                    "📤 Fork detected: No common ancestor in range {}-{}. Searching backwards: requesting blocks {}-{}",
+                                    start_height, end_height.min(our_height), next_search_start, next_search_end
+                                );
+
+                                // Request the NEXT window backwards
+                                let msg =
+                                    NetworkMessage::GetBlocks(next_search_start, next_search_end);
                                 if let Err(e) = self.send_message(&msg).await {
                                     warn!("Failed to request blocks for ancestor search: {}", e);
                                 }
