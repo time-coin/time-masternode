@@ -835,10 +835,18 @@ impl PeerConnection {
 
                         // If peer has longer chain and we found a common ancestor, reorganize
                         if let Some(ancestor) = common_ancestor {
-                            if end_height > our_height {
+                            // Get peer's actual tip height (may be higher than end_height of this batch)
+                            let peer_tip_height = self
+                                .peer_height
+                                .read()
+                                .await
+                                .unwrap_or(end_height)
+                                .max(end_height);
+
+                            if peer_tip_height > our_height {
                                 info!(
                                     "📊 Peer has longer chain ({} > {}) with common ancestor at {}",
-                                    end_height, our_height, ancestor
+                                    peer_tip_height, our_height, ancestor
                                 );
 
                                 // Collect all blocks after common ancestor
@@ -852,15 +860,17 @@ impl PeerConnection {
                                 if reorg_blocks.is_empty() {
                                     // We found a common ancestor but received no blocks after it
                                     // This means we need to request blocks after the ancestor
-                                    if end_height > ancestor {
+                                    if peer_tip_height > ancestor {
                                         debug!(
                                             "🔍 Found common ancestor at {}, requesting blocks {}-{}",
                                             ancestor,
                                             ancestor + 1,
-                                            end_height
+                                            peer_tip_height
                                         );
-                                        let msg =
-                                            NetworkMessage::GetBlocks(ancestor + 1, end_height + 1);
+                                        let msg = NetworkMessage::GetBlocks(
+                                            ancestor + 1,
+                                            peer_tip_height + 1,
+                                        );
                                         if let Err(e) = self.send_message(&msg).await {
                                             warn!("Failed to request blocks after ancestor: {}", e);
                                         }
@@ -882,7 +892,7 @@ impl PeerConnection {
                                             match blockchain
                                                 .should_accept_fork(
                                                     &reorg_blocks,
-                                                    end_height,
+                                                    peer_tip_height,
                                                     &self.peer_ip,
                                                 )
                                                 .await
@@ -922,7 +932,7 @@ impl PeerConnection {
                                             info!("🔍 Detected gaps in block sequence, requesting complete chain from {}", first_new);
                                             let msg = NetworkMessage::GetBlocks(
                                                 first_new,
-                                                end_height + 1,
+                                                peer_tip_height + 1,
                                             );
                                             if let Err(e) = self.send_message(&msg).await {
                                                 warn!("Failed to request complete chain: {}", e);
@@ -934,8 +944,10 @@ impl PeerConnection {
                                             first_new, last_new, ancestor + 1, our_height + 1);
                                         // Request from where we left off, not from the beginning
                                         let next_needed = last_new + 1;
-                                        let msg =
-                                            NetworkMessage::GetBlocks(next_needed, end_height + 1);
+                                        let msg = NetworkMessage::GetBlocks(
+                                            next_needed,
+                                            peer_tip_height + 1,
+                                        );
                                         if let Err(e) = self.send_message(&msg).await {
                                             warn!("Failed to request complete chain: {}", e);
                                         }
