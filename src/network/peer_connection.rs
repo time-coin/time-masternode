@@ -774,23 +774,48 @@ impl PeerConnection {
                                 let mut tracker = self.fork_resolution_tracker.write().await;
                                 let search_depth = our_height.saturating_sub(start_height);
 
-                                if let Some(ref mut attempt) = *tracker {
-                                    if attempt.should_give_up() {
-                                        error!(
-                                            "🚨 CRITICAL: Fork resolution failed after {} attempts (searched back {} blocks). Manual intervention required.",
-                                            attempt.attempt_count, search_depth
-                                        );
-                                        return Err("Fork resolution failed - too many attempts"
-                                            .to_string());
+                                let should_continue = if let Some(ref mut attempt) = *tracker {
+                                    // Check if this is the same fork height we're already working on
+                                    if attempt.fork_height == start_height {
+                                        // Same height - don't increment, this is a duplicate response
+                                        true
+                                    } else if start_height < attempt.fork_height {
+                                        // We've moved to an earlier block - this is progress, increment
+                                        if attempt.should_give_up() {
+                                            error!(
+                                                "🚨 CRITICAL: Fork resolution failed after {} attempts (searched back {} blocks). Manual intervention required.",
+                                                attempt.attempt_count, search_depth
+                                            );
+                                            false
+                                        } else {
+                                            attempt.increment();
+                                            attempt.fork_height = start_height; // Update to new height
+                                            true
+                                        }
+                                    } else {
+                                        // start_height > attempt.fork_height means we received a response for a newer block
+                                        // This shouldn't happen in normal flow, treat as new fork
+                                        *tracker = Some(ForkResolutionAttempt::new(
+                                            start_height,
+                                            self.peer_height.read().await.unwrap_or(end_height),
+                                        ));
+                                        true
                                     }
-                                    attempt.increment();
                                 } else {
+                                    // First attempt
                                     let peer_tip =
                                         self.peer_height.read().await.unwrap_or(end_height);
                                     *tracker =
                                         Some(ForkResolutionAttempt::new(start_height, peer_tip));
-                                }
+                                    true
+                                };
                                 drop(tracker);
+
+                                if !should_continue {
+                                    return Err(
+                                        "Fork resolution failed - too many attempts".to_string()
+                                    );
+                                }
 
                                 // Check if we've searched too far back
                                 if search_depth > 2000 {
