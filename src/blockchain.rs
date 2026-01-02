@@ -2461,6 +2461,23 @@ impl Blockchain {
         let our_tip_hash = self.get_block_hash(our_height).ok();
         let peer_tip_hash = competing_blocks.last().map(|b| b.hash());
 
+        // Get our tip timestamp
+        let our_tip_timestamp = if let Ok(our_tip) = self.get_block(our_height) {
+            Some(our_tip.header.timestamp)
+        } else {
+            None
+        };
+
+        // Check if peer is whitelisted
+        let peer_is_whitelisted = if let Some(registry) = self.peer_registry.read().await.as_ref() {
+            registry.is_whitelisted(peer_ip).await
+        } else {
+            false // Default to not whitelisted if registry not available
+        };
+
+        // Calculate fork depth
+        let fork_depth = our_height.saturating_sub(common_ancestor);
+
         // Use fork resolver to make decision
         let resolution = self
             .fork_resolver
@@ -2475,6 +2492,9 @@ impl Blockchain {
                 peer_tip_timestamp,
                 our_tip_hash,
                 peer_tip_hash,
+                peer_is_whitelisted,
+                our_tip_timestamp,
+                fork_depth,
             })
             .await;
 
@@ -2532,6 +2552,24 @@ impl Blockchain {
         let our_tip_hash = self.get_block_hash(our_height).ok();
         let peer_tip_hash = None; // Not available during early investigation
 
+        // Get our tip timestamp
+        let our_tip_timestamp = if let Ok(our_tip) = self.get_block(our_height) {
+            Some(our_tip.header.timestamp)
+        } else {
+            None
+        };
+
+        // Check if peer is whitelisted
+        let peer_is_whitelisted = if let Some(registry) = self.peer_registry.read().await.as_ref() {
+            registry.is_whitelisted(peer_ip).await
+        } else {
+            false // Default to not whitelisted if registry not available
+        };
+
+        // Calculate fork depth
+        let common_ancestor_height = fork_height.saturating_sub(1);
+        let fork_depth = our_height.saturating_sub(common_ancestor_height);
+
         let resolution = self
             .fork_resolver
             .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
@@ -2541,10 +2579,13 @@ impl Blockchain {
                 peer_chain_work: estimated_peer_work,
                 peer_ip: peer_ip.to_string(),
                 supporting_peers,
-                common_ancestor: fork_height.saturating_sub(1),
+                common_ancestor: common_ancestor_height,
                 peer_tip_timestamp: None, // Unknown at this stage
                 our_tip_hash,
                 peer_tip_hash,
+                peer_is_whitelisted,
+                our_tip_timestamp,
+                fork_depth,
             })
             .await;
 
