@@ -57,6 +57,13 @@ pub struct NodeConfig {
     pub version: String,
     #[serde(default = "default_network")]
     pub network: String,
+    /// Allow this node to produce catchup blocks when behind consensus
+    #[serde(default = "default_false")]
+    pub enable_catchup_blocks: bool,
+}
+
+fn default_false() -> bool {
+    false
 }
 
 fn default_network() -> String {
@@ -256,6 +263,7 @@ impl Config {
                 name: "TIME Coin Node".to_string(),
                 version: "1.0.0".to_string(),
                 network: "testnet".to_string(),
+                enable_catchup_blocks: false,
             },
             network: NetworkConfig {
                 listen_address: "0.0.0.0".to_string(),

@@ -1200,6 +1200,14 @@ async fn main() {
                             continue;
                         }
 
+                        // Check if catchup blocks are enabled in config
+                        if !config.node.enable_catchup_blocks {
+                            tracing::warn!(
+                                "⚠️  Selected as TSDC catchup leader but catchup blocks are DISABLED in config. Enable with 'enable_catchup_blocks = true' in [node] section."
+                            );
+                            continue;
+                        }
+
                         tracing::info!(
                             "🎯 SELECTED AS CATCHUP LEADER for height {} (via TSDC consensus)",
                             expected_height
@@ -1466,6 +1474,7 @@ async fn main() {
     let status_registry = registry.clone();
     let status_tsdc_clone = tsdc_consensus.clone();
     let status_masternode_addr_clone = masternode_address.clone();
+    let status_config_clone = config.clone();
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
         loop {
@@ -1542,13 +1551,20 @@ async fn main() {
                                         };
 
                                         if is_leader {
-                                            tracing::info!(
-                                                "🎯 We are TSDC catchup leader - producing block(s) via responsive check"
-                                            );
-                                            // Note: We could trigger block production here, but to keep logic
-                                            // centralized, we just log. The 10-minute block production loop
-                                            // will handle it at the next tick (max 10min wait)
-                                            // For true responsiveness, block production logic would need refactoring
+                                            // Check if catchup blocks are enabled
+                                            if status_config_clone.node.enable_catchup_blocks {
+                                                tracing::info!(
+                                                    "🎯 We are TSDC catchup leader - producing block(s) via responsive check"
+                                                );
+                                                // Note: We could trigger block production here, but to keep logic
+                                                // centralized, we just log. The 10-minute block production loop
+                                                // will handle it at the next tick (max 10min wait)
+                                                // For true responsiveness, block production logic would need refactoring
+                                            } else {
+                                                tracing::warn!(
+                                                    "⚠️  TSDC catchup leader but catchup blocks DISABLED in config"
+                                                );
+                                            }
                                         } else {
                                             tracing::info!(
                                                 "⏳ Waiting for TSDC catchup leader {} to produce blocks",

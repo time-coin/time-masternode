@@ -4,6 +4,10 @@ version = "1.0.0"
 # Network type: "mainnet" or "testnet"
 # Testnet: P2P=24100, RPC=24101, Address prefix=TIME0
 network = "testnet"
+# Allow this node to produce catchup blocks when behind consensus
+# Only enable this on ONE designated catchup node to avoid conflicts
+# Default: false (disabled)
+enable_catchup_blocks = false
 
 [network]
 # P2P network settings
@@ -19,7 +23,7 @@ enable_peer_discovery = true
 # Seed nodes for peer discovery
 bootstrap_peers = []
 # IPs to permanently blacklist (will not connect to or accept connections from)
-#blacklisted_peers = ["165.232.154.150", "178.128.199.144"]
+#blacklisted_peers = ["1.2.3.4", "5.6.7.8"]
 # IPs to whitelist (exempt from rate limiting and bans)
 # Useful for trusted masternodes or infrastructure nodes
 # These peers are automatically exempt from:
