@@ -12,7 +12,8 @@ use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::time::{Duration, Instant};
+use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 
 /// Direction of the network connection
@@ -43,16 +44,29 @@ pub struct MessageContext {
     pub broadcast_tx: Option<broadcast::Sender<NetworkMessage>>,
 }
 
+/// Tracks repeated GetBlocks requests to detect loops
+#[derive(Debug, Clone)]
+struct GetBlocksRequest {
+    start: u64,
+    end: u64,
+    timestamp: Instant,
+}
+
 /// Unified message handler for all network messages
 pub struct MessageHandler {
     peer_ip: String,
     direction: ConnectionDirection,
+    recent_requests: Arc<RwLock<Vec<GetBlocksRequest>>>,
 }
 
 impl MessageHandler {
     /// Create a new message handler for a specific peer and connection direction
     pub fn new(peer_ip: String, direction: ConnectionDirection) -> Self {
-        Self { peer_ip, direction }
+        Self {
+            peer_ip,
+            direction,
+            recent_requests: Arc::new(RwLock::new(Vec::new())),
+        }
     }
 
     /// Handle a network message and optionally return a response message
@@ -178,6 +192,42 @@ impl MessageHandler {
             "📥 [{}] Received GetBlocks({}-{}) from {} (our height: {})",
             self.direction, start, end, self.peer_ip, our_height
         );
+
+        // Check for repeated requests (loop detection)
+        {
+            let mut requests = self.recent_requests.write().await;
+            let now = Instant::now();
+
+            // Clean old requests (older than 30 seconds)
+            requests.retain(|req| now.duration_since(req.timestamp) < Duration::from_secs(30));
+
+            // Count similar requests in the last 30 seconds
+            let similar_count = requests
+                .iter()
+                .filter(|req| {
+                    // Consider requests similar if they overlap significantly
+                    let start_match = (req.start as i64 - start as i64).abs() <= 100;
+                    let end_match = (req.end as i64 - end as i64).abs() <= 100;
+                    start_match && end_match
+                })
+                .count();
+
+            if similar_count >= 20 {
+                warn!(
+                    "🚨 [{}] Possible sync loop detected: {} sent {} similar GetBlocks requests in 30s (ranges near {}-{}). Ignoring this request.",
+                    self.direction, self.peer_ip, similar_count, start, end
+                );
+                // Return empty response to break the loop
+                return Ok(Some(NetworkMessage::BlocksResponse(vec![])));
+            }
+
+            // Record this request
+            requests.push(GetBlocksRequest {
+                start,
+                end,
+                timestamp: now,
+            });
+        }
 
         let mut blocks = Vec::new();
         // Send blocks we have: cap at our_height, requested end, and batch limit of 100

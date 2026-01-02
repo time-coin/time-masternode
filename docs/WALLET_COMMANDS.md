@@ -18,7 +18,7 @@ time-cli send-to-address TIME0xyz789... 0.5
 ```
 
 **Parameters:**
-- `address` - The recipient's TIME Coin address (TIME0... for testnet, TIME1... for mainnet)
+- `address` - The recipient's TIME Coin address (starts with `time1` prefix)
 - `amount` - The amount to send in TIME (supports decimal values)
 
 **Returns:**

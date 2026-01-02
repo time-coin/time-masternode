@@ -1,7 +1,7 @@
 # TIME Coin - Linux Installation Guide
 
-**Version**: 0.1.0  
-**Last Updated**: 2025-12-11
+**Version**: 0.2.0  
+**Last Updated**: 2026-01-02
 
 ---
 
@@ -84,7 +84,7 @@ The automated installation script handles everything for you:
 
 1. **Download the project**:
    ```bash
-   git clone https://github.com/yourusername/timecoin.git
+   git clone https://github.com/time-coin/timecoin.git
    cd timecoin
    ```
 
@@ -138,7 +138,7 @@ rustc --version
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/timecoin.git
+git clone https://github.com/time-coin/timecoin.git
 cd timecoin
 
 # Build release binaries
@@ -650,7 +650,7 @@ wallet_address = ""
 tier = "free"
 ```
 
-See [Configuration Guide](./CONFIGURATION.md) for full reference (TODO).
+See [Network Configuration Guide](./NETWORK_CONFIG.md) for full reference.
 
 ---
 
@@ -687,9 +687,9 @@ See [Configuration Guide](./CONFIGURATION.md) for full reference (TODO).
 
 ## Support
 
-- **Documentation**: [https://github.com/yourusername/timecoin/docs](../README.md)
-- **Issues**: [GitHub Issues](https://github.com/yourusername/timecoin/issues)
-- **Community**: [Discord/Telegram](https://time-coin.io/community)
+- **Documentation**: [https://github.com/time-coin/timecoin/tree/main/docs](../README.md)
+- **Issues**: [GitHub Issues](https://github.com/time-coin/timecoin/issues)
+- **Community**: [time-coin.io](https://time-coin.io)
 
 ---
 

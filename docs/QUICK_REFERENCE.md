@@ -52,7 +52,7 @@ Conditions:
 ## Network
 
 ```yaml
-Transport:     TCP with optional TLS v1.3
+Transport:     TCP (plain, TLS planned)
 Serialization: bincode (internal), JSON (RPC)
 Framing:       [length: u32_be] [type: u8] [payload]
 Max message:   4 MB

@@ -6,8 +6,8 @@ TIME Coin supports two networks with different ports and address prefixes:
 
 | Network | P2P Port | RPC Port | Address Prefix | Magic Bytes |
 |---------|----------|----------|----------------|-------------|
-| **Mainnet** | 24000 | 24001 | TIME1 | 0xC01D7E4D ("COLD TIME") |
-| **Testnet** | 24100 | 24101 | TIME0 | 0x7E577E4D ("TEST TIME") |
+| **Mainnet** | 24000 | 24001 | time1 | 0xC01D7E4D ("COLD TIME") |
+| **Testnet** | 24100 | 24101 | time1 | 0x7E577E4D ("TEST TIME") |
 
 ## Configuration Files
 
@@ -44,10 +44,12 @@ listen_address = "0.0.0.0:24100"  # Explicit port for testnet
 
 ## Address Prefixes
 
-TIME Coin addresses use network-specific prefixes to prevent mixing:
+TIME Coin addresses use the `time1` prefix for both networks:
 
-- **Mainnet**: `TIME1abc...` (prevents testnet coins from being sent to mainnet)
-- **Testnet**: `TIME0xyz...` (prevents mainnet coins from being sent to testnet)
+- **Mainnet**: `time1abc...`
+- **Testnet**: `time1xyz...`
+
+Both networks use the same address format, but transactions are network-isolated through magic bytes.
 
 ## Running Different Networks
 
@@ -61,7 +63,7 @@ Output will show:
 ```
 📡 Network: Testnet
   └─ Magic Bytes: [126, 87, 126, 77]
-  └─ Address Prefix: TIME0
+  └─ Address Prefix: time1
 ```
 
 ### Mainnet
@@ -74,7 +76,7 @@ Output will show:
 ```
 📡 Network: Mainnet
   └─ Magic Bytes: [192, 29, 126, 77]
-  └─ Address Prefix: TIME1
+  └─ Address Prefix: time1
 ```
 
 ## Masternode Configuration

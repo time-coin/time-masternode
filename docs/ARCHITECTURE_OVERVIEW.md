@@ -1,7 +1,7 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2025-12-24  
-**Version:** 2.1 (Code cleanup - removed unused modules)
+**Last Updated:** 2026-01-02  
+**Version:** 0.2.0 (AI Integration, TLS Planning, Fork Resolution)
 
 ---
 
@@ -24,10 +24,11 @@
 ┌──────────────────────┐ ┌─────────────────┐ ┌──────────────────┐
 │  Consensus           │ │  Network        │ │  Storage         │
 │  Engines             │ │  Layer          │ │  Layer           │
-│  - Avalanche         │ │  - P2P Mesh     │ │  - Sled DB       │
+│  - Avalanche         │ │  - P2P TCP      │ │  - Sled DB       │
 │    (TX Finality)     │ │  - Message Relay│ │  - UTXO Manager  │
 │  - TSDC              │ │  - Peer Mgmt    │ │  - TX Pool       │
 │    (Block Producer)  │ │  - Heartbeats   │ │  - Block Chain   │
+│  - AI Fork Resolver  │ │  - Fork Sync    │ │  - AI History    │
 └──────────────────────┘ └─────────────────┘ └──────────────────┘
        │                   │                   │
        └───────────────────┼───────────────────┘

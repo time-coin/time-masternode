@@ -10,7 +10,7 @@
 - Rust 1.70+
 - 2GB RAM minimum
 - 10GB disk space
-- Network connectivity (P2P ports 24100 or 24200)
+- Network connectivity (P2P port 24100 for testnet)
 
 ---
 
@@ -46,13 +46,13 @@ data_dir = "./data_testnet"
 log_level = "info"
 
 [network]
-p2p_bind = "0.0.0.0:24200"
-rpc_bind = "127.0.0.1:24201"
+p2p_bind = "0.0.0.0:24100"
+rpc_bind = "127.0.0.1:24101"
 max_peers = 50
 enable_peer_discovery = true
 bootstrap_peers = [
-    "seed1.time-coin.io:24200",
-    "seed2.time-coin.io:24200"
+    "seed1.time-coin.io:24100",
+    "seed2.time-coin.io:24100"
 ]
 
 [masternode]
@@ -71,7 +71,7 @@ block_time_seconds = 600  # 10 minutes
 # Expected output
 2024-12-23T03:00:00Z  INFO  timecoin: Starting TIME Coin Node v0.1.0
 2024-12-23T03:00:00Z  INFO  consensus: Initializing Avalanche + TSDC consensus
-2024-12-23T03:00:00Z  INFO  network: Starting network server on 0.0.0.0:24200
+2024-12-23T03:00:00Z  INFO  network: Starting network server on 0.0.0.0:24100
 2024-12-23T03:00:00Z  INFO  network: Starting network client
 2024-12-23T03:00:00Z  INFO  network: 🔌 Connecting to peers...
 ```
@@ -80,7 +80,7 @@ block_time_seconds = 600  # 10 minutes
 
 ```bash
 # In another terminal, check RPC
-curl http://localhost:24201/rpc \
+curl http://localhost:24101/rpc \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}'
@@ -140,7 +140,7 @@ wallet_address = "your_wallet_address_here"
 ### Check Node Status
 
 ```bash
-curl http://localhost:24201/rpc \
+curl http://localhost:24101/rpc \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}'
@@ -149,7 +149,7 @@ curl http://localhost:24201/rpc \
 ### Check Peer Connections
 
 ```bash
-curl http://localhost:24201/rpc \
+curl http://localhost:24101/rpc \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"getpeercount","params":[],"id":1}'
@@ -177,9 +177,9 @@ network = "testnet"
 data_dir = "./data_node1"
 
 [network]
-p2p_bind = "0.0.0.0:24200"
-rpc_bind = "127.0.0.1:24201"
-external_address = "192.168.1.100:24200"  # Your IP
+p2p_bind = "0.0.0.0:24100"
+rpc_bind = "127.0.0.1:24101"
+external_address = "192.168.1.100:24100"  # Your IP
 bootstrap_peers = []  # No peers to connect to
 ```
 
@@ -196,9 +196,9 @@ network = "testnet"
 data_dir = "./data_node2"
 
 [network]
-p2p_bind = "0.0.0.0:24201"
-rpc_bind = "127.0.0.1:24202"
-bootstrap_peers = ["192.168.1.100:24200"]  # Connect to Node 1
+p2p_bind = "0.0.0.0:24102"
+rpc_bind = "127.0.0.1:24103"
+bootstrap_peers = ["192.168.1.100:24100"]  # Connect to Node 1
 ```
 
 Run:
@@ -209,8 +209,8 @@ Run:
 ### Verify Network
 
 ```bash
-# On each node
-curl http://localhost:24201/rpc -X POST \
+# On each node (adjust port for each node: 24101, 24103, etc.)
+curl http://localhost:24101/rpc -X POST \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}' | \
   jq '.result.peer_count'
@@ -261,7 +261,7 @@ cargo fmt
 **Solution:**
 ```bash
 # On Linux, open firewall
-sudo ufw allow 24200/tcp
+sudo ufw allow 24100/tcp
 
 # On macOS
 sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
@@ -276,7 +276,7 @@ sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
 
 ```bash
 sleep 15
-curl http://localhost:24201/rpc ...
+curl http://localhost:24101/rpc ...
 ```
 
 ### High CPU/Memory Usage
@@ -287,7 +287,7 @@ curl http://localhost:24201/rpc ...
 
 ```bash
 # Monitor progress
-watch -n 5 'curl -s http://localhost:24201/rpc \
+watch -n 5 'curl -s http://localhost:24101/rpc \
   -X POST \
   -H "Content-Type: application/json" \
   -d "{\"jsonrpc\":\"2.0\",\"method\":\"getblockcount\",\"params\":[],\"id\":1}" | \
@@ -301,7 +301,7 @@ watch -n 5 'curl -s http://localhost:24201/rpc \
 **Solution:**
 ```bash
 # Find process
-lsof -i :24200
+lsof -i :24100
 
 # Kill process
 kill -9 <PID>

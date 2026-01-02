@@ -151,8 +151,8 @@ analysis/
 - **Block Reward:** 100 × (1 + ln(n)) TIME
 
 ### Network
-- **Testnet P2P:** 24200
-- **Testnet RPC:** 24201
+- **Testnet P2P:** 24100
+- **Testnet RPC:** 24101
 - **Mainnet P2P:** 24000
 - **Mainnet RPC:** 24001
 
@@ -217,9 +217,9 @@ analysis/
 ## 📞 Support & Community
 
 ### Get Help
-- **GitHub Issues**: [Report bugs](https://github.com/yourusername/timecoin/issues)
-- **GitHub Discussions**: [Ask questions](https://github.com/yourusername/timecoin/discussions)
-- **Discord**: [Join community](https://discord.gg/timecoin)
+- **GitHub Issues**: [Report bugs](https://github.com/time-coin/timecoin/issues)
+- **GitHub Discussions**: [Ask questions](https://github.com/time-coin/timecoin/discussions)
+- **Website**: [time-coin.io](https://time-coin.io)
 - **Email**: [support@time-coin.io](mailto:support@time-coin.io)
 
 ### Stay Updated

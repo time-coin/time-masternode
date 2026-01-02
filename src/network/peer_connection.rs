@@ -978,12 +978,12 @@ impl PeerConnection {
                             if end_height >= our_height {
                                 // If we've already searched starting from genesis (or very close to it),
                                 // and still no common ancestor, the chains are incompatible
-                                if start_height <= 1 {
-                                    // We've searched from genesis/near-genesis and found no match
-                                    // This means the chains diverge at or before genesis
+                                if start_height <= 10 && matching_count == 0 {
+                                    // We've searched from genesis/near-genesis and found NO matches at all
+                                    // This means the chains diverge at or before genesis - incompatible chains
                                     error!(
-                                        "🚨 CRITICAL: No common ancestor found even when searching from genesis with peer {}! Chains may be incompatible.",
-                                        self.peer_ip
+                                        "🚨 CRITICAL: No common ancestor found even when searching from genesis with peer {}! Found {} matches. Chains are incompatible.",
+                                        self.peer_ip, matching_count
                                     );
                                     return Err("No common ancestor found - chains incompatible"
                                         .to_string());
