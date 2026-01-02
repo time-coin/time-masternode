@@ -626,13 +626,28 @@ lock_script = {
 **REQUIREMENT:** Specify the transport medium for §11 messages.
 
 ```
-TRANSPORT_PROTOCOL = QUIC v1 (RFC 9000)
-Fallback: TCP with optional Noise Protocol handshake (Noise_NN_25519_ChaChaPoly_BLAKE2b)
+TRANSPORT_PROTOCOL = TCP (currently unencrypted)
+Encryption: TLS v1.3 support (infrastructure ready, integration pending)
+Development: Plain TCP for simplicity and debugging
 ```
 
+**Current Implementation:**
+- Raw TCP via `tokio::net::TcpStream`
+- No transport-layer encryption (v1.0.0)
+- TLS infrastructure exists in `src/network/secure_transport.rs` and `src/network/tls.rs`
+- Future versions will integrate TLS encryption
+
 **Justification:**
-- QUIC provides connection multiplexing and modern TLS.
-- TCP fallback for compatibility; Noise adds encryption without TLS overhead.
+- TCP provides reliable, ordered delivery with universal compatibility
+- Simpler debugging during initial deployment
+- TLS v1.3 support ready for future integration
+- Focus on protocol correctness before adding encryption overhead
+
+**Security Note:**
+- Current P2P communication is **not encrypted**
+- Deploy nodes on trusted networks or use VPN/SSH tunneling
+- Message-level signing provides authentication (even without encryption)
+- TLS integration planned for v1.1.0
 
 ### 18.2 Message Framing
 All messages MUST be length-prefixed:
@@ -662,7 +677,7 @@ Implementations MUST define a mapping from §11 Rust enums to wire bytes.
 ### 18.4 Peer Discovery and Bootstrap
 **Bootstrap Process:**
 1. Node reads hardcoded bootstrap peer list (DNS seeds or IP addresses).
-2. Connects to bootstrap peers via QUIC/TCP.
+2. Connects to bootstrap peers via TCP (with optional TLS).
 3. Requests `PeerListRequest` to discover additional peers.
 4. Maintains peer database; prefer geographic diversity and low latency.
 

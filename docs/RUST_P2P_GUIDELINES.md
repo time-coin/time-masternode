@@ -150,10 +150,11 @@ struct BlockchainBehaviour {
 // SECURITY CONSIDERATIONS
 // - Validate all incoming messages with `serde` + schema checks
 // - Use `tokio::time::timeout` on all network operations
-// - Implement peer scoring (see `libp2p::peer_score`)
+// - Implement peer scoring and reputation systems
 
 // STANDARDS COMPLIANCE
-// - libp2p implements IETF specs for Noise, QUIC, etc.
+// - Uses TLS v1.3 (RFC 8446) for encrypted transport
+// - TCP for reliable, ordered delivery
 ```
 
 ---

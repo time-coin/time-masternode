@@ -52,13 +52,14 @@ Conditions:
 ## Network
 
 ```yaml
-Transport:     QUIC v1 (RFC 9000) | TCP fallback
-Serialization: bincode (consensus), protobuf (RPC)
-Framing:       [length: u32_be] [payload]
+Transport:     TCP with optional TLS v1.3
+Serialization: bincode (internal), JSON (RPC)
+Framing:       [length: u32_be] [type: u8] [payload]
 Max message:   4 MB
-Max peers:     125
-Port:          18888 (mainnet), 18889 (testnet)
-Bootstrap:     seed1.timecoin.dev, seed2.timecoin.dev, seed3.timecoin.dev
+Max peers:     50 (configurable)
+Port:          24000 (mainnet), 24100 (testnet)
+Storage:       Sled embedded database
+Bootstrap:     Configured in config.toml
 ```
 
 ---
@@ -283,9 +284,10 @@ VFP validation:
 ## References
 
 - RFC 9381: ECVRF
-- RFC 9000: QUIC
+- RFC 8446: TLS v1.3
 - BIP 350: bech32m
 - BLAKE3: https://blake3.io
 - Avalanche consensus: https://arxiv.org/abs/1906.08936
+- Sled embedded database: https://github.com/spacejam/sled
 
 ---

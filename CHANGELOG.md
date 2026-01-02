@@ -141,7 +141,13 @@ anomaly_detection = true      # Default: true
 ```
 
 ### Known Issues
-None at release time.
+
+**P2P Encryption:**
+- TLS infrastructure is implemented but not yet integrated into peer connections
+- Current P2P communication uses plain TCP (unencrypted)
+- For production deployments, use VPN, SSH tunnels, or trusted networks
+- TLS integration planned for v1.1.0
+- Message-level signing provides authentication without encryption
 
 ### Contributors
 - Core Team

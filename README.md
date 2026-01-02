@@ -22,8 +22,8 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
 - **Masternode Tiers**: Free, Bronze, Silver, Gold tiers with weighted sampling power
 - **Dual Network Support**: Mainnet and Testnet configurations
 - **Real-time RPC API**: JSON-RPC 2.0 interface for wallets and services
-- **P2P Networking**: QUIC transport, peer discovery, and gossip protocol
-- **Persistent Storage**: RocksDB-based blockchain storage with AVS snapshots
+- **P2P Networking**: TCP transport with peer discovery and gossip protocol (TLS support planned)
+- **Persistent Storage**: Sled embedded database for blockchain storage with AVS (Active Validator Set) snapshots
 - **Light Client Support**: Merkle proofs and block headers for SPV wallets
 
 ## ✅ Status
