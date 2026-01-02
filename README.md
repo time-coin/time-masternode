@@ -32,7 +32,7 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
 - All 8 "underspecified" issues resolved
 - All 6 "missing components" specified
 - 12 new normative sections (§16–§27)
-- See [docs/TIMECOIN_PROTOCOL_V6.md](docs/TIMECOIN_PROTOCOL_V6.md)
+- See [docs/TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md)
 
 **Implementation**: ✅ **PHASE 6 COMPLETE** (RPC API & Testnet Next)
 - ✅ Phase 4: Pure Avalanche Consensus COMPLETE (Dec 23, 2025)
@@ -44,8 +44,6 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
   - 3-node testing procedures documented
   - Cloud testnet deployment ready
 - 🚀 Phase 7: RPC API & Testnet Stabilization READY
-- See [ROADMAP_CHECKLIST.md](ROADMAP_CHECKLIST.md) for full timeline
-- See [PHASE_6_COMPLETION_REPORT.md](PHASE_6_COMPLETION_REPORT.md) for details
 
 ## 🚀 Features
 
@@ -69,8 +67,7 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
   - Lock-free connection management (DashMap)
   - Bootstrap peer discovery
   - Secure P2P networking
-  
-See [analysis/COMPILATION_COMPLETE_QUICK_REFERENCE.md](analysis/COMPILATION_COMPLETE_QUICK_REFERENCE.md) for detailed build information.
+
 
 ## 📋 Requirements
 
@@ -83,7 +80,7 @@ See [analysis/COMPILATION_COMPLETE_QUICK_REFERENCE.md](analysis/COMPILATION_COMP
 ### From Source
 
 ```bash
-git clone https://github.com/yourusername/timecoin.git
+git clone https://github.com/time-coin/timecoin.git
 cd timecoin
 cargo build --release
 ```
@@ -150,12 +147,12 @@ Then start:
 ## 🌐 Network Ports
 
 ### Mainnet
-- P2P: 24100
-- RPC: 24101
+- P2P: 24000
+- RPC: 24001
 
 ### Testnet
-- P2P: 24200
-- RPC: 24201
+- P2P: 24100
+- RPC: 24101
 
 ## 📁 Directory Structure
 
@@ -163,64 +160,139 @@ Then start:
 timecoin/
 ├── src/
 │   ├── main.rs              # Entry point
+│   ├── lib.rs               # Library exports
 │   ├── config.rs            # Configuration management
-│   ├── types.rs             # Core types
+│   ├── types.rs             # Core types (Block, Transaction, UTXO, etc.)
 │   ├── consensus.rs         # Avalanche Snowball + TSDC consensus
+│   ├── avalanche.rs         # Avalanche protocol implementation
+│   ├── tsdc.rs              # Time-Scheduled Deterministic Consensus
+│   ├── blockchain.rs        # Blockchain storage and validation
+│   ├── storage.rs           # Sled database abstraction layer
 │   ├── utxo_manager.rs      # UTXO state machine
-│   ├── blockchain.rs        # Blockchain storage
+│   ├── transaction_pool.rs  # Mempool management
 │   ├── masternode_registry.rs # Masternode tracking
 │   ├── heartbeat_attestation.rs # Uptime verification
+│   ├── finality_proof.rs    # VFP (Verifiable Finality Proofs)
+│   ├── wallet.rs            # Wallet functionality
+│   ├── address.rs           # Address encoding/decoding
+│   ├── peer_manager.rs      # High-level peer management
+│   ├── time_sync.rs         # Network time synchronization
+│   ├── state_notifier.rs    # State change notifications
+│   ├── shutdown.rs          # Graceful shutdown handler
+│   ├── error.rs             # Error types
+│   ├── network_type.rs      # Mainnet/Testnet enum
+│   ├── ai/                  # 🤖 AI Systems (NEW in v1.0.0)
+│   │   ├── mod.rs
+│   │   ├── peer_selector.rs     # AI-powered peer selection
+│   │   ├── fork_resolver.rs     # Multi-factor fork resolution
+│   │   ├── anomaly_detector.rs  # Security anomaly detection
+│   │   ├── predictive_sync.rs   # Block arrival prediction
+│   │   ├── transaction_analyzer.rs  # Transaction pattern analysis
+│   │   ├── transaction_validator.rs # AI validation rules
+│   │   ├── network_optimizer.rs     # Dynamic network tuning
+│   │   └── resource_manager.rs      # Resource allocation
 │   ├── block/               # Block generation & validation
+│   │   ├── mod.rs
+│   │   ├── types.rs         # Block structures
+│   │   ├── producer.rs      # Block production
+│   │   ├── validator.rs     # Block validation
+│   │   └── merkle.rs        # Merkle tree implementation
+│   ├── crypto/              # Cryptographic primitives
+│   │   ├── mod.rs
+│   │   ├── keys.rs          # Ed25519 key management
+│   │   ├── vrf.rs           # ECVRF implementation
+│   │   └── hash.rs          # BLAKE3 hashing
 │   ├── network/             # P2P networking
-│   │   ├── connection_manager.rs   # Lock-free peer connection tracking (NEW)
-│   │   ├── peer_discovery.rs       # Bootstrap peer service (NEW)
-│   │   ├── peer_connection.rs      # Peer connection handler
-│   │   ├── peer_connection_registry.rs # Peer registry & messaging
+│   │   ├── mod.rs
+│   │   ├── server.rs        # TCP server
 │   │   ├── client.rs        # Network client
-│   │   ├── server.rs        # Network server
-│   │   ├── message.rs       # Network messages
+│   │   ├── message.rs       # Network message types
+│   │   ├── message_handler.rs   # Message processing logic
+│   │   ├── peer_connection.rs   # Individual peer connection
+│   │   ├── peer_connection_registry.rs # Peer registry & messaging
+│   │   ├── connection_manager.rs    # Lock-free connection tracking
+│   │   ├── connection_state.rs      # Connection state machine
+│   │   ├── peer_discovery.rs        # Bootstrap peer service
+│   │   ├── peer_scoring.rs          # Peer reputation system
 │   │   ├── state_sync.rs    # State synchronization
 │   │   ├── blacklist.rs     # IP blacklisting
 │   │   ├── rate_limiter.rs  # Rate limiting
 │   │   ├── dedup_filter.rs  # Message deduplication
-│   │   ├── tls.rs           # TLS encryption
-│   │   ├── signed_message.rs # Message signing
-│   │   └── secure_transport.rs # Secure transport layer
-│   └── rpc/                 # RPC server
+│   │   ├── anomaly_detection.rs # Network anomaly detection
+│   │   ├── fee_prediction.rs    # AI fee estimation
+│   │   ├── block_optimization.rs # Block propagation optimization
+│   │   ├── tls.rs           # TLS encryption (infrastructure ready)
+│   │   ├── signed_message.rs    # Ed25519 message signing
+│   │   └── secure_transport.rs  # Secure transport layer (future)
+│   ├── rpc/                 # JSON-RPC server
+│   │   ├── mod.rs
+│   │   ├── server.rs        # RPC HTTP server
+│   │   └── methods.rs       # RPC method handlers
+│   └── bin/
+│       ├── timed.rs         # Main daemon binary
+│       └── time-cli.rs      # CLI tool binary
 ├── docs/                    # 📚 Complete documentation
-│   └── TIMECOIN_PROTOCOL_V5.md # Protocol v5 specification (Avalanche + TSDC)
+│   ├── INDEX.md             # Documentation index (START HERE)
+│   ├── TIMECOIN_PROTOCOL.md # Protocol v6 specification
+│   ├── AI_SYSTEM.md         # AI system documentation (NEW)
+│   ├── IMPLEMENTATION_DETAILS.md # Technical implementation spec (NEW)
+│   ├── QUICKSTART.md        # Quick deployment guide
+│   ├── QUICK_REFERENCE.md   # One-page parameter reference
+│   ├── ARCHITECTURE_OVERVIEW.md # System architecture
+│   ├── NETWORK_ARCHITECTURE.md  # P2P design
+│   ├── CLI_GUIDE.md         # Command-line reference
+│   ├── WALLET_COMMANDS.md   # Wallet operations
+│   ├── CRYPTOGRAPHY_RATIONALE.md # Crypto choices explained
+│   ├── LINUX_INSTALLATION.md    # Linux setup guide
+│   ├── INTEGRATION_QUICKSTART.md # Integration guide
+│   ├── RUST_P2P_GUIDELINES.md   # P2P best practices
+│   ├── P2P_NETWORK_BEST_PRACTICES.md # Network patterns
+│   ├── NETWORK_CONFIG.md    # Network configuration
+│   └── _archive_protocol/   # Archived protocol versions
 ├── analysis/                # Implementation notes & analysis
+│   └── (development notes, not for production use)
+├── scripts/                 # Utility scripts
+│   └── (deployment and maintenance scripts)
+├── tests/                   # Integration tests
+│   └── (test suites)
 ├── config.toml              # Default config (testnet)
-├── config.mainnet.toml      # Mainnet config
-├── COMPILATION_COMPLETE.md  # Build status & quick reference
-└── Cargo.toml               # Dependencies
+├── config.mainnet.toml      # Mainnet configuration
+├── genesis.testnet.json     # Testnet genesis block
+├── genesis.mainnet.json     # Mainnet genesis block
+├── CHANGELOG.md             # Version history
+├── CONTRIBUTING.md          # Contribution guidelines
+├── Cargo.toml               # Rust dependencies
+├── Cargo.lock               # Locked dependency versions
+├── build.rs                 # Build script
+├── Dockerfile               # Docker container definition
+├── timed.service            # systemd service file
+└── LICENSE                  # MIT License
 ```
 
 ## 📚 Documentation
 
-**[→ Complete Documentation Index](docs/PROTOCOL_V6_INDEX.md)** (Read this first!)
+**[→ Complete Documentation Index](docs/INDEX.md)** (Read this first!)
 
-### Protocol Specification
-- **[TIMECOIN_PROTOCOL_V6.md](docs/TIMECOIN_PROTOCOL_V6.md)** - Normative protocol specification (§1–§27)
-  - §1–§15: Core architecture (stable)
-  - §16–§27: Implementation specifications (NEW - all gaps filled)
+### Core Documentation
+- **[INDEX.md](docs/INDEX.md)** - Documentation roadmap (START HERE)
+- **[TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md)** - Protocol v6 specification (§1–§27)
+- **[AI_SYSTEM.md](docs/AI_SYSTEM.md)** - AI optimization systems (v1.0.0)
+- **[IMPLEMENTATION_DETAILS.md](docs/IMPLEMENTATION_DETAILS.md)** - Technical implementation spec
 
-### Implementation Guidance
-- **[IMPLEMENTATION_ADDENDUM.md](docs/IMPLEMENTATION_ADDENDUM.md)** - 5-phase 12-week development schedule
+### Getting Started
+- **[QUICKSTART.md](docs/QUICKSTART.md)** - Quick deployment guide
+- **[CLI_GUIDE.md](docs/CLI_GUIDE.md)** - Command-line reference
+- **[INTEGRATION_QUICKSTART.md](docs/INTEGRATION_QUICKSTART.md)** - Integration guide
+
+### Reference
 - **[QUICK_REFERENCE.md](docs/QUICK_REFERENCE.md)** - One-page parameter lookup
-- **[CRYPTOGRAPHY_RATIONALE.md](docs/CRYPTOGRAPHY_RATIONALE.md)** - Why BLAKE3 + Ed25519 + ECVRF
+- **[WALLET_COMMANDS.md](docs/WALLET_COMMANDS.md)** - Wallet operations
+- **[CRYPTOGRAPHY_RATIONALE.md](docs/CRYPTOGRAPHY_RATIONALE.md)** - Crypto choices explained
 
-### Analysis & Tracking
-- **[V6_UPDATE_SUMMARY.md](docs/V6_UPDATE_SUMMARY.md)** - What changed and why
-- **[ANALYSIS_RECOMMENDATIONS_TRACKER.md](docs/ANALYSIS_RECOMMENDATIONS_TRACKER.md)** - All 14 recommendations mapped to implementation
-
-### Network & Architecture
-- **[NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)** - P2P design and peer discovery
+### Architecture
+- **[ARCHITECTURE_OVERVIEW.md](docs/ARCHITECTURE_OVERVIEW.md)** - System architecture
+- **[NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)** - P2P design
 - **[RUST_P2P_GUIDELINES.md](docs/RUST_P2P_GUIDELINES.md)** - P2P implementation best practices
-
-### Previous Versions (Archive)
-- [TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) - Previous version
-- [TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md) - Original specification
 
 ## 🏗️ Architecture
 
