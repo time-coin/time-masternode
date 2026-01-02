@@ -760,6 +760,52 @@ impl PeerConnection {
                     our_height
                 );
 
+                // CONSENSUS CHECK: If we're significantly behind, verify this peer is on consensus chain
+                let peer_tip = self.peer_height.read().await.unwrap_or(end_height);
+                if peer_tip > our_height + 50 {
+                    // Get all connected peers
+                    let connected_peers = peer_registry.get_connected_peers().await;
+                    
+                    // Count how many peers have similar height to this peer (consensus check)
+                    let mut supporting_peers_count = 0;
+                    let mut total_peers_with_height = 0;
+                    
+                    for peer_ip in &connected_peers {
+                        if let Some(height) = peer_registry.get_peer_height(peer_ip).await {
+                            total_peers_with_height += 1;
+                            // Peer agrees if within 10 blocks
+                            if (height as i64 - peer_tip as i64).abs() <= 10 {
+                                supporting_peers_count += 1;
+                            }
+                        }
+                    }
+                    
+                    // If less than 50% of peers agree with this peer, it's not canonical
+                    if total_peers_with_height > 0 && (supporting_peers_count as f64 / total_peers_with_height as f64) < 0.5 {
+                        info!(
+                            "📊 Peer {} NOT on consensus chain ({}/{} peers agree at height {}). Deferring to periodic consensus.",
+                            self.peer_ip, supporting_peers_count, total_peers_with_height, peer_tip
+                        );
+                        // Try to add sequential blocks, but don't do fork resolution
+                        let mut added = 0;
+                        for block in blocks {
+                            match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                Ok(true) => added += 1,
+                                Ok(false) | Err(_) => break,
+                            }
+                        }
+                        if added > 0 {
+                            info!("✅ Added {} sequential blocks from {}", added, self.peer_ip);
+                        }
+                        return Ok(());
+                    }
+                    
+                    info!(
+                        "✅ Peer {} IS on consensus chain ({}/{} peers agree at height {}). Proceeding with fork resolution.",
+                        self.peer_ip, supporting_peers_count, total_peers_with_height, peer_tip
+                    );
+                }
+
                 // FIRST: Check if we have matching blocks (common ancestor search)
                 let mut common_ancestor: Option<u64> = None;
                 if start_height <= our_height {
@@ -787,6 +833,21 @@ impl PeerConnection {
                             "📊 Peer has longer chain ({} > {}) with common ancestor at {}",
                             peer_tip_height, our_height, ancestor
                         );
+
+                        // Store the common ancestor in tracker to prevent re-triggering block-1 search
+                        let mut tracker = self.fork_resolution_tracker.write().await;
+                        if let Some(ref mut attempt) = *tracker {
+                            attempt.common_ancestor = Some(ancestor);
+                        } else {
+                            *tracker = Some(ForkResolutionAttempt {
+                                fork_height: ancestor,
+                                attempt_count: 1,
+                                last_attempt: std::time::Instant::now(),
+                                common_ancestor: Some(ancestor),
+                                peer_height: peer_tip_height,
+                            });
+                        }
+                        drop(tracker);
 
                         // Collect blocks after common ancestor
                         let mut reorg_blocks: Vec<Block> = blocks
@@ -850,8 +911,12 @@ impl PeerConnection {
                     }
                 }
 
-                // THIRD: Only if no common ancestor found, do block-1 search
-                if common_ancestor.is_none() && start_height > 0 && start_height <= our_height {
+                // THIRD: Only if no common ancestor found (either in this batch OR in tracker), do block-1 search
+                let tracker = self.fork_resolution_tracker.read().await;
+                let already_have_ancestor = tracker.as_ref().and_then(|t| t.common_ancestor).is_some();
+                drop(tracker);
+                
+                if common_ancestor.is_none() && !already_have_ancestor && start_height > 0 && start_height <= our_height {
                     if let Ok(our_block) = blockchain.get_block(start_height) {
                         let incoming_hash = blocks[0].hash();
                         let our_hash = our_block.hash();
