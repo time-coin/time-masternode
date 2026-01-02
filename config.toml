@@ -1,6 +1,6 @@
 [node]
 name = "TIME Coin Node"
-version = "0.1.0"
+version = "1.0.0"
 # Network type: "mainnet" or "testnet"
 # Testnet: P2P=24100, RPC=24101, Address prefix=TIME0
 network = "testnet"

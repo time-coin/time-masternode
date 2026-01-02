@@ -254,7 +254,7 @@ impl Config {
         Self {
             node: NodeConfig {
                 name: "TIME Coin Node".to_string(),
-                version: "0.1.0".to_string(),
+                version: "1.0.0".to_string(),
                 network: "testnet".to_string(),
             },
             network: NetworkConfig {

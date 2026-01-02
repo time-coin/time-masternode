@@ -211,8 +211,8 @@ impl RpcHandler {
         let active_masternodes = self.registry.count_active().await;
 
         Ok(json!({
-            "version": 10000,
-            "subversion": "/timed:0.1.0/",
+            "version": 100000,
+            "subversion": "/timed:1.0.0/",
             "protocolversion": 70016,
             "localservices": "0000000000000409",
             "localrelay": true,
@@ -242,11 +242,11 @@ impl RpcHandler {
                     "addr": mn.masternode.address.clone(),
                     "services": "0000000000000409",
                     "lastseen": mn.last_heartbeat,
-                    "subver": "/timed:0.1.0/",
+                    "subver": "/timed:1.0.0/",
                     "inbound": false,
                     "conntime": mn.masternode.registered_at,
                     "timeoffset": 0,
-                    "version": 10000,
+                    "version": 100000,
                     "is_masternode": true,
                     "tier": format!("{:?}", mn.masternode.tier),
                     "active": mn.is_active,
