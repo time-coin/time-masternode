@@ -849,7 +849,24 @@ impl PeerConnection {
                                     .collect();
                                 reorg_blocks.sort_by_key(|b| b.header.height);
 
-                                if !reorg_blocks.is_empty() {
+                                if reorg_blocks.is_empty() {
+                                    // We found a common ancestor but received no blocks after it
+                                    // This means we need to request blocks after the ancestor
+                                    if end_height > ancestor {
+                                        debug!(
+                                            "🔍 Found common ancestor at {}, requesting blocks {}-{}",
+                                            ancestor,
+                                            ancestor + 1,
+                                            end_height
+                                        );
+                                        let msg =
+                                            NetworkMessage::GetBlocks(ancestor + 1, end_height + 1);
+                                        if let Err(e) = self.send_message(&msg).await {
+                                            warn!("Failed to request blocks after ancestor: {}", e);
+                                        }
+                                        return Ok(());
+                                    }
+                                } else if !reorg_blocks.is_empty() {
                                     let first_new = reorg_blocks.first().unwrap().header.height;
                                     let last_new = reorg_blocks.last().unwrap().header.height;
 
