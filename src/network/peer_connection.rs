@@ -1059,14 +1059,14 @@ impl PeerConnection {
                         "⚠️ [{:?}] All {} blocks skipped from {}",
                         self.direction, skipped, self.peer_ip
                     );
-                    
+
                     // If this is the consensus peer and all blocks were skipped, we need fork resolution
                     if skipped == block_count && peer_tip > our_height + 50 {
                         // Check if this peer is on consensus chain
                         let connected_peers = peer_registry.get_connected_peers().await;
                         let mut supporting_peers_count = 0;
                         let mut total_peers_with_height = 0;
-                        
+
                         for peer_ip in &connected_peers {
                             if let Some(height) = peer_registry.get_peer_height(peer_ip).await {
                                 total_peers_with_height += 1;
@@ -1075,8 +1075,11 @@ impl PeerConnection {
                                 }
                             }
                         }
-                        
-                        if total_peers_with_height > 0 && (supporting_peers_count as f64 / total_peers_with_height as f64) >= 0.5 {
+
+                        if total_peers_with_height > 0
+                            && (supporting_peers_count as f64 / total_peers_with_height as f64)
+                                >= 0.5
+                        {
                             warn!(
                                 "🔀 All blocks skipped from consensus peer {}. Starting fork resolution from block {}.",
                                 self.peer_ip, start_height
@@ -1642,9 +1645,8 @@ impl PeerConnection {
             NetworkMessage::Ping { nonce, timestamp } => {
                 self.handle_ping(*nonce, *timestamp).await?;
             }
-            NetworkMessage::Pong { .. } => {
-                // Pong is handled separately in message_loop - don't duplicate processing
-                return Ok(());
+            NetworkMessage::Pong { nonce, timestamp } => {
+                self.handle_pong(*nonce, *timestamp).await?;
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,
@@ -1765,9 +1767,8 @@ impl PeerConnection {
             NetworkMessage::Ping { nonce, timestamp } => {
                 self.handle_ping(*nonce, *timestamp).await?;
             }
-            NetworkMessage::Pong { .. } => {
-                // Pong is handled separately in message_loop - don't duplicate processing
-                return Ok(());
+            NetworkMessage::Pong { nonce, timestamp } => {
+                self.handle_pong(*nonce, *timestamp).await?;
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,
@@ -1930,9 +1931,8 @@ impl PeerConnection {
             NetworkMessage::Ping { nonce, timestamp } => {
                 self.handle_ping(*nonce, *timestamp).await?;
             }
-            NetworkMessage::Pong { .. } => {
-                // Pong is handled separately in message_loop - don't duplicate processing
-                return Ok(());
+            NetworkMessage::Pong { nonce, timestamp } => {
+                self.handle_pong(*nonce, *timestamp).await?;
             }
             _ => {
                 // Other message types are handled by peer_registry or other handlers
