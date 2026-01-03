@@ -616,17 +616,31 @@ async fn maintain_peer_connection(
     peer_registry: Arc<PeerConnectionRegistry>,
     _local_ip: Option<String>,
 ) -> Result<(), String> {
+    // Mark in peer_registry BEFORE attempting connection to prevent race with inbound
+    if !peer_registry.mark_connecting(ip) {
+        return Err(format!(
+            "Already connecting/connected to {} in peer_registry",
+            ip
+        ));
+    }
+
     // Create outbound connection
-    let peer_conn = PeerConnection::new_outbound(ip.to_string(), port).await?;
+    let peer_conn = match PeerConnection::new_outbound(ip.to_string(), port).await {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Failed to connect - clean up peer_registry mark
+            peer_registry.unregister_peer(ip).await;
+            return Err(e);
+        }
+    };
 
     tracing::info!("✓ Connected to peer: {}", ip);
 
     // Get peer IP for later reference
     let peer_ip = peer_conn.peer_ip().to_string();
 
-    // Mark as connected in both managers (transitions from Connecting -> Connected)
+    // Mark as connected in connection_manager (transitions from Connecting -> Connected)
     connection_manager.mark_connected(&peer_ip);
-    peer_registry.mark_connecting(&peer_ip); // Also track in peer_registry for accurate counts
 
     // Run the message loop which handles ping/pong and routes other messages
     // Pass peer_registry, masternode_registry, and blockchain so it can process block syncs
