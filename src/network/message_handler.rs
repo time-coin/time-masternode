@@ -141,6 +141,10 @@ impl MessageHandler {
                 )
                 .await
             }
+            NetworkMessage::FinalityVoteBroadcast { vote } => {
+                self.handle_finality_vote_broadcast(vote.clone(), context)
+                    .await
+            }
             _ => {
                 debug!(
                     "[{}] Unhandled message type from {}",
@@ -546,8 +550,37 @@ impl MessageHandler {
             // 1. Retrieve the block from cache
             if let Some(cache) = &context.block_cache {
                 if let Some((_, block)) = cache.remove(&block_hash) {
-                    // 2. Collect precommit signatures (TODO: implement signature collection)
-                    let _signatures: Vec<Vec<u8>> = vec![]; // TODO: Collect actual signatures
+                    // 2. Collect precommit signatures for finality proof
+                    //
+                    // TODO: Implement signature collection
+                    //
+                    // MISSING FUNCTIONALITY:
+                    // The current implementation accumulates vote weights but doesn't
+                    // store the actual Ed25519 signatures from precommit votes.
+                    //
+                    // Required changes:
+                    // 1. Modify accumulate_precommit_vote() to store (voter_id, signature, weight)
+                    //    instead of just aggregating weights
+                    // 2. Add get_precommit_signatures(block_hash) method to retrieve them
+                    // 3. Create FinalityProof with collected signatures:
+                    //    ```rust
+                    //    let signatures = consensus.avalanche.get_precommit_signatures(block_hash)?;
+                    //    let finality_proof = FinalityProof {
+                    //        block_hash,
+                    //        height: block.header.height,
+                    //        signatures,
+                    //        total_stake: precommit_weight,
+                    //        timestamp: chrono::Utc::now().timestamp() as u64,
+                    //    };
+                    //    ```
+                    //
+                    // IMPACT: Without this, finality proofs lack cryptographic signatures,
+                    // making them non-verifiable by light clients or external validators.
+                    //
+                    // PRIORITY: HIGH - Required for light client support
+                    //
+                    // For now, we proceed without signatures (finality still achieved via consensus)
+                    let _signatures: Vec<Vec<u8>> = vec![]; // Placeholder
 
                     // 3. Phase 3E.3: Call tsdc.finalize_block_complete()
                     // Note: This would be called through a TSDC module instance
@@ -645,6 +678,58 @@ impl MessageHandler {
                         hex::encode(block_hash)
                     );
                 }
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle FinalityVoteBroadcast - verify signature and accumulate vote
+    async fn handle_finality_vote_broadcast(
+        &self,
+        vote: crate::types::FinalityVote,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "[{}] Received finality vote for tx {} from {}",
+            self.direction,
+            hex::encode(vote.txid),
+            vote.voter_mn_id
+        );
+
+        // Get voter's public key from masternode registry
+        let voter_pubkey = match context.masternode_registry.get(&vote.voter_mn_id).await {
+            Some(mn_info) => mn_info.masternode.public_key,
+            None => {
+                warn!(
+                    "[{}] Received finality vote from unknown validator: {}",
+                    self.direction, vote.voter_mn_id
+                );
+                return Ok(None);
+            }
+        };
+
+        // Verify the vote signature
+        if let Err(e) = vote.verify(&voter_pubkey) {
+            warn!(
+                "[{}] Invalid finality vote signature from {}: {}",
+                self.direction, vote.voter_mn_id, e
+            );
+            return Ok(None);
+        }
+
+        debug!(
+            "[{}] ✅ Verified finality vote signature from {}",
+            self.direction, vote.voter_mn_id
+        );
+
+        // Accumulate the vote for VFP assembly
+        if let Some(consensus) = &context.consensus {
+            if let Err(e) = consensus.avalanche.accumulate_finality_vote(vote) {
+                warn!(
+                    "[{}] Failed to accumulate finality vote: {}",
+                    self.direction, e
+                );
             }
         }
 

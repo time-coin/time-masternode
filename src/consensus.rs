@@ -48,6 +48,43 @@ struct NodeIdentity {
     signing_key: ed25519_dalek::SigningKey,
 }
 
+impl NodeIdentity {
+    /// Sign a finality vote with this node's key
+    fn sign_finality_vote(
+        &self,
+        chain_id: u32,
+        txid: Hash256,
+        tx_hash_commitment: Hash256,
+        slot_index: u64,
+        voter_mn_id: String,
+        voter_weight: u64,
+    ) -> FinalityVote {
+        use ed25519_dalek::Signer;
+
+        // Create the signing message
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&chain_id.to_le_bytes());
+        msg.extend_from_slice(&txid);
+        msg.extend_from_slice(&tx_hash_commitment);
+        msg.extend_from_slice(&slot_index.to_le_bytes());
+        msg.extend_from_slice(voter_mn_id.as_bytes());
+        msg.extend_from_slice(&voter_weight.to_le_bytes());
+
+        // Sign the message
+        let signature = self.signing_key.sign(&msg);
+
+        FinalityVote {
+            chain_id,
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            voter_mn_id,
+            voter_weight,
+            signature: signature.to_bytes().to_vec(),
+        }
+    }
+}
+
 // ============================================================================
 // AVALANCHE PROTOCOL TYPES
 // ============================================================================
@@ -833,45 +870,6 @@ impl AvalancheConsensus {
     }
 
     // ========================================================================
-    // FINALITY VOTE GENERATION (Per Protocol §8.5)
-    // ========================================================================
-
-    /// Generate a finality vote for a transaction if this validator is AVS-active
-    /// Called when this validator responds with "Valid" during query round
-    pub fn generate_finality_vote(
-        &self,
-        txid: Hash256,
-        slot_index: u64,
-        voter_mn_id: String,
-        voter_weight: u64,
-        snapshot: &AVSSnapshot,
-    ) -> Option<FinalityVote> {
-        // Only generate vote if voter is in the AVS snapshot for this slot
-        if !snapshot.contains_validator(&voter_mn_id) {
-            return None;
-        }
-
-        // Create the finality vote
-        let vote = FinalityVote {
-            chain_id: 1, // TODO: Make configurable
-            txid,
-            tx_hash_commitment: txid, // TODO: Hash the actual tx bytes
-            slot_index,
-            voter_mn_id,
-            voter_weight,
-            signature: vec![], // TODO: Sign with validator's key
-        };
-
-        Some(vote)
-    }
-
-    /// Broadcast a finality vote to all peer masternodes
-    /// Used by consensus to propagate votes across the network
-    pub fn broadcast_finality_vote(&self, vote: FinalityVote) -> NetworkMessage {
-        NetworkMessage::FinalityVoteBroadcast { vote }
-    }
-
-    // ========================================================================
     // PHASE 3D: PREPARE VOTE HANDLING
     // ========================================================================
 
@@ -1047,6 +1045,61 @@ impl ConsensusEngine {
     pub fn update_masternodes(&self, masternodes: Vec<Masternode>) {
         self.masternodes.store(Arc::new(masternodes));
     }
+
+    // ========================================================================
+    // FINALITY VOTE GENERATION (Per Protocol §8.5)
+    // ========================================================================
+
+    /// Generate a finality vote for a transaction if this validator is AVS-active
+    /// Called when this validator responds with "Valid" during query round
+    pub fn generate_finality_vote(
+        &self,
+        txid: Hash256,
+        tx: &Transaction,
+        slot_index: u64,
+        snapshot: &AVSSnapshot,
+    ) -> Option<FinalityVote> {
+        // Get identity (returns None if not set)
+        let identity = self.identity.get()?;
+        let voter_mn_id = identity.address.clone();
+
+        // Only generate vote if voter is in the AVS snapshot for this slot
+        if !snapshot.contains_validator(&voter_mn_id) {
+            return None;
+        }
+
+        // Get voter weight from snapshot
+        let voter_weight = snapshot.get_validator_weight(&voter_mn_id)?;
+
+        // Compute transaction hash commitment (BLAKE3 hash of canonical tx bytes)
+        let tx_bytes = bincode::serialize(tx).ok()?;
+        let tx_hash = blake3::hash(&tx_bytes);
+
+        // Convert blake3 hash to Hash256 (both are [u8; 32])
+        let tx_hash_commitment: Hash256 = *tx_hash.as_bytes();
+
+        // Sign and create the vote using identity
+        let vote = identity.sign_finality_vote(
+            1, // TODO: Make chain_id configurable
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            voter_mn_id,
+            voter_weight,
+        );
+
+        Some(vote)
+    }
+
+    /// Broadcast a finality vote to all peer masternodes
+    /// Used by consensus to propagate votes across the network
+    pub fn broadcast_finality_vote(&self, vote: FinalityVote) -> NetworkMessage {
+        NetworkMessage::FinalityVoteBroadcast { vote }
+    }
+
+    // ========================================================================
+    // MASTERNODE HELPERS
+    // ========================================================================
 
     // Lock-free read of masternodes
     fn get_masternodes(&self) -> arc_swap::Guard<Arc<Vec<Masternode>>> {

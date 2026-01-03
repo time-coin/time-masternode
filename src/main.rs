@@ -280,14 +280,18 @@ async fn main() {
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
     // Initialize peer manager
-    let peer_db = Arc::new(
-        sled::Config::new()
-            .path(format!("{}/peers", db_dir))
-            .cache_capacity(cache_size)
-            .open()
-            .map_err(|e| format!("Failed to open peer database: {}", e))
-            .unwrap(),
-    );
+    let peer_db = match sled::Config::new()
+        .path(format!("{}/peers", db_dir))
+        .cache_capacity(cache_size)
+        .open()
+    {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            eprintln!("❌ Failed to open peer database: {}", e);
+            eprintln!("   Check disk space and file permissions");
+            std::process::exit(1);
+        }
+    };
     let peer_manager = Arc::new(PeerManager::new(
         peer_db,
         config.network.clone(),

@@ -3,8 +3,12 @@ use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+// Use parking_lot::RwLock instead of std::sync::RwLock
+// parking_lot RwLock doesn't poison on panic, making it safer for production
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerPerformance {
@@ -100,14 +104,14 @@ impl AIPeerSelector {
                 )))
             })?;
 
-            self.performance.write().unwrap().insert(address, perf);
+            self.performance.write().insert(address, perf);
         }
 
         Ok(())
     }
 
     pub fn save_to_db(&self) -> Result<(), AppError> {
-        let perf_lock = self.performance.read().unwrap();
+        let perf_lock = self.performance.read();
         for (address, perf) in perf_lock.iter() {
             let key = format!("ai_peer_{}", address);
             let value = bincode::serialize(perf).map_err(|e| {
@@ -134,7 +138,7 @@ impl AIPeerSelector {
 
     pub fn record_success(&self, peer: &SocketAddr, response_time_ms: f64) {
         let address = peer.to_string();
-        let mut perf_lock = self.performance.write().unwrap();
+        let mut perf_lock = self.performance.write();
         let perf = perf_lock
             .entry(address.clone())
             .or_insert_with(|| PeerPerformance::new(address));
@@ -159,7 +163,7 @@ impl AIPeerSelector {
 
     pub fn record_failure(&self, peer: &SocketAddr) {
         let address = peer.to_string();
-        let mut perf_lock = self.performance.write().unwrap();
+        let mut perf_lock = self.performance.write();
         let perf = perf_lock
             .entry(address.clone())
             .or_insert_with(|| PeerPerformance::new(address));
@@ -173,7 +177,7 @@ impl AIPeerSelector {
             return None;
         }
 
-        let perf_lock = self.performance.read().unwrap();
+        let perf_lock = self.performance.read();
         let mut best_peer: Option<(SocketAddr, f64)> = None;
 
         for candidate in candidates {
@@ -197,14 +201,13 @@ impl AIPeerSelector {
     pub fn get_peer_score(&self, peer: &SocketAddr) -> f64 {
         self.performance
             .read()
-            .unwrap()
             .get(&peer.to_string())
             .map(|p| p.total_score)
             .unwrap_or(0.5)
     }
 
     pub fn get_top_peers(&self, limit: usize) -> Vec<(String, f64)> {
-        let perf_lock = self.performance.read().unwrap();
+        let perf_lock = self.performance.read();
         let mut peers: Vec<_> = perf_lock
             .iter()
             .map(|(addr, perf)| (addr.clone(), perf.total_score))
@@ -216,7 +219,7 @@ impl AIPeerSelector {
     }
 
     pub fn get_statistics(&self) -> HashMap<String, f64> {
-        let perf_lock = self.performance.read().unwrap();
+        let perf_lock = self.performance.read();
         let total_peers = perf_lock.len() as f64;
 
         if total_peers == 0.0 {

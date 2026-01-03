@@ -876,45 +876,48 @@ impl Blockchain {
     /// Proactively monitors peers and initiates sync from best masternodes
     pub fn spawn_sync_coordinator(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            info!("🔄 Sync coordinator started - monitoring peers every {}s", SYNC_COORDINATOR_INTERVAL_SECS);
-            let mut interval = tokio::time::interval(
-                std::time::Duration::from_secs(SYNC_COORDINATOR_INTERVAL_SECS)
+            info!(
+                "🔄 Sync coordinator started - monitoring peers every {}s",
+                SYNC_COORDINATOR_INTERVAL_SECS
             );
-            
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                SYNC_COORDINATOR_INTERVAL_SECS,
+            ));
+
             loop {
                 interval.tick().await;
-                
+
                 // Skip if already syncing
                 if *self.is_syncing.read().await {
                     continue;
                 }
-                
+
                 let our_height = self.get_height().await;
                 let time_expected = self.calculate_expected_height();
-                
+
                 // Get peer registry
                 let peer_registry_opt = self.peer_registry.read().await;
                 let peer_registry = match peer_registry_opt.as_ref() {
                     Some(pr) => pr,
                     None => continue,
                 };
-                
+
                 // Get all connected peers
                 let connected_peers = peer_registry.get_connected_peers().await;
                 if connected_peers.is_empty() {
                     continue;
                 }
-                
+
                 // Find the best masternode to sync from
                 let mut best_masternode: Option<(String, u64)> = None;
-                
+
                 for peer_ip in &connected_peers {
                     // Check if this peer is a whitelisted masternode
                     let is_masternode = peer_registry.is_whitelisted(peer_ip).await;
                     if !is_masternode {
                         continue;
                     }
-                    
+
                     // Get peer's height
                     if let Some(peer_height) = peer_registry.get_peer_height(peer_ip).await {
                         // Only consider peers ahead of us by at least 5 blocks
@@ -932,7 +935,7 @@ impl Blockchain {
                         }
                     }
                 }
-                
+
                 // If we found a better masternode, sync from it
                 if let Some((best_peer, peer_height)) = best_masternode {
                     let blocks_behind = peer_height.saturating_sub(our_height);
@@ -940,7 +943,7 @@ impl Blockchain {
                         "🎯 Sync coordinator: Found masternode {} at height {} ({} blocks ahead of us at {})",
                         best_peer, peer_height, blocks_behind, our_height
                     );
-                    
+
                     // Initiate sync
                     let blockchain_clone = Arc::clone(&self);
                     tokio::spawn(async move {
@@ -1468,6 +1471,59 @@ impl Blockchain {
         Some(0)
     }
 
+    /// Get all finalized transaction IDs in a height range (for reorg protection)
+    ///
+    /// This method scans blocks in the given range and identifies which transactions
+    /// were finalized by Avalanche consensus before being included in blocks.
+    ///
+    /// CRITICAL: Finalized transactions MUST be preserved during reorgs (Approach A).
+    /// Once Avalanche finalizes a transaction, it cannot be excluded from the chain,
+    /// even if the block containing it is orphaned. Any fork missing a finalized
+    /// transaction must be rejected.
+    async fn get_finalized_txids_in_range(
+        &self,
+        start_height: u64,
+        end_height: u64,
+    ) -> Result<Vec<[u8; 32]>, String> {
+        let mut finalized_txids = Vec::new();
+
+        // IMPLEMENTATION NOTE: This is a simplified version that checks if transactions
+        // existed in the finalized pool when blocks were created. A production version
+        // would need persistent tracking of finalization status, possibly using:
+        // 1. Database table mapping txid -> (finalized_at_timestamp, block_height)
+        // 2. Bloom filter for fast lookup with occasional false positives
+        // 3. In-memory cache with persistence to disk
+        //
+        // For now, we make a conservative assumption: ALL non-coinbase transactions
+        // in blocks were finalized by Avalanche before inclusion. This is safe because:
+        // - TSDC block production only includes finalized transactions (see blockchain.rs:1142)
+        // - Avalanche finalizes transactions before they enter blocks
+        // - Coinbase transactions are block-specific and don't need protection
+
+        for height in start_height..=end_height {
+            if let Ok(block) = self.get_block_by_height(height).await {
+                for tx in block.transactions.iter() {
+                    // Skip coinbase transactions (they're block-specific, not finalized by Avalanche)
+                    let is_coinbase =
+                        !tx.inputs.is_empty() && tx.inputs[0].previous_output.vout == u32::MAX;
+
+                    if !is_coinbase {
+                        finalized_txids.push(tx.txid());
+                    }
+                }
+            }
+        }
+
+        tracing::debug!(
+            "Found {} finalized transactions in height range {} to {}",
+            finalized_txids.len(),
+            start_height,
+            end_height
+        );
+
+        Ok(finalized_txids)
+    }
+
     // ===== Internal Helper Methods =====
 
     fn load_chain_height(&self) -> Result<u64, String> {
@@ -1808,15 +1864,44 @@ impl Blockchain {
                         }
                     }
 
-                    // TODO: Restore UTXOs that were spent by this transaction
-                    // This requires either:
-                    // 1. Keeping a rollback journal of spent UTXOs
-                    // 2. Re-scanning the chain from genesis to target_height
-                    // For now, we log that this is incomplete
-                    if !tx.inputs.is_empty() && tx.inputs[0].previous_output.vout != u32::MAX {
-                        // Not a coinbase transaction
+                    // CRITICAL: Handle finalized vs unfinalized transactions differently
+                    //
+                    // APPROACH A: Finalized Transaction Protection
+                    // - Finalized transactions (by Avalanche) CANNOT be rolled back
+                    // - Only unfinalized transactions should have their UTXOs restored
+                    // - Finalized transactions will be re-included by reorg validation check
+                    //
+                    // CURRENT IMPLEMENTATION STATUS:
+                    // 1. ✅ Reorg validation prevents forks missing finalized transactions
+                    // 2. ⚠️  UTXO restoration for unfinalized transactions still needs implementation
+                    //    This requires:
+                    //    a) Tracking which transactions were finalized before block inclusion
+                    //    b) Undo log storing spent UTXO data for unfinalized transactions
+                    //    c) Logic to restore UTXOs only for unfinalized transactions
+                    //
+                    // 3. ⚠️  Mempool handling needs implementation:
+                    //    - Finalized transactions: Do NOT return to mempool (already finalized)
+                    //    - Unfinalized transactions: Return to mempool for re-mining
+                    //
+                    // IMPACT OF CURRENT INCOMPLETE STATE:
+                    // - Finalized transactions: PROTECTED ✅ (cannot be excluded from chain)
+                    // - Unfinalized transactions: Vulnerable to UTXO corruption ⚠️
+                    // - Deep reorgs are prevented by MAX_REORG_DEPTH and checkpoints
+                    //
+                    // PRIORITY:
+                    // - HIGH: Implement undo log for unfinalized transaction UTXO restoration
+                    // - MEDIUM: Add finalization status tracking per transaction
+                    //
+                    // NOTE: Since reorganize_to_chain() validates finalized transactions are
+                    // present in new chain, finalized UTXOs will be correctly re-spent when
+                    // new blocks are applied. Only unfinalized transactions need special handling.
+
+                    let is_coinbase =
+                        !tx.inputs.is_empty() && tx.inputs[0].previous_output.vout == u32::MAX;
+
+                    if !is_coinbase {
                         tracing::debug!(
-                            "⚠️  UTXO restoration for spent inputs not fully implemented (tx {} at height {})",
+                            "📝 Transaction {} at height {} - UTXOs not restored (needs undo log implementation)",
                             hex::encode(&txid[..8]),
                             height
                         );
@@ -2362,6 +2447,46 @@ impl Blockchain {
         }
 
         tracing::info!("✅ All blocks validated successfully, proceeding with reorganization");
+
+        // CRITICAL: Validate finalized transaction protection (Approach A)
+        // Once Avalanche finalizes a transaction, it MUST be in the canonical chain.
+        // Reject any fork that excludes a finalized transaction.
+        tracing::info!("🔒 Checking finalized transaction protection...");
+        let finalized_txs_to_check = self
+            .get_finalized_txids_in_range(common_ancestor + 1, current)
+            .await?;
+
+        if !finalized_txs_to_check.is_empty() {
+            tracing::info!(
+                "🔍 Found {} finalized transactions that must be preserved during reorg",
+                finalized_txs_to_check.len()
+            );
+
+            // Build set of all txids in the new chain
+            let mut new_chain_txids = std::collections::HashSet::new();
+            for block in &new_blocks {
+                for tx in &block.transactions {
+                    new_chain_txids.insert(tx.txid());
+                }
+            }
+
+            // Check each finalized transaction is present in new chain
+            for txid in &finalized_txs_to_check {
+                if !new_chain_txids.contains(txid) {
+                    return Err(format!(
+                        "⛔ REORG REJECTED: New chain is missing finalized transaction {} \
+                        (Avalanche instant finality guarantee violated). \
+                        Finalized transactions cannot be excluded from the canonical chain.",
+                        hex::encode(txid)
+                    ));
+                }
+            }
+
+            tracing::info!(
+                "✅ All {} finalized transactions are present in new chain",
+                finalized_txs_to_check.len()
+            );
+        }
 
         // Step 1: Rollback to common ancestor
         self.rollback_to_height(common_ancestor).await?;

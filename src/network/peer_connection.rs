@@ -871,9 +871,7 @@ impl PeerConnection {
 
                 // Update our knowledge of peer's height
                 let current_known = self.peer_height.read().await;
-                if current_known.is_none()
-                    || (current_known.is_some() && current_known.unwrap() < end_height)
-                {
+                if current_known.map(|h| h < end_height).unwrap_or(true) {
                     *self.peer_height.write().await = Some(end_height);
                 }
                 drop(current_known);
@@ -885,7 +883,7 @@ impl PeerConnection {
 
                 // Phase 3 Step 2: PRIORITIZED SYNC - Whitelist bypass for trusted masternodes
                 let peer_tip = self.peer_height.read().await.unwrap_or(end_height);
-                
+
                 // WHITELIST BYPASS: Skip consensus checks for whitelisted masternodes
                 if is_whitelisted {
                     info!(
@@ -905,7 +903,7 @@ impl PeerConnection {
                     );
                     return Ok(());
                 }
-                
+
                 // CONSENSUS CHECK: For non-whitelisted peers, verify they're on consensus chain
                 if peer_tip > our_height + 50 {
                     // Get all connected peers
@@ -1019,15 +1017,14 @@ impl PeerConnection {
                             .collect();
                         reorg_blocks.sort_by_key(|b| b.header.height);
 
-                        if reorg_blocks.is_empty()
-                            || reorg_blocks.last().unwrap().header.height < peer_tip_height
+                        let last_reorg_height = reorg_blocks.last().map(|b| b.header.height);
+                        if last_reorg_height
+                            .map(|h| h < peer_tip_height)
+                            .unwrap_or(true)
                         {
                             // Need more blocks - request from ancestor to peer tip
-                            let request_start = if reorg_blocks.is_empty() {
-                                ancestor + 1
-                            } else {
-                                reorg_blocks.last().unwrap().header.height + 1
-                            };
+                            let request_start =
+                                last_reorg_height.map(|h| h + 1).unwrap_or(ancestor + 1);
 
                             // CRITICAL FIX: Only request if we actually need these blocks
                             if request_start > our_height {
@@ -1053,7 +1050,11 @@ impl PeerConnection {
                         let has_gaps = reorg_blocks
                             .windows(2)
                             .any(|w| w[1].header.height != w[0].header.height + 1);
-                        if has_gaps || reorg_blocks.first().unwrap().header.height != ancestor + 1 {
+                        let first_height_invalid = reorg_blocks
+                            .first()
+                            .map(|b| b.header.height != ancestor + 1)
+                            .unwrap_or(true); // If empty, we definitely need blocks
+                        if has_gaps || first_height_invalid {
                             info!(
                                 "📤 Detected gaps, requesting complete chain from {}",
                                 ancestor + 1

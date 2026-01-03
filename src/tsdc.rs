@@ -15,7 +15,7 @@
 
 use crate::block::types::{Block, BlockHeader};
 use crate::crypto::ECVRF;
-use crate::types::Hash256;
+use crate::types::{Hash256, Transaction};
 use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
@@ -25,6 +25,54 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::sync::RwLock;
+
+/// Compute merkle root from a list of transactions
+/// Uses BLAKE3 hashing for speed and security
+fn compute_merkle_root(transactions: &[Transaction]) -> Hash256 {
+    if transactions.is_empty() {
+        return [0u8; 32]; // Empty merkle root for blocks with no transactions
+    }
+
+    // Hash each transaction
+    let mut hashes: Vec<Hash256> = transactions
+        .iter()
+        .map(|tx| {
+            // Serialize transaction and hash it
+            let tx_bytes = bincode::serialize(tx).unwrap_or_default();
+            let hash = blake3::hash(&tx_bytes);
+            *hash.as_bytes()
+        })
+        .collect();
+
+    // Build merkle tree by repeatedly hashing pairs
+    while hashes.len() > 1 {
+        let mut next_level = Vec::new();
+
+        // Process pairs
+        for chunk in hashes.chunks(2) {
+            let combined_hash = if chunk.len() == 2 {
+                // Hash the concatenation of two hashes
+                let mut combined = Vec::with_capacity(64);
+                combined.extend_from_slice(&chunk[0]);
+                combined.extend_from_slice(&chunk[1]);
+                let hash = blake3::hash(&combined);
+                *hash.as_bytes()
+            } else {
+                // Odd number of hashes - duplicate the last one
+                let mut combined = Vec::with_capacity(64);
+                combined.extend_from_slice(&chunk[0]);
+                combined.extend_from_slice(&chunk[0]);
+                let hash = blake3::hash(&combined);
+                *hash.as_bytes()
+            };
+            next_level.push(combined_hash);
+        }
+
+        hashes = next_level;
+    }
+
+    hashes[0]
+}
 
 /// TSDC errors
 #[derive(Error, Debug)]
@@ -537,11 +585,14 @@ impl TSCDConsensus {
         let total_reward: u64 = masternode_rewards.iter().map(|(_, amount)| amount).sum();
 
         // Create block
+        // Compute merkle root from transactions
+        let merkle_root = compute_merkle_root(&transactions);
+
         let header = BlockHeader {
             version: 1,
             height: block_height,
             previous_hash: parent_hash,
-            merkle_root: Hash256::default(), // TODO: Compute merkle root from transactions
+            merkle_root,
             timestamp,
             block_reward: total_reward,
             leader: String::new(),

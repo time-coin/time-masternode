@@ -2,8 +2,12 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+// Use parking_lot::RwLock instead of std::sync::RwLock
+// parking_lot RwLock doesn't poison on panic, making it safer for production
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkEvent {
@@ -64,7 +68,7 @@ impl AnomalyDetector {
             value,
         };
 
-        let mut events_lock = self.events.write().unwrap();
+        let mut events_lock = self.events.write();
         events_lock.push_back(event);
 
         if events_lock.len() > 1000 {
@@ -74,12 +78,12 @@ impl AnomalyDetector {
         drop(events_lock);
 
         if let Some(anomaly) = self.detect_anomaly(&event_type, value) {
-            self.anomalies.write().unwrap().push(anomaly);
+            self.anomalies.write().push(anomaly);
         }
     }
 
     fn detect_anomaly(&self, event_type: &str, value: f64) -> Option<AnomalyReport> {
-        let events_lock = self.events.read().unwrap();
+        let events_lock = self.events.read();
 
         let matching: Vec<f64> = events_lock
             .iter()
@@ -131,7 +135,7 @@ impl AnomalyDetector {
     }
 
     pub fn get_recent_anomalies(&self, limit: usize) -> Vec<AnomalyReport> {
-        let anomalies_lock = self.anomalies.read().unwrap();
+        let anomalies_lock = self.anomalies.read();
         let len = anomalies_lock.len();
         if len <= limit {
             anomalies_lock.clone()
@@ -141,7 +145,7 @@ impl AnomalyDetector {
     }
 
     pub fn get_anomaly_count(&self) -> usize {
-        self.anomalies.read().unwrap().len()
+        self.anomalies.read().len()
     }
 
     pub fn is_suspicious_activity(&self, event_type: &str, window_secs: u64) -> bool {
@@ -150,7 +154,7 @@ impl AnomalyDetector {
             .unwrap()
             .as_secs();
 
-        let anomalies_lock = self.anomalies.read().unwrap();
+        let anomalies_lock = self.anomalies.read();
         let recent_anomalies = anomalies_lock
             .iter()
             .filter(|a| {

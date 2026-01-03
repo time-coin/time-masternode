@@ -3,8 +3,12 @@ use crate::types::Transaction;
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+// Use parking_lot::RwLock instead of std::sync::RwLock
+// parking_lot RwLock doesn't poison on panic, making it safer for production
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransactionPattern {
@@ -71,7 +75,7 @@ impl TransactionAnalyzer {
                                 e
                             )))
                         })?;
-                    self.patterns.write().unwrap().insert((hour, day), pattern);
+                    self.patterns.write().insert((hour, day), pattern);
                 }
             }
         }
@@ -80,7 +84,7 @@ impl TransactionAnalyzer {
     }
 
     pub fn save_patterns(&self) -> Result<(), AppError> {
-        let patterns_lock = self.patterns.read().unwrap();
+        let patterns_lock = self.patterns.read();
         for ((hour, day), pattern) in patterns_lock.iter() {
             let key = format!("ai_tx_pattern_{}_{}", hour, day);
             let value = bincode::serialize(pattern).map_err(|e| {
@@ -111,7 +115,7 @@ impl TransactionAnalyzer {
             .unwrap()
             .as_secs();
 
-        let mut history_lock = self.tx_history.write().unwrap();
+        let mut history_lock = self.tx_history.write();
         history_lock.push_back((now, tx_count, total_size));
 
         if history_lock.len() > 10000 {
@@ -130,7 +134,7 @@ impl TransactionAnalyzer {
         let hour = dt.hour() as u8;
         let day = dt.weekday().number_from_monday() as u8;
 
-        let mut patterns_lock = self.patterns.write().unwrap();
+        let mut patterns_lock = self.patterns.write();
         let pattern = patterns_lock
             .entry((hour, day))
             .or_insert(TransactionPattern {
@@ -159,10 +163,10 @@ impl TransactionAnalyzer {
         let hour = dt.hour() as u8;
         let day = dt.weekday().number_from_monday() as u8;
 
-        let patterns_lock = self.patterns.read().unwrap();
+        let patterns_lock = self.patterns.read();
         let pattern = patterns_lock.get(&(hour, day))?;
 
-        let history_lock = self.tx_history.read().unwrap();
+        let history_lock = self.tx_history.read();
         let samples = history_lock
             .iter()
             .filter(|(ts, _, _)| {
@@ -186,7 +190,7 @@ impl TransactionAnalyzer {
     }
 
     pub fn recommend_fee(&self) -> FeeRecommendation {
-        let history_lock = self.tx_history.read().unwrap();
+        let history_lock = self.tx_history.read();
 
         if history_lock.is_empty() {
             return FeeRecommendation {

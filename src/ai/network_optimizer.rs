@@ -2,8 +2,12 @@ use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sled::Db;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::SystemTime;
+
+// Use parking_lot::RwLock instead of std::sync::RwLock
+// parking_lot RwLock doesn't poison on panic, making it safer for production
+use parking_lot::RwLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkMetrics {
@@ -40,7 +44,7 @@ impl NetworkOptimizer {
     }
 
     pub fn record_metrics(&self, metrics: NetworkMetrics) {
-        let mut history_lock = self.metrics_history.write().unwrap();
+        let mut history_lock = self.metrics_history.write();
         history_lock.push_back(metrics.clone());
 
         if history_lock.len() > 1000 {
@@ -50,12 +54,12 @@ impl NetworkOptimizer {
         drop(history_lock);
 
         if let Some(suggestion) = self.analyze_and_suggest() {
-            self.suggestions.write().unwrap().push(suggestion);
+            self.suggestions.write().push(suggestion);
         }
     }
 
     fn analyze_and_suggest(&self) -> Option<OptimizationSuggestion> {
-        let history_lock = self.metrics_history.read().unwrap();
+        let history_lock = self.metrics_history.read();
 
         if history_lock.len() < self.min_samples {
             return None;
@@ -118,7 +122,7 @@ impl NetworkOptimizer {
     }
 
     pub fn get_recent_suggestions(&self, limit: usize) -> Vec<OptimizationSuggestion> {
-        let suggestions_lock = self.suggestions.read().unwrap();
+        let suggestions_lock = self.suggestions.read();
         let len = suggestions_lock.len();
         if len <= limit {
             suggestions_lock.clone()
@@ -128,7 +132,7 @@ impl NetworkOptimizer {
     }
 
     pub fn get_network_health_score(&self) -> f64 {
-        let history_lock = self.metrics_history.read().unwrap();
+        let history_lock = self.metrics_history.read();
 
         if history_lock.len() < self.min_samples {
             return 0.5;
@@ -151,7 +155,7 @@ impl NetworkOptimizer {
     }
 
     pub fn get_statistics(&self) -> HashMap<String, f64> {
-        let history_lock = self.metrics_history.read().unwrap();
+        let history_lock = self.metrics_history.read();
 
         if history_lock.is_empty() {
             return HashMap::new();
