@@ -430,35 +430,12 @@ async fn handle_peer(
                                         let already_registered = peer_registry.is_connected(&ip_str);
 
                                         if has_outbound || already_registered {
-                                            // We already have a connection to this peer
-                                            // Use deterministic tie-breaking based on IP comparison
-                                            let should_we_connect = connection_manager.should_connect_to(&ip_str);
-
-                                            if should_we_connect {
-                                                // Our IP is higher, we should be the one connecting OUT
-                                                // So reject this INbound connection
-                                                tracing::info!(
-                                                    "🔄 Rejecting duplicate inbound from {} (already have connection)",
-                                                    peer.addr
-                                                );
-                                                // Send ACK first so client doesn't get "connection reset"
-                                                let ack_msg = NetworkMessage::Ack {
-                                                    message_type: "Handshake".to_string(),
-                                                };
-                                                if let Some(w) = writer.take() {
-                                                    peer_registry.register_peer(ip_str.clone(), w).await;
-                                                    let _ = peer_registry.send_to_peer(&ip_str, ack_msg).await;
-                                                }
-                                                break; // Close connection gracefully
-                                            }
-                                            // Otherwise, accept this inbound and close the outbound
+                                            // We already have a connection to this peer - reject duplicate
                                             tracing::info!(
-                                                "✅ Accepting inbound from {} and closing existing outbound",
+                                                "🔄 Rejecting duplicate inbound from {} (already have connection)",
                                                 peer.addr
                                             );
-                                            // Close the outbound connection in favor of this inbound
-                                            connection_manager.remove(&ip_str);
-                                            peer_registry.unregister_peer(&ip_str).await;
+                                            break; // Close this new inbound connection
                                         }
 
                                         // Mark this inbound connection in both managers
