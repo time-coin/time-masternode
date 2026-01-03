@@ -81,10 +81,12 @@ pub enum NetworkMessage {
     Ping {
         nonce: u64,
         timestamp: i64,
+        height: Option<u64>, // Phase 3: Advertise our height in pings
     },
     Pong {
         nonce: u64,
         timestamp: i64,
+        height: Option<u64>, // Phase 3: Include height in pong responses
     },
     GetPendingTransactions,
     PendingTransactionsResponse(Vec<Transaction>),

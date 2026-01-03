@@ -392,6 +392,19 @@ async fn main() {
         }
     }
 
+    // Cleanup blocks with invalid merkle roots (00000...)
+    // This removes blocks produced before the mempool population fix
+    match blockchain.cleanup_invalid_merkle_blocks().await {
+        Ok(count) => {
+            if count > 0 {
+                tracing::info!("✅ Removed {} block(s) with invalid merkle roots", count);
+            }
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to cleanup invalid merkle blocks: {}", e);
+        }
+    }
+
     // Create shared peer connection registry for both client and server
     let peer_connection_registry = Arc::new(PeerConnectionRegistry::new());
 
@@ -532,171 +545,6 @@ async fn main() {
             }
         });
         shutdown_manager.register_task(heartbeat_handle);
-
-        // Start TSDC slot loop for leader election and block production
-        let tsdc_loop = tsdc_consensus.clone();
-        let consensus_tsdc = consensus_engine.clone();
-        let peer_registry_tsdc = peer_connection_registry.clone();
-        let masternode_registry_tsdc = registry.clone();
-        let blockchain_tsdc = blockchain.clone();
-        let shutdown_token_tsdc = shutdown_token.clone();
-        let mn_address_tsdc = mn.address.clone();
-        let mn_tier = mn.tier;
-        let mn_public_key = mn.public_key;
-
-        // Generate VRF keys before spawn (RNG can't cross await)
-        use ed25519_dalek::SigningKey;
-        use rand::RngCore;
-        let mut seed = [0u8; 32];
-        let mut rng = rand::thread_rng();
-        rng.fill_bytes(&mut seed);
-        let vrf_sk = SigningKey::from_bytes(&seed);
-        let vrf_pk = vrf_sk.verifying_key();
-
-        let tsdc_handle = tokio::spawn(async move {
-            // Register this node as a TSDC validator
-            let validator = tsdc::TSCDValidator {
-                id: mn_address_tsdc.clone(),
-                public_key: mn_public_key.to_bytes().to_vec(),
-                stake: mn_tier.collateral(),
-                vrf_secret_key: Some(vrf_sk),
-                vrf_public_key: Some(vrf_pk),
-            };
-            tsdc_loop.set_local_validator(validator).await;
-
-            // Track last proposed slot to prevent duplicate proposals
-            let mut last_proposed_slot: Option<u64> = None;
-
-            // Calculate time until next slot boundary
-            let slot_duration = 600u64; // 10 minutes
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let current_slot = now / slot_duration;
-            let slot_deadline = (current_slot + 1) * slot_duration;
-            let sleep_duration = slot_deadline.saturating_sub(now);
-
-            // Wait until next slot boundary
-            tokio::time::sleep(tokio::time::Duration::from_secs(sleep_duration)).await;
-
-            let mut slot_interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(slot_duration));
-            slot_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-            loop {
-                tokio::select! {
-                    _ = shutdown_token_tsdc.cancelled() => {
-                        tracing::debug!("🛑 TSDC slot loop shutting down gracefully");
-                        break;
-                    }
-                    _ = slot_interval.tick() => {
-                        let current_slot = tsdc_loop.current_slot();
-
-                        // Skip if we already proposed for this slot
-                        if last_proposed_slot == Some(current_slot) {
-                            tracing::trace!("Already proposed for slot {}, skipping", current_slot);
-                            continue;
-                        }
-
-                        // Don't produce regular blocks if genesis doesn't exist
-                        let genesis_exists = blockchain_tsdc.get_height().await > 0;
-
-                        if !genesis_exists {
-                            tracing::trace!("Waiting for genesis block before producing regular blocks");
-                            continue;
-                        }
-
-                        // Try to become leader for this slot
-                        match tsdc_loop.select_leader(current_slot).await {
-                            Ok(leader) => {
-                                if leader.id == mn_address_tsdc {
-                                    // Check if we have enough synced nodes before proposing
-                                    // Count connected peers (we're including ourselves implicitly)
-                                    let connected_count = peer_registry_tsdc.connected_count();
-
-                                    // Require at least 3 nodes total (including ourselves) for consensus
-                                    let required_sync = 3;
-                                    let total_nodes = connected_count + 1; // +1 for ourselves
-
-                                    if total_nodes < required_sync {
-                                        tracing::warn!(
-                                            "⚠️  Not enough synced peers for block proposal: {}/{} required",
-                                            total_nodes,
-                                            required_sync
-                                        );
-                                        continue;
-                                    }
-
-                                    tracing::info!("🎯 SELECTED AS LEADER for slot {}", current_slot);
-
-                                    // Get current blockchain height for block proposal
-                                    let current_height = blockchain_tsdc.get_height().await;
-
-                                    // Get finalized transactions from consensus engine
-                                    let finalized_txs = consensus_tsdc.get_finalized_transactions_for_block();
-
-                                    // Calculate masternode rewards for all active masternodes
-                                    let active_masternodes = masternode_registry_tsdc.get_active_masternodes().await;
-                                    const BLOCK_REWARD_SATOSHIS: u64 = 100 * 100_000_000; // 100 TIME
-                                    let masternode_rewards: Vec<(String, u64)> = if !active_masternodes.is_empty() {
-                                        let per_masternode = BLOCK_REWARD_SATOSHIS / active_masternodes.len() as u64;
-                                        active_masternodes.iter()
-                                            .map(|mn| (mn.masternode.address.clone(), per_masternode))
-                                            .collect()
-                                    } else {
-                                        vec![]
-                                    };
-
-                                    tracing::info!(
-                                        "💰 Distributing {} TIME to {} masternodes ({} TIME each)",
-                                        BLOCK_REWARD_SATOSHIS as f64 / 100_000_000.0,
-                                        active_masternodes.len(),
-                                        if !active_masternodes.is_empty() {
-                                            (BLOCK_REWARD_SATOSHIS / active_masternodes.len() as u64) as f64 / 100_000_000.0
-                                        } else {
-                                            0.0
-                                        }
-                                    );
-
-                                    // Propose block with current blockchain height
-                                    match tsdc_loop.propose_block(
-                                        current_height,
-                                        mn_address_tsdc.clone(),
-                                        finalized_txs.clone(),
-                                        masternode_rewards,
-                                    ).await {
-                                        Ok(block) => {
-                                            tracing::info!(
-                                                "📦 Proposed block at height {} with {} transactions",
-                                                block.header.height,
-                                                block.transactions.len()
-                                            );
-
-                                            // Mark this slot as proposed
-                                            last_proposed_slot = Some(current_slot);
-
-                                            // Broadcast block proposal to all peers
-                                            let proposal = NetworkMessage::TSCDBlockProposal { block };
-                                            peer_registry_tsdc.broadcast(proposal).await;
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Failed to propose block: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    tracing::debug!("Slot {} leader: {}", current_slot, leader.id);
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to select leader for slot {}: {}", current_slot, e);
-                            }
-                        }
-                    }
-                }
-            }
-        });
-        shutdown_manager.register_task(tsdc_handle);
     }
 
     // Initialize blockchain and sync from peers in background
@@ -938,6 +786,12 @@ async fn main() {
         > = std::collections::HashMap::new();
         let leader_timeout = std::time::Duration::from_secs(60); // 60 seconds for leader to respond
 
+        // Track last sync time to prevent immediate catchup leader selection
+        // After syncing from peers, node needs time to populate mempool via p2p gossip
+        // Otherwise produces blocks with empty mempool (00000 merkle roots)
+        let mut last_sync_time: Option<std::time::Instant> = None;
+        let min_time_after_sync = std::time::Duration::from_secs(60); // 60s to populate mempool
+
         // Give time for initial blockchain sync to complete before starting block production
         // This prevents race conditions where both init sync and production loop call sync_from_peers()
         tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
@@ -1089,6 +943,9 @@ async fn main() {
                         // First, try to sync from peers
                         match block_blockchain.sync_from_peers().await {
                             Ok(()) => {
+                                // Mark sync completion time
+                                last_sync_time = Some(std::time::Instant::now());
+
                                 // Re-check height after sync - only skip catchup if we actually caught up
                                 let new_height = block_blockchain.get_height().await;
                                 let new_expected = block_blockchain.calculate_expected_height();
@@ -1168,6 +1025,9 @@ async fn main() {
                         // If we received ANY blocks from peers, don't produce catchup blocks yet
                         // Instead, loop back and try sync_from_peers() again
                         if received_blocks_from_peer {
+                            // Mark sync completion time (received blocks from peer)
+                            last_sync_time = Some(std::time::Instant::now());
+
                             let final_height = block_blockchain.get_height().await;
                             let final_expected = block_blockchain.calculate_expected_height();
 
@@ -1271,6 +1131,23 @@ async fn main() {
                                 "⚠️  Selected as TSDC catchup leader but catchup blocks are DISABLED in config. Enable with 'enable_catchup_blocks = true' in [node] section."
                             );
                             continue;
+                        }
+
+                        // CRITICAL FIX: Prevent producing blocks immediately after syncing
+                        // When a node syncs from peers, it receives blocks but its mempool is EMPTY
+                        // It needs time (60s) to receive pending transactions via p2p gossip
+                        // Otherwise it produces blocks with no transactions (00000 merkle roots)
+                        if let Some(sync_time) = last_sync_time {
+                            let time_since_sync = sync_time.elapsed();
+                            if time_since_sync < min_time_after_sync {
+                                let wait_more = min_time_after_sync - time_since_sync;
+                                tracing::warn!(
+                                    "⏸️  Selected as catchup leader but just synced {}s ago - waiting {}s more for mempool to populate",
+                                    time_since_sync.as_secs(),
+                                    wait_more.as_secs()
+                                );
+                                continue;
+                            }
                         }
 
                         tracing::info!(
@@ -1428,6 +1305,18 @@ async fn main() {
                             .unwrap_or(false);
 
                         if is_producer {
+                            // CRITICAL: Do NOT produce blocks if we're significantly behind
+                            // This prevents creating forks when out of sync
+                            if blocks_behind > 10 {
+                                tracing::warn!(
+                                    "⚠️ Skipping normal block production: {} blocks behind ({}. Expected: {}). Must sync first.",
+                                    blocks_behind,
+                                    current_height,
+                                    expected_height
+                                );
+                                continue;
+                            }
+
                             // Validate chain time before producing
                             if let Err(e) = block_blockchain.validate_chain_time().await {
                                 tracing::warn!("⚠️  Chain time validation failed: {}", e);

@@ -1346,13 +1346,22 @@ async fn handle_peer(
                                     let _ = masternode_registry.broadcast_message(msg).await;
                                 }
                                 // Health Check Messages
-                                NetworkMessage::Ping { nonce, timestamp: _ } => {
+                                NetworkMessage::Ping { nonce, timestamp: _, height } => {
                                     check_rate_limit!("ping");
+
+                                    // Phase 3: Update peer height if provided
+                                    if let Some(h) = height {
+                                        peer_registry.update_peer_height(&ip_str, *h).await;
+                                    }
+
+                                    // Phase 3: Get our height to include in pong response
+                                    let our_height = blockchain.get_height().await;
 
                                     // Respond to ping with pong
                                     let pong_msg = NetworkMessage::Pong {
                                         nonce: *nonce,
                                         timestamp: chrono::Utc::now().timestamp(),
+                                        height: Some(our_height), // Phase 3: Include our height
                                     };
                                     tracing::info!("📨 [Inbound] Received ping from {} (nonce: {})", peer.addr, nonce);
 
@@ -1365,7 +1374,11 @@ async fn handle_peer(
                                         }
                                     }
                                 }
-                                NetworkMessage::Pong { nonce, timestamp: _ } => {
+                                NetworkMessage::Pong { nonce, timestamp: _, height } => {
+                                    // Phase 3: Update peer height if provided
+                                    if let Some(h) = height {
+                                        peer_registry.update_peer_height(&ip_str, *h).await;
+                                    }
                                     // Inbound connections don't send pings, just log if we receive a pong
                                     tracing::debug!("📥 [Inbound] Received pong from {} (nonce: {})", peer.addr, nonce);
                                 }

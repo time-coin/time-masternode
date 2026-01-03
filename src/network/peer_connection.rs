@@ -319,34 +319,69 @@ impl PeerConnection {
     }
 
     /// Send a ping to the peer
-    async fn send_ping(&self) -> Result<(), String> {
+    /// Phase 3: Now includes blockchain height in ping
+    async fn send_ping(&self, blockchain: Option<&Arc<Blockchain>>) -> Result<(), String> {
         let nonce = rand::random::<u64>();
         let timestamp = chrono::Utc::now().timestamp();
+        // Phase 3: Get our height if blockchain available
+        let height = if let Some(bc) = blockchain {
+            Some(bc.get_height().await)
+        } else {
+            None
+        };
 
         {
             let mut state = self.ping_state.write().await;
             state.record_ping_sent(nonce);
         }
 
+        // Phase 3: Include height in log if available
+        let height_info = height
+            .map(|h| format!(" at height {}", h))
+            .unwrap_or_default();
         info!(
-            "📤 [{:?}] Sent ping to {} (nonce: {})",
-            self.direction, self.peer_ip, nonce
+            "📤 [{:?}] Sent ping to {}{} (nonce: {})",
+            self.direction, self.peer_ip, height_info, nonce
         );
 
-        self.send_message(&NetworkMessage::Ping { nonce, timestamp })
-            .await
+        self.send_message(&NetworkMessage::Ping {
+            nonce,
+            timestamp,
+            height,
+        })
+        .await
     }
 
     /// Handle received ping
-    async fn handle_ping(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
+    async fn handle_ping(
+        &self,
+        nonce: u64,
+        _timestamp: i64,
+        peer_height: Option<u64>,
+        our_height: Option<u64>,
+    ) -> Result<(), String> {
+        // Phase 3: Log peer height from ping
+        let height_info = peer_height
+            .map(|h| format!(" at height {}", h))
+            .unwrap_or_default();
         info!(
-            "📨 [{:?}] Received ping from {} (nonce: {})",
-            self.direction, self.peer_ip, nonce
+            "📨 [{:?}] Received ping from {}{}  (nonce: {})",
+            self.direction, self.peer_ip, height_info, nonce
         );
 
+        // Phase 3: Update peer height if provided
+        if let Some(height) = peer_height {
+            *self.peer_height.write().await = Some(height);
+        }
+
         let timestamp = chrono::Utc::now().timestamp();
-        self.send_message(&NetworkMessage::Pong { nonce, timestamp })
-            .await?;
+        // Phase 3: Include our height in pong response
+        self.send_message(&NetworkMessage::Pong {
+            nonce,
+            timestamp,
+            height: our_height,
+        })
+        .await?;
 
         info!(
             "✅ [{:?}] Sent pong to {} (nonce: {})",
@@ -357,11 +392,25 @@ impl PeerConnection {
     }
 
     /// Handle received pong
-    async fn handle_pong(&self, nonce: u64, _timestamp: i64) -> Result<(), String> {
+    async fn handle_pong(
+        &self,
+        nonce: u64,
+        _timestamp: i64,
+        peer_height: Option<u64>,
+    ) -> Result<(), String> {
+        // Phase 3: Log peer height from pong
+        let height_info = peer_height
+            .map(|h| format!(" at height {}", h))
+            .unwrap_or_default();
         info!(
-            "📨 [{:?}] Received pong from {} (nonce: {})",
-            self.direction, self.peer_ip, nonce
+            "📨 [{:?}] Received pong from {}{}  (nonce: {})",
+            self.direction, self.peer_ip, height_info, nonce
         );
+
+        // Phase 3: Update peer height if provided
+        if let Some(height) = peer_height {
+            *self.peer_height.write().await = Some(height);
+        }
 
         let mut state = self.ping_state.write().await;
 
@@ -489,7 +538,8 @@ impl PeerConnection {
         );
 
         // Send initial ping
-        if let Err(e) = self.send_ping().await {
+        // Phase 3: No blockchain available in this loop - pass None
+        if let Err(e) = self.send_ping(None).await {
             error!(
                 "❌ [{:?}] Failed to send initial ping to {}: {}",
                 self.direction, self.peer_ip, e
@@ -524,7 +574,8 @@ impl PeerConnection {
 
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    if let Err(e) = self.send_ping().await {
+                    // Phase 3: No blockchain available in this loop - pass None
+                    if let Err(e) = self.send_ping(None).await {
                         error!("❌ [{:?}] Failed to send ping to {}: {}",
                                self.direction, self.peer_ip, e);
                         break;
@@ -594,7 +645,8 @@ impl PeerConnection {
         );
 
         // Send initial ping
-        if let Err(e) = self.send_ping().await {
+        // Phase 3: No blockchain in this loop - pass None
+        if let Err(e) = self.send_ping(None).await {
             error!(
                 "❌ [{:?}] Failed to send initial ping to {}: {}",
                 self.direction, self.peer_ip, e
@@ -629,7 +681,8 @@ impl PeerConnection {
 
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    if let Err(e) = self.send_ping().await {
+                    // Phase 3: No blockchain in this loop - pass None
+                    if let Err(e) = self.send_ping(None).await {
                         error!("❌ [{:?}] Failed to send ping to {}: {}",
                                self.direction, self.peer_ip, e);
                         break;
@@ -701,7 +754,8 @@ impl PeerConnection {
         );
 
         // Send initial ping
-        if let Err(e) = self.send_ping().await {
+        // Phase 3: Pass blockchain for height information
+        if let Err(e) = self.send_ping(Some(&blockchain)).await {
             error!(
                 "❌ [{:?}] Failed to send initial ping to {}: {}",
                 self.direction, self.peer_ip, e
@@ -736,7 +790,8 @@ impl PeerConnection {
 
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    if let Err(e) = self.send_ping().await {
+                    // Phase 3: Pass blockchain for height information
+                    if let Err(e) = self.send_ping(Some(&blockchain)).await {
                         error!("❌ [{:?}] Failed to send ping to {}: {}",
                                self.direction, self.peer_ip, e);
                         break;
@@ -781,11 +836,23 @@ impl PeerConnection {
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
 
         match &message {
-            NetworkMessage::Ping { nonce, timestamp } => {
-                self.handle_ping(*nonce, *timestamp).await?;
+            NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: Pass peer height and our height to handler
+                let our_height = Some(blockchain.get_height().await);
+                self.handle_ping(*nonce, *timestamp, *height, our_height)
+                    .await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: Pass peer height to handler
+                self.handle_pong(*nonce, *timestamp, *height).await?;
             }
             NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
                 // SIMPLIFIED FORK RESOLUTION - delegates to blockchain layer
@@ -897,6 +964,16 @@ impl PeerConnection {
                             peer_tip_height, our_height, ancestor
                         );
 
+                        // CRITICAL FIX: If we keep receiving blocks at or below our height,
+                        // we're in a sync loop. Break out and let periodic sync handle it.
+                        if end_height <= our_height {
+                            warn!(
+                                "⚠️ Received blocks {}-{} but we're already at height {}. Breaking potential sync loop.",
+                                start_height, end_height, our_height
+                            );
+                            return Ok(());
+                        }
+
                         // Store the common ancestor in tracker to prevent re-triggering block-1 search
                         let mut tracker = self.fork_resolution_tracker.write().await;
                         if let Some(ref mut attempt) = *tracker {
@@ -929,13 +1006,23 @@ impl PeerConnection {
                             } else {
                                 reorg_blocks.last().unwrap().header.height + 1
                             };
-                            info!(
-                                "📤 Requesting blocks {}-{} for complete chain",
-                                request_start, peer_tip_height
-                            );
-                            let msg = NetworkMessage::GetBlocks(request_start, peer_tip_height + 1);
-                            if let Err(e) = self.send_message(&msg).await {
-                                warn!("Failed to request blocks: {}", e);
+
+                            // CRITICAL FIX: Only request if we actually need these blocks
+                            if request_start > our_height {
+                                info!(
+                                    "📤 Requesting blocks {}-{} for complete chain",
+                                    request_start, peer_tip_height
+                                );
+                                let msg =
+                                    NetworkMessage::GetBlocks(request_start, peer_tip_height + 1);
+                                if let Err(e) = self.send_message(&msg).await {
+                                    warn!("Failed to request blocks: {}", e);
+                                }
+                            } else {
+                                warn!(
+                                    "⏭️  Skipping redundant block request {}-{} (we have up to {})",
+                                    request_start, peer_tip_height, our_height
+                                );
                             }
                             return Ok(());
                         }
@@ -1764,11 +1851,21 @@ impl PeerConnection {
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
 
         match &message {
-            NetworkMessage::Ping { nonce, timestamp } => {
-                self.handle_ping(*nonce, *timestamp).await?;
+            NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: No blockchain in this handler
+                self.handle_ping(*nonce, *timestamp, *height, None).await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: Pass peer height
+                self.handle_pong(*nonce, *timestamp, *height).await?;
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,
@@ -1886,11 +1983,21 @@ impl PeerConnection {
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
 
         match &message {
-            NetworkMessage::Ping { nonce, timestamp } => {
-                self.handle_ping(*nonce, *timestamp).await?;
+            NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: No blockchain in this loop, so can't provide our height
+                self.handle_ping(*nonce, *timestamp, *height, None).await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: Pass peer height to handler
+                self.handle_pong(*nonce, *timestamp, *height).await?;
             }
             NetworkMessage::MasternodeAnnouncement {
                 address,
@@ -1977,7 +2084,8 @@ impl PeerConnection {
         );
 
         // Send initial ping
-        if let Err(e) = self.send_ping().await {
+        // Phase 3: No blockchain available in this loop - pass None
+        if let Err(e) = self.send_ping(None).await {
             error!(
                 "❌ [{:?}] Failed to send initial ping to {}: {}",
                 self.direction, self.peer_ip, e
@@ -2012,7 +2120,8 @@ impl PeerConnection {
 
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    if let Err(e) = self.send_ping().await {
+                    // Phase 3: No blockchain available in this loop - pass None
+                    if let Err(e) = self.send_ping(None).await {
                         error!("❌ [{:?}] Failed to send ping to {}: {}",
                                self.direction, self.peer_ip, e);
                         break;
@@ -2063,11 +2172,21 @@ impl PeerConnection {
             serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
 
         match &message {
-            NetworkMessage::Ping { nonce, timestamp } => {
-                self.handle_ping(*nonce, *timestamp).await?;
+            NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: No blockchain in this loop
+                self.handle_ping(*nonce, *timestamp, *height, None).await?;
             }
-            NetworkMessage::Pong { nonce, timestamp } => {
-                self.handle_pong(*nonce, *timestamp).await?;
+            NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                // Phase 3: Pass peer height
+                self.handle_pong(*nonce, *timestamp, *height).await?;
             }
             _ => {
                 // Other message types are handled by peer_registry or other handlers

@@ -343,6 +343,12 @@ impl PeerConnectionRegistry {
         heights.get(peer_ip).copied()
     }
 
+    /// Phase 3: Update a peer's known height
+    pub async fn update_peer_height(&self, peer_ip: &str, height: u64) {
+        let mut heights = self.peer_heights.write().await;
+        heights.insert(peer_ip.to_string(), height);
+    }
+
     pub async fn get_peer_writer(
         &self,
         _peer_ip: &str,

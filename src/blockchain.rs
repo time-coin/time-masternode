@@ -3355,6 +3355,56 @@ impl Blockchain {
 
         Ok(())
     }
+
+    /// Scan blockchain for blocks with invalid (00000...) merkle roots and remove them
+    /// Returns the number of blocks deleted
+    pub async fn cleanup_invalid_merkle_blocks(&self) -> Result<u64, String> {
+        let current_height = self.get_height().await;
+        let mut invalid_blocks = Vec::new();
+
+        tracing::info!(
+            "🔍 Scanning blocks 1-{} for invalid merkle roots (00000...)",
+            current_height
+        );
+
+        // Check all blocks except genesis (height 0)
+        for height in 1..=current_height {
+            match self.get_block(height) {
+                Ok(block) => {
+                    // Check if merkle root is all zeros (invalid)
+                    let is_zero_merkle = block.header.merkle_root.iter().all(|&b| b == 0);
+
+                    if is_zero_merkle {
+                        tracing::warn!(
+                            "⚠️  Found invalid block at height {} with 00000 merkle root",
+                            height
+                        );
+                        invalid_blocks.push(height);
+                    }
+                }
+                Err(_) => {
+                    // Block not found - may be a gap in chain
+                    tracing::debug!("Block {} not found (possible chain gap)", height);
+                }
+            }
+        }
+
+        if invalid_blocks.is_empty() {
+            tracing::info!("✅ No invalid merkle root blocks found");
+            return Ok(0);
+        }
+
+        tracing::warn!(
+            "🗑️  Found {} block(s) with invalid merkle roots: {:?}",
+            invalid_blocks.len(),
+            invalid_blocks
+        );
+
+        // Delete the invalid blocks
+        self.delete_corrupt_blocks(&invalid_blocks).await?;
+
+        Ok(invalid_blocks.len() as u64)
+    }
 }
 
 impl Clone for Blockchain {

@@ -85,8 +85,16 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         match msg {
-            NetworkMessage::Ping { nonce, timestamp } => self.handle_ping(*nonce, *timestamp).await,
-            NetworkMessage::Pong { nonce, timestamp } => self.handle_pong(*nonce, *timestamp).await,
+            NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height: _,
+            } => self.handle_ping(*nonce, *timestamp).await,
+            NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height: _,
+            } => self.handle_pong(*nonce, *timestamp).await,
             NetworkMessage::GetBlocks(start, end) => {
                 self.handle_get_blocks(*start, *end, context).await
             }
@@ -154,9 +162,12 @@ impl MessageHandler {
             self.direction, self.peer_ip, nonce
         );
 
+        // Phase 3: MessageHandler doesn't have blockchain access, so we can't include height
+        // This is fine - height will be included in peer_connection and server handlers
         let pong = NetworkMessage::Pong {
             nonce,
             timestamp: chrono::Utc::now().timestamp(),
+            height: None, // Phase 3: No blockchain access in this handler
         };
 
         info!(
