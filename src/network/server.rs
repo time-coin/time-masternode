@@ -101,6 +101,7 @@ impl NetworkServer {
             peer_state,
             local_ip,
             vec![],
+            vec![],
             attestation_system,
         )
         .await
@@ -120,6 +121,7 @@ impl NetworkServer {
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
         blacklisted_peers: Vec<String>,
+        whitelisted_peers: Vec<String>,
         attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
@@ -133,6 +135,16 @@ impl NetworkServer {
                 tracing::info!("🚫 Blacklisted peer from config: {}", ip);
             } else {
                 tracing::warn!("⚠️  Invalid IP in blacklisted_peers: {}", peer);
+            }
+        }
+
+        // Initialize whitelist with configured IPs (BEFORE server starts accepting connections)
+        for peer in &whitelisted_peers {
+            if let Ok(ip) = peer.parse::<std::net::IpAddr>() {
+                blacklist.add_to_whitelist(ip, "Pre-configured whitelist");
+                tracing::info!("✅ Whitelisted peer before server start: {}", ip);
+            } else {
+                tracing::warn!("⚠️  Invalid IP in whitelisted_peers: {}", peer);
             }
         }
 
@@ -209,18 +221,31 @@ impl NetworkServer {
                 }
             }
 
+            // Phase 3: Check if this IP is whitelisted (trusted masternode)
+            let is_whitelisted = {
+                let blacklist = self.blacklist.read().await;
+                blacklist.is_whitelisted(ip)
+            };
+
             // Phase 2.1: Check connection limits BEFORE accepting
-            if let Err(reason) = self.connection_manager.can_accept_inbound(&ip_str) {
+            // Phase 3: Whitelisted masternodes bypass regular connection limits
+            if let Err(reason) = self
+                .connection_manager
+                .can_accept_inbound(&ip_str, is_whitelisted)
+            {
                 tracing::warn!("🚫 Rejected inbound connection from {}: {}", ip, reason);
                 drop(stream); // Close immediately
                 continue;
             }
 
+            let connection_type = if is_whitelisted { "[WHITELIST]" } else { "" };
             tracing::info!(
-                "✅ Accepting inbound connection from {} (total: {}, inbound: {})",
+                "✅ {} Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
+                connection_type,
                 ip,
                 self.connection_manager.connected_count(),
-                self.connection_manager.inbound_count()
+                self.connection_manager.inbound_count(),
+                self.connection_manager.count_whitelisted_connections()
             );
 
             let peer = PeerInfo {
@@ -270,7 +295,8 @@ impl NetworkServer {
                     local_ip,
                     block_cache, // Phase 3E.1: Pass block cache
                     attestation_sys,
-                    fork_status, // Phase 2: Pass fork status tracker
+                    fork_status,    // Phase 2: Pass fork status tracker
+                    is_whitelisted, // Phase 1: Pass whitelist status
                 )
                 .await;
             });
@@ -329,6 +355,7 @@ async fn handle_peer(
     block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Block cache parameter
     attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker
+    _is_whitelisted: bool, // Phase 1: Whitelist status for relaxed timeouts (used in future enhancements)
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer

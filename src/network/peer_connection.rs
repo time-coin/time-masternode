@@ -166,6 +166,9 @@ pub struct PeerConnection {
 
     /// Fork loop detection: track consecutive fork detections at same height
     fork_loop_tracker: Arc<RwLock<Option<(u64, u32, std::time::Instant)>>>, // (height, count, last_seen)
+
+    /// Whitelist status - whitelisted masternodes get relaxed ping/pong timeouts
+    is_whitelisted: bool,
 }
 
 impl PeerConnection {
@@ -174,11 +177,23 @@ impl PeerConnection {
     const PONG_TIMEOUT: Duration = Duration::from_secs(90);
     const MAX_MISSED_PONGS: u32 = 3;
 
+    // Phase 1: Relaxed timeouts for whitelisted masternodes
+    const WHITELISTED_PONG_TIMEOUT: Duration = Duration::from_secs(180); // 3 minutes
+    const WHITELISTED_MAX_MISSED_PONGS: u32 = 6; // Allow more missed pongs
+
     /// Create a new outbound connection to a peer
-    pub async fn new_outbound(peer_ip: String, port: u16) -> Result<Self, String> {
+    pub async fn new_outbound(
+        peer_ip: String,
+        port: u16,
+        is_whitelisted: bool,
+    ) -> Result<Self, String> {
         let addr = format!("{}:{}", peer_ip, port);
 
-        info!("🔗 [OUTBOUND] Connecting to {}", addr);
+        if is_whitelisted {
+            info!("🔗 [OUTBOUND-WHITELIST] Connecting to masternode {}", addr);
+        } else {
+            info!("🔗 [OUTBOUND] Connecting to {}", addr);
+        }
 
         let stream = TcpStream::connect(&addr)
             .await
@@ -209,12 +224,13 @@ impl PeerConnection {
             fork_loop_tracker: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
+            is_whitelisted,
         })
     }
 
     /// Create a new inbound connection from a peer
     #[allow(dead_code)]
-    pub async fn new_inbound(stream: TcpStream) -> Result<Self, String> {
+    pub async fn new_inbound(stream: TcpStream, is_whitelisted: bool) -> Result<Self, String> {
         let peer_addr = stream
             .peer_addr()
             .map_err(|e| format!("Failed to get peer address: {}", e))?;
@@ -225,7 +241,14 @@ impl PeerConnection {
 
         let peer_ip = peer_addr.ip().to_string();
 
-        info!("🔗 [Inbound] Accepted connection from {}", peer_addr);
+        if is_whitelisted {
+            info!(
+                "🔗 [INBOUND-WHITELIST] Accepted masternode connection from {}",
+                peer_addr
+            );
+        } else {
+            info!("🔗 [Inbound] Accepted connection from {}", peer_addr);
+        }
 
         let (read_half, write_half) = stream.into_split();
 
@@ -244,6 +267,7 @@ impl PeerConnection {
             fork_loop_tracker: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
+            is_whitelisted,
         })
     }
 
@@ -389,30 +413,33 @@ impl PeerConnection {
     /// Check if connection should be closed due to timeout
     async fn should_disconnect(
         &self,
-        peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
+        _peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) -> bool {
         let mut state = self.ping_state.write().await;
 
-        if state.check_timeout(Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT) {
-            // Check if this is a whitelisted peer before disconnecting
-            let is_whitelisted = peer_registry.is_whitelisted(&self.peer_ip).await;
+        // Use relaxed timeouts for whitelisted masternodes
+        let (max_missed, timeout_duration) = if self.is_whitelisted {
+            (
+                Self::WHITELISTED_MAX_MISSED_PONGS,
+                Self::WHITELISTED_PONG_TIMEOUT,
+            )
+        } else {
+            (Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT)
+        };
 
-            if is_whitelisted {
+        if state.check_timeout(max_missed, timeout_duration) {
+            if self.is_whitelisted {
                 warn!(
-                    "⚠️ [{:?}] Whitelisted peer {} unresponsive after {} missed pongs - resetting counter but keeping connection",
-                    self.direction, self.peer_ip, state.missed_pongs
+                    "⚠️ [{:?}] WHITELIST VIOLATION: Masternode {} unresponsive after {} missed pongs (relaxed timeout: {}s)",
+                    self.direction, self.peer_ip, state.missed_pongs, timeout_duration.as_secs()
                 );
-                // Reset the missed pongs counter for whitelisted peers
-                // Don't clear pending_pings - let them expire naturally to avoid mismatches
-                state.missed_pongs = 0;
-                false
             } else {
                 warn!(
                     "⚠️ [{:?}] Peer {} unresponsive after {} missed pongs",
                     self.direction, self.peer_ip, state.missed_pongs
                 );
-                true
             }
+            true
         } else {
             false
         }
@@ -1995,9 +2022,22 @@ impl PeerConnection {
                 // Check for timeout (simplified for dead code method)
                 _ = timeout_check.tick() => {
                     let mut state = self.ping_state.write().await;
-                    if state.check_timeout(Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT) {
-                        error!("❌ [{:?}] Disconnecting {} due to timeout",
-                               self.direction, self.peer_ip);
+
+                    // Use relaxed timeouts for whitelisted masternodes
+                    let (max_missed, timeout_duration) = if self.is_whitelisted {
+                        (Self::WHITELISTED_MAX_MISSED_PONGS, Self::WHITELISTED_PONG_TIMEOUT)
+                    } else {
+                        (Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT)
+                    };
+
+                    if state.check_timeout(max_missed, timeout_duration) {
+                        if self.is_whitelisted {
+                            error!("❌ [{:?}] Disconnecting WHITELISTED masternode {} due to timeout ({} missed pongs, {}s timeout)",
+                                   self.direction, self.peer_ip, state.missed_pongs, timeout_duration.as_secs());
+                        } else {
+                            error!("❌ [{:?}] Disconnecting {} due to timeout",
+                                   self.direction, self.peer_ip);
+                        }
                         break;
                     }
                 }

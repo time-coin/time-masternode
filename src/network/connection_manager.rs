@@ -10,9 +10,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 // Phase 2.1: Connection limits for DoS protection
+// Phase 3: Masternode slot reservation
 const MAX_TOTAL_CONNECTIONS: usize = 125;
 const MAX_INBOUND_CONNECTIONS: usize = 100;
 const MAX_OUTBOUND_CONNECTIONS: usize = 25;
+const RESERVED_MASTERNODE_SLOTS: usize = 50; // Reserve slots for whitelisted masternodes
+const MAX_REGULAR_PEER_CONNECTIONS: usize = 75; // Remaining slots for regular peers
 const MAX_CONNECTIONS_PER_IP: usize = 3;
 const CONNECTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60); // 1 minute
 const MAX_NEW_CONNECTIONS_PER_WINDOW: usize = 10; // 10 new connections per minute
@@ -37,6 +40,7 @@ struct ConnectionInfo {
     bytes_received: u64,
     messages_sent: u64,
     messages_received: u64,
+    is_whitelisted: bool, // NEW: Track if this is a whitelisted masternode
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -70,13 +74,36 @@ impl ConnectionManager {
     }
 
     /// Phase 2.1: Check if we can accept a new inbound connection
-    pub fn can_accept_inbound(&self, peer_ip: &str) -> Result<(), String> {
-        // Check total connection limit
+    /// Phase 3: Add whitelist exemption for masternodes
+    pub fn can_accept_inbound(&self, peer_ip: &str, is_whitelisted: bool) -> Result<(), String> {
+        // Whitelisted masternodes bypass regular connection limits (but still respect total)
+        if is_whitelisted {
+            let total = self.connected_count();
+            if total >= MAX_TOTAL_CONNECTIONS {
+                return Err(format!(
+                    "Max total connections reached: {}/{}",
+                    total, MAX_TOTAL_CONNECTIONS
+                ));
+            }
+            // Allow whitelisted connection - bypass all other checks
+            return Ok(());
+        }
+
+        // For regular peers, enforce stricter limits
         let total = self.connected_count();
         if total >= MAX_TOTAL_CONNECTIONS {
             return Err(format!(
                 "Max total connections reached: {}/{}",
                 total, MAX_TOTAL_CONNECTIONS
+            ));
+        }
+
+        // Check if regular peer slots are full
+        let regular_count = self.count_regular_peer_connections();
+        if regular_count >= MAX_REGULAR_PEER_CONNECTIONS {
+            return Err(format!(
+                "Max regular peer connections reached: {}/{} (reserved {} slots for masternodes)",
+                regular_count, MAX_REGULAR_PEER_CONNECTIONS, RESERVED_MASTERNODE_SLOTS
             ));
         }
 
@@ -145,6 +172,29 @@ impl ConnectionManager {
             .filter(|entry| {
                 entry.key().starts_with(peer_ip)
                     && entry.value().state == PeerConnectionState::Connected
+            })
+            .count()
+    }
+
+    /// Phase 3: Count regular (non-whitelisted) peer connections
+    fn count_regular_peer_connections(&self) -> usize {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                entry.value().state == PeerConnectionState::Connected
+                    && !entry.value().is_whitelisted
+            })
+            .count()
+    }
+
+    /// Phase 3: Count whitelisted masternode connections
+    #[allow(dead_code)]
+    pub fn count_whitelisted_connections(&self) -> usize {
+        self.connections
+            .iter()
+            .filter(|entry| {
+                entry.value().state == PeerConnectionState::Connected
+                    && entry.value().is_whitelisted
             })
             .count()
     }
@@ -221,6 +271,7 @@ impl ConnectionManager {
                 bytes_received: 0,
                 messages_sent: 0,
                 messages_received: 0,
+                is_whitelisted: false, // Will be updated if peer is whitelisted
             };
             self.connections.insert(peer_ip.to_string(), info);
             self.connected_count
@@ -267,6 +318,7 @@ impl ConnectionManager {
                 bytes_received: 0,
                 messages_sent: 0,
                 messages_received: 0,
+                is_whitelisted: false, // Will be updated if peer is whitelisted
             };
             self.connections.insert(peer_ip.to_string(), info);
             true
@@ -316,6 +368,7 @@ impl ConnectionManager {
                 bytes_received: 0,
                 messages_sent: 0,
                 messages_received: 0,
+                is_whitelisted: false,
             };
             self.connections.insert(peer_ip.to_string(), info);
             true
@@ -399,6 +452,26 @@ impl ConnectionManager {
                 entry.state = PeerConnectionState::Disconnected;
             }
         }
+    }
+
+    /// Phase 3: Mark a connection as whitelisted (trusted masternode)
+    pub fn mark_whitelisted(&self, peer_ip: &str) {
+        if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            entry.is_whitelisted = true;
+        }
+    }
+
+    /// Phase 3: Check if a peer is marked as whitelisted
+    pub fn is_whitelisted(&self, peer_ip: &str) -> bool {
+        self.connections
+            .get(peer_ip)
+            .map(|entry| entry.is_whitelisted)
+            .unwrap_or(false)
+    }
+
+    /// Phase 2: Check if peer should be protected from disconnection (whitelisted)
+    pub fn should_protect(&self, peer_ip: &str) -> bool {
+        self.is_whitelisted(peer_ip)
     }
 
     /// Mark a peer as reconnecting (with retry logic)

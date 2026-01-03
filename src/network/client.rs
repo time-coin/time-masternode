@@ -493,9 +493,10 @@ fn spawn_connection_task(
     tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
 
     tokio::spawn(async move {
-        let mut retry_delay = 5;
+        // Phase 2: Aggressive reconnection for whitelisted masternodes
+        let mut retry_delay = if is_masternode { 2 } else { 5 }; // Masternodes reconnect faster (2s vs 5s)
         let mut consecutive_failures = 0;
-        let max_failures = if is_masternode { 20 } else { 10 }; // Masternodes get more retries
+        let max_failures = if is_masternode { 50 } else { 10 }; // Masternodes get many more retries (50 vs 10)
 
         loop {
             match maintain_peer_connection(
@@ -508,6 +509,7 @@ fn spawn_connection_task(
                 peer_manager.clone(),
                 peer_registry.clone(),
                 local_ip.clone(),
+                is_masternode,
             )
             .await
             {
@@ -515,7 +517,7 @@ fn spawn_connection_task(
                     let tag = if is_masternode { "[MASTERNODE]" } else { "" };
                     tracing::info!("{} Connection to {} ended gracefully", tag, ip);
                     consecutive_failures = 0;
-                    retry_delay = 5;
+                    retry_delay = if is_masternode { 2 } else { 5 }; // Reset to initial delay
                 }
                 Err(e) => {
                     consecutive_failures += 1;
@@ -539,7 +541,14 @@ fn spawn_connection_task(
                         break;
                     }
 
-                    retry_delay = (retry_delay * 2).min(300);
+                    // Phase 2: Exponential backoff with lower max for masternodes
+                    // Masternodes: 2s -> 4s -> 8s -> 16s -> 32s -> 60s (cap at 60s)
+                    // Regular peers: 5s -> 10s -> 20s -> 40s -> 80s -> 160s -> 300s (cap at 5min)
+                    retry_delay = if is_masternode {
+                        (retry_delay * 2).min(60) // Cap at 1 minute for masternodes
+                    } else {
+                        (retry_delay * 2).min(300) // Cap at 5 minutes for regular peers
+                    };
                 }
             }
 
@@ -615,6 +624,7 @@ async fn maintain_peer_connection(
     _peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
     _local_ip: Option<String>,
+    is_masternode: bool,
 ) -> Result<(), String> {
     // Mark in peer_registry BEFORE attempting connection to prevent race with inbound
     if !peer_registry.mark_connecting(ip) {
@@ -624,8 +634,8 @@ async fn maintain_peer_connection(
         ));
     }
 
-    // Create outbound connection
-    let peer_conn = match PeerConnection::new_outbound(ip.to_string(), port).await {
+    // Create outbound connection with whitelist status
+    let peer_conn = match PeerConnection::new_outbound(ip.to_string(), port, is_masternode).await {
         Ok(conn) => conn,
         Err(e) => {
             // Failed to connect - clean up peer_registry mark
@@ -641,6 +651,15 @@ async fn maintain_peer_connection(
 
     // Mark as connected in connection_manager (transitions from Connecting -> Connected)
     connection_manager.mark_connected(&peer_ip);
+
+    // Phase 2: Mark whitelisted masternodes in connection_manager for protection
+    if is_masternode {
+        connection_manager.mark_whitelisted(&peer_ip);
+        tracing::info!(
+            "🛡️ Marked {} as whitelisted masternode with enhanced protection",
+            peer_ip
+        );
+    }
 
     // Run the message loop which handles ping/pong and routes other messages
     // Pass peer_registry, masternode_registry, and blockchain so it can process block syncs

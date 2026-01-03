@@ -1659,6 +1659,21 @@ async fn main() {
     });
     shutdown_manager.register_task(status_handle);
 
+    // Prepare combined whitelist BEFORE creating server
+    // This ensures masternodes are whitelisted before any connections are accepted
+    let mut combined_whitelist = config.network.whitelisted_peers.clone();
+    combined_whitelist.extend(discovered_peer_ips.clone());
+
+    println!(
+        "🔐 Preparing whitelist with {} trusted peer(s)...",
+        combined_whitelist.len()
+    );
+    if !combined_whitelist.is_empty() {
+        println!("  • {} from config", config.network.whitelisted_peers.len());
+        println!("  • {} from time-coin.io", discovered_peer_ips.len());
+    }
+    println!();
+
     match NetworkServer::new_with_blacklist(
         &p2p_addr,
         utxo_mgr.clone(),
@@ -1671,56 +1686,12 @@ async fn main() {
         peer_state.clone(),
         local_ip.clone(),
         config.network.blacklisted_peers.clone(),
+        combined_whitelist,
         attestation_system.clone(),
     )
     .await
     {
         Ok(mut server) => {
-            // Load whitelisted peers from config (if any)
-            if !config.network.whitelisted_peers.is_empty() {
-                let mut blacklist_guard = server.blacklist.write().await;
-                let mut whitelisted_count = 0;
-
-                for ip_str in &config.network.whitelisted_peers {
-                    if let Ok(ip_addr) = ip_str.parse::<std::net::IpAddr>() {
-                        blacklist_guard.add_to_whitelist(ip_addr, "From config");
-                        whitelisted_count += 1;
-                    } else {
-                        tracing::warn!("⚠️  Invalid whitelisted IP in config: {}", ip_str);
-                    }
-                }
-                drop(blacklist_guard);
-
-                println!(
-                    "  ✅ Loaded {} whitelisted peer(s) from config",
-                    whitelisted_count
-                );
-                println!();
-            }
-
-            // Whitelist peers discovered from time-coin.io (these are trusted)
-            if !discovered_peer_ips.is_empty() {
-                let mut blacklist_guard = server.blacklist.write().await;
-                let mut whitelisted_count = 0;
-
-                for ip_str in &discovered_peer_ips {
-                    if let Ok(ip_addr) = ip_str.parse::<std::net::IpAddr>() {
-                        if !blacklist_guard.is_whitelisted(ip_addr) {
-                            blacklist_guard.add_to_whitelist(ip_addr, "From time-coin.io");
-                            whitelisted_count += 1;
-                        }
-                    }
-                }
-                drop(blacklist_guard);
-
-                if whitelisted_count > 0 {
-                    println!(
-                        "  ✅ Whitelisted {} peer(s) from time-coin.io",
-                        whitelisted_count
-                    );
-                }
-            }
-
             // NOTE: Masternodes announced via P2P are NOT auto-whitelisted.
             // Only peers from time-coin.io and config are trusted.
 
