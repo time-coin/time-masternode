@@ -97,7 +97,10 @@ impl PingState {
             self.missed_pongs = 0; // Reset counter on successful pong
             true
         } else {
-            debug!("🔀 Received pong for unknown nonce: {} (likely duplicate connection)", nonce);
+            debug!(
+                "🔀 Received pong for unknown nonce: {} (likely duplicate connection)",
+                nonce
+            );
             false
         }
     }
@@ -1118,28 +1121,37 @@ impl PeerConnection {
                             );
                             error!("🔧 Triggering rollback to find common ancestor with network");
 
-                            // Roll back 10 blocks to find common ancestor
-                            let rollback_to = our_height.saturating_sub(10);
+                            // Use exponential rollback: start with 10, then 50, then 100 blocks
+                            // This helps find the fork point faster
+                            let rollback_amount = if our_height > 1000 {
+                                // For deep forks, roll back more aggressively
+                                100
+                            } else if our_height > 100 {
+                                50
+                            } else {
+                                10
+                            };
+
+                            let rollback_to = our_height.saturating_sub(rollback_amount);
                             info!(
-                                "🔄 Attempting rollback to height {} to find common ancestor",
+                                "🔄 Attempting rollback {} blocks to height {} to find common ancestor",
+                                rollback_amount,
                                 rollback_to
                             );
 
                             if let Err(e) = blockchain.rollback_to_height(rollback_to).await {
                                 warn!("Failed to rollback to {}: {}", rollback_to, e);
                             } else {
-                                // After rollback, request blocks from this height to see if we can sync
-                                let msg = NetworkMessage::GetBlocks(rollback_to, rollback_to + 50);
-                                if let Err(e) = self.send_message(&msg).await {
-                                    warn!("Failed to request blocks after rollback: {}", e);
-                                } else {
-                                    info!(
-                                        "✅ Rolled back to height {}, requesting re-sync",
-                                        rollback_to
-                                    );
-                                }
+                                info!(
+                                    "✅ Rolled back to height {}, requesting re-sync",
+                                    rollback_to
+                                );
+                                // Don't request blocks immediately - let normal sync handle it
+                                // This prevents the infinite loop
                             }
-                            return Ok(());
+
+                            // Don't return here - continue processing to allow normal sync
+                            // return Ok(());
                         }
                     }
 
