@@ -97,7 +97,7 @@ impl PingState {
             self.missed_pongs = 0; // Reset counter on successful pong
             true
         } else {
-            warn!("⚠️ Received pong for unknown nonce: {}", nonce);
+            debug!("🔀 Received pong for unknown nonce: {} (likely duplicate connection)", nonce);
             false
         }
     }
