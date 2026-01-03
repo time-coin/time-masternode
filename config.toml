@@ -63,6 +63,17 @@ use_genesis_file = true
 # Genesis block file path (only used if use_genesis_file = true)
 genesis_file = "genesis.testnet.json"
 
+[sync]
+# Phase 3: Sync coordinator settings
+# Enable proactive sync from best masternodes
+enable_coordinator = true
+# Interval to check peers for sync opportunities (seconds)
+coordinator_interval_secs = 60
+# Timeout for masternode sync requests (seconds)
+masternode_sync_timeout_secs = 600
+# Minimum blocks behind before triggering sync
+min_blocks_behind = 5
+
 [block]
 # Block production settings
 block_time_seconds = 600  # 10 minutes

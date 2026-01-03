@@ -883,8 +883,30 @@ impl PeerConnection {
                     self.direction, block_count, start_height, end_height, self.peer_ip, our_height
                 );
 
-                // CONSENSUS CHECK: If we're significantly behind, verify this peer is on consensus chain
+                // Phase 3 Step 2: PRIORITIZED SYNC - Whitelist bypass for trusted masternodes
                 let peer_tip = self.peer_height.read().await.unwrap_or(end_height);
+                
+                // WHITELIST BYPASS: Skip consensus checks for whitelisted masternodes
+                if is_whitelisted {
+                    info!(
+                        "🔓 [WHITELIST] Accepting {} blocks from trusted masternode {} without consensus check",
+                        block_count, self.peer_ip
+                    );
+                    let mut added = 0;
+                    for block in blocks {
+                        match blockchain.add_block_with_fork_handling(block.clone()).await {
+                            Ok(true) => added += 1,
+                            Ok(false) | Err(_) => break,
+                        }
+                    }
+                    info!(
+                        "✅ [WHITELIST] Added {}/{} blocks from trusted peer {}",
+                        added, block_count, self.peer_ip
+                    );
+                    return Ok(());
+                }
+                
+                // CONSENSUS CHECK: For non-whitelisted peers, verify they're on consensus chain
                 if peer_tip > our_height + 50 {
                     // Get all connected peers
                     let connected_peers = peer_registry.get_connected_peers().await;

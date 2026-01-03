@@ -26,9 +26,11 @@ const TIMESTAMP_TOLERANCE_SECS: i64 = 900; // ±15 minutes (Phase 1.3)
 const MAX_REORG_DEPTH: u64 = 1_000; // Maximum blocks to reorg
 const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
-// P2P sync configuration
-const PEER_SYNC_TIMEOUT_SECS: u64 = 120;
+// P2P sync configuration (Phase 3 Step 4: Extended timeouts for masternodes)
+const PEER_SYNC_TIMEOUT_SECS: u64 = 300; // Increased from 120s to 300s (5 minutes)
 const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
+const MASTERNODE_SYNC_TIMEOUT_SECS: u64 = 600; // 10 minutes for masternode sync
+const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 60; // Check sync every 60 seconds
 
 // Chain work constants - each block adds work based on validator count
 const BASE_WORK_PER_BLOCK: u128 = 1_000_000;
@@ -868,6 +870,101 @@ impl Blockchain {
         }
 
         Err(format!("Timeout waiting for blocks from {}", peer_ip))
+    }
+
+    /// Phase 3 Step 3: Spawn sync coordinator background task
+    /// Proactively monitors peers and initiates sync from best masternodes
+    pub fn spawn_sync_coordinator(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            info!("🔄 Sync coordinator started - monitoring peers every {}s", SYNC_COORDINATOR_INTERVAL_SECS);
+            let mut interval = tokio::time::interval(
+                std::time::Duration::from_secs(SYNC_COORDINATOR_INTERVAL_SECS)
+            );
+            
+            loop {
+                interval.tick().await;
+                
+                // Skip if already syncing
+                if *self.is_syncing.read().await {
+                    continue;
+                }
+                
+                let our_height = self.get_height().await;
+                let time_expected = self.calculate_expected_height();
+                
+                // Get peer registry
+                let peer_registry_opt = self.peer_registry.read().await;
+                let peer_registry = match peer_registry_opt.as_ref() {
+                    Some(pr) => pr,
+                    None => continue,
+                };
+                
+                // Get all connected peers
+                let connected_peers = peer_registry.get_connected_peers().await;
+                if connected_peers.is_empty() {
+                    continue;
+                }
+                
+                // Find the best masternode to sync from
+                let mut best_masternode: Option<(String, u64)> = None;
+                
+                for peer_ip in &connected_peers {
+                    // Check if this peer is a whitelisted masternode
+                    let is_masternode = peer_registry.is_whitelisted(peer_ip).await;
+                    if !is_masternode {
+                        continue;
+                    }
+                    
+                    // Get peer's height
+                    if let Some(peer_height) = peer_registry.get_peer_height(peer_ip).await {
+                        // Only consider peers ahead of us by at least 5 blocks
+                        if peer_height > our_height + 5 {
+                            match &best_masternode {
+                                None => {
+                                    best_masternode = Some((peer_ip.clone(), peer_height));
+                                }
+                                Some((_, best_height)) => {
+                                    if peer_height > *best_height {
+                                        best_masternode = Some((peer_ip.clone(), peer_height));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // If we found a better masternode, sync from it
+                if let Some((best_peer, peer_height)) = best_masternode {
+                    let blocks_behind = peer_height.saturating_sub(our_height);
+                    info!(
+                        "🎯 Sync coordinator: Found masternode {} at height {} ({} blocks ahead of us at {})",
+                        best_peer, peer_height, blocks_behind, our_height
+                    );
+                    
+                    // Initiate sync
+                    let blockchain_clone = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = blockchain_clone.sync_from_peers().await {
+                            warn!("⚠️  Sync coordinator sync failed: {}", e);
+                        }
+                    });
+                } else {
+                    // Check if we're behind time-based expectation
+                    if our_height + 10 < time_expected {
+                        info!(
+                            "⏰ Sync coordinator: We're behind time-based height ({}  vs expected {}), attempting general sync",
+                            our_height, time_expected
+                        );
+                        let blockchain_clone = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            if let Err(e) = blockchain_clone.sync_from_peers().await {
+                                warn!("⚠️  Sync coordinator time-based sync failed: {}", e);
+                            }
+                        });
+                    }
+                }
+            }
+        })
     }
 
     /// Produce a block for the current TSDC slot

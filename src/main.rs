@@ -1605,6 +1605,11 @@ async fn main() {
 
             println!("  ✅ Network server listening on {}", p2p_addr);
 
+            // Phase 3 Step 3: Start sync coordinator
+            let sync_coordinator_handle = blockchain.clone().spawn_sync_coordinator();
+            shutdown_manager.register_task(sync_coordinator_handle);
+            println!("  ✅ Sync coordinator started");
+
             // Start RPC server with access to blacklist
             let rpc_consensus = consensus_engine.clone();
             let rpc_utxo = utxo_mgr.clone();
