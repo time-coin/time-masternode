@@ -1300,8 +1300,39 @@ async fn handle_peer(
                                 }
                                 // Heartbeat Messages
                                 NetworkMessage::HeartbeatBroadcast(heartbeat) => {
-                                    tracing::info!("💓 [Inbound] Received heartbeat from {} seq {}",
-                                        heartbeat.masternode_address, heartbeat.sequence_number);
+                                    tracing::info!("💓 [Inbound] Received heartbeat from {} seq {} at height {}",
+                                        heartbeat.masternode_address, heartbeat.sequence_number, heartbeat.block_height);
+
+                                    // Check for opportunistic sync if peer has higher block height
+                                    let our_height = blockchain.get_height().await;
+                                    if heartbeat.block_height > our_height {
+                                        tracing::info!(
+                                            "🔄 Opportunistic sync: peer {} at height {} (we're at {})",
+                                            heartbeat.masternode_address,
+                                            heartbeat.block_height,
+                                            our_height
+                                        );
+
+                                        // Request blocks from this peer
+                                        // Start from our current height + 1 to catch up
+                                        let start_height = our_height + 1;
+                                        let request = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
+
+                                        if let Err(e) = peer_registry.send_to_peer(&ip_str, request).await {
+                                            tracing::warn!(
+                                                "Failed to request blocks from {}: {}",
+                                                peer.addr,
+                                                e
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                "📨 Requested blocks {}-{} from {}",
+                                                start_height,
+                                                heartbeat.block_height,
+                                                peer.addr
+                                            );
+                                        }
+                                    }
 
                                     // Process heartbeat through masternode registry
                                     // TODO: Pass health_ai for AI learning

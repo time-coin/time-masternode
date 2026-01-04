@@ -529,6 +529,7 @@ async fn main() {
         // Start heartbeat task with attestation
         let registry_clone = registry.clone();
         let attestation_clone = attestation_system.clone();
+        let blockchain_clone = blockchain.clone();
         let mn_address = mn.address.clone();
         let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
@@ -558,11 +559,13 @@ async fn main() {
                             .await;
 
                         // Create and broadcast attestable heartbeat
-                        match attestation_clone.create_heartbeat().await {
+                        let block_height = blockchain_clone.get_height().await;
+                        match attestation_clone.create_heartbeat(block_height).await {
                             Ok(heartbeat) => {
                                 tracing::debug!(
-                                    "💓 Created signed heartbeat seq {}",
-                                    heartbeat.sequence_number
+                                    "💓 Created signed heartbeat seq {} at height {}",
+                                    heartbeat.sequence_number,
+                                    heartbeat.block_height
                                 );
                                 // Broadcast directly through peer connections (not registry channel)
                                 let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);

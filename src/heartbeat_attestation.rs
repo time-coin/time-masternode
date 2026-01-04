@@ -37,21 +37,29 @@ pub struct SignedHeartbeat {
     pub masternode_address: String,
     pub sequence_number: u64,
     pub timestamp: i64,
+    pub block_height: u64, // Current block height of sender
     pub masternode_pubkey: VerifyingKey,
     pub signature: Signature,
 }
 
 impl SignedHeartbeat {
     /// Create a new signed heartbeat
-    pub fn new(address: String, sequence: u64, timestamp: i64, signing_key: &SigningKey) -> Self {
+    pub fn new(
+        address: String,
+        sequence: u64,
+        timestamp: i64,
+        block_height: u64,
+        signing_key: &SigningKey,
+    ) -> Self {
         let pubkey = signing_key.verifying_key();
-        let message = Self::message_bytes(&address, sequence, timestamp, &pubkey);
+        let message = Self::message_bytes(&address, sequence, timestamp, block_height, &pubkey);
         let signature = signing_key.sign(&message);
 
         Self {
             masternode_address: address,
             sequence_number: sequence,
             timestamp,
+            block_height,
             masternode_pubkey: pubkey,
             signature,
         }
@@ -61,6 +69,7 @@ impl SignedHeartbeat {
         address: &str,
         sequence: u64,
         timestamp: i64,
+        block_height: u64,
         pubkey: &VerifyingKey,
     ) -> Vec<u8> {
         let mut hasher = Sha256::new();
@@ -68,6 +77,7 @@ impl SignedHeartbeat {
         hasher.update(address.as_bytes());
         hasher.update(sequence.to_le_bytes());
         hasher.update(timestamp.to_le_bytes());
+        hasher.update(block_height.to_le_bytes());
         hasher.update(pubkey.as_bytes());
         hasher.finalize().to_vec()
     }
@@ -78,6 +88,7 @@ impl SignedHeartbeat {
             &self.masternode_address,
             self.sequence_number,
             self.timestamp,
+            self.block_height,
             &self.masternode_pubkey,
         );
 
@@ -221,7 +232,7 @@ impl HeartbeatAttestationSystem {
     }
 
     /// Create a new heartbeat (for local masternode)
-    pub async fn create_heartbeat(&self) -> Result<SignedHeartbeat, String> {
+    pub async fn create_heartbeat(&self, block_height: u64) -> Result<SignedHeartbeat, String> {
         let address = self
             .local_address
             .read()
@@ -244,6 +255,7 @@ impl HeartbeatAttestationSystem {
             address,
             sequence,
             timestamp,
+            block_height,
             &signing_key,
         ))
     }
@@ -484,6 +496,7 @@ mod tests {
             "node1".to_string(),
             1,
             chrono::Utc::now().timestamp(),
+            0, // block_height
             &signing_key,
         );
 
@@ -499,6 +512,7 @@ mod tests {
             "node1".to_string(),
             1,
             chrono::Utc::now().timestamp(),
+            0, // block_height
             &node_key,
         );
 
@@ -516,6 +530,7 @@ mod tests {
             "node1".to_string(),
             1,
             chrono::Utc::now().timestamp(),
+            0, // block_height
             &node_key,
         );
 
@@ -542,6 +557,7 @@ mod tests {
             "node1".to_string(),
             1,
             chrono::Utc::now().timestamp(),
+            0, // block_height
             &node_key,
         );
         system.receive_heartbeat(hb1.clone()).await.unwrap();
@@ -558,6 +574,7 @@ mod tests {
             "node1".to_string(),
             1,
             chrono::Utc::now().timestamp(),
+            0, // block_height
             &node_key,
         );
         let result = system.receive_heartbeat(hb_old).await;
