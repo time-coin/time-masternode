@@ -922,24 +922,36 @@ impl PeerConnection {
                     }
 
                     if fork_detected && blocks.len() > 1 {
-                        // We have multiple blocks from trusted peer and detected a fork
-                        // Pass them to fork resolution to handle the reorg
-                        info!(
-                            "🔄 [WHITELIST] Triggering fork resolution with {} blocks from trusted peer",
-                            blocks.len()
-                        );
+                        // Check if fork is relevant (near current height)
+                        let our_height = blockchain.get_height().await;
+                        let fork_height = blocks[0].header.height;
+                        let height_threshold = our_height.saturating_sub(10);
 
-                        match blockchain
-                            .handle_fork(blocks.clone(), self.peer_ip.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                info!("✅ [WHITELIST] Fork resolution completed successfully");
-                                return Ok(());
+                        if fork_height >= height_threshold {
+                            // Fork is relevant - near current height
+                            info!(
+                                "🔄 [WHITELIST] Triggering fork resolution with {} blocks from trusted peer (height {})",
+                                blocks.len(), fork_height
+                            );
+
+                            match blockchain
+                                .handle_fork(blocks.clone(), self.peer_ip.clone())
+                                .await
+                            {
+                                Ok(_) => {
+                                    info!("✅ [WHITELIST] Fork resolution completed successfully");
+                                    return Ok(());
+                                }
+                                Err(e) => {
+                                    warn!("⚠️  [WHITELIST] Fork resolution failed: {}", e);
+                                }
                             }
-                            Err(e) => {
-                                warn!("⚠️  [WHITELIST] Fork resolution failed: {}", e);
-                            }
+                        } else {
+                            // Fork is too far in the past - ignore it
+                            debug!(
+                                "⏭️  [WHITELIST] Ignoring old fork at height {} (current: {}, threshold: {})",
+                                fork_height, our_height, height_threshold
+                            );
                         }
                     }
 
