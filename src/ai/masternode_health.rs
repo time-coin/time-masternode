@@ -279,7 +279,7 @@ impl MasternodeHealthAI {
         probability += false_positive_rate * 0.3; // History of false positives
         probability += network_factor; // Network issues
 
-        probability.max(0.1).min(0.9) // Bounds
+        probability.clamp(0.1, 0.9) // Bounds
     }
 
     /// Record false offline detection (for learning)
