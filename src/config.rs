@@ -49,6 +49,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub masternode: MasternodeConfig,
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub ai: AIConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -237,6 +239,274 @@ fn default_message_max_age() -> i64 {
     300 // 5 minutes
 }
 
+/// AI System Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIConfig {
+    /// Master switch to enable/disable all AI features
+    #[serde(default = "default_ai_enabled")]
+    pub enabled: bool,
+
+    /// Global learning rate for all AI modules (0.0-1.0)
+    #[serde(default = "default_learning_rate")]
+    pub learning_rate: f64,
+
+    /// Minimum samples required before AI makes predictions
+    #[serde(default = "default_min_samples")]
+    pub min_samples: usize,
+
+    /// Enable automatic parameter tuning
+    #[serde(default = "default_true")]
+    pub auto_tuning: bool,
+
+    /// Individual module configurations
+    #[serde(default)]
+    pub peer_selector: AIPeerSelectorConfig,
+
+    #[serde(default)]
+    pub fork_resolver: AIForkResolverConfig,
+
+    #[serde(default)]
+    pub block_production: AIBlockProductionConfig,
+
+    #[serde(default)]
+    pub masternode_health: AIMasternodeHealthConfig,
+
+    #[serde(default)]
+    pub sync_recovery: AISyncRecoveryConfig,
+
+    #[serde(default)]
+    pub mempool_optimizer: AIMempoolOptimizerConfig,
+
+    #[serde(default)]
+    pub anomaly_detector: AIAnomalyDetectorConfig,
+
+    #[serde(default)]
+    pub transaction_analyzer: AITransactionAnalyzerConfig,
+
+    #[serde(default)]
+    pub network_optimizer: AINetworkOptimizerConfig,
+
+    #[serde(default)]
+    pub predictive_sync: AIPredictiveSyncConfig,
+
+    #[serde(default)]
+    pub resource_manager: AIResourceManagerConfig,
+}
+
+impl Default for AIConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_ai_enabled(),
+            learning_rate: default_learning_rate(),
+            min_samples: default_min_samples(),
+            auto_tuning: default_true(),
+            peer_selector: AIPeerSelectorConfig::default(),
+            fork_resolver: AIForkResolverConfig::default(),
+            block_production: AIBlockProductionConfig::default(),
+            masternode_health: AIMasternodeHealthConfig::default(),
+            sync_recovery: AISyncRecoveryConfig::default(),
+            mempool_optimizer: AIMempoolOptimizerConfig::default(),
+            anomaly_detector: AIAnomalyDetectorConfig::default(),
+            transaction_analyzer: AITransactionAnalyzerConfig::default(),
+            network_optimizer: AINetworkOptimizerConfig::default(),
+            predictive_sync: AIPredictiveSyncConfig::default(),
+            resource_manager: AIResourceManagerConfig::default(),
+        }
+    }
+}
+
+fn default_ai_enabled() -> bool {
+    false // Disabled by default for safety
+}
+
+fn default_learning_rate() -> f64 {
+    0.1
+}
+
+fn default_min_samples() -> usize {
+    10
+}
+
+fn default_confidence_threshold() -> f64 {
+    0.7
+}
+
+fn default_anomaly_threshold() -> f64 {
+    2.0 // Z-score threshold
+}
+
+/// AI Peer Selector Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIPeerSelectorConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_max_history")]
+    pub max_history: usize,
+}
+
+impl Default for AIPeerSelectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_history: default_max_history(),
+        }
+    }
+}
+
+fn default_max_history() -> usize {
+    1000
+}
+
+/// AI Fork Resolver Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIForkResolverConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+}
+
+impl Default for AIForkResolverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            confidence_threshold: default_confidence_threshold(),
+        }
+    }
+}
+
+/// AI Block Production Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIBlockProductionConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    #[serde(default = "default_true")]
+    pub failure_prediction: bool,
+
+    #[serde(default = "default_true")]
+    pub strategy_optimization: bool,
+}
+
+impl Default for AIBlockProductionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Experimental
+            failure_prediction: true,
+            strategy_optimization: true,
+        }
+    }
+}
+
+/// AI Masternode Health Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIMasternodeHealthConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    #[serde(default = "default_true")]
+    pub adaptive_timeouts: bool,
+}
+
+impl Default for AIMasternodeHealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // New feature
+            adaptive_timeouts: true,
+        }
+    }
+}
+
+/// AI Sync Recovery Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
+pub struct AISyncRecoveryConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+}
+
+
+/// AI Mempool Optimizer Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
+pub struct AIMempoolOptimizerConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+
+    #[serde(default = "default_false")]
+    pub predictive_loading: bool,
+}
+
+
+/// AI Anomaly Detector Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIAnomalyDetectorConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    #[serde(default = "default_anomaly_threshold")]
+    pub alert_threshold: f64,
+}
+
+impl Default for AIAnomalyDetectorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            alert_threshold: default_anomaly_threshold(),
+        }
+    }
+}
+
+/// AI Transaction Analyzer Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AITransactionAnalyzerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AITransactionAnalyzerConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// AI Network Optimizer Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AINetworkOptimizerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AINetworkOptimizerConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// AI Predictive Sync Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIPredictiveSyncConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AIPredictiveSyncConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// AI Resource Manager Configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
+pub struct AIResourceManagerConfig {
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+}
+
+
 impl Config {
     /// Get the data directory for a specific network
     #[allow(dead_code)]
@@ -315,6 +585,7 @@ impl Config {
                 enable_message_signing: true,
                 message_max_age_seconds: 300,
             },
+            ai: AIConfig::default(),
         }
     }
 

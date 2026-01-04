@@ -111,3 +111,66 @@ api_key = ""
 enable_message_signing = true
 # Maximum age of signed messages (prevents replay attacks)
 message_max_age_seconds = 300  # 5 minutes
+
+[ai]
+# AI System Configuration
+# Master switch to enable/disable all AI features
+enabled = false
+# Global learning rate for all AI modules (0.0-1.0)
+learning_rate = 0.1
+# Minimum samples required before AI makes predictions
+min_samples = 10
+# Enable automatic parameter tuning
+auto_tuning = true
+
+[ai.peer_selector]
+# AI-powered peer selection for optimal sync performance
+enabled = true
+max_history = 1000
+
+[ai.fork_resolver]
+# AI-powered fork resolution with multi-factor analysis
+enabled = true
+confidence_threshold = 0.7
+
+[ai.block_production]
+# AI block production optimization (experimental)
+enabled = false
+failure_prediction = true
+strategy_optimization = true
+
+[ai.masternode_health]
+# AI masternode health monitoring with adaptive timeouts (new)
+enabled = false
+adaptive_timeouts = true
+
+[ai.sync_recovery]
+# AI sync failure recovery (experimental)
+enabled = false
+
+[ai.mempool_optimizer]
+# AI mempool optimization (experimental)
+enabled = false
+predictive_loading = false
+
+[ai.anomaly_detector]
+# AI anomaly detection for security
+enabled = true
+alert_threshold = 2.0
+
+[ai.transaction_analyzer]
+# AI transaction pattern analysis
+enabled = true
+
+[ai.network_optimizer]
+# AI network optimization
+enabled = true
+
+[ai.predictive_sync]
+# AI predictive sync
+enabled = true
+
+[ai.resource_manager]
+# AI resource management (experimental)
+enabled = false
+
