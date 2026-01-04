@@ -375,7 +375,16 @@ impl TSCDConsensus {
             .into_iter()
             .filter(|mn| {
                 let time_since_heartbeat = now.saturating_sub(mn.last_heartbeat);
-                time_since_heartbeat < heartbeat_window
+                let passes = time_since_heartbeat < heartbeat_window;
+                if !passes {
+                    tracing::debug!(
+                        "Filtering out {} - heartbeat {}s ago (window: {}s)",
+                        mn.masternode.address,
+                        time_since_heartbeat,
+                        heartbeat_window
+                    );
+                }
+                passes
             })
             .collect();
 
@@ -386,15 +395,24 @@ impl TSCDConsensus {
                 "⚠️  No masternodes with recent heartbeat at genesis - using all {} active masternodes",
                 all_masternodes.len()
             );
-            all_masternodes
+            all_masternodes.clone()
         } else {
+            if masternodes.len() < all_masternodes.len() {
+                tracing::info!(
+                    "Heartbeat filter: {}/{} masternodes passed (window: {}s)",
+                    masternodes.len(),
+                    all_masternodes.len(),
+                    heartbeat_window
+                );
+            }
             masternodes
         };
 
         if masternodes.is_empty() {
             return Err(TSCDError::ConfigError(format!(
-                "No recently active masternodes (none with heartbeat in last {}s)",
-                heartbeat_window
+                "No recently active masternodes (none with heartbeat in last {}s) - ALL {} masternodes filtered out!",
+                heartbeat_window,
+                all_masternodes.len()
             )));
         }
 

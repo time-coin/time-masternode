@@ -1101,7 +1101,7 @@ async fn main() {
                         let tsdc_leader = match block_tsdc.select_leader_for_catchup(attempt, expected_height).await {
                             Ok(leader) => leader,
                             Err(e) => {
-                                tracing::warn!("⚠️  Cannot select TSDC catchup leader: {}", e);
+                                tracing::warn!("⚠️  Cannot select TSDC catchup leader: {} - NO ONE CAN PRODUCE BLOCKS!", e);
                                 continue;
                             }
                         };
@@ -1113,8 +1113,17 @@ async fn main() {
 
                         // Check if we are the selected leader for this catchup operation
                         let is_catchup_leader = if let Some(ref our_addr) = block_masternode_address {
-                            tsdc_leader.id == *our_addr
+                            let is_leader = tsdc_leader.id == *our_addr;
+                            tracing::info!(
+                                "🎲 Catchup leader selection for height {}: selected={}, we are {}, match={}",
+                                expected_height,
+                                tsdc_leader.id,
+                                our_addr,
+                                is_leader
+                            );
+                            is_leader
                         } else {
+                            tracing::debug!("Not a masternode, cannot be catchup leader");
                             false // Not a masternode, can't be leader
                         };
 
