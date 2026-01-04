@@ -420,17 +420,14 @@ impl Default for AIMasternodeHealthConfig {
 }
 
 /// AI Sync Recovery Configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AISyncRecoveryConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
 }
 
-
 /// AI Mempool Optimizer Configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AIMempoolOptimizerConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
@@ -438,7 +435,6 @@ pub struct AIMempoolOptimizerConfig {
     #[serde(default = "default_false")]
     pub predictive_loading: bool,
 }
-
 
 /// AI Anomaly Detector Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -499,13 +495,11 @@ impl Default for AIPredictiveSyncConfig {
 }
 
 /// AI Resource Manager Configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AIResourceManagerConfig {
     #[serde(default = "default_false")]
     pub enabled: bool,
 }
-
 
 impl Config {
     /// Get the data directory for a specific network
