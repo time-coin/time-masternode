@@ -2756,23 +2756,45 @@ impl Blockchain {
                     // Check if this is a same-height fork or we're behind
                     if consensus_height == our_height {
                         // Same height fork - need to reorg
-                        tracing::info!(
-                            "🔀 Periodic fork detection: same-height fork at {}, reorging from {}",
+                        tracing::warn!(
+                            "🔀 Periodic fork detection: same-height fork at {}, rolling back and resyncing from {}",
                             consensus_height,
                             consensus_peer
                         );
 
-                        // Request blocks around the fork point to trigger reorg
-                        let rollback_start = consensus_height.saturating_sub(5);
-                        if let Some(peer_registry) = blockchain.peer_registry.read().await.as_ref()
-                        {
-                            let req = NetworkMessage::GetBlocks(rollback_start, consensus_height);
-                            if let Err(e) = peer_registry.send_to_peer(&consensus_peer, req).await {
-                                tracing::warn!(
-                                    "⚠️  Failed to request reorg blocks from {}: {}",
-                                    consensus_peer,
-                                    e
-                                );
+                        // Rollback the incorrect block
+                        let rollback_to = consensus_height.saturating_sub(1);
+                        match blockchain.rollback_to_height(rollback_to).await {
+                            Ok(_) => {
+                                tracing::info!("✅ Rolled back to height {}", rollback_to);
+
+                                // Now request the correct blocks
+                                if let Some(peer_registry) =
+                                    blockchain.peer_registry.read().await.as_ref()
+                                {
+                                    let req = NetworkMessage::GetBlocks(
+                                        consensus_height,
+                                        consensus_height,
+                                    );
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&consensus_peer, req).await
+                                    {
+                                        tracing::warn!(
+                                            "⚠️  Failed to request correct block from {}: {}",
+                                            consensus_peer,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "📤 Requested correct block {} from {}",
+                                            consensus_height,
+                                            consensus_peer
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to rollback for fork resolution: {}", e);
                             }
                         }
                     } else if consensus_height > our_height {
