@@ -639,6 +639,7 @@ impl MasternodeRegistry {
     pub async fn receive_heartbeat_broadcast(
         &self,
         heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
+        health_ai: Option<&Arc<crate::ai::MasternodeHealthAI>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Update the masternode's last_heartbeat timestamp
         let mn_address = &heartbeat.masternode_address;
@@ -652,6 +653,13 @@ impl MasternodeRegistry {
             info.last_heartbeat = now;
             info.is_active = true;
             tracing::debug!("💓 Updated last_heartbeat for masternode {}", mn_address);
+
+            // Record heartbeat in AI (if available)
+            if let Some(ai) = health_ai {
+                if let Err(e) = ai.record_heartbeat(mn_address, now).await {
+                    tracing::warn!("Failed to record AI heartbeat: {}", e);
+                }
+            }
         } else {
             // Masternode not in registry - register it from heartbeat
             // This ensures masternodes are discovered even if we missed their announcement

@@ -1304,7 +1304,8 @@ async fn handle_peer(
                                         heartbeat.masternode_address, heartbeat.sequence_number);
 
                                     // Process heartbeat through masternode registry
-                                    if let Err(e) = masternode_registry.receive_heartbeat_broadcast(heartbeat.clone()).await {
+                                    // TODO: Pass health_ai for AI learning
+                                    if let Err(e) = masternode_registry.receive_heartbeat_broadcast(heartbeat.clone(), None).await {
                                         tracing::warn!("Failed to process heartbeat: {}", e);
                                     }
 

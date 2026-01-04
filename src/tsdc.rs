@@ -191,6 +191,8 @@ pub struct TSCDConsensus {
     config: TSCDConfig,
     /// Reference to masternode registry (masternodes ARE validators)
     masternode_registry: Option<Arc<crate::masternode_registry::MasternodeRegistry>>,
+    /// AI-powered masternode health monitoring
+    health_ai: Option<Arc<crate::ai::MasternodeHealthAI>>,
     /// Mapping from slot number to block state
     slot_states: Arc<RwLock<HashMap<u64, SlotState>>>,
     /// Current chain head (highest finalized block)
@@ -212,6 +214,7 @@ impl TSCDConsensus {
         Self {
             config,
             masternode_registry: None,
+            health_ai: None,
             slot_states: Arc::new(RwLock::new(HashMap::new())),
             chain_head: Arc::new(RwLock::new(None)),
             finalized_height: Arc::new(AtomicU64::new(0)),
@@ -229,6 +232,7 @@ impl TSCDConsensus {
         Self {
             config,
             masternode_registry: Some(registry),
+            health_ai: None,
             slot_states: Arc::new(RwLock::new(HashMap::new())),
             chain_head: Arc::new(RwLock::new(None)),
             finalized_height: Arc::new(AtomicU64::new(0)),
@@ -244,6 +248,11 @@ impl TSCDConsensus {
         registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     ) {
         self.masternode_registry = Some(registry);
+    }
+
+    /// Set the AI health monitor
+    pub fn set_health_ai(&mut self, health_ai: Arc<crate::ai::MasternodeHealthAI>) {
+        self.health_ai = Some(health_ai);
     }
 
     /// Set this node's validator identity
@@ -364,24 +373,59 @@ impl TSCDConsensus {
         // 2. HeartbeatBroadcast messages not yet exchanged between peers
         // 3. Race condition between 120s startup delay and 60s heartbeat interval
         // Using a longer window ensures a leader can be selected to bootstrap the network.
+        //
+        // AI ENHANCEMENT: If AI health monitoring is enabled, use adaptive timeouts
+        // instead of hardcoded values. AI learns each masternode's heartbeat pattern
+        // and adjusts timeouts based on network conditions.
         let heartbeat_window = if target_height <= 1 {
             300 // 5 minutes for genesis-level catchup (bootstrap tolerance)
         } else {
             60 // 60 seconds for normal catchup (strict liveness check)
         };
 
+        // Build network health context for AI (if available)
+        let network_health = crate::ai::NetworkHealth::default(); // TODO: Get from network optimizer
+
         let masternodes: Vec<_> = all_masternodes
             .clone()
             .into_iter()
             .filter(|mn| {
                 let time_since_heartbeat = now.saturating_sub(mn.last_heartbeat);
-                let passes = time_since_heartbeat < heartbeat_window;
+
+                // Use AI adaptive timeout if available and enabled
+                let timeout_secs = if let Some(ref health_ai) = self.health_ai {
+                    // AI recommends adaptive timeout
+                    let prediction = tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(health_ai.recommend_timeout(
+                            &mn.masternode.address,
+                            &network_health,
+                            target_height,
+                        ))
+                    });
+
+                    if prediction.confidence > 0.5 {
+                        tracing::debug!(
+                            "🧠 [AI Timeout] {} → {}s (confidence: {:.1}%, reason: {})",
+                            mn.masternode.address,
+                            prediction.recommended_timeout_secs,
+                            prediction.confidence * 100.0,
+                            prediction.reason
+                        );
+                        prediction.recommended_timeout_secs
+                    } else {
+                        heartbeat_window
+                    }
+                } else {
+                    heartbeat_window
+                };
+
+                let passes = time_since_heartbeat < timeout_secs;
                 if !passes {
                     tracing::debug!(
-                        "Filtering out {} - heartbeat {}s ago (window: {}s)",
+                        "Filtering out {} - heartbeat {}s ago (timeout: {}s)",
                         mn.masternode.address,
                         time_since_heartbeat,
-                        heartbeat_window
+                        timeout_secs
                     );
                 }
                 passes

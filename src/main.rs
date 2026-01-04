@@ -339,12 +339,40 @@ async fn main() {
     let consensus_engine = Arc::new(consensus_engine);
     tracing::info!("✓ Consensus engine initialized with AI validation");
 
+    // Initialize AI Masternode Health Monitor (if enabled)
+    let health_ai = if config.ai.enabled && config.ai.masternode_health.enabled {
+        match crate::ai::MasternodeHealthAI::new(
+            Arc::new(block_storage.clone()),
+            config.ai.learning_rate,
+            config.ai.min_samples,
+        ) {
+            Ok(ai) => {
+                tracing::info!("✓ AI Masternode Health Monitor initialized");
+                Some(Arc::new(ai))
+            }
+            Err(e) => {
+                tracing::warn!("⚠️  Failed to initialize AI health monitor: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("AI Masternode Health Monitor disabled in config");
+        None
+    };
+
     // Initialize TSDC consensus engine with masternode registry
-    let tsdc_consensus = Arc::new(TSCDConsensus::with_masternode_registry(
-        Default::default(),
-        registry.clone(),
-    ));
-    tracing::info!("✓ TSDC consensus engine initialized");
+    let mut tsdc_consensus =
+        TSCDConsensus::with_masternode_registry(Default::default(), registry.clone());
+
+    // Set AI health monitor if available
+    if let Some(ref ai) = health_ai {
+        tsdc_consensus.set_health_ai(ai.clone());
+        tracing::info!("✓ TSDC consensus engine initialized with AI health monitoring");
+    } else {
+        tracing::info!("✓ TSDC consensus engine initialized (no AI)");
+    }
+
+    let tsdc_consensus = Arc::new(tsdc_consensus);
 
     // Initialize blockchain
     let blockchain = Arc::new(Blockchain::new(
