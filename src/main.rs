@@ -1071,7 +1071,8 @@ async fn main() {
 
                     let mut current_height_check = block_blockchain.get_height().await;
                     let probe_start = current_height_check + 1;
-                    let probe_end = expected_height + 100;
+                    // Cap probe at expected height - no need to request blocks that don't exist yet
+                    let probe_end = expected_height;
 
                     // Send GetBlocks requests to all peers
                     for peer_ip in &connected_peers {

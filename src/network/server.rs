@@ -1288,7 +1288,10 @@ async fn handle_peer(
                                                 tracing::info!("🔄 Requesting chain from height {} to resolve fork", reorg_start);
 
                                                 // Request earlier blocks to find common ancestor
-                                                let msg = NetworkMessage::GetBlocks(reorg_start, end_height + 100);
+                                                // Cap at expected height to avoid requesting blocks that don't exist yet
+                                                let expected_height = blockchain.calculate_expected_height();
+                                                let reorg_end = end_height.max(expected_height);
+                                                let msg = NetworkMessage::GetBlocks(reorg_start, reorg_end);
                                                 if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
                                                     tracing::warn!("Failed to request reorg blocks: {}", e);
                                                 }
