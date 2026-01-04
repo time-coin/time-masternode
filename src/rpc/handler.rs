@@ -191,7 +191,12 @@ impl RpcHandler {
                     "nTx": block.transactions.len(),
                     "confirmations": (self.blockchain.get_height().await as i64 - height as i64 + 1).max(0),
                     "block_reward": block.header.block_reward,
-                    "masternode_rewards": block.masternode_rewards.len(),
+                    "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
+                        json!({
+                            "address": addr,
+                            "amount": amount
+                        })
+                    }).collect::<Vec<_>>(),
                 }))
             }
             Err(e) => Err(RpcError {
