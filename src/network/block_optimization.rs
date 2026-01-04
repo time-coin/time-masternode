@@ -177,7 +177,11 @@ impl BlockOptimizer {
     fn extract_pattern_id(&self, tx: &Transaction) -> String {
         // Use first input as pattern (simplified)
         if let Some(input) = tx.inputs.first() {
-            format!("{:x}", input.previous_output.txid[0])[..8].to_string()
+            // Format with zero-padding to ensure at least 8 chars
+            format!("{:016x}", input.previous_output.txid[0])
+                .chars()
+                .take(8)
+                .collect()
         } else {
             "unknown".to_string()
         }
