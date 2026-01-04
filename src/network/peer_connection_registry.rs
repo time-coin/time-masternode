@@ -303,8 +303,8 @@ impl PeerConnectionRegistry {
     // ===== Peer Writer Registry (formerly peer_connection_registry.rs) =====
 
     pub async fn register_peer(&self, peer_ip: String, writer: PeerWriter) {
-        // Also mark as connected in the connections map for get_connected_peers()
-        self.mark_connecting(&peer_ip);
+        // Mark as connected in the connections map for get_connected_peers()
+        self.mark_inbound(&peer_ip);
 
         let mut writers = self.peer_writers.write().await;
         writers.insert(peer_ip.clone(), Arc::new(tokio::sync::Mutex::new(writer)));
