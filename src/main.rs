@@ -898,6 +898,22 @@ async fn main() {
                     let time_since_expected = now_timestamp - expected_block_time;
                     let catchup_delay_threshold = 300; // 5 minutes
 
+                    // Log when next block is actually due
+                    if blocks_behind == 0 {
+                        let next_block_due = genesis_timestamp + ((current_height + 1) as i64 * 600);
+                        let wait_time = next_block_due - now_timestamp;
+                        if wait_time > 0 {
+                            tracing::debug!(
+                                "📅 At expected height {} - next block due in {}s at {}",
+                                current_height,
+                                wait_time,
+                                chrono::DateTime::from_timestamp(next_block_due, 0)
+                                    .map(|dt| dt.format("%H:%M:%S").to_string())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            );
+                        }
+                    }
+
                     // Smart catchup trigger:
                     // - If many blocks behind (>2): Catch up immediately
                     // - If 1 block behind: Use 5-minute grace period
