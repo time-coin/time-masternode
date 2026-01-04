@@ -779,6 +779,10 @@ async fn main() {
     let is_producing_block = Arc::new(AtomicBool::new(false));
     let is_producing_block_clone = is_producing_block.clone();
 
+    // Trigger for immediate catchup block production (when 5-min status check detects need)
+    let catchup_trigger = Arc::new(tokio::sync::Notify::new());
+    let catchup_trigger_producer = catchup_trigger.clone();
+
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
 
@@ -866,6 +870,11 @@ async fn main() {
                 _ = shutdown_token_block.cancelled() => {
                     tracing::debug!("🛑 Block production task shutting down gracefully");
                     break;
+                }
+                _ = catchup_trigger_producer.notified() => {
+                    // Triggered by 5-minute status check when catchup is needed
+                    tracing::info!("🔔 Catchup production triggered by status check");
+                    // Fall through to production logic below
                 }
                 _ = interval.tick() => {
                     // Mark start of new block period
@@ -1458,6 +1467,7 @@ async fn main() {
     let status_tsdc_clone = tsdc_consensus.clone();
     let status_masternode_addr_clone = masternode_address.clone();
     let status_config_clone = config.clone();
+    let status_catchup_trigger = catchup_trigger.clone(); // Trigger to wake up block production
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
         loop {
@@ -1537,12 +1547,10 @@ async fn main() {
                                             // Check if catchup blocks are enabled
                                             if status_config_clone.node.enable_catchup_blocks {
                                                 tracing::info!(
-                                                    "🎯 We are TSDC catchup leader - producing block(s) via responsive check"
+                                                    "🎯 We are TSDC catchup leader - triggering catchup production immediately"
                                                 );
-                                                // Note: We could trigger block production here, but to keep logic
-                                                // centralized, we just log. The 10-minute block production loop
-                                                // will handle it at the next tick (max 10min wait)
-                                                // For true responsiveness, block production logic would need refactoring
+                                                // Notify block production task to run catchup immediately
+                                                status_catchup_trigger.notify_one();
                                             } else {
                                                 tracing::warn!(
                                                     "⚠️  TSDC catchup leader but catchup blocks DISABLED in config"
