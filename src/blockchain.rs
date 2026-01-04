@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const BLOCK_TIME_SECONDS: i64 = 600; // 10 minutes
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
@@ -98,6 +98,7 @@ enum ForkResolutionState {
         peer_addr: String,
         check_height: u64,
         searched_back: u64,
+        started_at: std::time::Instant, // NEW: Track when state started
     },
 
     /// Common ancestor found, need to get peer's chain
@@ -107,6 +108,7 @@ enum ForkResolutionState {
         peer_addr: String,
         peer_height: u64,
         fetched_up_to: u64,
+        started_at: std::time::Instant, // NEW: Track when state started
     },
 
     /// Have complete alternate chain, ready to reorg
@@ -116,7 +118,11 @@ enum ForkResolutionState {
     },
 
     /// Performing reorganization
-    Reorging { from_height: u64, to_height: u64 },
+    Reorging {
+        from_height: u64,
+        to_height: u64,
+        started_at: std::time::Instant, // NEW: Track when state started
+    },
 }
 
 pub struct Blockchain {
@@ -908,6 +914,22 @@ impl Blockchain {
                     continue;
                 }
 
+                // CRITICAL FIX: Actively request fresh chain tips from all peers
+                // This prevents network fragmentation by proactively detecting forks
+                debug!(
+                    "🔍 Sync coordinator: Requesting chain tips from {} peer(s)",
+                    connected_peers.len()
+                );
+                for peer_ip in &connected_peers {
+                    let msg = NetworkMessage::GetChainTip;
+                    if let Err(e) = peer_registry.send_to_peer(peer_ip, msg).await {
+                        debug!("Failed to request chain tip from {}: {}", peer_ip, e);
+                    }
+                }
+
+                // Wait for responses to arrive
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
                 // Find the best masternode to sync from
                 let mut best_masternode: Option<(String, u64)> = None;
 
@@ -934,6 +956,24 @@ impl Blockchain {
                             }
                         }
                     }
+                }
+
+                // Check for consensus fork before syncing
+                // This uses fresh chain tip data we just requested
+                if let Some((_consensus_height, sync_peer)) = self.compare_chain_with_peers().await
+                {
+                    // Fork detected by consensus mechanism
+                    info!(
+                        "🔀 Sync coordinator: Fork detected via consensus, syncing from {}",
+                        sync_peer
+                    );
+                    let blockchain_clone = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        if let Err(e) = blockchain_clone.sync_from_peers().await {
+                            warn!("⚠️  Consensus fork sync failed: {}", e);
+                        }
+                    });
+                    continue; // Skip other sync logic this round
                 }
 
                 // If we found a better masternode, sync from it
@@ -2686,39 +2726,71 @@ impl Blockchain {
 
         // Case 2: Same height but different hash - fork at same height!
         if consensus_height == our_height && consensus_hash != our_hash {
-            // Use lexicographic hash comparison as tiebreaker (deterministic)
-            // All nodes will pick the same "winner" based on hash ordering
+            // Use AI fork resolver for intelligent decision making
             let our_chain_peer_count = chain_counts
                 .get(&(our_height, our_hash))
                 .map(|peers| peers.len())
                 .unwrap_or(1); // Count ourselves
 
-            tracing::warn!(
+            let our_timestamp = self
+                .get_block_by_height(our_height)
+                .await
+                .ok()
+                .map(|b| b.header.timestamp);
+
+            // Get approximate peer timestamp (would need to fetch actual block)
+            let peer_timestamp = None; // TODO: Fetch from peer
+
+            // Use AI fork resolver for intelligent decision
+            let fork_params = crate::ai::fork_resolver::ForkResolutionParams {
+                our_height,
+                our_chain_work: *self.cumulative_work.read().await,
+                peer_height: consensus_height,
+                peer_chain_work: 0, // Would need to fetch from peer
+                peer_ip: consensus_peers[0].clone(),
+                supporting_peers: peer_tips
+                    .iter()
+                    .map(|(ip, (h, _))| (ip.clone(), *h, 0u128))
+                    .collect(),
+                common_ancestor: consensus_height.saturating_sub(1),
+                peer_tip_timestamp: peer_timestamp, // Fixed variable name
+                our_tip_hash: Some(our_hash),
+                peer_tip_hash: Some(consensus_hash),
+                peer_is_whitelisted: true, // Check actual whitelist status
+                our_tip_timestamp: our_timestamp, // Fixed variable name
+                fork_depth: 0,             // Same height fork
+            };
+
+            let resolution = self.fork_resolver.resolve_fork(fork_params).await;
+
+            warn!(
                 "🔀 Fork at same height {}: our hash {} ({} peers) vs consensus hash {} ({} peers)",
                 consensus_height,
-                hex::encode(our_hash),
+                hex::encode(&our_hash[..8]),
                 our_chain_peer_count,
-                hex::encode(consensus_hash),
+                hex::encode(&consensus_hash[..8]),
                 consensus_peers.len()
             );
+            warn!(
+                "   AI Resolution: {} (confidence: {:.0}%, risk: {:?})",
+                if resolution.accept_peer_chain {
+                    "ACCEPT consensus chain"
+                } else {
+                    "KEEP our chain"
+                },
+                resolution.confidence * 100.0,
+                resolution.risk_level
+            );
 
-            // Switch if:
-            // 1. Consensus has more peers, OR
-            // 2. Same peer count but consensus hash is "greater" (lexicographic tiebreaker)
-            if consensus_peers.len() > our_chain_peer_count
-                || (consensus_peers.len() == our_chain_peer_count && consensus_hash > our_hash)
-            {
-                tracing::info!(
-                    "🔄 Switching to consensus chain at height {} (hash: {})",
-                    consensus_height,
-                    hex::encode(consensus_hash)
-                );
+            // Log reasoning
+            for reason in &resolution.reasoning {
+                info!("   • {}", reason);
+            }
+
+            if resolution.accept_peer_chain {
                 return Some((consensus_height, consensus_peers[0].clone()));
             } else {
-                tracing::info!(
-                    "✓ Keeping our chain at height {} (we have majority or better hash)",
-                    our_height
-                );
+                // Keep our chain based on AI decision
                 return None;
             }
         }
@@ -2897,15 +2969,39 @@ impl Blockchain {
             peer_addr: peer_addr.clone(),
             check_height: fork_height.saturating_sub(1),
             searched_back: 0,
+            started_at: std::time::Instant::now(), // NEW: Track start time
         };
 
         // Start the ancestor search
         self.continue_fork_resolution().await
     }
 
-    /// Continue fork resolution state machine
+    /// Continue fork resolution state machine with timeout protection
     async fn continue_fork_resolution(&self) -> Result<(), String> {
+        // Check for stale fork resolution state (timeout after 2 minutes)
+        const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 120;
+
         let state = self.fork_state.read().await.clone();
+
+        // Check timeout for states with timestamps
+        match &state {
+            ForkResolutionState::FindingAncestor { started_at, .. }
+            | ForkResolutionState::FetchingChain { started_at, .. }
+            | ForkResolutionState::Reorging { started_at, .. } => {
+                if started_at.elapsed().as_secs() > FORK_RESOLUTION_TIMEOUT_SECS {
+                    warn!(
+                        "⚠️  Fork resolution timed out after {}s, resetting state",
+                        started_at.elapsed().as_secs()
+                    );
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Err(format!(
+                        "Fork resolution timeout after {}s",
+                        FORK_RESOLUTION_TIMEOUT_SECS
+                    ));
+                }
+            }
+            _ => {}
+        }
 
         match state {
             ForkResolutionState::None => Ok(()),
@@ -2915,6 +3011,7 @@ impl Blockchain {
                 peer_addr,
                 check_height,
                 searched_back,
+                started_at: _,
             } => {
                 // Safety check - don't search too far back
                 if searched_back > 2000 {
@@ -2940,6 +3037,7 @@ impl Blockchain {
                 peer_addr,
                 peer_height,
                 fetched_up_to,
+                started_at: _,
             } => {
                 if fetched_up_to >= peer_height {
                     // We have the complete alternate chain, ready to reorg
@@ -2971,7 +3069,20 @@ impl Blockchain {
                 Ok(())
             }
 
-            ForkResolutionState::Reorging { .. } => {
+            ForkResolutionState::Reorging {
+                from_height: _,
+                to_height: _,
+                started_at,
+            } => {
+                // Check if reorg is taking too long
+                if started_at.elapsed().as_secs() > 60 {
+                    warn!(
+                        "⚠️  Reorg stuck for {}s, resetting",
+                        started_at.elapsed().as_secs()
+                    );
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Err("Reorg operation stalled".to_string());
+                }
                 // Already reorging, wait
                 Ok(())
             }
@@ -2991,10 +3102,13 @@ impl Blockchain {
                 fork_height,
                 check_height,
                 searched_back,
+                started_at,
                 ..
             } => {
                 let check_height = *check_height;
                 let searched_back = *searched_back;
+                let fork_height = *fork_height;
+                let started_at = *started_at; // Capture for use below
 
                 // Check if this block matches our block at the same height
                 if let Ok(our_block) = self.get_block(block.header.height) {
@@ -3008,10 +3122,11 @@ impl Blockchain {
 
                         *state = ForkResolutionState::FetchingChain {
                             common_ancestor: block.header.height,
-                            fork_height: *fork_height,
+                            fork_height,
                             peer_addr: peer_addr.to_string(),
                             peer_height,
                             fetched_up_to: block.header.height,
+                            started_at: std::time::Instant::now(), // NEW: Track start time
                         };
 
                         drop(state);
@@ -3026,10 +3141,11 @@ impl Blockchain {
                 }
 
                 *state = ForkResolutionState::FindingAncestor {
-                    fork_height: *fork_height,
+                    fork_height,
                     peer_addr: peer_addr.to_string(),
                     check_height: check_height - 1,
                     searched_back: searched_back + 1,
+                    started_at, // Preserve original start time
                 };
 
                 drop(state);
@@ -3109,6 +3225,7 @@ impl Blockchain {
         *self.fork_state.write().await = ForkResolutionState::Reorging {
             from_height: our_height,
             to_height: new_height,
+            started_at: std::time::Instant::now(), // NEW: Track start time
         };
 
         // 1. Rollback to common ancestor (use existing method)

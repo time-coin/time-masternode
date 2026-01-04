@@ -28,6 +28,7 @@
 | [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) | Complete protocol specification | Developers, Researchers |
 | [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) | Network layer design & modules | Network Developers |
 | [docs/AI_PEER_SELECTION.md](docs/AI_PEER_SELECTION.md) | AI-powered peer selection system | All Developers |
+| [docs/FORK_RESOLUTION_GUIDE.md](docs/FORK_RESOLUTION_GUIDE.md) | Fork detection and resolution guide | Node Operators, Developers |
 | [QUICK_REFERENCE.md](analysis/QUICK_REFERENCE.md) | Command reference & quick facts | All Users |
 
 ### Operational Guides
