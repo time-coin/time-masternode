@@ -362,34 +362,42 @@ impl PeerScoringSystem {
         }
 
         // Exploitation: pick the best scoring peer
-        let stats = self.stats.read().await;
-        let mut peer_scores: Vec<(String, f64)> = available_peers
-            .iter()
-            .map(|peer| {
-                let score = stats.get(peer).map(|s| s.reliability_score).unwrap_or(0.5); // New peers start neutral
-                (peer.clone(), score)
-            })
-            .collect();
+        let best_peer = {
+            let stats = self.stats.read().await;
+            let mut peer_scores: Vec<(String, f64)> = available_peers
+                .iter()
+                .map(|peer| {
+                    let score = stats.get(peer).map(|s| s.reliability_score).unwrap_or(0.5); // New peers start neutral
+                    (peer.clone(), score)
+                })
+                .collect();
 
-        // Sort by score descending
-        peer_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            // Sort by score descending
+            peer_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-        if let Some((best_peer, score)) = peer_scores.first() {
-            info!(
-                "🤖 [AI] Selected best peer: {} (score: {:.3})",
-                best_peer, score
-            );
+            if let Some((best_peer, score)) = peer_scores.first() {
+                info!(
+                    "🤖 [AI] Selected best peer: {} (score: {:.3})",
+                    best_peer, score
+                );
 
-            // Log top 3 for debugging
-            for (i, (peer, s)) in peer_scores.iter().take(3).enumerate() {
-                debug!("  {}. {} (score: {:.3})", i + 1, peer, s);
+                // Log top 3 for debugging
+                for (i, (peer, s)) in peer_scores.iter().take(3).enumerate() {
+                    debug!("  {}. {} (score: {:.3})", i + 1, peer, s);
+                }
+
+                Some(best_peer.clone())
+            } else {
+                None
             }
+        }; // Drop read lock here
 
-            self.record_selection(best_peer).await;
-            Some(best_peer.clone())
-        } else {
-            None
+        // Now record selection with write lock (read lock is dropped)
+        if let Some(peer) = &best_peer {
+            self.record_selection(peer).await;
         }
+
+        best_peer
     }
 
     /// Get performance stats for a peer (for debugging/monitoring)
