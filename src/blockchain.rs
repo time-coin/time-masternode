@@ -1653,11 +1653,32 @@ impl Blockchain {
             return vec![];
         }
 
-        let per_masternode = total_reward / masternodes.len() as u64;
-        masternodes
+        // Calculate total weight using tier's reward_weight
+        let total_weight: u64 = masternodes
             .iter()
-            .map(|mn| (mn.masternode.address.clone(), per_masternode))
-            .collect()
+            .map(|mn| mn.masternode.tier.reward_weight())
+            .sum();
+
+        if total_weight == 0 {
+            return vec![];
+        }
+
+        // Distribute rewards proportionally based on tier weights
+        let mut rewards = Vec::new();
+        let mut distributed = 0u64;
+
+        for (i, mn) in masternodes.iter().enumerate() {
+            let share = if i == masternodes.len() - 1 {
+                // Last masternode gets remainder to avoid rounding errors
+                total_reward - distributed
+            } else {
+                (total_reward * mn.masternode.tier.reward_weight()) / total_weight
+            };
+            rewards.push((mn.masternode.address.clone(), share));
+            distributed += share;
+        }
+
+        rewards
     }
 
     // ===== Fork Detection and Reorganization =====

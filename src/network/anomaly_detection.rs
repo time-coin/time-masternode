@@ -257,7 +257,8 @@ impl AnomalyDetector {
         // Feature 3: Request rate (weight: 20%)
         let request_rate = self.calculate_request_rate(&metrics);
         if request_rate >= MAX_REQUESTS_PER_MINUTE as f64 {
-            let rate_score = ((request_rate / MAX_REQUESTS_PER_MINUTE as f64) - 1.0).clamp(0.0, 1.0);
+            let rate_score =
+                ((request_rate / MAX_REQUESTS_PER_MINUTE as f64) - 1.0).clamp(0.0, 1.0);
             score += rate_score * 0.2;
 
             reasons.push(format!(
