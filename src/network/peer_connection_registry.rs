@@ -22,6 +22,7 @@ use tracing::{debug, warn};
 
 type PeerWriter = BufWriter<OwnedWriteHalf>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
+type ChainTip = (u64, [u8; 32]); // (height, block_hash)
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionDirection {
@@ -61,7 +62,7 @@ pub struct PeerConnectionRegistry {
     // Map of peer IP to their reported blockchain height
     peer_heights: Arc<RwLock<HashMap<String, u64>>>,
     // Map of peer IP to their chain tip (height + hash)
-    peer_chain_tips: Arc<RwLock<HashMap<String, (u64, [u8; 32])>>>,
+    peer_chain_tips: Arc<RwLock<HashMap<String, ChainTip>>>,
     // Pending responses for request/response pattern
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
     // TSDC consensus resources (shared from server)
@@ -362,7 +363,7 @@ impl PeerConnectionRegistry {
     }
 
     /// Get a peer's chain tip (height + hash)
-    pub async fn get_peer_chain_tip(&self, peer_ip: &str) -> Option<(u64, [u8; 32])> {
+    pub async fn get_peer_chain_tip(&self, peer_ip: &str) -> Option<ChainTip> {
         let tips = self.peer_chain_tips.read().await;
         tips.get(peer_ip).copied()
     }

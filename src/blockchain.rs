@@ -2661,7 +2661,7 @@ impl Blockchain {
         for (peer_ip, (height, hash)) in &peer_tips {
             chain_counts
                 .entry((*height, *hash))
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(peer_ip.clone());
         }
 
@@ -2696,9 +2696,9 @@ impl Blockchain {
             tracing::warn!(
                 "🔀 Fork at same height {}: our hash {} ({} peers) vs consensus hash {} ({} peers)",
                 consensus_height,
-                hex::encode(&our_hash),
+                hex::encode(our_hash),
                 our_chain_peer_count,
-                hex::encode(&consensus_hash),
+                hex::encode(consensus_hash),
                 consensus_peers.len()
             );
 
@@ -2711,7 +2711,7 @@ impl Blockchain {
                 tracing::info!(
                     "🔄 Switching to consensus chain at height {} (hash: {})",
                     consensus_height,
-                    hex::encode(&consensus_hash)
+                    hex::encode(consensus_hash)
                 );
                 return Some((consensus_height, consensus_peers[0].clone()));
             } else {
