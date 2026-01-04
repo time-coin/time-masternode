@@ -890,13 +890,59 @@ impl PeerConnection {
                         "🔓 [WHITELIST] Accepting {} blocks from trusted masternode {} without consensus check",
                         block_count, self.peer_ip
                     );
+
+                    // Try to add blocks one by one
                     let mut added = 0;
-                    for block in blocks {
+                    let mut fork_detected = false;
+
+                    for block in blocks.iter() {
                         match blockchain.add_block_with_fork_handling(block.clone()).await {
                             Ok(true) => added += 1,
-                            Ok(false) | Err(_) => break,
+                            Ok(false) => {
+                                // Block already exists or can't be added yet
+                                break;
+                            }
+                            Err(e) if e.contains("Fork detected") => {
+                                // Fork detected - need to handle reorg
+                                warn!(
+                                    "🔀 [WHITELIST] Fork detected from trusted peer {}: {}",
+                                    self.peer_ip, e
+                                );
+                                fork_detected = true;
+                                break;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "⚠️  [WHITELIST] Failed to add block {}: {}",
+                                    block.header.height, e
+                                );
+                                break;
+                            }
                         }
                     }
+
+                    if fork_detected && blocks.len() > 1 {
+                        // We have multiple blocks from trusted peer and detected a fork
+                        // Pass them to fork resolution to handle the reorg
+                        info!(
+                            "🔄 [WHITELIST] Triggering fork resolution with {} blocks from trusted peer",
+                            blocks.len()
+                        );
+
+                        match blockchain
+                            .handle_fork(blocks.clone(), self.peer_ip.clone())
+                            .await
+                        {
+                            Ok(_) => {
+                                info!("✅ [WHITELIST] Fork resolution completed successfully");
+                                return Ok(());
+                            }
+                            Err(e) => {
+                                warn!("⚠️  [WHITELIST] Fork resolution failed: {}", e);
+                            }
+                        }
+                    }
+
                     info!(
                         "✅ [WHITELIST] Added {}/{} blocks from trusted peer {}",
                         added, block_count, self.peer_ip
