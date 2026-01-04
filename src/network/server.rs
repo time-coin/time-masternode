@@ -1091,19 +1091,27 @@ async fn handle_peer(
                                                                 // Check if we should accept this fork
                                                                 match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
-                                                                        // Accept the fork - need to find true common ancestor
-                                                                        // Since block's previous_hash doesn't match our chain,
-                                                                        // we must search backwards to find where chains diverged
-
-                                                                        // Request more blocks going backwards to find common ancestor
-                                                                        let search_start = check_height.saturating_sub(100);
+                                                                        // Accept the fork - perform immediate reorg
+                                                                        // The blocks we have should be sufficient to reorg
                                                                         tracing::info!(
-                                                                            "✅ Accepting fork from {}, requesting blocks {}-{} to find common ancestor",
-                                                                            peer.addr, search_start, end_height
+                                                                            "✅ Accepting fork from {}, performing reorg with {} block(s)",
+                                                                            peer.addr, blocks.len()
                                                                         );
-                                                                        let msg = NetworkMessage::GetBlocks(search_start, end_height + 1);
-                                                                        if let Err(e) = peer_registry.send_to_peer(&peer.addr, msg).await {
-                                                                            tracing::warn!("Failed to request fork blocks: {}", e);
+                                                                        
+                                                                        // Perform the reorg by adding the blocks
+                                                                        // They will replace our chain at the fork point
+                                                                        for block in blocks.iter() {
+                                                                            match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                                                                Ok(true) => {
+                                                                                    tracing::info!("✅ Added block {} via reorg", block.header.height);
+                                                                                }
+                                                                                Ok(false) => {
+                                                                                    tracing::debug!("Block {} already exists", block.header.height);
+                                                                                }
+                                                                                Err(e) => {
+                                                                                    tracing::warn!("⚠️ Failed to add block {} during reorg: {}", block.header.height, e);
+                                                                                }
+                                                                            }
                                                                         }
                                                                         continue;
                                                                     }
