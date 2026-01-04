@@ -1651,9 +1651,12 @@ impl PeerConnection {
                 let our_height = blockchain.get_height().await;
                 let our_hash = blockchain.get_block_hash(our_height).unwrap_or([0u8; 32]);
 
-                // Store peer height
+                // Store peer height and chain tip
                 *self.peer_height.write().await = Some(*height);
                 peer_registry.set_peer_height(&self.peer_ip, *height).await;
+                peer_registry
+                    .update_peer_chain_tip(&self.peer_ip, *height, *hash)
+                    .await;
 
                 if *height == our_height {
                     // Same height - check if same hash (on same chain)

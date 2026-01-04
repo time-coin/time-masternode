@@ -2624,70 +2624,118 @@ impl Blockchain {
             return None;
         }
 
-        // Request block heights from all peers
+        // Request chain tips (height + hash) from all peers
         for peer in &connected_peers {
-            let request = NetworkMessage::GetBlockHeight;
+            let request = NetworkMessage::GetChainTip;
             if let Err(e) = registry.send_to_peer(peer, request).await {
-                tracing::debug!("Failed to send GetBlockHeight to {}: {}", peer, e);
+                tracing::debug!("Failed to send GetChainTip to {}: {}", peer, e);
             }
         }
 
         // Wait for responses (with timeout)
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
-        // Collect peer heights from registry
-        let mut peer_heights: std::collections::HashMap<String, u64> =
+        // Collect peer chain tips (height + hash) from registry
+        let mut peer_tips: std::collections::HashMap<String, (u64, [u8; 32])> =
             std::collections::HashMap::new();
         for peer_ip in &connected_peers {
-            if let Some(height) = registry.get_peer_height(peer_ip).await {
-                peer_heights.insert(peer_ip.clone(), height);
+            if let Some((height, hash)) = registry.get_peer_chain_tip(peer_ip).await {
+                peer_tips.insert(peer_ip.clone(), (height, hash));
             }
         }
 
-        if peer_heights.is_empty() {
-            tracing::debug!("No peer height responses received");
+        if peer_tips.is_empty() {
+            tracing::debug!("No peer chain tip responses received");
             return None;
         }
 
-        // Find the most common height (consensus)
-        let mut height_counts: std::collections::HashMap<u64, usize> =
+        let our_height = self.get_height().await;
+        let our_hash = match self.get_block_hash(our_height) {
+            Ok(hash) => hash,
+            Err(_) => return None,
+        };
+
+        // Group peers by (height, hash) to find consensus
+        let mut chain_counts: std::collections::HashMap<(u64, [u8; 32]), Vec<String>> =
             std::collections::HashMap::new();
-        for height in peer_heights.values() {
-            *height_counts.entry(*height).or_insert(0) += 1;
+        for (peer_ip, (height, hash)) in &peer_tips {
+            chain_counts
+                .entry((*height, *hash))
+                .or_insert_with(Vec::new)
+                .push(peer_ip.clone());
         }
 
-        // Get the height with most peers (longest chain by consensus)
-        let consensus_height = height_counts
+        // Find the chain (height + hash) with the most peers
+        let consensus_chain = chain_counts
             .iter()
-            .max_by_key(|(_, count)| *count)
-            .map(|(height, _)| *height)?;
+            .max_by_key(|(_, peers)| peers.len())
+            .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
-        // Find a peer with the consensus height
-        let consensus_peer = peer_heights
-            .iter()
-            .find(|(_, height)| **height == consensus_height)
-            .map(|(peer, height)| (peer.clone(), *height))?;
+        let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
 
-        let our_height = self.get_height().await;
-
+        // Case 1: Consensus chain is longer - definitely switch
         if consensus_height > our_height {
             tracing::info!(
-                "🔀 Fork detected: consensus height {} > our height {} (peer: {})",
+                "🔀 Fork detected: consensus height {} > our height {} ({} peers agree)",
                 consensus_height,
                 our_height,
-                consensus_peer.0
+                consensus_peers.len()
             );
-            Some((consensus_height, consensus_peer.0))
-        } else if consensus_height < our_height {
-            tracing::warn!(
-                "⚠️  We appear to be ahead of consensus: our height {} > consensus {}",
-                our_height,
-                consensus_height
-            );
-            None
-        } else {
-            None
+            return Some((consensus_height, consensus_peers[0].clone()));
         }
+
+        // Case 2: Same height but different hash - fork at same height!
+        if consensus_height == our_height && consensus_hash != our_hash {
+            // Use lexicographic hash comparison as tiebreaker (deterministic)
+            // All nodes will pick the same "winner" based on hash ordering
+            let our_chain_peer_count = chain_counts
+                .get(&(our_height, our_hash))
+                .map(|peers| peers.len())
+                .unwrap_or(1); // Count ourselves
+
+            tracing::warn!(
+                "🔀 Fork at same height {}: our hash {} ({} peers) vs consensus hash {} ({} peers)",
+                consensus_height,
+                hex::encode(&our_hash),
+                our_chain_peer_count,
+                hex::encode(&consensus_hash),
+                consensus_peers.len()
+            );
+
+            // Switch if:
+            // 1. Consensus has more peers, OR
+            // 2. Same peer count but consensus hash is "greater" (lexicographic tiebreaker)
+            if consensus_peers.len() > our_chain_peer_count
+                || (consensus_peers.len() == our_chain_peer_count && consensus_hash > our_hash)
+            {
+                tracing::info!(
+                    "🔄 Switching to consensus chain at height {} (hash: {})",
+                    consensus_height,
+                    hex::encode(&consensus_hash)
+                );
+                return Some((consensus_height, consensus_peers[0].clone()));
+            } else {
+                tracing::info!(
+                    "✓ Keeping our chain at height {} (we have majority or better hash)",
+                    our_height
+                );
+                return None;
+            }
+        }
+
+        // Case 3: We're ahead of consensus
+        if our_height > consensus_height {
+            tracing::warn!(
+                "⚠️  We appear to be ahead of consensus: our height {} > consensus {} ({} peers)",
+                our_height,
+                consensus_height,
+                consensus_peers.len()
+            );
+            return None;
+        }
+
+        // Case 4: Same height, same hash - no fork
+        None
     }
 
     /// Start periodic chain comparison task

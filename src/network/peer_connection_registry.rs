@@ -60,6 +60,8 @@ pub struct PeerConnectionRegistry {
     peer_writers: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<PeerWriter>>>>>,
     // Map of peer IP to their reported blockchain height
     peer_heights: Arc<RwLock<HashMap<String, u64>>>,
+    // Map of peer IP to their chain tip (height + hash)
+    peer_chain_tips: Arc<RwLock<HashMap<String, (u64, [u8; 32])>>>,
     // Pending responses for request/response pattern
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
     // TSDC consensus resources (shared from server)
@@ -88,6 +90,7 @@ impl PeerConnectionRegistry {
             outbound_count: AtomicUsize::new(0),
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
+            peer_chain_tips: Arc::new(RwLock::new(HashMap::new())),
             pending_responses: Arc::new(RwLock::new(HashMap::new())),
             tsdc_consensus: Arc::new(RwLock::new(None)),
             tsdc_block_cache: Arc::new(RwLock::new(None)),
@@ -347,6 +350,18 @@ impl PeerConnectionRegistry {
     pub async fn update_peer_height(&self, peer_ip: &str, height: u64) {
         let mut heights = self.peer_heights.write().await;
         heights.insert(peer_ip.to_string(), height);
+    }
+
+    /// Update a peer's chain tip (height + hash)
+    pub async fn update_peer_chain_tip(&self, peer_ip: &str, height: u64, hash: [u8; 32]) {
+        let mut tips = self.peer_chain_tips.write().await;
+        tips.insert(peer_ip.to_string(), (height, hash));
+    }
+
+    /// Get a peer's chain tip (height + hash)
+    pub async fn get_peer_chain_tip(&self, peer_ip: &str) -> Option<(u64, [u8; 32])> {
+        let tips = self.peer_chain_tips.read().await;
+        tips.get(peer_ip).copied()
     }
 
     pub async fn get_peer_writer(
