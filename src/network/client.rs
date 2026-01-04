@@ -320,6 +320,9 @@ impl NetworkClient {
                 );
 
                 // Reconnect to any disconnected masternodes (HIGH PRIORITY)
+                // Note: For masternodes, we want BOTH nodes to establish outbound connections
+                // to ensure full mesh redundancy. Only check if we have an outbound connection,
+                // so both nodes will attempt outbound connections to each other.
                 for mn in masternodes.iter().take(reserved_masternode_slots) {
                     let ip = &mn.masternode.address;
 
@@ -335,8 +338,9 @@ impl NetworkClient {
                         continue;
                     }
 
-                    if !connection_manager.is_connected(ip)
-                        && !peer_registry.is_connected(ip)
+                    // For masternodes: only skip if we already have an OUTBOUND connection
+                    // This allows both nodes to connect outbound to each other for full mesh
+                    if !connection_manager.has_outbound_connection(ip)
                         && connection_manager.mark_connecting(ip)
                     {
                         tracing::info!(

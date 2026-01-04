@@ -230,6 +230,17 @@ impl ConnectionManager {
             .unwrap_or(false)
     }
 
+    /// Check if we have an outbound connection to a peer
+    pub fn has_outbound_connection(&self, peer_ip: &str) -> bool {
+        self.connections
+            .get(peer_ip)
+            .map(|info| {
+                info.state == PeerConnectionState::Connected
+                    && info.direction == ConnectionDirection::Outbound
+            })
+            .unwrap_or(false)
+    }
+
     /// Check if we should connect to a peer
     /// Returns false if already connected or currently connecting
     pub fn should_connect_to(&self, peer_ip: &str) -> bool {
