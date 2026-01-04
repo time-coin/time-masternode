@@ -2753,22 +2753,50 @@ impl Blockchain {
                 if let Some((consensus_height, consensus_peer)) =
                     blockchain.compare_chain_with_peers().await
                 {
-                    tracing::info!(
-                        "🔀 Periodic fork detection: consensus height {} > our height {}, syncing from {}",
-                        consensus_height,
-                        our_height,
-                        consensus_peer
-                    );
-
-                    // Trigger sync from the consensus peer
-                    if let Err(e) = blockchain.sync_from_specific_peer(&consensus_peer).await {
-                        tracing::warn!(
-                            "⚠️  Failed to sync from consensus peer {} during periodic check: {}",
-                            consensus_peer,
-                            e
+                    // Check if this is a same-height fork or we're behind
+                    if consensus_height == our_height {
+                        // Same height fork - need to reorg
+                        tracing::info!(
+                            "🔀 Periodic fork detection: same-height fork at {}, reorging from {}",
+                            consensus_height,
+                            consensus_peer
                         );
-                    } else {
-                        tracing::info!("✅ Periodic chain sync completed from {}", consensus_peer);
+
+                        // Request blocks around the fork point to trigger reorg
+                        let rollback_start = consensus_height.saturating_sub(5);
+                        if let Some(peer_registry) = blockchain.peer_registry.read().await.as_ref()
+                        {
+                            let req = NetworkMessage::GetBlocks(rollback_start, consensus_height);
+                            if let Err(e) = peer_registry.send_to_peer(&consensus_peer, req).await {
+                                tracing::warn!(
+                                    "⚠️  Failed to request reorg blocks from {}: {}",
+                                    consensus_peer,
+                                    e
+                                );
+                            }
+                        }
+                    } else if consensus_height > our_height {
+                        // We're behind - normal sync
+                        tracing::info!(
+                            "🔀 Periodic fork detection: consensus height {} > our height {}, syncing from {}",
+                            consensus_height,
+                            our_height,
+                            consensus_peer
+                        );
+
+                        // Trigger sync from the consensus peer
+                        if let Err(e) = blockchain.sync_from_specific_peer(&consensus_peer).await {
+                            tracing::warn!(
+                                "⚠️  Failed to sync from consensus peer {} during periodic check: {}",
+                                consensus_peer,
+                                e
+                            );
+                        } else {
+                            tracing::info!(
+                                "✅ Periodic chain sync completed from {}",
+                                consensus_peer
+                            );
+                        }
                     }
                 }
             }
