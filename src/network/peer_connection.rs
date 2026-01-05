@@ -975,18 +975,47 @@ impl PeerConnection {
                                 );
 
                                 // Get blocks after common ancestor for reorg
-                                let reorg_blocks: Vec<_> = blocks
+                                let mut sorted_blocks = blocks.clone();
+                                sorted_blocks.sort_by_key(|b| b.header.height);
+
+                                let reorg_blocks: Vec<_> = sorted_blocks
                                     .iter()
                                     .filter(|b| b.header.height > ancestor)
                                     .cloned()
                                     .collect();
 
                                 if !reorg_blocks.is_empty() {
+                                    // Verify blocks form a continuous chain starting from ancestor + 1
+                                    let first_block_height =
+                                        reorg_blocks.first().unwrap().header.height;
+                                    let expected_first_height = ancestor + 1;
+
+                                    if first_block_height > expected_first_height {
+                                        // Gap detected - need to request missing blocks
+                                        warn!(
+                                            "⚠️ [WHITELIST] Gap detected: common ancestor at {}, but first received block is {}. Requesting missing blocks {}-{}",
+                                            ancestor, first_block_height, expected_first_height, end_height
+                                        );
+
+                                        // Request the missing blocks to complete the chain
+                                        let msg = NetworkMessage::GetBlocks(
+                                            expected_first_height,
+                                            end_height,
+                                        );
+                                        if let Err(e) = self.send_message(&msg).await {
+                                            warn!("Failed to request gap-filling blocks: {}", e);
+                                        }
+                                        // Don't attempt reorg yet - wait for complete chain
+                                        return Ok(());
+                                    }
+
                                     // For whitelisted peers, trust them and perform reorg
                                     // (They are masternodes, so they should have the canonical chain)
                                     info!(
-                                        "✅ [WHITELIST] Accepting fork from trusted masternode, reorganizing from height {} with {} blocks",
-                                        ancestor, reorg_blocks.len()
+                                        "✅ [WHITELIST] Accepting fork from trusted masternode, reorganizing from height {} with {} blocks (height {}-{})",
+                                        ancestor, reorg_blocks.len(),
+                                        reorg_blocks.first().unwrap().header.height,
+                                        reorg_blocks.last().unwrap().header.height
                                     );
 
                                     match blockchain
@@ -1002,6 +1031,13 @@ impl PeerConnection {
                                                 "❌ [WHITELIST] Chain reorganization failed: {}",
                                                 e
                                             );
+                                            // On failure, request more blocks going further back
+                                            let request_from = ancestor.saturating_sub(5);
+                                            let msg =
+                                                NetworkMessage::GetBlocks(request_from, end_height);
+                                            if let Err(send_err) = self.send_message(&msg).await {
+                                                warn!("Failed to re-request blocks after reorg failure: {}", send_err);
+                                            }
                                         }
                                     }
                                 }

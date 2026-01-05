@@ -1091,41 +1091,96 @@ async fn handle_peer(
                                                                 // Check if we should accept this fork
                                                                 match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
-                                                                        // Accept the fork - perform immediate reorg
+                                                                        // Accept the fork - find common ancestor and perform reorg
                                                                         tracing::info!(
-                                                                            "✅ Accepting fork from {}, performing reorg with {} block(s)",
+                                                                            "✅ Accepting fork from {}, finding common ancestor from {} blocks",
                                                                             peer.addr, blocks.len()
                                                                         );
 
-                                                                        // The common ancestor is before check_height since prev_hash didn't match
-                                                                        // We need to find it by scanning backward through the blocks we have
-                                                                        let mut common_ancestor = check_height.saturating_sub(1);
+                                                                        // Find the common ancestor by checking which blocks match our chain
+                                                                        let mut common_ancestor = None;
+                                                                        let our_height = blockchain.get_height().await;
 
-                                                                        // Try to find the actual common ancestor by checking if blocks match
-                                                                        for height in (0..=common_ancestor).rev() {
-                                                                            if let Some(our_hash) = blockchain.get_block_hash_at_height(height).await {
-                                                                                // Check if any of the peer's blocks at this height match
-                                                                                if let Some(peer_block) = blocks.iter().find(|b| b.header.height == height) {
-                                                                                    if peer_block.hash() == our_hash {
-                                                                                        common_ancestor = height;
+                                                                        // Sort blocks by height
+                                                                        let mut sorted_blocks = blocks.clone();
+                                                                        sorted_blocks.sort_by_key(|b| b.header.height);
+
+                                                                        // Find the highest block that matches our chain
+                                                                        for block in sorted_blocks.iter() {
+                                                                            if block.header.height <= our_height {
+                                                                                if let Some(our_hash) = blockchain.get_block_hash_at_height(block.header.height).await {
+                                                                                    if block.hash() == our_hash {
+                                                                                        // This block matches - potential common ancestor
+                                                                                        common_ancestor = Some(block.header.height);
+                                                                                    } else {
+                                                                                        // Blocks differ at this height - fork detected
                                                                                         break;
                                                                                     }
                                                                                 }
                                                                             }
                                                                         }
 
+                                                                        // If we didn't find any matching block, try one before the first received block
+                                                                        let ancestor = if let Some(height) = common_ancestor {
+                                                                            height
+                                                                        } else {
+                                                                            // No matching blocks found in the received set
+                                                                            // The common ancestor must be before the first block we received
+                                                                            let min_height = sorted_blocks.first().map(|b| b.header.height).unwrap_or(0);
+                                                                            min_height.saturating_sub(1)
+                                                                        };
+
+                                                                        // Get blocks AFTER the common ancestor
+                                                                        let reorg_blocks: Vec<_> = sorted_blocks
+                                                                            .iter()
+                                                                            .filter(|b| b.header.height > ancestor)
+                                                                            .cloned()
+                                                                            .collect();
+
+                                                                        if reorg_blocks.is_empty() {
+                                                                            tracing::warn!("No blocks to reorganize after filtering by common ancestor {}", ancestor);
+                                                                            continue;
+                                                                        }
+
+                                                                        // Verify blocks form a continuous chain starting from ancestor + 1
+                                                                        let first_block_height = reorg_blocks.first().unwrap().header.height;
+                                                                        let expected_first_height = ancestor + 1;
+
+                                                                        if first_block_height > expected_first_height {
+                                                                            // Gap detected - need to request missing blocks
+                                                                            tracing::warn!(
+                                                                                "⚠️ Gap detected: common ancestor at {}, but first received block is {}. Requesting missing blocks {}-{}",
+                                                                                ancestor, first_block_height, expected_first_height, first_block_height - 1
+                                                                            );
+
+                                                                            // Request the missing blocks to complete the chain
+                                                                            let msg = NetworkMessage::GetBlocks(expected_first_height, end_height);
+                                                                            if let Err(e) = peer_registry.send_to_peer(&ip_str, msg).await {
+                                                                                tracing::error!("Failed to request gap-filling blocks: {}", e);
+                                                                            }
+                                                                            continue;
+                                                                        }
+
                                                                         tracing::info!(
-                                                                            "🔀 Reorganizing from common ancestor {} with {} blocks",
-                                                                            common_ancestor, blocks.len()
+                                                                            "🔀 Reorganizing from common ancestor {} with {} blocks (height {}-{})",
+                                                                            ancestor, reorg_blocks.len(),
+                                                                            reorg_blocks.first().unwrap().header.height,
+                                                                            reorg_blocks.last().unwrap().header.height
                                                                         );
 
                                                                         // Perform the actual reorg using the proper function
-                                                                        match blockchain.reorganize_to_chain(common_ancestor, blocks.clone()).await {
+                                                                        match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
                                                                             Ok(()) => {
                                                                                 tracing::info!("✅ Chain reorganization successful");
                                                                             }
                                                                             Err(e) => {
                                                                                 tracing::error!("❌ Chain reorganization failed: {}", e);
+                                                                                // On failure, request more blocks to try again
+                                                                                let request_from = ancestor.saturating_sub(5);
+                                                                                let msg = NetworkMessage::GetBlocks(request_from, end_height);
+                                                                                if let Err(send_err) = peer_registry.send_to_peer(&ip_str, msg).await {
+                                                                                    tracing::error!("Failed to re-request blocks after reorg failure: {}", send_err);
+                                                                                }
                                                                             }
                                                                         }
                                                                         continue;
