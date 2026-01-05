@@ -374,10 +374,25 @@ impl TSCDConsensus {
         // 3. Race condition between 120s startup delay and 60s heartbeat interval
         // Using a longer window ensures a leader can be selected to bootstrap the network.
         //
+        // CRITICAL FIX: When catching up from height 0 (network reset), DISABLE heartbeat
+        // filtering entirely to ensure all nodes use the SAME masternode list. The heartbeat
+        // filter creates non-deterministic leader selection because different nodes receive
+        // heartbeats at different times, causing disagreement on who the leader is.
+        // Only enable filtering when the chain has actual blocks (current_height > 0).
+        //
         // AI ENHANCEMENT: If AI health monitoring is enabled, use adaptive timeouts
         // instead of hardcoded values. AI learns each masternode's heartbeat pattern
         // and adjusts timeouts based on network conditions.
-        let heartbeat_window = if target_height <= 1 {
+        let current_height = self
+            .chain_head
+            .read()
+            .await
+            .as_ref()
+            .map(|b| b.header.height)
+            .unwrap_or(0);
+        let heartbeat_window = if current_height == 0 {
+            u64::MAX // Disable filtering when catching up from height 0
+        } else if target_height <= 1 {
             300 // 5 minutes for genesis-level catchup (bootstrap tolerance)
         } else {
             60 // 60 seconds for normal catchup (strict liveness check)
@@ -432,21 +447,32 @@ impl TSCDConsensus {
             })
             .collect();
 
-        // If no masternodes pass the heartbeat filter at genesis, fall back to all active
-        // masternodes. This handles the edge case where no heartbeats have been exchanged yet.
-        let mut masternodes = if masternodes.is_empty() && target_height <= 1 {
+        // If no masternodes pass the heartbeat filter, fall back to all active masternodes
+        // CRITICAL: With current_height==0, heartbeat_window==u64::MAX, so this should never trigger
+        // But keep it as a safety fallback for other edge cases
+        let current_height_for_fallback = self
+            .chain_head
+            .read()
+            .await
+            .as_ref()
+            .map(|b| b.header.height)
+            .unwrap_or(0);
+        let mut masternodes = if masternodes.is_empty() {
             tracing::warn!(
-                "⚠️  No masternodes with recent heartbeat at genesis - using all {} active masternodes",
+                "⚠️  No masternodes with recent heartbeat (height={}, target={}) - using all {} active masternodes",
+                current_height_for_fallback,
+                target_height,
                 all_masternodes.len()
             );
             all_masternodes.clone()
         } else {
             if masternodes.len() < all_masternodes.len() {
                 tracing::info!(
-                    "Heartbeat filter: {}/{} masternodes passed (window: {}s)",
+                    "Heartbeat filter: {}/{} masternodes passed (window: {}s, current_height: {})",
                     masternodes.len(),
                     all_masternodes.len(),
-                    heartbeat_window
+                    heartbeat_window,
+                    current_height_for_fallback
                 );
             }
             masternodes
