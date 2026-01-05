@@ -1534,20 +1534,23 @@ impl Blockchain {
         // 2. Bloom filter for fast lookup with occasional false positives
         // 3. In-memory cache with persistence to disk
         //
-        // For now, we make a conservative assumption: ALL non-coinbase transactions
-        // in blocks were finalized by Avalanche before inclusion. This is safe because:
-        // - TSDC block production only includes finalized transactions (see blockchain.rs:1142)
-        // - Avalanche finalizes transactions before they enter blocks
-        // - Coinbase transactions are block-specific and don't need protection
+        // Block structure: [coinbase, reward_distribution, ...finalized_txs]
+        // - Index 0: Coinbase (creates block reward)
+        // - Index 1: Reward distribution (spends coinbase, distributes to masternodes)
+        // - Index 2+: Avalanche-finalized user transactions
+        //
+        // Only transactions at index 2+ were finalized by Avalanche and need protection.
+        // Coinbase and reward distribution are block-specific and regenerated during reorgs.
 
         for height in start_height..=end_height {
             if let Ok(block) = self.get_block_by_height(height).await {
-                for tx in block.transactions.iter() {
-                    // Skip coinbase transactions (they're block-specific, not finalized by Avalanche)
-                    let is_coinbase =
-                        !tx.inputs.is_empty() && tx.inputs[0].previous_output.vout == u32::MAX;
-
-                    if !is_coinbase {
+                // CRITICAL: Block structure is [coinbase, reward_distribution, ...finalized_txs]
+                // Only transactions at index 2+ are actual Avalanche-finalized user transactions.
+                // Coinbase (index 0) and reward distribution (index 1) are block-specific and
+                // must NOT be protected during reorgs - they're regenerated for each block.
+                for (idx, tx) in block.transactions.iter().enumerate() {
+                    // Skip first two transactions (coinbase + reward distribution)
+                    if idx >= 2 {
                         finalized_txids.push(tx.txid());
                     }
                 }
