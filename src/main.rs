@@ -823,7 +823,9 @@ async fn main() {
             u64,
             (String, std::time::Instant, u64),
         > = std::collections::HashMap::new();
-        let leader_timeout = std::time::Duration::from_secs(60); // 60 seconds for leader to respond
+        // Reduced timeout for faster rotation when network is stalled
+        // Leaders have 30 seconds to produce blocks before we rotate to backup
+        let leader_timeout = std::time::Duration::from_secs(30);
 
         // Track last sync time to prevent immediate catchup leader selection
         // After syncing from peers, node needs time to populate mempool via p2p gossip
@@ -1241,12 +1243,51 @@ async fn main() {
                     let our_desc = block_masternode_address
                         .as_deref()
                         .unwrap_or("non-masternode");
+
+                    // Check how long we've been waiting for this leader
+                    let wait_duration = if let Some((_, selection_time, _)) =
+                        catchup_leader_tracker.get(&expected_height)
+                    {
+                        selection_time.elapsed()
+                    } else {
+                        std::time::Duration::from_secs(0)
+                    };
+
                     tracing::info!(
-                        "⏳ Waiting for catchup leader {} to produce blocks (we are {})",
+                        "⏳ Waiting for catchup leader {} to produce blocks (we are {}, waited: {}s)",
                         tsdc_leader.id,
-                        our_desc
+                        our_desc,
+                        wait_duration.as_secs()
                     );
-                    // Wait for leader - check again in next iteration
+
+                    // Sleep briefly then check if blocks were produced
+                    // This allows the leader time to produce while avoiding 10-minute wait
+                    tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+
+                    // After waiting, check if the leader made progress
+                    let height_after_wait = block_blockchain.get_height().await;
+                    if height_after_wait > current_height {
+                        tracing::info!(
+                            "✅ Leader {} produced block(s), height advanced: {} → {}",
+                            tsdc_leader.id,
+                            current_height,
+                            height_after_wait
+                        );
+                        // Progress made - leader is working, continue to next iteration
+                        continue;
+                    }
+
+                    // No progress made - check if we should rotate leader
+                    if wait_duration >= leader_timeout {
+                        tracing::warn!(
+                            "⚠️  No progress after waiting {}s for leader {} - will rotate to backup leader",
+                            wait_duration.as_secs(),
+                            tsdc_leader.id
+                        );
+                        // The rotation will happen at the top of the next iteration
+                    }
+
+                    // Loop back to re-check leader selection (which will rotate if timed out)
                     continue;
                 }
 
