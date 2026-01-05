@@ -3596,14 +3596,17 @@ impl Blockchain {
                     }
                 }
 
-                // If all competing blocks start after this height, this is likely the ancestor
-                if competing_blocks.iter().all(|b| b.header.height > height) {
-                    info!(
-                        "Found common ancestor at height {} (all competing blocks are after this)",
-                        height
-                    );
-                    return height;
-                }
+                // CRITICAL FIX: Don't assume height H is common ancestor just because competing blocks are all > H.
+                // We must verify that the FIRST competing block (at height+1) actually builds on our block at height H.
+                // Otherwise, our block at height H might be different from the network's block at height H (a fork).
+                //
+                // OLD BUGGY LOGIC (REMOVED):
+                // if competing_blocks.iter().all(|b| b.header.height > height) {
+                //     return height; // WRONG: Doesn't verify the blocks actually connect!
+                // }
+                //
+                // The correct approach is handled above: we only return when we find a competing block that
+                // explicitly builds on (previous_hash matches) or matches (same hash) our block.
             } else {
                 // If we can't find our block at this height, keep going back
                 warn!(
