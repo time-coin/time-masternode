@@ -1747,8 +1747,9 @@ async fn handle_peer(
         }
     }
 
-    // Cleanup: mark inbound connection as disconnected
+    // Cleanup: mark inbound connection as disconnected in BOTH managers
     connection_manager.mark_inbound_disconnected(&ip_str);
+    peer_registry.unregister_peer(&ip_str).await;
     tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
 
     Ok(())
