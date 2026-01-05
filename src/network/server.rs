@@ -1092,25 +1092,40 @@ async fn handle_peer(
                                                                 match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
                                                                         // Accept the fork - perform immediate reorg
-                                                                        // The blocks we have should be sufficient to reorg
                                                                         tracing::info!(
                                                                             "✅ Accepting fork from {}, performing reorg with {} block(s)",
                                                                             peer.addr, blocks.len()
                                                                         );
-                                                                        
-                                                                        // Perform the reorg by adding the blocks
-                                                                        // They will replace our chain at the fork point
-                                                                        for block in blocks.iter() {
-                                                                            match blockchain.add_block_with_fork_handling(block.clone()).await {
-                                                                                Ok(true) => {
-                                                                                    tracing::info!("✅ Added block {} via reorg", block.header.height);
+
+                                                                        // The common ancestor is before check_height since prev_hash didn't match
+                                                                        // We need to find it by scanning backward through the blocks we have
+                                                                        let mut common_ancestor = check_height.saturating_sub(1);
+
+                                                                        // Try to find the actual common ancestor by checking if blocks match
+                                                                        for height in (0..=common_ancestor).rev() {
+                                                                            if let Some(our_hash) = blockchain.get_block_hash_at_height(height).await {
+                                                                                // Check if any of the peer's blocks at this height match
+                                                                                if let Some(peer_block) = blocks.iter().find(|b| b.header.height == height) {
+                                                                                    if peer_block.hash() == our_hash {
+                                                                                        common_ancestor = height;
+                                                                                        break;
+                                                                                    }
                                                                                 }
-                                                                                Ok(false) => {
-                                                                                    tracing::debug!("Block {} already exists", block.header.height);
-                                                                                }
-                                                                                Err(e) => {
-                                                                                    tracing::warn!("⚠️ Failed to add block {} during reorg: {}", block.header.height, e);
-                                                                                }
+                                                                            }
+                                                                        }
+
+                                                                        tracing::info!(
+                                                                            "🔀 Reorganizing from common ancestor {} with {} blocks",
+                                                                            common_ancestor, blocks.len()
+                                                                        );
+
+                                                                        // Perform the actual reorg using the proper function
+                                                                        match blockchain.reorganize_to_chain(common_ancestor, blocks.clone()).await {
+                                                                            Ok(()) => {
+                                                                                tracing::info!("✅ Chain reorganization successful");
+                                                                            }
+                                                                            Err(e) => {
+                                                                                tracing::error!("❌ Chain reorganization failed: {}", e);
                                                                             }
                                                                         }
                                                                         continue;

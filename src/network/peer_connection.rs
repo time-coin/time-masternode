@@ -930,21 +930,83 @@ impl PeerConnection {
                         if fork_height >= height_threshold {
                             // Fork is relevant - near current height
                             info!(
-                                "🔄 [WHITELIST] Triggering fork resolution with {} blocks from trusted peer (height {})",
+                                "🔄 [WHITELIST] Fork detected with {} blocks from trusted peer (height {})",
                                 blocks.len(), fork_height
                             );
 
-                            match blockchain
-                                .handle_fork(blocks.clone(), self.peer_ip.clone())
-                                .await
-                            {
-                                Ok(_) => {
-                                    info!("✅ [WHITELIST] Fork resolution completed successfully");
-                                    return Ok(());
+                            // Find common ancestor by scanning blocks
+                            let mut common_ancestor: Option<u64> = None;
+                            let mut actual_fork_height: Option<u64> = None;
+
+                            for block in blocks.iter() {
+                                let height = block.header.height;
+                                if height <= our_height {
+                                    if let Ok(our_block) =
+                                        blockchain.get_block_by_height(height).await
+                                    {
+                                        if our_block.hash() == block.hash() {
+                                            // Blocks match - this is common ancestor
+                                            common_ancestor = Some(height);
+                                        } else {
+                                            // Fork detected at this height
+                                            actual_fork_height = Some(height);
+                                            warn!(
+                                                "🔀 [WHITELIST] Fork at height {}: our {} vs peer {}",
+                                                height,
+                                                hex::encode(&our_block.hash()[..8]),
+                                                hex::encode(&block.hash()[..8])
+                                            );
+                                            break;
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!("⚠️  [WHITELIST] Fork resolution failed: {}", e);
+                            }
+
+                            if let Some(fork_at) = actual_fork_height {
+                                let ancestor = common_ancestor.unwrap_or(fork_at.saturating_sub(1));
+                                let end_height = blocks
+                                    .last()
+                                    .map(|b| b.header.height)
+                                    .unwrap_or(fork_height);
+
+                                info!(
+                                    "🔀 [WHITELIST] Fork at height {}, common ancestor: {}, peer height: {}",
+                                    fork_at, ancestor, end_height
+                                );
+
+                                // Get blocks after common ancestor for reorg
+                                let reorg_blocks: Vec<_> = blocks
+                                    .iter()
+                                    .filter(|b| b.header.height > ancestor)
+                                    .cloned()
+                                    .collect();
+
+                                if !reorg_blocks.is_empty() {
+                                    // For whitelisted peers, trust them and perform reorg
+                                    // (They are masternodes, so they should have the canonical chain)
+                                    info!(
+                                        "✅ [WHITELIST] Accepting fork from trusted masternode, reorganizing from height {} with {} blocks",
+                                        ancestor, reorg_blocks.len()
+                                    );
+
+                                    match blockchain
+                                        .reorganize_to_chain(ancestor, reorg_blocks)
+                                        .await
+                                    {
+                                        Ok(()) => {
+                                            info!("✅ [WHITELIST] Chain reorganization successful");
+                                            return Ok(());
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "❌ [WHITELIST] Chain reorganization failed: {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
+                            } else {
+                                debug!("⏭️  [WHITELIST] No actual fork found in blocks");
                             }
                         } else {
                             // Fork is too far in the past - ignore it
