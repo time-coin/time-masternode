@@ -1110,29 +1110,31 @@ impl Blockchain {
         let deterministic_timestamp =
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
-        // CRITICAL: During catchup, use current time instead of historical deterministic time
-        // If the scheduled timestamp is too far in the past (>15min), use current time
-        // to avoid timestamp validation failures
+        // Check if we're catching up (used for relaxed masternode selection)
         let blocks_behind = self
             .calculate_expected_height()
             .saturating_sub(current_height);
 
-        let now = chrono::Utc::now().timestamp();
-        let timestamp_age = now - deterministic_timestamp;
-        let use_current_time = timestamp_age > TIMESTAMP_TOLERANCE_SECS;
+        // CRITICAL: Always use deterministic timestamp, but ensure it's > previous block
+        // This maintains proper block schedule (genesis + height*600) while preventing duplicates
+        let mut aligned_timestamp = deterministic_timestamp;
 
-        let aligned_timestamp = if use_current_time {
-            tracing::debug!(
-                "📅 Block {} using current timestamp {} (scheduled {} is {}s old, exceeds tolerance)",
-                next_height,
-                now,
-                deterministic_timestamp,
-                timestamp_age
-            );
-            now
-        } else {
-            deterministic_timestamp
-        };
+        // Ensure timestamp is strictly greater than previous block
+        if current_height > 0 {
+            if let Ok(prev_block) = self.get_block_by_height(current_height).await {
+                if aligned_timestamp <= prev_block.header.timestamp {
+                    // Use whichever is greater: deterministic schedule or prev+1
+                    aligned_timestamp = prev_block.header.timestamp + 1;
+                    tracing::debug!(
+                        "📅 Block {} timestamp adjusted to {} to maintain strict ordering (scheduled: {}, prev: {})",
+                        next_height,
+                        aligned_timestamp,
+                        deterministic_timestamp,
+                        prev_block.header.timestamp
+                    );
+                }
+            }
+        }
 
         // Use relaxed masternode selection when catching up (any blocks behind)
         // or when explicitly producing catchup blocks (target_height provided)
