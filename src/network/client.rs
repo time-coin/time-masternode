@@ -452,7 +452,7 @@ impl NetworkClient {
 
                 // PHASE 4: Periodic chain tip comparison for fork detection
                 // Query all connected peers for their chain tip and check for forks
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
                 if our_height > 0 {
                     let our_hash = blockchain.get_block_hash(our_height).unwrap_or([0u8; 32]);
 
@@ -666,14 +666,12 @@ async fn maintain_peer_connection(
     }
 
     // Run the message loop which handles ping/pong and routes other messages
-    // Pass peer_registry, masternode_registry, and blockchain so it can process block syncs
-    let result = peer_conn
-        .run_message_loop_with_registry_masternode_and_blockchain(
-            peer_registry.clone(),
-            masternode_registry.clone(),
-            blockchain.clone(),
-        )
-        .await;
+    // Use the new unified message loop with builder pattern
+    let config = crate::network::peer_connection::MessageLoopConfig::new(peer_registry.clone())
+        .with_masternode_registry(masternode_registry.clone())
+        .with_blockchain(blockchain.clone());
+    
+    let result = peer_conn.run_message_loop_unified(config).await;
 
     // Clean up on disconnect in both managers
     connection_manager.mark_disconnected(&peer_ip);

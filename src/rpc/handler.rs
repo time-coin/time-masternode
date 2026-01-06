@@ -127,7 +127,7 @@ impl RpcHandler {
             NetworkType::Mainnet => "main",
             NetworkType::Testnet => "test",
         };
-        let height = self.blockchain.get_height().await;
+        let height = self.blockchain.get_height();
         let best_hash = self.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
 
         Ok(json!({
@@ -149,7 +149,7 @@ impl RpcHandler {
     }
 
     async fn get_block_count(&self) -> Result<Value, RpcError> {
-        let height = self.blockchain.get_height().await;
+        let height = self.blockchain.get_height();
         Ok(json!(height))
     }
 
@@ -189,7 +189,7 @@ impl RpcHandler {
                     "merkleroot": hex::encode(block.header.merkle_root),
                     "tx": txids,
                     "nTx": block.transactions.len(),
-                    "confirmations": (self.blockchain.get_height().await as i64 - height as i64 + 1).max(0),
+                    "confirmations": (self.blockchain.get_height() as i64 - height as i64 + 1).max(0),
                     "block_reward": block.header.block_reward,
                     "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
                         json!({
@@ -264,7 +264,7 @@ impl RpcHandler {
     async fn get_txout_set_info(&self) -> Result<Value, RpcError> {
         let utxos = self.utxo_manager.list_all_utxos().await;
         let total_amount: u64 = utxos.iter().map(|u| u.value).sum();
-        let height = self.blockchain.get_height().await;
+        let height = self.blockchain.get_height();
 
         Ok(json!({
             "height": height,

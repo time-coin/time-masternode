@@ -202,7 +202,7 @@ impl MessageHandler {
         end: u64,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        let our_height = context.blockchain.get_height().await;
+        let our_height = context.blockchain.get_height();
         info!(
             "📥 [{}] Received GetBlocks({}-{}) from {} (our height: {})",
             self.direction, start, end, self.peer_ip, our_height
@@ -347,7 +347,7 @@ impl MessageHandler {
         );
 
         // Validate: Only accept proposals for the next block (current + 1)
-        let our_height = context.blockchain.get_height().await;
+        let our_height = context.blockchain.get_height();
         let expected_height = our_height + 1;
 
         if block_height != expected_height {
@@ -613,7 +613,7 @@ impl MessageHandler {
                     );
 
                     // Add block to blockchain (if not already present)
-                    let current_height = context.blockchain.get_height().await;
+                    let current_height = context.blockchain.get_height();
 
                     // Skip adding genesis block if chain already has blocks
                     if block.header.height == 0 && current_height > 0 {

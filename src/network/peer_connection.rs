@@ -171,6 +171,47 @@ pub struct PeerConnection {
     is_whitelisted: bool,
 }
 
+/// Configuration for peer connection message loop
+/// Supports optional components for different connection scenarios
+pub struct MessageLoopConfig {
+    /// Required: Peer registry for tracking active connections
+    pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+
+    /// Optional: Masternode registry for masternode-specific handling
+    pub masternode_registry: Option<Arc<crate::masternode_registry::MasternodeRegistry>>,
+
+    /// Optional: Blockchain for block synchronization and validation
+    pub blockchain: Option<Arc<Blockchain>>,
+}
+
+impl MessageLoopConfig {
+    /// Create a new config with just peer registry (minimal setup)
+    pub fn new(
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) -> Self {
+        Self {
+            peer_registry,
+            masternode_registry: None,
+            blockchain: None,
+        }
+    }
+
+    /// Add masternode registry (builder pattern)
+    pub fn with_masternode_registry(
+        mut self,
+        registry: Arc<crate::masternode_registry::MasternodeRegistry>,
+    ) -> Self {
+        self.masternode_registry = Some(registry);
+        self
+    }
+
+    /// Add blockchain (builder pattern)
+    pub fn with_blockchain(mut self, blockchain: Arc<Blockchain>) -> Self {
+        self.blockchain = Some(blockchain);
+        self
+    }
+}
+
 impl PeerConnection {
     const PING_INTERVAL: Duration = Duration::from_secs(30);
     const TIMEOUT_CHECK_INTERVAL: Duration = Duration::from_secs(10);
@@ -324,11 +365,7 @@ impl PeerConnection {
         let nonce = rand::random::<u64>();
         let timestamp = chrono::Utc::now().timestamp();
         // Phase 3: Get our height if blockchain available
-        let height = if let Some(bc) = blockchain {
-            Some(bc.get_height().await)
-        } else {
-            None
-        };
+        let height = blockchain.map(|bc| bc.get_height());
 
         {
             let mut state = self.ping_state.write().await;
@@ -495,6 +532,23 @@ impl PeerConnection {
     }
 
     /// Run the unified message loop for this connection with broadcast channel integration
+    ///
+    /// **DEPRECATED**: Use `run_message_loop_unified()` with `MessageLoopConfig` instead.
+    /// This provides better flexibility with the builder pattern.
+    ///
+    /// # Migration
+    /// ```
+    /// // Old way:
+    /// peer_connection.run_message_loop_with_registry(peer_registry).await?;
+    ///
+    /// // New way:
+    /// let config = MessageLoopConfig::new(peer_registry);
+    /// peer_connection.run_message_loop_unified(config).await?;
+    /// ```
+    #[deprecated(
+        since = "1.0.0",
+        note = "Use run_message_loop_unified() with MessageLoopConfig for better flexibility"
+    )]
     pub async fn run_message_loop_with_registry(
         mut self,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
@@ -601,6 +655,12 @@ impl PeerConnection {
     }
 
     /// Run the unified message loop with masternode registry integration
+    ///
+    /// **DEPRECATED**: Use `run_message_loop_unified()` with `MessageLoopConfig` instead.
+    #[deprecated(
+        since = "1.0.0",
+        note = "Use run_message_loop_unified() with MessageLoopConfig for better flexibility"
+    )]
     pub async fn run_message_loop_with_registry_and_masternode(
         mut self,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
@@ -709,6 +769,12 @@ impl PeerConnection {
 
     /// Run the unified message loop with masternode registry AND blockchain integration
     /// This is used for outbound connections that need to receive block sync responses
+    ///
+    /// **DEPRECATED**: Use `run_message_loop_unified()` with `MessageLoopConfig` instead.
+    #[deprecated(
+        since = "1.0.0",
+        note = "Use run_message_loop_unified() with MessageLoopConfig for better flexibility"
+    )]
     pub async fn run_message_loop_with_registry_masternode_and_blockchain(
         mut self,
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
@@ -842,7 +908,7 @@ impl PeerConnection {
                 height,
             } => {
                 // Phase 3: Pass peer height and our height to handler
-                let our_height = Some(blockchain.get_height().await);
+                let our_height = Some(blockchain.get_height());
                 self.handle_ping(*nonce, *timestamp, *height, our_height)
                     .await?;
             }
@@ -867,7 +933,7 @@ impl PeerConnection {
 
                 let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
                 let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
 
                 // Update our knowledge of peer's height
                 let current_known = self.peer_height.read().await;
@@ -923,7 +989,7 @@ impl PeerConnection {
 
                     if fork_detected && blocks.len() > 1 {
                         // Check if fork is relevant (near current height)
-                        let our_height = blockchain.get_height().await;
+                        let our_height = blockchain.get_height();
                         let fork_height = blocks[0].header.height;
                         let height_threshold = our_height.saturating_sub(10);
 
@@ -975,21 +1041,47 @@ impl PeerConnection {
 
                                             // CRITICAL FIX: Don't assume fork is only 1 block deep
                                             // The previous_hash mismatch indicates the fork extends to our_height or earlier
-                                            // We need to request earlier blocks to find the true common ancestor
-                                            warn!(
-                                                "⚠️ [WHITELIST] Previous hash mismatch indicates fork is deeper than height {}. Requesting earlier blocks to find common ancestor.",
-                                                our_height
-                                            );
+                                            // We need to iteratively search for the true common ancestor
 
-                                            // Request blocks starting from further back to find common ancestor
-                                            // Go back at least 20 blocks, but not below block 1
-                                            let request_from = our_height.saturating_sub(20).max(1);
-                                            let msg =
-                                                NetworkMessage::GetBlocks(request_from, end_height);
-                                            if let Err(e) = self.send_message(&msg).await {
-                                                warn!("Failed to request earlier blocks for deep fork resolution: {}", e);
+                                            // Determine how far back to search based on lowest block received
+                                            let lowest_peer_block = blocks
+                                                .iter()
+                                                .map(|b| b.header.height)
+                                                .min()
+                                                .unwrap_or(height);
+
+                                            // If we already received blocks going back far enough, scan them to find common ancestor
+                                            if lowest_peer_block < our_height {
+                                                warn!(
+                                                    "⚠️ [WHITELIST] Scanning received blocks (lowest: {}) to find common ancestor",
+                                                    lowest_peer_block
+                                                );
+                                                // The fork resolution logic below will handle this
+                                                // Don't return here - let it proceed to scan the blocks
+                                                actual_fork_height = Some(our_height);
+                                                break;
+                                            } else {
+                                                // We don't have blocks going back far enough - request more
+                                                // Calculate how far back based on MAX_REORG_DEPTH or a reasonable limit
+                                                let search_depth =
+                                                    50u64.min(our_height.saturating_sub(1));
+                                                let request_from =
+                                                    our_height.saturating_sub(search_depth).max(1);
+
+                                                warn!(
+                                                    "⚠️ [WHITELIST] Fork is deeper than height {}. Requesting {} blocks back (from height {}) to find common ancestor.",
+                                                    our_height, search_depth, request_from
+                                                );
+
+                                                let msg = NetworkMessage::GetBlocks(
+                                                    request_from,
+                                                    end_height,
+                                                );
+                                                if let Err(e) = self.send_message(&msg).await {
+                                                    warn!("Failed to request earlier blocks for deep fork resolution: {}", e);
+                                                }
+                                                return Ok(());
                                             }
-                                            return Ok(());
                                         }
                                     }
                                 }
@@ -1022,12 +1114,32 @@ impl PeerConnection {
                                         {
                                             if our_ancestor.hash() != peer_ancestor.hash() {
                                                 // Ancestor doesn't match - fork is earlier than we thought
+                                                // Calculate how much further back to search
+                                                let lowest_received = blocks
+                                                    .iter()
+                                                    .map(|b| b.header.height)
+                                                    .min()
+                                                    .unwrap_or(ancestor);
+                                                let already_searched_back =
+                                                    ancestor.saturating_sub(lowest_received);
+
+                                                // Exponentially increase search depth: if we already searched back N blocks, try 2*N more
+                                                let additional_depth = if already_searched_back > 0
+                                                {
+                                                    (already_searched_back * 2).min(100)
+                                                } else {
+                                                    50 // Default to 50 blocks if we haven't searched back yet
+                                                };
+
+                                                let request_from = ancestor
+                                                    .saturating_sub(additional_depth)
+                                                    .max(1);
+
                                                 warn!(
-                                                    "⚠️ [WHITELIST] Common ancestor {} doesn't match! Fork is earlier. Requesting more blocks.",
-                                                    ancestor
+                                                    "⚠️ [WHITELIST] Common ancestor {} doesn't match! Fork is earlier. Already searched to height {}, now requesting from height {} ({} more blocks back)",
+                                                    ancestor, lowest_received, request_from, additional_depth
                                                 );
-                                                let request_from =
-                                                    ancestor.saturating_sub(20).max(1);
+
                                                 let msg = NetworkMessage::GetBlocks(
                                                     request_from,
                                                     end_height,
@@ -1043,11 +1155,29 @@ impl PeerConnection {
                                         }
                                     } else {
                                         // Peer didn't send the ancestor block - request it to verify
+                                        let lowest_received = blocks
+                                            .iter()
+                                            .map(|b| b.header.height)
+                                            .min()
+                                            .unwrap_or(ancestor);
+                                        let search_depth = ancestor.saturating_sub(lowest_received);
+
+                                        // If we haven't searched back much yet, start with 50 blocks
+                                        // Otherwise, double the search depth
+                                        let additional_depth = if search_depth < 10 {
+                                            50
+                                        } else {
+                                            (search_depth * 2).min(100)
+                                        };
+
+                                        let request_from =
+                                            ancestor.saturating_sub(additional_depth).max(1);
+
                                         warn!(
-                                            "⚠️ [WHITELIST] Cannot verify common ancestor {} - not in received blocks. Requesting earlier blocks.",
-                                            ancestor
+                                            "⚠️ [WHITELIST] Cannot verify common ancestor {} - not in received blocks (lowest: {}). Requesting from height {} ({} blocks back)",
+                                            ancestor, lowest_received, request_from, additional_depth
                                         );
-                                        let request_from = ancestor.saturating_sub(10).max(1);
+
                                         let msg =
                                             NetworkMessage::GetBlocks(request_from, end_height);
                                         if let Err(e) = self.send_message(&msg).await {
@@ -1567,7 +1697,7 @@ impl PeerConnection {
             }
             NetworkMessage::BlockInventory(block_height) => {
                 // Handle block inventory announcement - only request if we need it
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
 
                 if *block_height > our_height {
                     // Check if the gap is too large (more than 1 block)
@@ -1630,7 +1760,7 @@ impl PeerConnection {
             NetworkMessage::BlockResponse(block) => {
                 // Handle block response to our request
                 let block_height = block.header.height;
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
 
                 info!(
                     "📦 [{:?}] Received block {} from {} (our height: {})",
@@ -1661,7 +1791,7 @@ impl PeerConnection {
             NetworkMessage::BlockAnnouncement(block) => {
                 // Keep legacy full block announcement support for backward compatibility
                 let block_height = block.header.height;
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
 
                 debug!(
                     "📦 [{:?}] Received block announcement {} from {} (our height: {})",
@@ -1825,7 +1955,7 @@ impl PeerConnection {
                     .set_peer_height(&self.peer_ip, *peer_height)
                     .await;
 
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
 
                 // If peer has higher height, first determine canonical chain before requesting
                 if *peer_height > our_height {
@@ -1887,7 +2017,7 @@ impl PeerConnection {
             }
             NetworkMessage::ChainTipResponse { height, hash } => {
                 // Compare peer's chain tip with ours for fork detection
-                let our_height = blockchain.get_height().await;
+                let our_height = blockchain.get_height();
                 let our_hash = blockchain.get_block_hash(our_height).unwrap_or([0u8; 32]);
 
                 // Store peer height and chain tip
@@ -2397,6 +2527,12 @@ impl PeerConnection {
     }
 
     /// Run the unified message loop for this connection
+    ///
+    /// **DEPRECATED**: Use `run_message_loop_unified()` with `MessageLoopConfig` instead.
+    #[deprecated(
+        since = "1.0.0",
+        note = "Use run_message_loop_unified() with MessageLoopConfig for better flexibility"
+    )]
     #[allow(dead_code)]
     pub async fn run_message_loop(mut self) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
@@ -2555,6 +2691,153 @@ impl PeerConnection {
             }
         }
 
+        Ok(())
+    }
+
+    /// Unified message loop that works with any combination of components
+    ///
+    /// This replaces the 4 separate run_message_loop variants with a single
+    /// flexible implementation using the builder pattern.
+    ///
+    /// # Example
+    /// ```
+    /// // Basic setup (peer registry only)
+    /// let config = MessageLoopConfig::new(peer_registry);
+    /// peer_connection.run_message_loop_unified(config).await?;
+    ///
+    /// // With masternode registry
+    /// let config = MessageLoopConfig::new(peer_registry)
+    ///     .with_masternode_registry(masternode_registry);
+    /// peer_connection.run_message_loop_unified(config).await?;
+    ///
+    /// // Full setup
+    /// let config = MessageLoopConfig::new(peer_registry)
+    ///     .with_masternode_registry(masternode_registry)
+    ///     .with_blockchain(blockchain);
+    /// peer_connection.run_message_loop_unified(config).await?;
+    /// ```
+    pub async fn run_message_loop_unified(
+        mut self,
+        config: MessageLoopConfig,
+    ) -> Result<(), String> {
+        let mut ping_interval = interval(Self::PING_INTERVAL);
+        let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
+        let mut buffer = String::new();
+
+        info!(
+            "🔄 [{:?}] Starting unified message loop for {} (port: {})",
+            self.direction, self.peer_ip, self.remote_port
+        );
+
+        // Register this connection in the peer registry
+        config
+            .peer_registry
+            .register_peer_shared(self.peer_ip.clone(), self.shared_writer())
+            .await;
+        info!(
+            "📝 [{:?}] Registered {} in PeerConnectionRegistry",
+            self.direction, self.peer_ip
+        );
+
+        // Send initial handshake
+        let handshake = NetworkMessage::Handshake {
+            magic: *b"TIME",
+            protocol_version: 1,
+            network: "mainnet".to_string(),
+        };
+
+        if let Err(e) = self.send_message(&handshake).await {
+            error!(
+                "❌ [{:?}] Failed to send handshake to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        info!(
+            "🤝 [{:?}] Sent handshake to {}",
+            self.direction, self.peer_ip
+        );
+
+        // Send initial ping
+        if let Err(e) = self.send_ping(config.blockchain.as_ref()).await {
+            error!(
+                "❌ [{:?}] Failed to send initial ping to {}: {}",
+                self.direction, self.peer_ip, e
+            );
+            return Err(e);
+        }
+
+        // Main message loop
+        loop {
+            tokio::select! {
+                // Read incoming messages
+                result = self.reader.read_line(&mut buffer) => {
+                    match result {
+                        Ok(0) => {
+                            info!("🔌 [{:?}] Connection closed by {}", self.direction, self.peer_ip);
+                            break;
+                        }
+                        Ok(_) => {
+                            // Handle message based on available components
+                            let handle_result = if let Some(ref blockchain) = config.blockchain {
+                                // When blockchain is available, we need masternode registry
+                                let masternode_registry = config.masternode_registry.as_ref()
+                                    .expect("Masternode registry required when blockchain is provided");
+
+                                self.handle_message_with_blockchain(
+                                    &buffer,
+                                    &config.peer_registry,
+                                    masternode_registry,
+                                    blockchain,
+                                ).await
+                            } else if let Some(ref masternode_registry) = config.masternode_registry {
+                                // Masternode registry only
+                                self.handle_message_with_masternode_registry(
+                                    &buffer,
+                                    &config.peer_registry,
+                                    masternode_registry,
+                                ).await
+                            } else {
+                                // Basic setup: peer registry only
+                                self.handle_message_with_registry(&buffer, &config.peer_registry).await
+                            };
+
+                            if let Err(e) = handle_result {
+                                warn!("⚠️ [{:?}] Error handling message from {}: {}",
+                                      self.direction, self.peer_ip, e);
+                            }
+                            buffer.clear();
+                        }
+                        Err(e) => {
+                            error!("❌ [{:?}] Error reading from {}: {}", self.direction, self.peer_ip, e);
+                            break;
+                        }
+                    }
+                }
+
+                // Send periodic pings
+                _ = ping_interval.tick() => {
+                    if let Err(e) = self.send_ping(config.blockchain.as_ref()).await {
+                        error!("❌ [{:?}] Failed to send ping to {}: {}", self.direction, self.peer_ip, e);
+                        break;
+                    }
+                }
+
+                // Check for timeout
+                _ = timeout_check.tick() => {
+                    if self.should_disconnect(&config.peer_registry).await {
+                        error!("❌ [{:?}] Disconnecting {} due to timeout", self.direction, self.peer_ip);
+                        break;
+                    }
+                }
+            }
+        }
+
+        info!(
+            "🔌 [{:?}] Unified message loop ended for {}",
+            self.direction, self.peer_ip
+        );
         Ok(())
     }
 }

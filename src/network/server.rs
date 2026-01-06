@@ -656,13 +656,13 @@ async fn handle_peer(
                                     subs.write().await.insert(sub.id.clone(), sub.clone());
                                 }
                                 NetworkMessage::GetBlockHeight => {
-                                    let height = blockchain.get_height().await;
+                                    let height = blockchain.get_height();
                                     tracing::debug!("📥 Received GetBlockHeight from {}, responding with height {}", peer.addr, height);
                                     let reply = NetworkMessage::BlockHeightResponse(height);
                                     let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::GetChainTip => {
-                                    let height = blockchain.get_height().await;
+                                    let height = blockchain.get_height();
                                     let hash = blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
                                     tracing::debug!("📥 Received GetChainTip from {}, responding with height {} hash {}",
                                         peer.addr, height, hex::encode(&hash[..8]));
@@ -695,7 +695,7 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::GetUTXOStateHash => {
-                                    let height = blockchain.get_height().await;
+                                    let height = blockchain.get_height();
                                     let utxo_hash = blockchain.get_utxo_state_hash().await;
                                     let utxo_count = blockchain.get_utxo_count().await;
 
@@ -838,7 +838,7 @@ async fn handle_peer(
                                 NetworkMessage::BlockInventory(block_height) => {
                                     check_rate_limit!("block");
 
-                                    let our_height = blockchain.get_height().await;
+                                    let our_height = blockchain.get_height();
 
                                     // Only request if we need it
                                     if *block_height > our_height {
@@ -1047,7 +1047,7 @@ async fn handle_peer(
                                     } else {
                                         let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
                                         let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
-                                        let our_height = blockchain.get_height().await;
+                                        let our_height = blockchain.get_height();
 
                                         tracing::info!("📥 Received {} blocks (height {}-{}) from {} (our height: {})",
                                             block_count, start_height, end_height, peer.addr, our_height);
@@ -1099,7 +1099,7 @@ async fn handle_peer(
 
                                                                         // Find the common ancestor by checking which blocks match our chain
                                                                         let mut common_ancestor = None;
-                                                                        let our_height = blockchain.get_height().await;
+                                                                        let our_height = blockchain.get_height();
 
                                                                         // Sort blocks by height
                                                                         let mut sorted_blocks = blocks.clone();
@@ -1310,10 +1310,10 @@ async fn handle_peer(
                                                         "⏭️ Block {} from {} already exists or was skipped (our height: {})",
                                                         block.header.height,
                                                         peer.addr,
-                                                        blockchain.get_height().await
+                                                        blockchain.get_height()
                                                     );
                                                     // If we're skipping a block that's ahead of us, might be a fork
-                                                    if block.header.height > blockchain.get_height().await {
+                                                    if block.header.height > blockchain.get_height() {
                                                         fork_detected = true;
                                                     }
                                                 }
@@ -1322,7 +1322,7 @@ async fn handle_peer(
                                                     tracing::warn!("⏭️ Skipped block {} from {}: {}", block.header.height, peer.addr, e);
                                                     skipped += 1;
                                                     // If we're skipping a block that's ahead of us, might be a fork
-                                                    if block.header.height > blockchain.get_height().await {
+                                                    if block.header.height > blockchain.get_height() {
                                                         fork_detected = true;
                                                     }
                                                 }
@@ -1338,7 +1338,7 @@ async fn handle_peer(
                                             }
                                         } else if skipped > 0 && fork_detected {
                                             // All blocks skipped and we're behind - likely on wrong fork
-                                            let our_height = blockchain.get_height().await;
+                                            let our_height = blockchain.get_height();
 
                                             // Phase 2: Track consecutive invalid blocks from this peer
                                             let mut status = peer_fork_status.entry(peer.addr.clone())
@@ -1385,7 +1385,7 @@ async fn handle_peer(
                                         heartbeat.masternode_address, heartbeat.sequence_number, heartbeat.block_height);
 
                                     // Check for opportunistic sync if peer has higher block height
-                                    let our_height = blockchain.get_height().await;
+                                    let our_height = blockchain.get_height();
                                     if heartbeat.block_height > our_height {
                                         tracing::info!(
                                             "🔄 Opportunistic sync: peer {} at height {} (we're at {})",
@@ -1468,7 +1468,7 @@ async fn handle_peer(
                                     }
 
                                     // Phase 3: Get our height to include in pong response
-                                    let our_height = blockchain.get_height().await;
+                                    let our_height = blockchain.get_height();
 
                                     // Respond to ping with pong
                                     let pong_msg = NetworkMessage::Pong {
@@ -1578,7 +1578,7 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::GetChainWork => {
                                     // Respond with our chain work info
-                                    let height = blockchain.get_height().await;
+                                    let height = blockchain.get_height();
                                     let tip_hash = blockchain.get_block_hash_at_height(height).await.unwrap_or([0u8; 32]);
                                     let cumulative_work = blockchain.get_cumulative_work().await;
 
@@ -1605,7 +1605,7 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::ChainWorkResponse { height, tip_hash, cumulative_work } => {
                                     // Handle response - check if peer has better chain and potentially trigger reorg
-                                    let _our_height = blockchain.get_height().await;
+                                    let _our_height = blockchain.get_height();
 
                                     if blockchain.should_switch_by_work(*cumulative_work, *height, tip_hash).await {
                                         tracing::info!(

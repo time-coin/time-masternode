@@ -3,8 +3,11 @@ pub mod ai;
 pub mod avalanche;
 pub mod block;
 pub mod blockchain;
+pub mod blockchain_error;
+pub mod blockchain_validation;
 pub mod config;
 pub mod consensus;
+pub mod constants;
 pub mod crypto;
 pub mod error;
 pub mod finality_proof;
@@ -559,7 +562,7 @@ async fn main() {
                             .await;
 
                         // Create and broadcast attestable heartbeat
-                        let block_height = blockchain_clone.get_height().await;
+                        let block_height = blockchain_clone.get_height();
                         match attestation_clone.create_heartbeat(block_height).await {
                             Ok(heartbeat) => {
                                 tracing::debug!(
@@ -598,7 +601,7 @@ async fn main() {
         }
 
         // Verify we now have genesis
-        let has_genesis = blockchain_init.get_height().await > 0
+        let has_genesis = blockchain_init.get_height() > 0
             || blockchain_init.get_block_by_height(0).await.is_ok();
 
         if !has_genesis {
@@ -677,7 +680,7 @@ async fn main() {
                 tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
                 // Only check if we don't have a valid genesis yet
-                let height = blockchain_for_genesis.get_height().await;
+                let height = blockchain_for_genesis.get_height();
                 if height == 0 {
                     // Check if we have a genesis block
                     if blockchain_for_genesis.get_block_by_height(0).await.is_err() {
@@ -833,7 +836,7 @@ async fn main() {
 
         // Time-based catchup trigger: Check if we're behind schedule
         // Use time rather than block count to determine when to trigger catchup
-        let current_height = block_blockchain.get_height().await;
+        let current_height = block_blockchain.get_height();
         let expected_height = block_blockchain.calculate_expected_height();
         let blocks_behind = expected_height.saturating_sub(current_height);
 
@@ -928,7 +931,7 @@ async fn main() {
                 .and_utc()
                 .timestamp();
 
-            let current_height = block_blockchain.get_height().await;
+            let current_height = block_blockchain.get_height();
             let expected_height = block_blockchain.calculate_expected_height();
 
             // Get masternodes eligible for rewards
@@ -1038,7 +1041,7 @@ async fn main() {
                     let connected_peers = block_peer_registry.get_connected_peers().await;
 
                     if !connected_peers.is_empty() {
-                        let current_height_check = block_blockchain.get_height().await;
+                        let current_height_check = block_blockchain.get_height();
                         let probe_start = current_height_check + 1;
                         let probe_end = expected_height;
 
@@ -1184,7 +1187,7 @@ async fn main() {
                     tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
 
                     // After waiting, check if the leader made progress
-                    let height_after_wait = block_blockchain.get_height().await;
+                    let height_after_wait = block_blockchain.get_height();
                     if height_after_wait > current_height {
                         tracing::info!(
                             "✅ Leader {} produced block(s), height advanced: {} → {}",
@@ -1277,7 +1280,7 @@ async fn main() {
                     }
 
                     // Double-check: NEVER produce if current blockchain height >= target
-                    let current_height_check = block_blockchain.get_height().await;
+                    let current_height_check = block_blockchain.get_height();
                     if current_height_check >= target_height {
                         tracing::info!(
                             "✓ Block {} already exists (height: {}), skipping",
@@ -1328,7 +1331,7 @@ async fn main() {
                 is_producing.store(false, Ordering::SeqCst);
 
                 // Clear catchup leader tracker for completed heights
-                let final_height = block_blockchain.get_height().await;
+                let final_height = block_blockchain.get_height();
                 catchup_leader_tracker.retain(|&height, _| height > final_height);
 
                 tracing::info!(
@@ -1439,7 +1442,7 @@ async fn main() {
                             tracing::info!(
                                 "✅ Block {} added to chain, height now: {}",
                                 block_height,
-                                block_blockchain.get_height().await
+                                block_blockchain.get_height()
                             );
 
                             // Broadcast block to all peers
@@ -1533,7 +1536,7 @@ async fn main() {
                     break;
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)) => {
-                    let height = status_blockchain.get_height().await;
+                    let height = status_blockchain.get_height();
                     let mn_count = status_registry.list_active().await.len();
 
                     // Check if we need responsive catchup (between 10-minute block production checks)
