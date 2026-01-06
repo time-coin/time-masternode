@@ -928,18 +928,36 @@ async fn main() {
                 .and_utc()
                 .timestamp();
 
-            // Get masternodes eligible for rewards (active for entire block period)
-            let eligible = block_registry.get_eligible_for_rewards().await;
+            let current_height = block_blockchain.get_height().await;
+            let expected_height = block_blockchain.calculate_expected_height();
+
+            // Get masternodes eligible for rewards
+            // During catchup or bootstrap, use all registered masternodes (connections may not be established yet)
+            // During normal operation, only use active masternodes
+            let blocks_behind = expected_height.saturating_sub(current_height);
+            let is_catchup_or_bootstrap = blocks_behind > 0 || current_height == 0;
+
+            let eligible = if is_catchup_or_bootstrap {
+                // Use all registered masternodes during catchup/bootstrap
+                let all_mns = block_registry
+                    .list_all()
+                    .await
+                    .into_iter()
+                    .map(|info| (info.masternode, info.reward_address))
+                    .collect::<Vec<_>>();
+                if !all_mns.is_empty() {
+                    tracing::debug!("🔄 Catchup/bootstrap mode: using {} registered masternodes (ignoring active status)", all_mns.len());
+                }
+                all_mns
+            } else {
+                // Use only active masternodes during normal operation
+                block_registry.get_eligible_for_rewards().await
+            };
+
             let mut masternodes: Vec<Masternode> =
                 eligible.iter().map(|(mn, _)| mn.clone()).collect();
             // Sort deterministically by address for consistent leader election across all nodes
             sort_masternodes_canonical(&mut masternodes);
-
-            let current_height = block_blockchain.get_height().await;
-            let expected_height = block_blockchain.calculate_expected_height();
-
-            // Determine what to do based on height and time comparison
-            let blocks_behind = expected_height.saturating_sub(current_height);
 
             // Calculate time-based catchup trigger
             let genesis_timestamp = block_blockchain.genesis_timestamp();
