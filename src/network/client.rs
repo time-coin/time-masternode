@@ -670,7 +670,7 @@ async fn maintain_peer_connection(
     let config = crate::network::peer_connection::MessageLoopConfig::new(peer_registry.clone())
         .with_masternode_registry(masternode_registry.clone())
         .with_blockchain(blockchain.clone());
-    
+
     let result = peer_conn.run_message_loop_unified(config).await;
 
     // Clean up on disconnect in both managers
