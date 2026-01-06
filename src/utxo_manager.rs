@@ -11,6 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const LOCK_TIMEOUT_SECS: i64 = 600; // Phase 1.4: 10 minutes to align with block time
 
+// Optimization: Pre-allocate DashMap with expected capacity
+// Typical node has ~100k UTXOs, pre-allocating reduces rehashing
+const EXPECTED_UTXO_COUNT: usize = 100_000;
+
 #[derive(Debug, thiserror::Error)]
 #[allow(dead_code)]
 pub enum UtxoError {
@@ -49,7 +53,7 @@ impl UTXOStateManager {
         use crate::storage::InMemoryUtxoStorage;
         Self {
             storage: Arc::new(InMemoryUtxoStorage::new()),
-            utxo_states: DashMap::new(),
+            utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
         }
     }
 
@@ -57,7 +61,7 @@ impl UTXOStateManager {
     pub fn new_with_storage(storage: Arc<dyn UtxoStorage>) -> Self {
         Self {
             storage,
-            utxo_states: DashMap::new(),
+            utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
         }
     }
 

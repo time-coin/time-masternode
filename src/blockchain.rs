@@ -137,6 +137,8 @@ pub struct Blockchain {
     /// Current blockchain height - uses AtomicU64 for lock-free reads (100x faster)
     current_height: Arc<AtomicU64>,
     network_type: NetworkType,
+    /// Cached genesis timestamp (computed once, accessed frequently)
+    genesis_timestamp: i64,
     /// Synchronization state - uses AtomicBool for lock-free checks
     is_syncing: Arc<AtomicBool>,
     peer_manager: Arc<RwLock<Option<Arc<crate::peer_manager::PeerManager>>>>,
@@ -203,6 +205,7 @@ impl Blockchain {
             utxo_manager,
             current_height: Arc::new(AtomicU64::new(0)),
             network_type,
+            genesis_timestamp: network_type.genesis_timestamp(), // Cache for fast access
             is_syncing: Arc::new(AtomicBool::new(false)),
             peer_manager: Arc::new(RwLock::new(None)),
             peer_registry: Arc::new(RwLock::new(None)),
@@ -237,7 +240,7 @@ impl Blockchain {
     }
 
     pub fn genesis_timestamp(&self) -> i64 {
-        self.network_type.genesis_timestamp()
+        self.genesis_timestamp // Use cached value
     }
 
     /// Initialize blockchain - load local chain or sync from network
@@ -3927,6 +3930,7 @@ impl Clone for Blockchain {
             utxo_manager: self.utxo_manager.clone(),
             current_height: self.current_height.clone(),
             network_type: self.network_type,
+            genesis_timestamp: self.genesis_timestamp, // Clone cached value
             is_syncing: self.is_syncing.clone(),
             peer_manager: self.peer_manager.clone(),
             peer_registry: self.peer_registry.clone(),
