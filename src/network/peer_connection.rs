@@ -991,6 +991,56 @@ impl PeerConnection {
                                     fork_at, ancestor, end_height
                                 );
 
+                                // Verify the assumed common ancestor by checking if we have it in the received blocks
+                                // If ancestor wasn't explicitly matched, we need to verify it
+                                if common_ancestor.is_none() && ancestor > 0 {
+                                    // We assumed ancestor = fork_at - 1, but we didn't actually verify it
+                                    // Check if peer sent us the ancestor block
+                                    let ancestor_in_peer_blocks =
+                                        blocks.iter().find(|b| b.header.height == ancestor);
+
+                                    if let Some(peer_ancestor) = ancestor_in_peer_blocks {
+                                        // Peer sent the ancestor block - verify it matches ours
+                                        if let Ok(our_ancestor) =
+                                            blockchain.get_block_by_height(ancestor).await
+                                        {
+                                            if our_ancestor.hash() != peer_ancestor.hash() {
+                                                // Ancestor doesn't match - fork is earlier than we thought
+                                                warn!(
+                                                    "⚠️ [WHITELIST] Common ancestor {} doesn't match! Fork is earlier. Requesting more blocks.",
+                                                    ancestor
+                                                );
+                                                let request_from =
+                                                    ancestor.saturating_sub(20).max(1);
+                                                let msg = NetworkMessage::GetBlocks(
+                                                    request_from,
+                                                    end_height,
+                                                );
+                                                if let Err(e) = self.send_message(&msg).await {
+                                                    warn!(
+                                                        "Failed to request earlier blocks: {}",
+                                                        e
+                                                    );
+                                                }
+                                                return Ok(());
+                                            }
+                                        }
+                                    } else {
+                                        // Peer didn't send the ancestor block - request it to verify
+                                        warn!(
+                                            "⚠️ [WHITELIST] Cannot verify common ancestor {} - not in received blocks. Requesting earlier blocks.",
+                                            ancestor
+                                        );
+                                        let request_from = ancestor.saturating_sub(10).max(1);
+                                        let msg =
+                                            NetworkMessage::GetBlocks(request_from, end_height);
+                                        if let Err(e) = self.send_message(&msg).await {
+                                            warn!("Failed to request blocks for ancestor verification: {}", e);
+                                        }
+                                        return Ok(());
+                                    }
+                                }
+
                                 // Get blocks after common ancestor for reorg
                                 let mut sorted_blocks = blocks.clone();
                                 sorted_blocks.sort_by_key(|b| b.header.height);
