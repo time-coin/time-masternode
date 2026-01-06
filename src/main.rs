@@ -971,10 +971,8 @@ async fn main() {
             }
 
             // Smart catchup trigger:
-            // - If many blocks behind (>2): Catch up immediately
-            // - If 1 block behind: Use 5-minute grace period
-            let should_catchup = blocks_behind > 2
-                || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
+            // - If any blocks behind (>=1): Catch up immediately
+            let should_catchup = blocks_behind >= 1;
 
             // Allow single-node bootstrap during initial catchup (height 0)
             // For catchup mode, allow fewer masternodes (network may be degraded)
