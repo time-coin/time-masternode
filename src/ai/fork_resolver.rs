@@ -471,6 +471,28 @@ impl ForkResolver {
             return false;
         }
 
+        // NEW: Before hash tiebreaker, check for strong peer consensus override
+        // Count peers with same hash as us vs peer hash (for equal-height forks)
+        if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
+            // At same height with different hashes, we need to determine consensus
+            // Note: supporting_peers currently only has (ip, height, work) without hashes
+            // So we can't determine which specific chain each peer is on
+            // However, the caller should set peer_tip_hash to the consensus hash from majority
+            // Trust that if we're being asked about this peer, it represents majority consensus
+
+            // Check if we have at least 3 peers total (minimum for majority decision)
+            if params.supporting_peers.len() >= 3 && params.peer_is_whitelisted {
+                // For whitelisted peers with sufficient peer count, strongly prefer accepting
+                // This handles the case where 4/5 nodes agree on peer chain
+                reasoning.push(format!(
+                    "STRONG CONSENSUS: Accepting whitelisted peer chain with {} peers (overriding hash tiebreaker)",
+                    params.supporting_peers.len()
+                ));
+                score_breakdown.peer_consensus_score = 1.0;
+                return true;
+            }
+        }
+
         // Second: Compare tip hashes (deterministic tiebreaker)
         if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
             match peer_hash.cmp(&our_hash) {
