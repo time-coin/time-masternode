@@ -965,15 +965,31 @@ impl PeerConnection {
                                     {
                                         if block.header.previous_hash != our_tip_hash {
                                             // Fork: this block doesn't build on our tip
-                                            // The fork is at our current height
-                                            actual_fork_height = Some(our_height);
+                                            // The previous_hash mismatch means the fork is EARLIER than our current height
                                             warn!(
-                                                "🔀 [WHITELIST] Fork at height {}: block {} doesn't build on our tip (prev_hash mismatch)",
-                                                our_height, height
+                                                "🔀 [WHITELIST] Fork detected: block {} doesn't build on our tip (prev_hash mismatch: expected {}, got {})",
+                                                height,
+                                                hex::encode(&our_tip_hash[..8]),
+                                                hex::encode(&block.header.previous_hash[..8])
                                             );
-                                            // Need to find common ancestor by going back
-                                            // For now, assume fork is at our_height, ancestor at our_height - 1
-                                            break;
+
+                                            // CRITICAL FIX: Don't assume fork is only 1 block deep
+                                            // The previous_hash mismatch indicates the fork extends to our_height or earlier
+                                            // We need to request earlier blocks to find the true common ancestor
+                                            warn!(
+                                                "⚠️ [WHITELIST] Previous hash mismatch indicates fork is deeper than height {}. Requesting earlier blocks to find common ancestor.",
+                                                our_height
+                                            );
+
+                                            // Request blocks starting from further back to find common ancestor
+                                            // Go back at least 20 blocks, but not below block 1
+                                            let request_from = our_height.saturating_sub(20).max(1);
+                                            let msg =
+                                                NetworkMessage::GetBlocks(request_from, end_height);
+                                            if let Err(e) = self.send_message(&msg).await {
+                                                warn!("Failed to request earlier blocks for deep fork resolution: {}", e);
+                                            }
+                                            return Ok(());
                                         }
                                     }
                                 }

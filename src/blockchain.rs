@@ -2848,25 +2848,27 @@ impl Blockchain {
                             Ok(_) => {
                                 tracing::info!("✅ Rolled back to height {}", rollback_to);
 
-                                // Now request the correct blocks
+                                // CRITICAL FIX: Request a range of earlier blocks to find common ancestor
+                                // A fork at the same height likely means the fork is deeper
+                                // Request from 20 blocks back to ensure we find the true common ancestor
                                 if let Some(peer_registry) =
                                     blockchain.peer_registry.read().await.as_ref()
                                 {
-                                    let req = NetworkMessage::GetBlocks(
-                                        consensus_height,
-                                        consensus_height,
-                                    );
+                                    let request_from = consensus_height.saturating_sub(20).max(1);
+                                    let req =
+                                        NetworkMessage::GetBlocks(request_from, consensus_height);
                                     if let Err(e) =
                                         peer_registry.send_to_peer(&consensus_peer, req).await
                                     {
                                         tracing::warn!(
-                                            "⚠️  Failed to request correct block from {}: {}",
+                                            "⚠️  Failed to request blocks from {}: {}",
                                             consensus_peer,
                                             e
                                         );
                                     } else {
                                         tracing::info!(
-                                            "📤 Requested correct block {} from {}",
+                                            "📤 Requested blocks {}-{} from {} to find common ancestor",
+                                            request_from,
                                             consensus_height,
                                             consensus_peer
                                         );
