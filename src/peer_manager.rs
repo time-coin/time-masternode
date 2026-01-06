@@ -1,8 +1,18 @@
 //! Peer management for P2P network.
 //!
-//! Note: This module appears as "dead code" in library checks because it's
-//! only used by the binary (main.rs). The PeerManager is used for peer
-//! discovery, tracking, and reputation management.
+//! This module implements peer discovery, tracking, and reputation management
+//! for the TIME Coin network. It handles:
+//! - Peer discovery from central servers
+//! - Persistent peer storage in sled database
+//! - Reputation scoring and rate limiting
+//! - Masternode authentication and stake verification
+//!
+//! # Dead Code Annotations
+//!
+//! This module appears as "dead code" in library builds because it's primarily
+//! used by the binary (main.rs) for P2P network management. The extensive use
+//! of `#[allow(dead_code)]` is intentional - all functionality is accessed
+//! through the public PeerManager API at runtime.
 
 use crate::config::NetworkConfig;
 use crate::network_type::NetworkType;
@@ -13,21 +23,17 @@ use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
 use tracing::{error, info, warn};
 
-#[allow(dead_code)]
 const PEER_DISCOVERY_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
-#[allow(dead_code)]
 const PEER_REFRESH_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
 
 /// PHASE 2 PART 3: Peer Authentication & Rate Limiting Constants
-#[allow(dead_code)]
 const RATE_LIMIT_WINDOW_SECS: i64 = 60; // Rate limit window (1 minute)
-#[allow(dead_code)]
 const MAX_REQUESTS_PER_MINUTE: u32 = 100; // Max requests per peer per minute
-#[allow(dead_code)]
 const MIN_MASTERNODE_STAKE: u64 = 1_000 * 100_000_000; // 1000 TIME in satoshis
-#[allow(dead_code)]
+
+/// TODO: Implement reputation-based peer banning in Phase 2 enhancement
 const REPUTATION_THRESHOLD_BAN: i32 = -50; // Ban peers below this score
-#[allow(dead_code)]
+/// TODO: Apply penalty when detecting peer misbehavior (invalid blocks, spam, etc.)
 const REPUTATION_PENALTY_MISBEHAVIOR: i32 = -20; // Penalty for misbehaving peer
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

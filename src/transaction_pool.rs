@@ -1,6 +1,13 @@
 //! Transaction mempool management
 //!
 //! Phase 2.4: Enhanced with LRU eviction and memory pressure monitoring
+//!
+//! # Dead Code Annotations
+//!
+//! Public API methods are marked with `#[allow(dead_code)]` because they're
+//! used by the consensus engine and RPC handlers at runtime, not during
+//! library compilation. All functionality is accessed through the public
+//! TransactionPool API.
 
 #![allow(dead_code)] // Public API - methods will be used by consensus engine and RPC
 
