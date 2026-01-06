@@ -472,14 +472,12 @@ impl ForkResolver {
         }
 
         // NEW: Before hash tiebreaker, check for strong peer consensus override
-        // Count peers with same hash as us vs peer hash (for equal-height forks)
-        if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
-            // At same height with different hashes, we need to determine consensus
-            // Note: supporting_peers currently only has (ip, height, work) without hashes
-            // So we can't determine which specific chain each peer is on
-            // However, the caller should set peer_tip_hash to the consensus hash from majority
-            // Trust that if we're being asked about this peer, it represents majority consensus
-
+        // At same height with different hashes, we need to determine consensus
+        // Note: supporting_peers currently only has (ip, height, work) without hashes
+        // So we can't determine which specific chain each peer is on
+        // However, the caller should set peer_tip_hash to the consensus hash from majority
+        // Trust that if we're being asked about this peer, it represents majority consensus
+        if params.our_tip_hash.is_some() && params.peer_tip_hash.is_some() {
             // Check if we have at least 3 peers total (minimum for majority decision)
             if params.supporting_peers.len() >= 3 && params.peer_is_whitelisted {
                 // For whitelisted peers with sufficient peer count, strongly prefer accepting
