@@ -827,12 +827,6 @@ async fn main() {
         // Leaders have 30 seconds to produce blocks before we rotate to backup
         let leader_timeout = std::time::Duration::from_secs(30);
 
-        // Track last sync time to prevent immediate catchup leader selection
-        // After syncing from peers, node needs time to populate mempool via p2p gossip
-        // Otherwise produces blocks with empty mempool (00000 merkle roots)
-        let mut last_sync_time: Option<std::time::Instant> = None;
-        let min_time_after_sync = std::time::Duration::from_secs(60); // 60s to populate mempool
-
         // Give time for initial blockchain sync to complete before starting block production
         // This prevents race conditions where both init sync and production loop call sync_from_peers()
         tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
@@ -971,7 +965,7 @@ async fn main() {
             }
 
             // Smart catchup trigger:
-            // - If many blocks behind (>1): Catch up immediately  
+            // - If many blocks behind (>1): Catch up immediately
             // - If 1 block behind: Use 5-minute grace period
             let should_catchup = blocks_behind > 1
                 || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
@@ -1024,7 +1018,7 @@ async fn main() {
                     // First, try to sync from peers asynchronously
                     // Don't wait - if they have blocks, they'll send them and we'll receive via handlers
                     let connected_peers = block_peer_registry.get_connected_peers().await;
-                    
+
                     if !connected_peers.is_empty() {
                         let current_height_check = block_blockchain.get_height().await;
                         let probe_start = current_height_check + 1;
@@ -1032,7 +1026,9 @@ async fn main() {
 
                         tracing::info!(
                             "🔍 Sending GetBlocks({}-{}) to {} peer(s) asynchronously",
-                            probe_start, probe_end, connected_peers.len()
+                            probe_start,
+                            probe_end,
+                            connected_peers.len()
                         );
 
                         // Send GetBlocks requests to all peers - responses handled asynchronously
@@ -1042,7 +1038,7 @@ async fn main() {
                                 tracing::debug!("Failed to query peer {}: {}", peer_ip, e);
                             }
                         }
-                        
+
                         // Don't wait - continue immediately. If peers respond with blocks,
                         // the message handler will process them asynchronously and update our height.
                         // On the next loop iteration, we'll see the new height and adjust accordingly.
@@ -1194,31 +1190,6 @@ async fn main() {
 
                     // Loop back to re-check leader selection (which will rotate if timed out)
                     continue;
-                }
-
-                // Check if catchup blocks are enabled in config
-                if !config.node.enable_catchup_blocks {
-                    tracing::warn!(
-                        "⚠️  Selected as TSDC catchup leader but catchup blocks are DISABLED in config. Enable with 'enable_catchup_blocks = true' in [node] section."
-                    );
-                    continue;
-                }
-
-                // CRITICAL FIX: Prevent producing blocks immediately after syncing
-                // When a node syncs from peers, it receives blocks but its mempool is EMPTY
-                // It needs time (60s) to receive pending transactions via p2p gossip
-                // Otherwise it produces blocks with no transactions (00000 merkle roots)
-                if let Some(sync_time) = last_sync_time {
-                    let time_since_sync = sync_time.elapsed();
-                    if time_since_sync < min_time_after_sync {
-                        let wait_more = min_time_after_sync - time_since_sync;
-                        tracing::warn!(
-                            "⏸️  Selected as catchup leader but just synced {}s ago - waiting {}s more for mempool to populate",
-                            time_since_sync.as_secs(),
-                            wait_more.as_secs()
-                        );
-                        continue;
-                    }
                 }
 
                 tracing::info!(
