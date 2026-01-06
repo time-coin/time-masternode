@@ -149,6 +149,16 @@ pub enum Preference {
     Reject,
 }
 
+/// Memory usage statistics for consensus engine
+#[derive(Debug, Clone)]
+pub struct ConsensusMemoryStats {
+    pub tx_state_entries: usize,
+    pub active_rounds: usize,
+    pub finalized_txs: usize,
+    pub avs_snapshots: usize,
+    pub vfp_votes: usize,
+}
+
 impl std::fmt::Display for Preference {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
@@ -454,8 +464,8 @@ pub struct AvalancheConsensus {
     /// Active query rounds
     active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>,
 
-    /// Finalized transactions
-    finalized_txs: DashMap<Hash256, Preference>,
+    /// Finalized transactions with timestamp for cleanup
+    finalized_txs: DashMap<Hash256, (Preference, Instant)>,
 
     /// Validator list with weight info for stake-weighted sampling
     validators: Arc<RwLock<Vec<ValidatorInfo>>>,
@@ -517,6 +527,51 @@ impl AvalancheConsensus {
     /// Get current validators
     pub fn get_validators(&self) -> Vec<ValidatorInfo> {
         self.validators.read().clone()
+    }
+
+    /// Cleanup finalized transactions and associated state older than retention period
+    /// This prevents unbounded memory growth in the DashMaps
+    pub fn cleanup_old_finalized(&self, retention_secs: u64) -> usize {
+        let cutoff = Instant::now() - Duration::from_secs(retention_secs);
+        let mut removed_count = 0;
+
+        // Collect transactions to remove
+        let to_remove: Vec<Hash256> = self
+            .finalized_txs
+            .iter()
+            .filter(|entry| entry.value().1 < cutoff)
+            .map(|entry| *entry.key())
+            .collect();
+
+        // Remove from all maps
+        for txid in to_remove {
+            self.finalized_txs.remove(&txid);
+            self.tx_state.remove(&txid);
+            self.active_rounds.remove(&txid);
+            self.vfp_votes.remove(&txid);
+            removed_count += 1;
+        }
+
+        if removed_count > 0 {
+            tracing::debug!(
+                "Cleaned up {} finalized transactions older than {} seconds",
+                removed_count,
+                retention_secs
+            );
+        }
+
+        removed_count
+    }
+
+    /// Get memory usage statistics
+    pub fn memory_stats(&self) -> ConsensusMemoryStats {
+        ConsensusMemoryStats {
+            tx_state_entries: self.tx_state.len(),
+            active_rounds: self.active_rounds.len(),
+            finalized_txs: self.finalized_txs.len(),
+            avs_snapshots: self.avs_snapshots.len(),
+            vfp_votes: self.vfp_votes.len(),
+        }
     }
 
     /// Get validator addresses only (for compatibility)
@@ -702,7 +757,8 @@ impl AvalancheConsensus {
 
                 // Check for finalization using beta (finality_confidence)
                 if state.is_finalized(self.config.finality_confidence as u32) {
-                    self.finalized_txs.insert(txid, preference);
+                    self.finalized_txs
+                        .insert(txid, (preference, Instant::now()));
                     self.txs_finalized.fetch_add(1, Ordering::Relaxed);
                     state.finalize();
                     tracing::info!(
@@ -725,7 +781,7 @@ impl AvalancheConsensus {
     pub async fn run_consensus(&self, txid: Hash256) -> Result<Preference, AvalancheError> {
         // Check if already finalized
         if let Some(pref) = self.finalized_txs.get(&txid) {
-            return Ok(*pref);
+            return Ok(pref.value().0);
         }
 
         // Initialize if not already
@@ -736,7 +792,7 @@ impl AvalancheConsensus {
             self.execute_query_round(txid).await?;
 
             if let Some(pref) = self.finalized_txs.get(&txid) {
-                return Ok(*pref);
+                return Ok(pref.value().0);
             }
 
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -773,7 +829,7 @@ impl AvalancheConsensus {
 
     /// Get finalization preference
     pub fn get_finalized_preference(&self, txid: &Hash256) -> Option<Preference> {
-        self.finalized_txs.get(txid).map(|p| *p)
+        self.finalized_txs.get(txid).map(|entry| entry.value().0)
     }
 
     // ========================================================================
@@ -1635,13 +1691,17 @@ impl ConsensusEngine {
                         );
                     }
                     // Record finalization preference for reference
-                    consensus.finalized_txs.insert(txid, preference);
+                    consensus
+                        .finalized_txs
+                        .insert(txid, (preference, Instant::now()));
                 } else {
                     // Transaction did not achieve Avalanche consensus - reject it
                     // This maintains instant finality guarantees: only properly voted
                     // transactions can be finalized
                     tx_pool.reject_transaction(txid, "Avalanche consensus not reached".to_string());
-                    consensus.finalized_txs.insert(txid, Preference::Reject);
+                    consensus
+                        .finalized_txs
+                        .insert(txid, (Preference::Reject, Instant::now()));
                     tracing::warn!(
                         "❌ TX {:?} rejected: Avalanche consensus not reached after {} rounds (preference: {})",
                         hex::encode(txid),
@@ -1687,6 +1747,17 @@ impl ConsensusEngine {
     /// Submit a transaction to the consensus engine (called from RPC)
     pub async fn add_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
         self.submit_transaction(tx).await
+    }
+
+    /// Cleanup old finalized transactions from Avalanche consensus
+    /// Prevents unbounded memory growth by removing old finalized state
+    pub fn cleanup_old_finalized(&self, retention_secs: u64) -> usize {
+        self.avalanche.cleanup_old_finalized(retention_secs)
+    }
+
+    /// Get memory usage statistics from consensus engine
+    pub fn memory_stats(&self) -> ConsensusMemoryStats {
+        self.avalanche.memory_stats()
     }
 
     #[allow(dead_code)]

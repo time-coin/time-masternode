@@ -2,6 +2,7 @@ pub mod address;
 pub mod ai;
 pub mod avalanche;
 pub mod block;
+pub mod block_cache;
 pub mod blockchain;
 pub mod blockchain_error;
 pub mod blockchain_validation;
@@ -1505,6 +1506,7 @@ async fn main() {
     let status_catchup_trigger = catchup_trigger.clone(); // Trigger to wake up block production
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
+        let mut tick_count = 0u64; // Track ticks for cache monitoring
         loop {
             // Wait until next 5-minute mark (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55)
             let now = std::time::SystemTime::now()
@@ -1536,6 +1538,8 @@ async fn main() {
                     break;
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)) => {
+                    tick_count += 1; // Increment for cache monitoring
+
                     let height = status_blockchain.get_height();
                     let mn_count = status_registry.list_active().await.len();
 
@@ -1606,6 +1610,17 @@ async fn main() {
                                 height,
                                 mn_count
                             );
+
+                            // Log cache statistics every 5 checks (every ~25 minutes)
+                            if tick_count % 5 == 0 && tick_count > 0 {
+                                let cache_stats = status_blockchain.get_cache_stats();
+                                let cache_memory_mb = status_blockchain.get_cache_memory_usage() / (1024 * 1024);
+                                tracing::info!(
+                                    "💾 Block Cache: {} | Memory: {}MB",
+                                    cache_stats,
+                                    cache_memory_mb
+                                );
+                            }
                         }
                     } else {
                         tracing::info!(
@@ -1613,12 +1628,45 @@ async fn main() {
                             height,
                             mn_count
                         );
+
+                        // Log cache statistics every 5 checks (every ~25 minutes)
+                        if tick_count % 5 == 0 && tick_count > 0 {
+                            let cache_stats = status_blockchain.get_cache_stats();
+                            let cache_memory_mb = status_blockchain.get_cache_memory_usage() / (1024 * 1024);
+                            tracing::info!(
+                                "💾 Block Cache: {} | Memory: {}MB",
+                                cache_stats,
+                                cache_memory_mb
+                            );
+                        }
                     }
                 }
             }
         }
     });
     shutdown_manager.register_task(status_handle);
+
+    // Spawn consensus cleanup task to prevent memory leaks
+    // Cleans up finalized transactions older than 1 hour
+    let cleanup_consensus = consensus_engine.clone();
+    let cleanup_handle = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // Every 10 minutes
+        loop {
+            interval.tick().await;
+            let removed = cleanup_consensus.cleanup_old_finalized(3600); // Keep 1 hour
+            if removed > 0 {
+                let stats = cleanup_consensus.memory_stats();
+                tracing::info!(
+                    "🧹 Consensus cleanup: removed {} old finalized txs. Current: {} tx_state, {} active_rounds, {} finalized",
+                    removed,
+                    stats.tx_state_entries,
+                    stats.active_rounds,
+                    stats.finalized_txs
+                );
+            }
+        }
+    });
+    shutdown_manager.register_task(cleanup_handle);
 
     // Prepare combined whitelist BEFORE creating server
     // This ensures masternodes are whitelisted before any connections are accepted
