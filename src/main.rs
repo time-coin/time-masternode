@@ -1088,11 +1088,11 @@ async fn main() {
                         }
                     }
 
-                    // Wait up to 15 seconds for responses and continuously check if we receive blocks
-                    // This gives peers ample time to respond with their longer chains
-                    tracing::info!("⏳ Waiting up to 15 seconds for peer chain responses...");
+                    // Wait up to 10 seconds for responses and continuously check if we receive blocks
+                    // Shorter timeout allows loop to iterate more frequently for heartbeats
+                    tracing::info!("⏳ Waiting up to 10 seconds for peer chain responses...");
                     let wait_start = tokio::time::Instant::now();
-                    let wait_duration = tokio::time::Duration::from_secs(15);
+                    let wait_duration = tokio::time::Duration::from_secs(10);
                     let mut received_blocks_from_peer = false;
 
                     while wait_start.elapsed() < wait_duration {
