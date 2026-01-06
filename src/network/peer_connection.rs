@@ -959,6 +959,23 @@ impl PeerConnection {
                                             break;
                                         }
                                     }
+                                } else if height == our_height + 1 {
+                                    // Check if this block builds on our current tip
+                                    if let Ok(our_tip_hash) = blockchain.get_block_hash(our_height)
+                                    {
+                                        if block.header.previous_hash != our_tip_hash {
+                                            // Fork: this block doesn't build on our tip
+                                            // The fork is at our current height
+                                            actual_fork_height = Some(our_height);
+                                            warn!(
+                                                "🔀 [WHITELIST] Fork at height {}: block {} doesn't build on our tip (prev_hash mismatch)",
+                                                our_height, height
+                                            );
+                                            // Need to find common ancestor by going back
+                                            // For now, assume fork is at our_height, ancestor at our_height - 1
+                                            break;
+                                        }
+                                    }
                                 }
                             }
 
