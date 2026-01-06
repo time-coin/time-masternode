@@ -1330,9 +1330,24 @@ impl PeerConnection {
                         // we're in a sync loop. Break out and let periodic sync handle it.
                         if end_height <= our_height {
                             warn!(
-                                "⚠️ Received blocks {}-{} but we're already at height {}. Breaking potential sync loop.",
+                                "⚠️ Received blocks {}-{} but we're already at height {}. Notifying peer and breaking sync loop.",
                                 start_height, end_height, our_height
                             );
+
+                            // Inform peer of our height to prevent continued sync loop
+                            let height_msg = NetworkMessage::BlockHeightResponse(our_height);
+                            if let Err(e) = self.send_message(&height_msg).await {
+                                warn!(
+                                    "Failed to notify peer {} of our height {}: {}",
+                                    self.peer_ip, our_height, e
+                                );
+                            } else {
+                                debug!(
+                                    "✅ Notified peer {} that we're at height {}",
+                                    self.peer_ip, our_height
+                                );
+                            }
+
                             return Ok(());
                         }
 
