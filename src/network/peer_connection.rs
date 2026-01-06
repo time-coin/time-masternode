@@ -496,6 +496,43 @@ impl PeerConnection {
         }
     }
 
+    /// Check if other peers agree with fork from this peer (lightweight consensus)
+    /// Returns the number of peers that agree (are within 10 blocks of fork height)
+    async fn check_fork_agreement(
+        &self,
+        peer_registry: &Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+        fork_height: u64,
+        exclude_peer: &str,
+    ) -> Result<usize, String> {
+        let connected_peers = peer_registry.get_connected_peers().await;
+        
+        if connected_peers.len() < 2 {
+            // Not enough peers to check consensus
+            return Ok(0);
+        }
+        
+        let mut agreement_count = 0;
+        
+        for peer_ip in &connected_peers {
+            if peer_ip == exclude_peer {
+                continue; // Skip the peer we're checking
+            }
+            
+            if let Some(peer_height) = peer_registry.get_peer_height(peer_ip).await {
+                // Peer agrees if within 10 blocks of fork height
+                if (peer_height as i64 - fork_height as i64).abs() <= 10 {
+                    agreement_count += 1;
+                    debug!(
+                        "Peer {} agrees with fork (height {} vs fork {})",
+                        peer_ip, peer_height, fork_height
+                    );
+                }
+            }
+        }
+        
+        Ok(agreement_count)
+    }
+
     /// Check if connection should be closed due to timeout
     async fn should_disconnect(
         &self,
@@ -951,9 +988,10 @@ impl PeerConnection {
                 let peer_tip = self.peer_height.read().await.unwrap_or(end_height);
 
                 // WHITELIST BYPASS: Skip consensus checks for whitelisted masternodes
+                // BUT: Add lightweight consensus to prevent accepting corrupted data
                 if is_whitelisted {
                     info!(
-                        "🔓 [WHITELIST] Accepting {} blocks from trusted masternode {} without consensus check",
+                        "🔓 [WHITELIST] Processing {} blocks from trusted masternode {}",
                         block_count, self.peer_ip
                     );
 
@@ -988,6 +1026,25 @@ impl PeerConnection {
                     }
 
                     if fork_detected && blocks.len() > 1 {
+                        let fork_height = blocks[0].header.height;
+
+                        // Lightweight consensus: Check if at least 1 other peer agrees
+                        let agreement_count = self
+                            .check_fork_agreement(&peer_registry, fork_height, &self.peer_ip)
+                            .await?;
+
+                        if agreement_count == 0 {
+                            warn!(
+                                "⚠️  [WHITELIST] No other peer agrees with fork from {} at height {}, deferring",
+                                self.peer_ip, fork_height
+                            );
+                            return Ok(());
+                        }
+
+                        info!(
+                            "✅ [WHITELIST] Fork from {} confirmed by {} other peer(s)",
+                            self.peer_ip, agreement_count
+                        );
                         // CRITICAL: Always process forks from trusted peers, no threshold
                         // We MUST find the common ancestor regardless of fork depth
                         let our_height = blockchain.get_height();
