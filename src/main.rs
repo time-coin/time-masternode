@@ -978,8 +978,8 @@ async fn main() {
 
             // Allow single-node bootstrap during initial catchup (height 0)
             // For catchup mode, allow fewer masternodes (network may be degraded)
-            // For normal production, require at least 2 masternodes (reduced from 3 for network resilience)
-            if masternodes.len() < 2 && current_height > 0 && !should_catchup {
+            // For normal production, require at least 3 masternodes
+            if masternodes.len() < 3 && current_height > 0 && !should_catchup {
                 // Log periodically (every 60s) to avoid spam
                 static LAST_WARN: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
