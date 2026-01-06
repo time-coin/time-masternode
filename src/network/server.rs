@@ -449,25 +449,18 @@ async fn handle_peer(
                                         tracing::info!("✅ Handshake accepted from {} (network: {})", peer.addr, network);
                                         handshake_done = true;
 
-                                        // NOW check for duplicate connections after handshake
-                                        // This prevents race conditions where both peers connect simultaneously
-
-                                        // Check both connection_manager AND peer_registry for existing connections
-                                        let has_outbound = connection_manager.is_connected(&ip_str);
-                                        let already_registered = peer_registry.is_connected(&ip_str);
-
-                                        if has_outbound || already_registered {
-                                            // We already have a connection to this peer - reject duplicate
+                                        // Atomically register inbound connection to prevent race conditions
+                                        // This ensures only ONE inbound connection succeeds if multiple arrive simultaneously
+                                        if !peer_registry.try_register_inbound(&ip_str) {
                                             tracing::info!(
-                                                "🔄 Rejecting duplicate inbound from {} (already have connection)",
+                                                "🔄 Rejecting duplicate inbound from {} (already registered)",
                                                 peer.addr
                                             );
                                             break; // Close this new inbound connection
                                         }
 
-                                        // Mark this inbound connection in both managers
+                                        // Also mark in connection_manager for DoS protection tracking
                                         connection_manager.mark_inbound(&ip_str);
-                                        peer_registry.mark_inbound(&ip_str); // Also mark in peer registry for get_connected_peers()
 
                                         // Register writer in peer registry after successful handshake
                                         if let Some(w) = writer.take() {

@@ -181,6 +181,25 @@ impl PeerConnectionRegistry {
 
     // ===== Connection State Management =====
 
+    /// Atomically register inbound connection if not already connected
+    /// Returns true if registration succeeded, false if already exists
+    /// This prevents race conditions during concurrent connection attempts
+    pub fn try_register_inbound(&self, ip: &str) -> bool {
+        use dashmap::mapref::entry::Entry;
+
+        match self.connections.entry(ip.to_string()) {
+            Entry::Vacant(e) => {
+                e.insert(ConnectionState {
+                    direction: ConnectionDirection::Inbound,
+                    connected_at: Instant::now(),
+                });
+                self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
+    }
+
     pub fn mark_connecting(&self, ip: &str) -> bool {
         use dashmap::mapref::entry::Entry;
 
