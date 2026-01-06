@@ -82,8 +82,13 @@ impl BloomFilter {
 
 /// Time-windowed deduplication filter with automatic rotation
 /// Prevents unbounded memory growth and automatically expires old entries
+///
+/// Uses dual-window approach to prevent re-processing during rotation:
+/// - Current window: Active filter for new items
+/// - Previous window: Retained during rotation to catch duplicates
 pub struct DeduplicationFilter {
     current: Arc<RwLock<BloomFilter>>,
+    previous: Arc<RwLock<BloomFilter>>, // NEW: Keep previous window during rotation
     rotation_interval: Duration,
     last_rotation: Arc<RwLock<Instant>>,
 }
@@ -94,6 +99,7 @@ impl DeduplicationFilter {
     pub fn new(rotation_interval: Duration) -> Self {
         Self {
             current: Arc::new(RwLock::new(BloomFilter::new(10000))),
+            previous: Arc::new(RwLock::new(BloomFilter::new(10000))), // Initialize previous window
             rotation_interval,
             last_rotation: Arc::new(RwLock::new(Instant::now())),
         }
@@ -101,10 +107,15 @@ impl DeduplicationFilter {
 
     /// Check if item exists and insert it
     /// Returns true if item was already seen (or false positive)
+    ///
+    /// Dual-window approach prevents re-processing during rotation
     pub async fn check_and_insert(&self, item: &[u8]) -> bool {
-        // Check current without write lock (99% of cases)
-        if self.current.read().await.contains(item) {
-            return true;
+        // Check BOTH current and previous windows
+        let current_has = self.current.read().await.contains(item);
+        let previous_has = self.previous.read().await.contains(item);
+
+        if current_has || previous_has {
+            return true; // Item seen in either window
         }
 
         // Check if rotation is needed
@@ -116,15 +127,24 @@ impl DeduplicationFilter {
         if should_rotate {
             // Acquire write lock for rotation
             let mut last_rot = self.last_rotation.write().await;
+            // Double-check after acquiring lock
             if Instant::now().duration_since(*last_rot) > self.rotation_interval {
-                // Create new filter and rotate
+                // Atomic rotation: current becomes previous, new becomes current
+                let new_filter = BloomFilter::new(10000);
+
+                let mut previous = self.previous.write().await;
                 let mut current = self.current.write().await;
-                *current = BloomFilter::new(10000);
+
+                // Swap: current → previous, new → current
+                *previous = std::mem::replace(&mut *current, new_filter);
                 *last_rot = Instant::now();
+
+                drop(previous);
+                drop(current);
             }
         }
 
-        // Insert into current filter (write lock)
+        // Insert into current filter only
         self.current.write().await.insert(item);
         false
     }
