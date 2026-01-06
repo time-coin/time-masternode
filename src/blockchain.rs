@@ -2747,11 +2747,14 @@ impl Blockchain {
             let peer_timestamp = None; // TODO: Fetch from peer
 
             // Use AI fork resolver for intelligent decision
+            // CRITICAL: At same height, use consensus (peer count) as primary signal
+            // since we don't have peer's actual cumulative work
             let fork_params = crate::ai::fork_resolver::ForkResolutionParams {
                 our_height,
                 our_chain_work: *self.cumulative_work.read().await,
                 peer_height: consensus_height,
-                peer_chain_work: 0, // Would need to fetch from peer
+                // At same height with same work per block, use equal work but rely on consensus
+                peer_chain_work: *self.cumulative_work.read().await,
                 peer_ip: consensus_peers[0].clone(),
                 supporting_peers: peer_tips
                     .iter()
