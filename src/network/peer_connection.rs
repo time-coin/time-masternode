@@ -988,281 +988,254 @@ impl PeerConnection {
                     }
 
                     if fork_detected && blocks.len() > 1 {
-                        // Check if fork is relevant (near current height)
+                        // CRITICAL: Always process forks from trusted peers, no threshold
+                        // We MUST find the common ancestor regardless of fork depth
                         let our_height = blockchain.get_height();
                         let fork_height = blocks[0].header.height;
-                        let height_threshold = our_height.saturating_sub(10);
 
-                        if fork_height >= height_threshold {
-                            // Fork is relevant - near current height
-                            info!(
-                                "🔄 [WHITELIST] Fork detected with {} blocks from trusted peer (height {})",
-                                blocks.len(), fork_height
-                            );
+                        info!(
+                            "🔄 [WHITELIST] Fork detected with {} blocks from trusted peer (starting at height {})",
+                            blocks.len(), fork_height
+                        );
 
-                            // Find common ancestor by scanning blocks
-                            let mut common_ancestor: Option<u64> = None;
-                            let mut actual_fork_height: Option<u64> = None;
+                        // Find common ancestor by scanning blocks
+                        let mut common_ancestor: Option<u64> = None;
+                        let mut actual_fork_height: Option<u64> = None;
 
-                            for block in blocks.iter() {
-                                let height = block.header.height;
-                                if height <= our_height {
-                                    if let Ok(our_block) =
-                                        blockchain.get_block_by_height(height).await
-                                    {
-                                        if our_block.hash() == block.hash() {
-                                            // Blocks match - this is common ancestor
-                                            common_ancestor = Some(height);
-                                        } else {
-                                            // Fork detected at this height
-                                            actual_fork_height = Some(height);
-                                            warn!(
-                                                "🔀 [WHITELIST] Fork at height {}: our {} vs peer {}",
-                                                height,
-                                                hex::encode(&our_block.hash()[..8]),
-                                                hex::encode(&block.hash()[..8])
-                                            );
-                                            break;
-                                        }
+                        for block in blocks.iter() {
+                            let height = block.header.height;
+                            if height <= our_height {
+                                if let Ok(our_block) = blockchain.get_block_by_height(height).await
+                                {
+                                    if our_block.hash() == block.hash() {
+                                        // Blocks match - this is common ancestor
+                                        common_ancestor = Some(height);
+                                    } else {
+                                        // Fork detected at this height
+                                        actual_fork_height = Some(height);
+                                        warn!(
+                                            "🔀 [WHITELIST] Fork at height {}: our {} vs peer {}",
+                                            height,
+                                            hex::encode(&our_block.hash()[..8]),
+                                            hex::encode(&block.hash()[..8])
+                                        );
+                                        break;
                                     }
-                                } else if height == our_height + 1 {
-                                    // Check if this block builds on our current tip
-                                    if let Ok(our_tip_hash) = blockchain.get_block_hash(our_height)
-                                    {
-                                        if block.header.previous_hash != our_tip_hash {
-                                            // Fork: this block doesn't build on our tip
-                                            // The previous_hash mismatch means the fork is EARLIER than our current height
-                                            warn!(
+                                }
+                            } else if height == our_height + 1 {
+                                // Check if this block builds on our current tip
+                                if let Ok(our_tip_hash) = blockchain.get_block_hash(our_height) {
+                                    if block.header.previous_hash != our_tip_hash {
+                                        // Fork: this block doesn't build on our tip
+                                        // The previous_hash mismatch means the fork is EARLIER than our current height
+                                        warn!(
                                                 "🔀 [WHITELIST] Fork detected: block {} doesn't build on our tip (prev_hash mismatch: expected {}, got {})",
                                                 height,
                                                 hex::encode(&our_tip_hash[..8]),
                                                 hex::encode(&block.header.previous_hash[..8])
                                             );
 
-                                            // CRITICAL FIX: Don't assume fork is only 1 block deep
-                                            // The previous_hash mismatch indicates the fork extends to our_height or earlier
-                                            // We need to iteratively search for the true common ancestor
+                                        // CRITICAL FIX: Don't assume fork is only 1 block deep
+                                        // The previous_hash mismatch indicates the fork extends to our_height or earlier
+                                        // We need to iteratively search for the true common ancestor
 
-                                            // Determine how far back to search based on lowest block received
-                                            let lowest_peer_block = blocks
-                                                .iter()
-                                                .map(|b| b.header.height)
-                                                .min()
-                                                .unwrap_or(height);
+                                        // Determine how far back to search based on lowest block received
+                                        let lowest_peer_block = blocks
+                                            .iter()
+                                            .map(|b| b.header.height)
+                                            .min()
+                                            .unwrap_or(height);
 
-                                            // If we already received blocks going back far enough, scan them to find common ancestor
-                                            if lowest_peer_block < our_height {
-                                                warn!(
+                                        // If we already received blocks going back far enough, scan them to find common ancestor
+                                        if lowest_peer_block < our_height {
+                                            warn!(
                                                     "⚠️ [WHITELIST] Scanning received blocks (lowest: {}) to find common ancestor",
                                                     lowest_peer_block
                                                 );
-                                                // The fork resolution logic below will handle this
-                                                // Don't return here - let it proceed to scan the blocks
-                                                actual_fork_height = Some(our_height);
-                                                break;
-                                            } else {
-                                                // We don't have blocks going back far enough - request more
-                                                // Calculate how far back based on MAX_REORG_DEPTH or a reasonable limit
-                                                let search_depth =
-                                                    50u64.min(our_height.saturating_sub(1));
-                                                let request_from =
-                                                    our_height.saturating_sub(search_depth).max(1);
+                                            // The fork resolution logic below will handle this
+                                            // Don't return here - let it proceed to scan the blocks
+                                            actual_fork_height = Some(our_height);
+                                            break;
+                                        } else {
+                                            // We don't have blocks going back far enough - request more
+                                            // Calculate how far back based on MAX_REORG_DEPTH or a reasonable limit
+                                            let search_depth =
+                                                50u64.min(our_height.saturating_sub(1));
+                                            let request_from =
+                                                our_height.saturating_sub(search_depth).max(1);
 
-                                                warn!(
+                                            warn!(
                                                     "⚠️ [WHITELIST] Fork is deeper than height {}. Requesting {} blocks back (from height {}) to find common ancestor.",
                                                     our_height, search_depth, request_from
                                                 );
 
-                                                let msg = NetworkMessage::GetBlocks(
-                                                    request_from,
-                                                    end_height,
-                                                );
-                                                if let Err(e) = self.send_message(&msg).await {
-                                                    warn!("Failed to request earlier blocks for deep fork resolution: {}", e);
-                                                }
-                                                return Ok(());
+                                            let msg =
+                                                NetworkMessage::GetBlocks(request_from, end_height);
+                                            if let Err(e) = self.send_message(&msg).await {
+                                                warn!("Failed to request earlier blocks for deep fork resolution: {}", e);
                                             }
+                                            return Ok(());
                                         }
                                     }
                                 }
                             }
+                        }
 
-                            if let Some(fork_at) = actual_fork_height {
-                                let ancestor = common_ancestor.unwrap_or(fork_at.saturating_sub(1));
-                                let end_height = blocks
-                                    .last()
-                                    .map(|b| b.header.height)
-                                    .unwrap_or(fork_height);
+                        if let Some(fork_at) = actual_fork_height {
+                            let ancestor = common_ancestor.unwrap_or(fork_at.saturating_sub(1));
+                            let end_height = blocks
+                                .last()
+                                .map(|b| b.header.height)
+                                .unwrap_or(fork_height);
 
-                                info!(
+                            info!(
                                     "🔀 [WHITELIST] Fork at height {}, common ancestor: {}, peer height: {}",
                                     fork_at, ancestor, end_height
                                 );
 
-                                // Verify the assumed common ancestor by checking if we have it in the received blocks
-                                // If ancestor wasn't explicitly matched, we need to verify it
-                                if common_ancestor.is_none() && ancestor > 0 {
-                                    // We assumed ancestor = fork_at - 1, but we didn't actually verify it
-                                    // Check if peer sent us the ancestor block
-                                    let ancestor_in_peer_blocks =
-                                        blocks.iter().find(|b| b.header.height == ancestor);
+                            // Verify the assumed common ancestor by checking if we have it in the received blocks
+                            // If ancestor wasn't explicitly matched, we need to verify it
+                            if common_ancestor.is_none() && ancestor > 0 {
+                                // We assumed ancestor = fork_at - 1, but we didn't actually verify it
+                                // Check if peer sent us the ancestor block
+                                let ancestor_in_peer_blocks =
+                                    blocks.iter().find(|b| b.header.height == ancestor);
 
-                                    if let Some(peer_ancestor) = ancestor_in_peer_blocks {
-                                        // Peer sent the ancestor block - verify it matches ours
-                                        if let Ok(our_ancestor) =
-                                            blockchain.get_block_by_height(ancestor).await
-                                        {
-                                            if our_ancestor.hash() != peer_ancestor.hash() {
-                                                // Ancestor doesn't match - fork is earlier than we thought
-                                                // Calculate how much further back to search
-                                                let lowest_received = blocks
-                                                    .iter()
-                                                    .map(|b| b.header.height)
-                                                    .min()
-                                                    .unwrap_or(ancestor);
-                                                let already_searched_back =
-                                                    ancestor.saturating_sub(lowest_received);
+                                if let Some(peer_ancestor) = ancestor_in_peer_blocks {
+                                    // Peer sent the ancestor block - verify it matches ours
+                                    if let Ok(our_ancestor) =
+                                        blockchain.get_block_by_height(ancestor).await
+                                    {
+                                        if our_ancestor.hash() != peer_ancestor.hash() {
+                                            // Ancestor doesn't match - fork is earlier than we thought
+                                            // Calculate how much further back to search
+                                            let lowest_received = blocks
+                                                .iter()
+                                                .map(|b| b.header.height)
+                                                .min()
+                                                .unwrap_or(ancestor);
+                                            let already_searched_back =
+                                                ancestor.saturating_sub(lowest_received);
 
-                                                // Exponentially increase search depth: if we already searched back N blocks, try 2*N more
-                                                let additional_depth = if already_searched_back > 0
-                                                {
-                                                    (already_searched_back * 2).min(100)
-                                                } else {
-                                                    50 // Default to 50 blocks if we haven't searched back yet
-                                                };
+                                            // Exponentially increase search depth: if we already searched back N blocks, try 2*N more
+                                            let additional_depth = if already_searched_back > 0 {
+                                                (already_searched_back * 2).min(100)
+                                            } else {
+                                                50 // Default to 50 blocks if we haven't searched back yet
+                                            };
 
-                                                let request_from = ancestor
-                                                    .saturating_sub(additional_depth)
-                                                    .max(1);
+                                            let request_from =
+                                                ancestor.saturating_sub(additional_depth).max(1);
 
-                                                warn!(
+                                            warn!(
                                                     "⚠️ [WHITELIST] Common ancestor {} doesn't match! Fork is earlier. Already searched to height {}, now requesting from height {} ({} more blocks back)",
                                                     ancestor, lowest_received, request_from, additional_depth
                                                 );
 
-                                                let msg = NetworkMessage::GetBlocks(
-                                                    request_from,
-                                                    end_height,
-                                                );
-                                                if let Err(e) = self.send_message(&msg).await {
-                                                    warn!(
-                                                        "Failed to request earlier blocks: {}",
-                                                        e
-                                                    );
-                                                }
-                                                return Ok(());
+                                            let msg =
+                                                NetworkMessage::GetBlocks(request_from, end_height);
+                                            if let Err(e) = self.send_message(&msg).await {
+                                                warn!("Failed to request earlier blocks: {}", e);
                                             }
+                                            return Ok(());
                                         }
+                                    }
+                                } else {
+                                    // Peer didn't send the ancestor block - request it to verify
+                                    let lowest_received = blocks
+                                        .iter()
+                                        .map(|b| b.header.height)
+                                        .min()
+                                        .unwrap_or(ancestor);
+                                    let search_depth = ancestor.saturating_sub(lowest_received);
+
+                                    // If we haven't searched back much yet, start with 50 blocks
+                                    // Otherwise, double the search depth
+                                    let additional_depth = if search_depth < 10 {
+                                        50
                                     } else {
-                                        // Peer didn't send the ancestor block - request it to verify
-                                        let lowest_received = blocks
-                                            .iter()
-                                            .map(|b| b.header.height)
-                                            .min()
-                                            .unwrap_or(ancestor);
-                                        let search_depth = ancestor.saturating_sub(lowest_received);
+                                        (search_depth * 2).min(100)
+                                    };
 
-                                        // If we haven't searched back much yet, start with 50 blocks
-                                        // Otherwise, double the search depth
-                                        let additional_depth = if search_depth < 10 {
-                                            50
-                                        } else {
-                                            (search_depth * 2).min(100)
-                                        };
+                                    let request_from =
+                                        ancestor.saturating_sub(additional_depth).max(1);
 
-                                        let request_from =
-                                            ancestor.saturating_sub(additional_depth).max(1);
-
-                                        warn!(
+                                    warn!(
                                             "⚠️ [WHITELIST] Cannot verify common ancestor {} - not in received blocks (lowest: {}). Requesting from height {} ({} blocks back)",
                                             ancestor, lowest_received, request_from, additional_depth
                                         );
 
-                                        let msg =
-                                            NetworkMessage::GetBlocks(request_from, end_height);
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request blocks for ancestor verification: {}", e);
-                                        }
-                                        return Ok(());
+                                    let msg = NetworkMessage::GetBlocks(request_from, end_height);
+                                    if let Err(e) = self.send_message(&msg).await {
+                                        warn!("Failed to request blocks for ancestor verification: {}", e);
                                     }
+                                    return Ok(());
                                 }
+                            }
 
-                                // Get blocks after common ancestor for reorg
-                                let mut sorted_blocks = blocks.clone();
-                                sorted_blocks.sort_by_key(|b| b.header.height);
+                            // Get blocks after common ancestor for reorg
+                            let mut sorted_blocks = blocks.clone();
+                            sorted_blocks.sort_by_key(|b| b.header.height);
 
-                                let reorg_blocks: Vec<_> = sorted_blocks
-                                    .iter()
-                                    .filter(|b| b.header.height > ancestor)
-                                    .cloned()
-                                    .collect();
+                            let reorg_blocks: Vec<_> = sorted_blocks
+                                .iter()
+                                .filter(|b| b.header.height > ancestor)
+                                .cloned()
+                                .collect();
 
-                                if !reorg_blocks.is_empty() {
-                                    // Verify blocks form a continuous chain starting from ancestor + 1
-                                    let first_block_height =
-                                        reorg_blocks.first().unwrap().header.height;
-                                    let expected_first_height = ancestor + 1;
+                            if !reorg_blocks.is_empty() {
+                                // Verify blocks form a continuous chain starting from ancestor + 1
+                                let first_block_height =
+                                    reorg_blocks.first().unwrap().header.height;
+                                let expected_first_height = ancestor + 1;
 
-                                    if first_block_height > expected_first_height {
-                                        // Gap detected - need to request missing blocks
-                                        warn!(
+                                if first_block_height > expected_first_height {
+                                    // Gap detected - need to request missing blocks
+                                    warn!(
                                             "⚠️ [WHITELIST] Gap detected: common ancestor at {}, but first received block is {}. Requesting missing blocks {}-{}",
                                             ancestor, first_block_height, expected_first_height, end_height
                                         );
 
-                                        // Request the missing blocks to complete the chain
-                                        let msg = NetworkMessage::GetBlocks(
-                                            expected_first_height,
-                                            end_height,
-                                        );
-                                        if let Err(e) = self.send_message(&msg).await {
-                                            warn!("Failed to request gap-filling blocks: {}", e);
-                                        }
-                                        // Don't attempt reorg yet - wait for complete chain
-                                        return Ok(());
+                                    // Request the missing blocks to complete the chain
+                                    let msg = NetworkMessage::GetBlocks(
+                                        expected_first_height,
+                                        end_height,
+                                    );
+                                    if let Err(e) = self.send_message(&msg).await {
+                                        warn!("Failed to request gap-filling blocks: {}", e);
                                     }
+                                    // Don't attempt reorg yet - wait for complete chain
+                                    return Ok(());
+                                }
 
-                                    // For whitelisted peers, trust them and perform reorg
-                                    // (They are masternodes, so they should have the canonical chain)
-                                    info!(
+                                // For whitelisted peers, trust them and perform reorg
+                                // (They are masternodes, so they should have the canonical chain)
+                                info!(
                                         "✅ [WHITELIST] Accepting fork from trusted masternode, reorganizing from height {} with {} blocks (height {}-{})",
                                         ancestor, reorg_blocks.len(),
                                         reorg_blocks.first().unwrap().header.height,
                                         reorg_blocks.last().unwrap().header.height
                                     );
 
-                                    match blockchain
-                                        .reorganize_to_chain(ancestor, reorg_blocks)
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            info!("✅ [WHITELIST] Chain reorganization successful");
-                                            return Ok(());
-                                        }
-                                        Err(e) => {
-                                            warn!(
-                                                "❌ [WHITELIST] Chain reorganization failed: {}",
-                                                e
-                                            );
-                                            // On failure, request more blocks going further back
-                                            let request_from = ancestor.saturating_sub(5);
-                                            let msg =
-                                                NetworkMessage::GetBlocks(request_from, end_height);
-                                            if let Err(send_err) = self.send_message(&msg).await {
-                                                warn!("Failed to re-request blocks after reorg failure: {}", send_err);
-                                            }
+                                match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
+                                    Ok(()) => {
+                                        info!("✅ [WHITELIST] Chain reorganization successful");
+                                        return Ok(());
+                                    }
+                                    Err(e) => {
+                                        warn!("❌ [WHITELIST] Chain reorganization failed: {}", e);
+                                        // On failure, request more blocks going further back
+                                        let request_from = ancestor.saturating_sub(5);
+                                        let msg =
+                                            NetworkMessage::GetBlocks(request_from, end_height);
+                                        if let Err(send_err) = self.send_message(&msg).await {
+                                            warn!("Failed to re-request blocks after reorg failure: {}", send_err);
                                         }
                                     }
                                 }
-                            } else {
-                                debug!("⏭️  [WHITELIST] No actual fork found in blocks");
                             }
                         } else {
-                            // Fork is too far in the past - ignore it
-                            debug!(
-                                "⏭️  [WHITELIST] Ignoring old fork at height {} (current: {}, threshold: {})",
-                                fork_height, our_height, height_threshold
-                            );
+                            debug!("⏭️  [WHITELIST] No actual fork found in blocks");
                         }
                     }
 
