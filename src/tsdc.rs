@@ -366,37 +366,14 @@ impl TSCDConsensus {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        // GENESIS BOOTSTRAP FIX: At genesis level (target_height <= 1), use a much more
-        // lenient heartbeat window (5 minutes instead of 60 seconds). During initial network
-        // formation, nodes may not have established heartbeat patterns yet due to:
-        // 1. Network connections still being established
-        // 2. HeartbeatBroadcast messages not yet exchanged between peers
-        // 3. Race condition between 120s startup delay and 60s heartbeat interval
-        // Using a longer window ensures a leader can be selected to bootstrap the network.
+        // CRITICAL FIX: ALWAYS disable heartbeat filtering during catchup to ensure
+        // all nodes use the SAME masternode list. The heartbeat filter creates
+        // non-deterministic leader selection because different nodes receive heartbeats
+        // at different times, causing disagreement on who the leader is.
         //
-        // CRITICAL FIX: When catching up from height 0 (network reset), DISABLE heartbeat
-        // filtering entirely to ensure all nodes use the SAME masternode list. The heartbeat
-        // filter creates non-deterministic leader selection because different nodes receive
-        // heartbeats at different times, causing disagreement on who the leader is.
-        // Only enable filtering when the chain has actual blocks (current_height > 0).
-        //
-        // AI ENHANCEMENT: If AI health monitoring is enabled, use adaptive timeouts
-        // instead of hardcoded values. AI learns each masternode's heartbeat pattern
-        // and adjusts timeouts based on network conditions.
-        let current_height = self
-            .chain_head
-            .read()
-            .await
-            .as_ref()
-            .map(|b| b.header.height)
-            .unwrap_or(0);
-        let heartbeat_window = if current_height == 0 {
-            u64::MAX // Disable filtering when catching up from height 0
-        } else if target_height <= 1 {
-            300 // 5 minutes for genesis-level catchup (bootstrap tolerance)
-        } else {
-            60 // 60 seconds for normal catchup (strict liveness check)
-        };
+        // During normal block production (not catchup), strict filtering is fine.
+        // But during catchup, determinism is MORE important than liveness filtering.
+        let heartbeat_window = u64::MAX; // Always disable filtering for catchup
 
         // Build network health context for AI (if available)
         let network_health = crate::ai::NetworkHealth::default(); // TODO: Get from network optimizer
@@ -447,41 +424,12 @@ impl TSCDConsensus {
             })
             .collect();
 
-        // If no masternodes pass the heartbeat filter, fall back to all active masternodes
-        // CRITICAL: With current_height==0, heartbeat_window==u64::MAX, so this should never trigger
-        // But keep it as a safety fallback for other edge cases
-        let current_height_for_fallback = self
-            .chain_head
-            .read()
-            .await
-            .as_ref()
-            .map(|b| b.header.height)
-            .unwrap_or(0);
-        let mut masternodes = if masternodes.is_empty() {
-            tracing::warn!(
-                "⚠️  No masternodes with recent heartbeat (height={}, target={}) - using all {} active masternodes",
-                current_height_for_fallback,
-                target_height,
-                all_masternodes.len()
-            );
-            all_masternodes.clone()
-        } else {
-            if masternodes.len() < all_masternodes.len() {
-                tracing::info!(
-                    "Heartbeat filter: {}/{} masternodes passed (window: {}s, current_height: {})",
-                    masternodes.len(),
-                    all_masternodes.len(),
-                    heartbeat_window,
-                    current_height_for_fallback
-                );
-            }
-            masternodes
-        };
+        // With heartbeat filtering disabled for catchup, all nodes should have the same list
+        let mut masternodes = masternodes;
 
         if masternodes.is_empty() {
             return Err(TSCDError::ConfigError(format!(
-                "No recently active masternodes (none with heartbeat in last {}s) - ALL {} masternodes filtered out!",
-                heartbeat_window,
+                "No active masternodes available for catchup (need at least 1 of {} registered)",
                 all_masternodes.len()
             )));
         }
