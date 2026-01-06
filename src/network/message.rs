@@ -116,6 +116,15 @@ pub enum NetworkMessage {
         end_height: u64,
     },
     BlockRangeResponse(Vec<Block>),
+    // Fork alert - notify peer they're on wrong chain
+    ForkAlert {
+        your_height: u64,
+        your_hash: [u8; 32],
+        consensus_height: u64,
+        consensus_hash: [u8; 32],
+        consensus_peer_count: usize,
+        message: String,
+    },
     // Avalanche consensus voting
     TransactionVoteRequest {
         txid: Hash256,
@@ -252,6 +261,7 @@ impl NetworkMessage {
             NetworkMessage::ChainWorkResponse { .. } => "ChainWorkResponse",
             NetworkMessage::GetChainWorkAt(_) => "GetChainWorkAt",
             NetworkMessage::ChainWorkAtResponse { .. } => "ChainWorkAtResponse",
+            NetworkMessage::ForkAlert { .. } => "ForkAlert",
         }
     }
 
