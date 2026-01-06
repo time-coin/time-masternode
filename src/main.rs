@@ -971,13 +971,15 @@ async fn main() {
             }
 
             // Smart catchup trigger:
-            // - If any blocks behind (>=1): Catch up immediately
-            let should_catchup = blocks_behind >= 1;
+            // - If many blocks behind (>2): Catch up immediately
+            // - If 1 block behind: Use 5-minute grace period
+            let should_catchup = blocks_behind > 2
+                || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
 
             // Allow single-node bootstrap during initial catchup (height 0)
             // For catchup mode, allow fewer masternodes (network may be degraded)
-            // For normal production, require at least 3 masternodes
-            if masternodes.len() < 3 && current_height > 0 && !should_catchup {
+            // For normal production, require at least 2 masternodes (reduced from 3 for network resilience)
+            if masternodes.len() < 2 && current_height > 0 && !should_catchup {
                 // Log periodically (every 60s) to avoid spam
                 static LAST_WARN: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
