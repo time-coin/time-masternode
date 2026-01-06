@@ -1831,9 +1831,11 @@ impl PeerConnection {
                         let all_peers = peer_registry.get_connected_peers().await;
                         let mut our_chain_count = 1; // Count ourselves
                         let mut peer_chain_count = 0;
-                        
+
                         for peer_addr in &all_peers {
-                            if let Some((peer_h, peer_hash)) = peer_registry.get_peer_chain_tip(peer_addr).await {
+                            if let Some((peer_h, peer_hash)) =
+                                peer_registry.get_peer_chain_tip(peer_addr).await
+                            {
                                 if peer_h == our_height {
                                     if peer_hash == our_hash {
                                         our_chain_count += 1;
@@ -1850,7 +1852,7 @@ impl PeerConnection {
                                 "📢 [{:?}] Alerting {} they're on minority fork ({} peers on our chain, {} on theirs)",
                                 self.direction, self.peer_ip, our_chain_count, peer_chain_count
                             );
-                            
+
                             let alert = NetworkMessage::ForkAlert {
                                 your_height: *height,
                                 your_hash: *hash,
@@ -1864,7 +1866,7 @@ impl PeerConnection {
                                     hex::encode(&our_hash[..8])
                                 ),
                             };
-                            
+
                             if let Err(e) = self.send_message(&alert).await {
                                 warn!("Failed to send fork alert: {}", e);
                             }
@@ -2112,7 +2114,7 @@ impl PeerConnection {
                     hex::encode(&consensus_hash[..8]),
                     consensus_peer_count
                 );
-                
+
                 // If we're on the minority fork, immediately request consensus chain
                 if your_height == consensus_height && your_hash != consensus_hash {
                     warn!("   ⚠️ We appear to be on minority fork! Requesting consensus chain...");
@@ -2121,7 +2123,7 @@ impl PeerConnection {
                     if let Err(e) = self.send_message(&msg).await {
                         warn!("Failed to request consensus chain: {}", e);
                     }
-                    
+
                     // Also trigger blockchain's fork resolution check
                     info!("   🔄 Triggering immediate fork resolution check");
                     // The blockchain will handle this when it receives the blocks

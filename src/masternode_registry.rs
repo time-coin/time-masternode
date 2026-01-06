@@ -424,7 +424,14 @@ impl MasternodeRegistry {
             .values()
             .filter(|info| {
                 // Must be active AND connected
-                info.is_active && connection_manager.is_connected(&info.masternode.address)
+                // Connection manager uses IP without port, so strip port from masternode address
+                let ip_only = info
+                    .masternode
+                    .address
+                    .split(':')
+                    .next()
+                    .unwrap_or(&info.masternode.address);
+                info.is_active && connection_manager.is_connected(ip_only)
             })
             .cloned()
             .collect()
