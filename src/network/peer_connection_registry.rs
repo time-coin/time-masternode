@@ -196,7 +196,20 @@ impl PeerConnectionRegistry {
                 self.inbound_count.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(_) => false,
+            Entry::Occupied(mut e) => {
+                // Allow reconnection by updating existing entry
+                let old_direction = e.get().direction;
+                e.insert(ConnectionState {
+                    direction: ConnectionDirection::Inbound,
+                    connected_at: Instant::now(),
+                });
+                // Adjust counters if direction changed
+                if old_direction == ConnectionDirection::Outbound {
+                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
+                    self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                }
+                true
+            }
         }
     }
 
@@ -212,7 +225,20 @@ impl PeerConnectionRegistry {
                 self.outbound_count.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(_) => false,
+            Entry::Occupied(mut e) => {
+                // Allow reconnection by updating existing entry
+                let old_direction = e.get().direction;
+                e.insert(ConnectionState {
+                    direction: ConnectionDirection::Outbound,
+                    connected_at: Instant::now(),
+                });
+                // Adjust counters if direction changed
+                if old_direction == ConnectionDirection::Inbound {
+                    self.inbound_count.fetch_sub(1, Ordering::Relaxed);
+                    self.outbound_count.fetch_add(1, Ordering::Relaxed);
+                }
+                true
+            }
         }
     }
 
@@ -232,7 +258,20 @@ impl PeerConnectionRegistry {
                 self.inbound_count.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(_) => false,
+            Entry::Occupied(mut e) => {
+                // Allow reconnection by updating existing entry
+                let old_direction = e.get().direction;
+                e.insert(ConnectionState {
+                    direction: ConnectionDirection::Inbound,
+                    connected_at: Instant::now(),
+                });
+                // Adjust counters if direction changed
+                if old_direction == ConnectionDirection::Outbound {
+                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
+                    self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                }
+                true
+            }
         }
     }
 

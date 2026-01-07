@@ -380,10 +380,10 @@ mod tests {
         // Create and save
         let wallet = Wallet::new(NetworkType::Mainnet, None).unwrap();
         let original_address = wallet.address().to_string();
-        wallet.save(&path).unwrap();
+        wallet.save(&path, "test_password").unwrap();
 
         // Load and verify
-        let loaded = Wallet::load(&path).unwrap();
+        let loaded = Wallet::load(&path, "test_password").unwrap();
         assert_eq!(loaded.address(), original_address);
         assert_eq!(loaded.network(), NetworkType::Mainnet);
     }
