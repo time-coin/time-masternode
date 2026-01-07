@@ -1854,18 +1854,24 @@ impl Blockchain {
         }
 
         // Distribute rewards proportionally based on tier weights
+        // Deduct 0.1% fee from each masternode reward
         let mut rewards = Vec::new();
         let mut distributed = 0u64;
 
         for (i, mn) in masternodes.iter().enumerate() {
-            let share = if i == masternodes.len() - 1 {
+            let gross_share = if i == masternodes.len() - 1 {
                 // Last masternode gets remainder to avoid rounding errors
                 total_reward - distributed
             } else {
                 (total_reward * mn.masternode.tier.reward_weight()) / total_weight
             };
-            rewards.push((mn.masternode.address.clone(), share));
-            distributed += share;
+
+            // Deduct 0.1% fee from masternode reward
+            let fee = gross_share / 1000; // 0.1% = 1/1000
+            let net_share = gross_share.saturating_sub(fee);
+
+            rewards.push((mn.masternode.address.clone(), net_share));
+            distributed += gross_share; // Track gross for remainder calculation
         }
 
         rewards

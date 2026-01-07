@@ -29,6 +29,7 @@ impl DeterministicBlockGenerator {
         height: u64,
         previous_hash: Hash256,
         final_transactions: Vec<Transaction>,
+        transaction_fees: Vec<u64>, // Actual fees paid for each transaction
         masternodes: Vec<Masternode>,
         _base_reward: u64, // Ignored, use logarithmic calculation instead
     ) -> Block {
@@ -50,21 +51,23 @@ impl DeterministicBlockGenerator {
         // Phase 1.2: Enforce canonical transaction ordering for deterministic merkle roots
         // All transactions MUST be sorted by txid to ensure all nodes compute identical merkle roots
         // This prevents consensus failures from transaction ordering differences
+
+        // Build fee map before moving final_transactions
+        let mut fee_map: std::collections::HashMap<Hash256, u64> = std::collections::HashMap::new();
+        for (i, tx) in final_transactions.iter().enumerate() {
+            if i < transaction_fees.len() {
+                fee_map.insert(tx.txid(), transaction_fees[i]);
+            }
+        }
+
         let mut txs_sorted = final_transactions;
         txs_sorted.sort_by_key(|a| a.txid());
 
         // Calculate total fees collected from transactions
-        // Fees = inputs - outputs (already validated during transaction processing)
-        // At block generation time, we calculate fees from each transaction's outputs
         let total_fees: u64 = txs_sorted
             .iter()
             .filter(|tx| !tx.inputs.is_empty()) // Skip coinbase
-            .map(|tx| {
-                // Calculate fee as 0.1% of transaction amount
-                // Fee = output_sum / 1000 (matches validation in consensus.rs:1251)
-                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-                output_sum / 1000 // 0.1% fee rate
-            })
+            .map(|tx| *fee_map.get(&tx.txid()).unwrap_or(&0))
             .sum();
 
         // Calculate total reward using logarithmic scaling
@@ -260,6 +263,7 @@ mod tests {
             1,
             [0u8; 32],
             vec![tx1.clone(), tx2.clone(), tx3.clone()],
+            vec![0, 0, 0], // No fees for test
             vec![],
             100,
         );
@@ -268,12 +272,19 @@ mod tests {
             1,
             [0u8; 32],
             vec![tx3.clone(), tx1.clone(), tx2.clone()],
+            vec![0, 0, 0], // No fees for test
             vec![],
             100,
         );
 
-        let block3 =
-            DeterministicBlockGenerator::generate(1, [0u8; 32], vec![tx2, tx3, tx1], vec![], 100);
+        let block3 = DeterministicBlockGenerator::generate(
+            1,
+            [0u8; 32],
+            vec![tx2, tx3, tx1],
+            vec![0, 0, 0],
+            vec![],
+            100,
+        );
 
         // All blocks should have identical merkle roots
         assert_eq!(
@@ -289,9 +300,11 @@ mod tests {
     #[test]
     fn test_empty_block_merkle_root() {
         // Empty blocks (only coinbase) should have consistent merkle root
-        let block1 = DeterministicBlockGenerator::generate(1, [0u8; 32], vec![], vec![], 100);
+        let block1 =
+            DeterministicBlockGenerator::generate(1, [0u8; 32], vec![], vec![], vec![], 100);
 
-        let block2 = DeterministicBlockGenerator::generate(1, [0u8; 32], vec![], vec![], 100);
+        let block2 =
+            DeterministicBlockGenerator::generate(1, [0u8; 32], vec![], vec![], vec![], 100);
 
         assert_eq!(
             block1.header.merkle_root, block2.header.merkle_root,

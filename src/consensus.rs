@@ -1727,6 +1727,10 @@ impl ConsensusEngine {
         self.tx_pool.get_finalized_transactions()
     }
 
+    pub fn get_finalized_transactions_with_fees_for_block(&self) -> Vec<(Transaction, u64)> {
+        self.tx_pool.get_finalized_transactions_with_fees()
+    }
+
     #[allow(dead_code)]
     pub fn clear_finalized_transactions(&self) {
         self.tx_pool.clear_finalized();
@@ -1764,7 +1768,8 @@ impl ConsensusEngine {
     pub async fn generate_deterministic_block(&self, height: u64, _timestamp: i64) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
-        let finalized_txs = self.get_finalized_transactions_for_block();
+        let finalized = self.get_finalized_transactions_with_fees_for_block();
+        let (finalized_txs, fees): (Vec<_>, Vec<_>) = finalized.into_iter().unzip();
         let masternodes = self.get_active_masternodes();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
@@ -1773,6 +1778,7 @@ impl ConsensusEngine {
             height,
             previous_hash,
             finalized_txs,
+            fees,
             masternodes,
             base_reward,
         )
@@ -1787,7 +1793,8 @@ impl ConsensusEngine {
     ) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
-        let finalized_txs = self.get_finalized_transactions_for_block();
+        let finalized = self.get_finalized_transactions_with_fees_for_block();
+        let (finalized_txs, fees): (Vec<_>, Vec<_>) = finalized.into_iter().unzip();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
@@ -1798,6 +1805,7 @@ impl ConsensusEngine {
             height,
             previous_hash,
             finalized_txs,
+            fees,
             masternodes,
             base_reward,
         )
@@ -1812,7 +1820,8 @@ impl ConsensusEngine {
     ) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
-        let finalized_txs = self.get_finalized_transactions_for_block();
+        let finalized = self.get_finalized_transactions_with_fees_for_block();
+        let (finalized_txs, fees): (Vec<_>, Vec<_>) = finalized.into_iter().unzip();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
@@ -1820,6 +1829,7 @@ impl ConsensusEngine {
             height,
             previous_hash,
             finalized_txs,
+            fees,
             masternodes,
             base_reward,
         )

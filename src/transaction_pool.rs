@@ -143,6 +143,14 @@ impl TransactionPool {
         self.rejected.insert(txid, (reason, Instant::now()));
     }
 
+    /// Get all finalized transactions for block inclusion (with fees)
+    pub fn get_finalized_transactions_with_fees(&self) -> Vec<(Transaction, u64)> {
+        self.finalized
+            .iter()
+            .map(|e| (e.value().tx.clone(), e.value().fee))
+            .collect()
+    }
+
     /// Get all finalized transactions for block inclusion
     pub fn get_finalized_transactions(&self) -> Vec<Transaction> {
         self.finalized
