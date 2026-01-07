@@ -121,9 +121,34 @@ impl Wallet {
         let contents = fs::read(path)
             .map_err(|e| WalletError::LoadFailed(format!("Failed to read file: {}", e)))?;
 
-        // Deserialize encrypted file
-        let encrypted_file: EncryptedWalletFile = bincode::deserialize(&contents)
-            .map_err(|e| WalletError::LoadFailed(format!("Failed to deserialize: {}", e)))?;
+        // Try to deserialize as encrypted file (new format)
+        let encrypted_file: EncryptedWalletFile = match bincode::deserialize(&contents) {
+            Ok(ef) => ef,
+            Err(_) => {
+                // Fall back to old unencrypted format and migrate
+                tracing::warn!("⚠️  Old wallet format detected - migrating to encrypted format");
+                let old_data: WalletData = bincode::deserialize(&contents).map_err(|e| {
+                    WalletError::LoadFailed(format!("Failed to deserialize old format: {}", e))
+                })?;
+
+                // Reconstruct wallet from old data
+                let signing_key = SigningKey::from_bytes(&old_data.keypair.secret_key);
+                let verifying_key = VerifyingKey::from_bytes(&old_data.keypair.public_key)
+                    .map_err(|e| WalletError::LoadFailed(format!("Invalid public key: {}", e)))?;
+
+                let wallet = Wallet {
+                    data: old_data,
+                    signing_key,
+                    verifying_key,
+                };
+
+                // Save in new encrypted format
+                wallet.save(path, password)?;
+                tracing::info!("✓ Wallet migrated to encrypted format");
+
+                return Ok(wallet);
+            }
+        };
 
         // Derive decryption key from password
         let mut key = Self::derive_key(password, &encrypted_file.salt)?;
