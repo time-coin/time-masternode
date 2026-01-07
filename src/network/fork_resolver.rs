@@ -329,6 +329,8 @@ mod tests {
     use crate::block::types::{Block, BlockHeader};
 
     fn create_test_block(height: u64) -> Block {
+        use crate::types::MasternodeTier;
+        
         Block {
             header: BlockHeader {
                 version: 1,
@@ -336,9 +338,19 @@ mod tests {
                 merkle_root: [0u8; 32],
                 timestamp: 0,
                 height,
-                nonce: 0,
+                block_reward: 0,
+                leader: String::new(),
+                attestation_root: [0u8; 32],
+                masternode_tiers: vec![
+                    (MasternodeTier::Free, 0),
+                    (MasternodeTier::Bronze, 0),
+                    (MasternodeTier::Silver, 0),
+                    (MasternodeTier::Gold, 0),
+                ],
             },
             transactions: vec![],
+            masternode_rewards: vec![],
+            time_attestations: vec![],
         }
     }
 
