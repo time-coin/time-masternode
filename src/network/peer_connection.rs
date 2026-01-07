@@ -54,10 +54,11 @@ impl ForkResolutionAttempt {
     }
 
     fn should_give_up(&self) -> bool {
-        // Only give up if we've searched back more than 2000 blocks (checked elsewhere)
-        // or if we've been trying for more than 5 minutes
+        // Give more time for deeper forks - increased to 15 minutes
+        // Large forks (>1000 blocks) need more time on slow connections
         let elapsed = self.last_attempt.elapsed();
-        elapsed.as_secs() > 300 // 5 minutes
+        elapsed.as_secs() > 900 // 15 minutes
+            || self.attempt_count > 50 // Absolute retry limit
     }
 
     fn increment(&mut self) {
@@ -79,11 +80,23 @@ impl PingState {
     fn record_ping_sent(&mut self, nonce: u64) {
         let now = Instant::now();
         self.last_ping_sent = Some(now);
+
+        // Hard limit to prevent memory exhaustion on high packet-loss networks
+        const MAX_PENDING_PINGS: usize = 100;
+        if self.pending_pings.len() >= MAX_PENDING_PINGS {
+            // Remove oldest 50% when limit reached
+            self.pending_pings.drain(0..50);
+            tracing::warn!(
+                "Pending pings exceeded {}, cleared old entries",
+                MAX_PENDING_PINGS
+            );
+        }
+
         self.pending_pings.push((nonce, now));
 
-        // Remove pings that have already timed out (older than 90 seconds)
-        // Don't arbitrarily limit to 5 - let timeout handle cleanup
-        const TIMEOUT: Duration = Duration::from_secs(90);
+        // Remove pings that have already timed out (older than 120 seconds)
+        // Increased timeout for high-latency satellite/mobile connections
+        const TIMEOUT: Duration = Duration::from_secs(120);
         self.pending_pings
             .retain(|(_, sent_time)| now.duration_since(*sent_time) <= TIMEOUT);
     }
@@ -505,19 +518,19 @@ impl PeerConnection {
         exclude_peer: &str,
     ) -> Result<usize, String> {
         let connected_peers = peer_registry.get_connected_peers().await;
-        
+
         if connected_peers.len() < 2 {
             // Not enough peers to check consensus
             return Ok(0);
         }
-        
+
         let mut agreement_count = 0;
-        
+
         for peer_ip in &connected_peers {
             if peer_ip == exclude_peer {
                 continue; // Skip the peer we're checking
             }
-            
+
             if let Some(peer_height) = peer_registry.get_peer_height(peer_ip).await {
                 // Peer agrees if within 10 blocks of fork height
                 if (peer_height as i64 - fork_height as i64).abs() <= 10 {
@@ -529,7 +542,7 @@ impl PeerConnection {
                 }
             }
         }
-        
+
         Ok(agreement_count)
     }
 
@@ -1030,7 +1043,7 @@ impl PeerConnection {
 
                         // Lightweight consensus: Check if at least 1 other peer agrees
                         let agreement_count = self
-                            .check_fork_agreement(&peer_registry, fork_height, &self.peer_ip)
+                            .check_fork_agreement(peer_registry, fork_height, &self.peer_ip)
                             .await?;
 
                         if agreement_count == 0 {

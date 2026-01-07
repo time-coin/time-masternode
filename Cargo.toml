@@ -48,6 +48,10 @@ hostname = "0.4"
 socket2 = "0.5"
 tokio-util = "0.7"
 
+# Wallet encryption (Phase 2 Critical Security)
+aes-gcm = "0.10"                                    # AES-256-GCM encryption
+argon2 = "0.5"                                       # Password-based key derivation
+
 # Critical security enhancements
 blake3 = "1.5"                                      # Fast cryptographic hashing
 zeroize = { version = "1.7", features = ["derive"] }  # Secure memory cleanup

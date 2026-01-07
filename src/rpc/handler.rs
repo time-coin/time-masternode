@@ -773,10 +773,13 @@ impl RpcHandler {
         // Get UTXOs for this wallet
         let utxos = self.utxo_manager.list_all_utxos().await;
 
+        // Calculate required fee (0.1% of amount to match validation requirements)
+        let fee = amount_units / 1000; // 0.1% fee rate (matches consensus.rs:1251)
+        let fee = fee.max(1_000); // Minimum 0.00001 TIME fee
+
         // Find sufficient UTXOs
         let mut selected_utxos = Vec::new();
         let mut total_input = 0u64;
-        let fee = 1_000; // 0.00001 TIME fee
 
         for utxo in utxos {
             selected_utxos.push(utxo.clone());

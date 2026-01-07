@@ -55,14 +55,15 @@ impl DeterministicBlockGenerator {
 
         // Calculate total fees collected from transactions
         // Fees = inputs - outputs (already validated during transaction processing)
+        // At block generation time, we calculate fees from each transaction's outputs
         let total_fees: u64 = txs_sorted
             .iter()
-            .filter(|_tx| !_tx.inputs.is_empty()) // Skip coinbase
-            .map(|_tx| {
-                // Note: Input values would need to be looked up from UTXO set
-                // For now, fee is implicit in transaction (inputs - outputs)
-                // This will be calculated during validation
-                0u64 // Placeholder - actual fee tracking needs UTXO lookups
+            .filter(|tx| !tx.inputs.is_empty()) // Skip coinbase
+            .map(|tx| {
+                // Calculate fee as 0.1% of transaction amount
+                // Fee = output_sum / 1000 (matches validation in consensus.rs:1251)
+                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                output_sum / 1000 // 0.1% fee rate
             })
             .sum();
 
@@ -82,14 +83,20 @@ impl DeterministicBlockGenerator {
 
         // Distribute masternode rewards proportionally by weight
         // Rewards are stored in masternode_rewards field and converted to UTXOs when block is processed
+        // NOTE: Fees are deducted from rewards (0.1% fee on masternode rewards)
         let mut masternode_rewards = Vec::new();
 
         if total_weight > 0 && !masternodes_sorted.is_empty() {
             for mn in &masternodes_sorted {
                 let weight = mn.tier.reward_weight();
-                let reward = (masternode_pool * weight) / total_weight;
-                if reward > 0 {
-                    masternode_rewards.push((mn.wallet_address.clone(), reward));
+                let gross_reward = (masternode_pool * weight) / total_weight;
+
+                // Deduct 0.1% fee from masternode reward
+                let fee = gross_reward / 1000; // 0.1% = 1/1000
+                let net_reward = gross_reward.saturating_sub(fee);
+
+                if net_reward > 0 {
+                    masternode_rewards.push((mn.wallet_address.clone(), net_reward));
                 }
             }
         }

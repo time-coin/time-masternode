@@ -159,6 +159,7 @@ impl ForkResolver {
     }
 
     /// Create with default settings
+    #[allow(clippy::should_implement_trait)]
     pub fn default() -> Self {
         Self::new(MAX_CONCURRENT_RESOLUTIONS)
     }
@@ -329,8 +330,8 @@ mod tests {
     use crate::block::types::{Block, BlockHeader};
 
     fn create_test_block(height: u64) -> Block {
-        use crate::types::MasternodeTier;
-        
+        use crate::block::types::MasternodeTierCounts;
+
         Block {
             header: BlockHeader {
                 version: 1,
@@ -341,12 +342,12 @@ mod tests {
                 block_reward: 0,
                 leader: String::new(),
                 attestation_root: [0u8; 32],
-                masternode_tiers: vec![
-                    (MasternodeTier::Free, 0),
-                    (MasternodeTier::Bronze, 0),
-                    (MasternodeTier::Silver, 0),
-                    (MasternodeTier::Gold, 0),
-                ],
+                masternode_tiers: MasternodeTierCounts {
+                    free: 0,
+                    bronze: 0,
+                    silver: 0,
+                    gold: 0,
+                },
             },
             transactions: vec![],
             masternode_rewards: vec![],

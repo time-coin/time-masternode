@@ -1217,7 +1217,7 @@ impl ConsensusEngine {
         // 3. Check input values >= output values (no inflation)
         let mut input_sum = 0u64;
         for input in &tx.inputs {
-            if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+            if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
                 input_sum += utxo.value;
             } else {
                 return Err("UTXO not found".to_string());
@@ -1324,7 +1324,7 @@ impl ConsensusEngine {
             .utxo_manager
             .get_utxo(&input.previous_output)
             .await
-            .ok_or_else(|| format!("UTXO not found: {:?}", input.previous_output))?;
+            .map_err(|e| format!("UTXO not found: {:?} - {}", input.previous_output, e))?;
 
         // Create the message that should have been signed
         let message = self.create_signature_message(tx, input_idx)?;
@@ -1506,7 +1506,7 @@ impl ConsensusEngine {
         let input_sum: u64 = {
             let mut sum = 0u64;
             for input in &tx.inputs {
-                if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
                     sum += utxo.value;
                 }
             }

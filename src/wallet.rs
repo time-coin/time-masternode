@@ -1,15 +1,25 @@
 //! Wallet management for key storage and transaction signing
-//! Note: Scaffolding for future wallet integration
+//!
+//! Security: Wallets are encrypted with AES-256-GCM using Argon2 key derivation
 
 #![allow(dead_code)]
 
 use crate::address::Address;
 use crate::network_type::NetworkType;
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use argon2::{
+    password_hash::{PasswordHasher, SaltString},
+    Argon2,
+};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use zeroize::Zeroize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum WalletError {
@@ -21,9 +31,26 @@ pub enum WalletError {
     SaveFailed(String),
     #[error("Wallet file not found")]
     NotFound,
+    #[error("Invalid password")]
+    InvalidPassword,
+    #[error("Encryption error: {0}")]
+    EncryptionError(String),
 }
 
-/// Bitcoin-style wallet storage format
+/// Encrypted wallet file format
+#[derive(Serialize, Deserialize)]
+struct EncryptedWalletFile {
+    /// File format version
+    version: u32,
+    /// Argon2 salt for key derivation
+    salt: String,
+    /// AES-GCM nonce (12 bytes)
+    nonce: Vec<u8>,
+    /// Encrypted wallet data
+    ciphertext: Vec<u8>,
+}
+
+/// Bitcoin-style wallet storage format (plaintext, for encryption)
 #[derive(Serialize, Deserialize, Clone)]
 pub struct WalletData {
     /// Wallet version (for future upgrades)
@@ -83,8 +110,8 @@ impl Wallet {
         })
     }
 
-    /// Load wallet from file
-    pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, WalletError> {
+    /// Load wallet from encrypted file
+    pub fn load<P: AsRef<Path>>(path: P, password: &str) -> Result<Self, WalletError> {
         let path = path.as_ref();
 
         if !path.exists() {
@@ -94,8 +121,28 @@ impl Wallet {
         let contents = fs::read(path)
             .map_err(|e| WalletError::LoadFailed(format!("Failed to read file: {}", e)))?;
 
-        // Decrypt/deserialize (simplified - in production use proper encryption)
-        let data: WalletData = bincode::deserialize(&contents)
+        // Deserialize encrypted file
+        let encrypted_file: EncryptedWalletFile = bincode::deserialize(&contents)
+            .map_err(|e| WalletError::LoadFailed(format!("Failed to deserialize: {}", e)))?;
+
+        // Derive decryption key from password
+        let mut key = Self::derive_key(password, &encrypted_file.salt)?;
+
+        // Decrypt wallet data
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| WalletError::EncryptionError(e.to_string()))?;
+
+        let nonce = Nonce::from_slice(&encrypted_file.nonce);
+
+        let plaintext = cipher
+            .decrypt(nonce, encrypted_file.ciphertext.as_ref())
+            .map_err(|_| WalletError::InvalidPassword)?;
+
+        // Zeroize key material
+        key.zeroize();
+
+        // Deserialize wallet data
+        let data: WalletData = bincode::deserialize(&plaintext)
             .map_err(|e| WalletError::LoadFailed(format!("Failed to deserialize: {}", e)))?;
 
         // Reconstruct keypair
@@ -110,8 +157,8 @@ impl Wallet {
         })
     }
 
-    /// Save wallet to file (Bitcoin-style format)
-    pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), WalletError> {
+    /// Save wallet to encrypted file
+    pub fn save<P: AsRef<Path>>(&self, path: P, password: &str) -> Result<(), WalletError> {
         let path = path.as_ref();
 
         // Create parent directory if needed
@@ -121,8 +168,42 @@ impl Wallet {
             })?;
         }
 
-        // Serialize wallet data (in production: encrypt with AES-256)
-        let contents = bincode::serialize(&self.data)
+        // Generate random salt for Argon2
+        let salt = SaltString::generate(&mut OsRng);
+
+        // Derive encryption key from password
+        let mut key = Self::derive_key(password, salt.as_str())?;
+
+        // Encrypt wallet data
+        let cipher = Aes256Gcm::new_from_slice(&key)
+            .map_err(|e| WalletError::EncryptionError(e.to_string()))?;
+
+        // Generate random nonce (12 bytes for AES-GCM)
+        let nonce_bytes: [u8; 12] = rand::random();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // Serialize wallet data
+        let plaintext = bincode::serialize(&self.data)
+            .map_err(|e| WalletError::SaveFailed(format!("Failed to serialize: {}", e)))?;
+
+        // Encrypt
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_ref())
+            .map_err(|e| WalletError::EncryptionError(e.to_string()))?;
+
+        // Zeroize key material
+        key.zeroize();
+
+        // Create encrypted file structure
+        let encrypted_file = EncryptedWalletFile {
+            version: 1,
+            salt: salt.to_string(),
+            nonce: nonce_bytes.to_vec(),
+            ciphertext,
+        };
+
+        // Serialize encrypted file
+        let contents = bincode::serialize(&encrypted_file)
             .map_err(|e| WalletError::SaveFailed(format!("Failed to serialize: {}", e)))?;
 
         // Write atomically
@@ -134,6 +215,29 @@ impl Wallet {
             .map_err(|e| WalletError::SaveFailed(format!("Failed to rename: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Derive encryption key from password using Argon2
+    fn derive_key(password: &str, salt_str: &str) -> Result<[u8; 32], WalletError> {
+        let argon2 = Argon2::default();
+
+        let salt = SaltString::from_b64(salt_str)
+            .map_err(|e| WalletError::EncryptionError(format!("Invalid salt: {}", e)))?;
+
+        let password_hash = argon2
+            .hash_password(password.as_bytes(), &salt)
+            .map_err(|e| WalletError::EncryptionError(format!("Key derivation failed: {}", e)))?;
+
+        // Extract 32-byte key from hash
+        let hash_bytes = password_hash
+            .hash
+            .ok_or_else(|| WalletError::EncryptionError("No hash output".to_string()))?;
+
+        let mut key = [0u8; 32];
+        let hash_slice = hash_bytes.as_bytes();
+        key.copy_from_slice(&hash_slice[..32.min(hash_slice.len())]);
+
+        Ok(key)
     }
 
     /// Get wallet address
@@ -197,14 +301,17 @@ impl WalletManager {
     }
 
     /// Create or load wallet
+    /// NOTE: Uses default password "timecoin" for development.
+    /// TODO: In production, prompt user for password
     pub fn get_or_create_wallet(&self, network: NetworkType) -> Result<Wallet, WalletError> {
         let path = self.default_wallet_path();
+        const DEFAULT_PASSWORD: &str = "timecoin";
 
         if Path::new(&path).exists() {
-            Wallet::load(&path)
+            Wallet::load(&path, DEFAULT_PASSWORD)
         } else {
             let wallet = Wallet::new(network, Some("Default Wallet".to_string()))?;
-            wallet.save(&path)?;
+            wallet.save(&path, DEFAULT_PASSWORD)?;
             Ok(wallet)
         }
     }
@@ -215,16 +322,17 @@ impl WalletManager {
         &self,
         network: NetworkType,
         label: Option<String>,
+        password: &str,
     ) -> Result<Wallet, WalletError> {
         let wallet = Wallet::new(network, label)?;
-        wallet.save(self.default_wallet_path())?;
+        wallet.save(self.default_wallet_path(), password)?;
         Ok(wallet)
     }
 
     /// Load existing wallet
     #[allow(dead_code)]
-    pub fn load_wallet(&self) -> Result<Wallet, WalletError> {
-        Wallet::load(self.default_wallet_path())
+    pub fn load_wallet(&self, password: &str) -> Result<Wallet, WalletError> {
+        Wallet::load(self.default_wallet_path(), password)
     }
 }
 

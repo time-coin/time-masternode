@@ -264,7 +264,7 @@ impl AvalancheHandler {
         let input_sum: u64 = {
             let mut sum = 0u64;
             for input in &tx.inputs {
-                if let Some(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
                     sum += utxo.value;
                 }
             }

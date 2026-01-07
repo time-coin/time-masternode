@@ -15,8 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-// IMPROVED: Reasonable tolerance for network conditions (15 seconds)
-const TIMESTAMP_TOLERANCE_SECS: i64 = 15;
+// IMPROVED: Reasonable tolerance for network conditions (60 seconds)
+// Increased to account for: network latency (0-5s), clock drift (0-10s),
+// processing delays (0-5s), and buffer for satellite/mobile connections (40s)
+const TIMESTAMP_TOLERANCE_SECS: i64 = 60;
 const MAX_FORK_HISTORY: usize = 1000;
 
 /// Fork resolution parameters with enhanced metadata

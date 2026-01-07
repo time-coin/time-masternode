@@ -95,6 +95,14 @@ impl UTXOStateManager {
         Ok(())
     }
 
+    /// Get a UTXO by outpoint (used for undo logs)
+    pub async fn get_utxo(&self, outpoint: &OutPoint) -> Result<UTXO, UtxoError> {
+        self.storage
+            .get_utxo(outpoint)
+            .await
+            .ok_or(UtxoError::NotFound)
+    }
+
     /// Mark a UTXO as spent (used when processing blocks)
     pub async fn spend_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
         self.storage.remove_utxo(outpoint).await?;
@@ -295,10 +303,7 @@ impl UTXOStateManager {
         Vec::new()
     }
 
-    pub async fn get_utxo(&self, outpoint: &OutPoint) -> Option<UTXO> {
-        self.storage.get_utxo(outpoint).await
-    }
-
+    /// Get all UTXOs (for diagnostics)
     pub async fn list_all_utxos(&self) -> Vec<UTXO> {
         self.storage.list_utxos().await
     }

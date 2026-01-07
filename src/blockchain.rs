@@ -60,6 +60,45 @@ const TESTNET_CHECKPOINTS: &[(u64, &str)] = &[
     // Testnet checkpoints will be added as the network matures
 ];
 
+/// Undo log for blockchain rollback operations
+/// Records spent UTXOs and finalized transactions for each block
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UndoLog {
+    /// Block height this undo log corresponds to
+    pub height: u64,
+    /// Block hash for verification
+    pub block_hash: [u8; 32],
+    /// UTXOs that were spent in this block (for restoration during rollback)
+    pub spent_utxos: Vec<(OutPoint, UTXO)>,
+    /// Transaction IDs that were finalized by Avalanche before block inclusion
+    pub finalized_txs: Vec<[u8; 32]>,
+    /// Timestamp when undo log was created
+    pub created_at: i64,
+}
+
+impl UndoLog {
+    /// Create new undo log for a block
+    pub fn new(height: u64, block_hash: [u8; 32]) -> Self {
+        Self {
+            height,
+            block_hash,
+            spent_utxos: Vec::new(),
+            finalized_txs: Vec::new(),
+            created_at: chrono::Utc::now().timestamp(),
+        }
+    }
+
+    /// Add a spent UTXO to the undo log
+    pub fn add_spent_utxo(&mut self, outpoint: OutPoint, utxo: UTXO) {
+        self.spent_utxos.push((outpoint, utxo));
+    }
+
+    /// Mark a transaction as finalized
+    pub fn add_finalized_tx(&mut self, txid: [u8; 32]) {
+        self.finalized_txs.push(txid);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct GenesisBlock {
@@ -1399,8 +1438,11 @@ impl Blockchain {
             return Err(format!("Block too large: {} bytes", serialized.len()));
         }
 
-        // Process UTXOs
-        self.process_block_utxos(&block).await;
+        // Process UTXOs and create undo log
+        let undo_log = self.process_block_utxos(&block).await?;
+
+        // Save undo log for rollback support
+        self.save_undo_log(&undo_log)?;
 
         // Save block
         self.save_block(&block)?;
@@ -1656,17 +1698,73 @@ impl Blockchain {
         Ok(())
     }
 
-    async fn process_block_utxos(&self, block: &Block) {
-        let _block_hash = block.hash();
+    /// Process block UTXOs and create undo log for rollback support
+    async fn process_block_utxos(&self, block: &Block) -> Result<UndoLog, String> {
+        let block_hash = block.hash();
+        let mut undo_log = UndoLog::new(block.header.height, block_hash);
         let mut utxos_created = 0;
         let mut utxos_spent = 0;
 
-        // Process each transaction
+        // FIRST: Process masternode rewards (block rewards)
+        // Create a synthetic coinbase transaction ID for masternode rewards
+        let coinbase_txid = if !block.transactions.is_empty() {
+            block.transactions[0].txid()
+        } else {
+            // Fallback: Generate txid from block hash
+            block_hash
+        };
+
+        for (vout, (address, amount)) in block.masternode_rewards.iter().enumerate() {
+            let utxo = UTXO {
+                outpoint: OutPoint {
+                    txid: coinbase_txid,
+                    vout: vout as u32,
+                },
+                value: *amount,
+                script_pubkey: address.as_bytes().to_vec(),
+                address: address.clone(),
+            };
+
+            if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                tracing::warn!(
+                    "⚠️  Could not add masternode reward UTXO for {} at block {}: {:?}",
+                    address,
+                    block.header.height,
+                    e
+                );
+            } else {
+                utxos_created += 1;
+                tracing::debug!(
+                    "💰 Created reward UTXO for {} amount {} at block {}",
+                    address,
+                    amount,
+                    block.header.height
+                );
+            }
+        }
+
+        // SECOND: Process each transaction
         for tx in &block.transactions {
             let txid = tx.txid();
 
-            // Spend inputs (mark UTXOs as spent)
+            // Check if transaction was finalized by Avalanche before block inclusion
+            // Simplified: If transaction doesn't exist in finalized pool, assume it's finalized
+            // (More robust finalization tracking can be added later)
+            let is_finalized = false; // Conservative: treat all as unfinalized for undo logs
+            if is_finalized {
+                undo_log.add_finalized_tx(txid);
+            }
+
+            // Spend inputs (mark UTXOs as spent) and record in undo log
             for input in &tx.inputs {
+                // For non-finalized transactions, save the UTXO before spending
+                // so we can restore it during rollback
+                if !is_finalized {
+                    if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                        undo_log.add_spent_utxo(input.previous_output.clone(), utxo);
+                    }
+                }
+
                 if let Err(e) = self.utxo_manager.spend_utxo(&input.previous_output).await {
                     tracing::warn!(
                         "⚠️  Could not spend UTXO {}:{} in block {}: {:?}",
@@ -1711,13 +1809,17 @@ impl Blockchain {
 
         if utxos_created > 0 || utxos_spent > 0 {
             tracing::info!(
-                "💰 Block {} indexed {} UTXOs ({} created, {} spent)",
+                "💰 Block {} indexed {} UTXOs ({} created [including {} rewards], {} spent, {} in undo log)",
                 block.header.height,
                 utxos_created,
                 utxos_created,
-                utxos_spent
+                block.masternode_rewards.len(),
+                utxos_spent,
+                undo_log.spent_utxos.len()
             );
         }
+
+        Ok(undo_log)
     }
 
     fn calculate_rewards_from_info(&self, masternodes: &[MasternodeInfo]) -> Vec<(String, u64)> {
@@ -1844,6 +1946,41 @@ impl Blockchain {
         None
     }
 
+    /// Save undo log for a block
+    fn save_undo_log(&self, undo_log: &UndoLog) -> Result<(), String> {
+        let key = format!("undo_{}", undo_log.height);
+        let data = bincode::serialize(undo_log).map_err(|e| e.to_string())?;
+        self.storage
+            .insert(key.as_bytes(), data)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Load undo log for a block height
+    fn load_undo_log(&self, height: u64) -> Result<UndoLog, String> {
+        let key = format!("undo_{}", height);
+        let value = self
+            .storage
+            .get(key.as_bytes())
+            .map_err(|e| e.to_string())?;
+
+        if let Some(v) = value {
+            let undo_log: UndoLog = bincode::deserialize(&v).map_err(|e| e.to_string())?;
+            Ok(undo_log)
+        } else {
+            Err(format!("Undo log not found for height {}", height))
+        }
+    }
+
+    /// Delete undo log for a block height
+    fn delete_undo_log(&self, height: u64) -> Result<(), String> {
+        let key = format!("undo_{}", height);
+        self.storage
+            .remove(key.as_bytes())
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Get checkpoints for the current network
     fn get_checkpoints(&self) -> &'static [(u64, &'static str)] {
         match self.network_type {
@@ -1947,82 +2084,168 @@ impl Blockchain {
             target_height
         );
 
-        // Step 1: Rollback UTXOs for each block (in reverse order)
-        // Note: Full UTXO rollback requires storing spent UTXOs or reconstructing from chain
-        // For now, we remove outputs created by rolled-back blocks
+        // Step 1: Rollback UTXOs using undo logs (in reverse order)
         let mut utxo_rollback_count = 0;
+        let mut utxo_restored_count = 0;
+        let mut transactions_to_repool = Vec::new();
+
         for height in (target_height + 1..=current).rev() {
-            if let Ok(block) = self.get_block_by_height(height).await {
-                // Remove outputs created by transactions in this block
-                for tx in block.transactions.iter() {
-                    let txid = tx.txid();
-                    for (vout, _output) in tx.outputs.iter().enumerate() {
-                        let outpoint = OutPoint {
-                            txid,
-                            vout: vout as u32,
-                        };
-                        if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
-                            tracing::debug!(
-                                "Could not remove UTXO {:?} at height {}: {}",
+            // Load undo log for this block
+            match self.load_undo_log(height) {
+                Ok(undo_log) => {
+                    tracing::debug!(
+                        "📖 Loaded undo log for height {}: {} spent UTXOs, {} finalized txs",
+                        height,
+                        undo_log.spent_utxos.len(),
+                        undo_log.finalized_txs.len()
+                    );
+
+                    // Restore spent UTXOs from undo log
+                    for (outpoint, utxo) in undo_log.spent_utxos {
+                        if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                            tracing::warn!(
+                                "Could not restore UTXO {:?} at height {}: {}",
                                 outpoint,
                                 height,
                                 e
                             );
                         } else {
-                            utxo_rollback_count += 1;
+                            utxo_restored_count += 1;
                         }
                     }
 
-                    // CRITICAL: Handle finalized vs unfinalized transactions differently
-                    //
-                    // APPROACH A: Finalized Transaction Protection
-                    // - Finalized transactions (by Avalanche) CANNOT be rolled back
-                    // - Only unfinalized transactions should have their UTXOs restored
-                    // - Finalized transactions will be re-included by reorg validation check
-                    //
-                    // CURRENT IMPLEMENTATION STATUS:
-                    // 1. ✅ Reorg validation prevents forks missing finalized transactions
-                    // 2. ⚠️  UTXO restoration for unfinalized transactions still needs implementation
-                    //    This requires:
-                    //    a) Tracking which transactions were finalized before block inclusion
-                    //    b) Undo log storing spent UTXO data for unfinalized transactions
-                    //    c) Logic to restore UTXOs only for unfinalized transactions
-                    //
-                    // 3. ⚠️  Mempool handling needs implementation:
-                    //    - Finalized transactions: Do NOT return to mempool (already finalized)
-                    //    - Unfinalized transactions: Return to mempool for re-mining
-                    //
-                    // IMPACT OF CURRENT INCOMPLETE STATE:
-                    // - Finalized transactions: PROTECTED ✅ (cannot be excluded from chain)
-                    // - Unfinalized transactions: Vulnerable to UTXO corruption ⚠️
-                    // - Deep reorgs are prevented by MAX_REORG_DEPTH and checkpoints
-                    //
-                    // PRIORITY:
-                    // - HIGH: Implement undo log for unfinalized transaction UTXO restoration
-                    // - MEDIUM: Add finalization status tracking per transaction
-                    //
-                    // NOTE: Since reorganize_to_chain() validates finalized transactions are
-                    // present in new chain, finalized UTXOs will be correctly re-spent when
-                    // new blocks are applied. Only unfinalized transactions need special handling.
+                    // Get the block to identify transactions for mempool
+                    if let Ok(block) = self.get_block_by_height(height).await {
+                        // FIRST: Remove masternode reward UTXOs
+                        let coinbase_txid = if !block.transactions.is_empty() {
+                            block.transactions[0].txid()
+                        } else {
+                            block.hash()
+                        };
 
-                    let is_coinbase =
-                        !tx.inputs.is_empty() && tx.inputs[0].previous_output.vout == u32::MAX;
+                        for (vout, _) in block.masternode_rewards.iter().enumerate() {
+                            let outpoint = OutPoint {
+                                txid: coinbase_txid,
+                                vout: vout as u32,
+                            };
+                            if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
+                                tracing::debug!(
+                                    "Could not remove reward UTXO {:?} at height {}: {}",
+                                    outpoint,
+                                    height,
+                                    e
+                                );
+                            } else {
+                                utxo_rollback_count += 1;
+                            }
+                        }
 
-                    if !is_coinbase {
-                        tracing::debug!(
-                            "📝 Transaction {} at height {} - UTXOs not restored (needs undo log implementation)",
-                            hex::encode(&txid[..8]),
-                            height
-                        );
+                        // SECOND: Remove transaction outputs
+                        for tx in block.transactions.iter() {
+                            let txid = tx.txid();
+
+                            // Remove created UTXOs
+                            for (vout, _output) in tx.outputs.iter().enumerate() {
+                                let outpoint = OutPoint {
+                                    txid,
+                                    vout: vout as u32,
+                                };
+                                if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
+                                    tracing::debug!(
+                                        "Could not remove UTXO {:?} at height {}: {}",
+                                        outpoint,
+                                        height,
+                                        e
+                                    );
+                                } else {
+                                    utxo_rollback_count += 1;
+                                }
+                            }
+
+                            // Non-coinbase, non-finalized transactions go back to mempool
+                            let is_coinbase = !tx.inputs.is_empty()
+                                && tx.inputs[0].previous_output.vout == u32::MAX;
+                            let is_finalized = undo_log.finalized_txs.contains(&txid);
+
+                            if !is_coinbase && !is_finalized {
+                                transactions_to_repool.push(tx.clone());
+                                tracing::debug!(
+                                    "📝 Transaction {} will be returned to mempool",
+                                    hex::encode(&txid[..8])
+                                );
+                            } else if is_finalized {
+                                tracing::debug!(
+                                    "✅ Finalized transaction {} - will NOT return to mempool",
+                                    hex::encode(&txid[..8])
+                                );
+                            }
+                        }
+                    }
+
+                    // Delete undo log after successful rollback
+                    if let Err(e) = self.delete_undo_log(height) {
+                        tracing::warn!("Could not delete undo log for height {}: {}", height, e);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "⚠️  No undo log found for height {}: {}. Rollback may be incomplete.",
+                        height,
+                        e
+                    );
+
+                    // Fallback: Try to at least remove created UTXOs
+                    if let Ok(block) = self.get_block_by_height(height).await {
+                        // Remove masternode rewards
+                        let coinbase_txid = if !block.transactions.is_empty() {
+                            block.transactions[0].txid()
+                        } else {
+                            block.hash()
+                        };
+
+                        for (vout, _) in block.masternode_rewards.iter().enumerate() {
+                            let outpoint = OutPoint {
+                                txid: coinbase_txid,
+                                vout: vout as u32,
+                            };
+                            if let Ok(()) = self.utxo_manager.remove_utxo(&outpoint).await {
+                                utxo_rollback_count += 1;
+                            }
+                        }
+
+                        // Remove transaction outputs
+                        for tx in block.transactions.iter() {
+                            let txid = tx.txid();
+                            for (vout, _output) in tx.outputs.iter().enumerate() {
+                                let outpoint = OutPoint {
+                                    txid,
+                                    vout: vout as u32,
+                                };
+                                if let Ok(()) = self.utxo_manager.remove_utxo(&outpoint).await {
+                                    utxo_rollback_count += 1;
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
         tracing::info!(
-            "🔄 Rolled back {} UTXO changes (removed outputs from rolled-back blocks)",
-            utxo_rollback_count
+            "🔄 UTXO rollback complete: removed {} outputs, restored {} spent UTXOs, {} txs for mempool",
+            utxo_rollback_count,
+            utxo_restored_count,
+            transactions_to_repool.len()
         );
+
+        // Return non-finalized transactions to mempool for re-mining
+        // TODO: Need to pass transaction pool reference to restore transactions
+        if !transactions_to_repool.is_empty() {
+            tracing::info!(
+                "💡 {} non-finalized transactions need to be returned to mempool (requires transaction pool integration)",
+                transactions_to_repool.len()
+            );
+        }
 
         // Step 2: Remove blocks from storage (highest first)
         for height in (target_height + 1..=current).rev() {
@@ -2232,7 +2455,7 @@ impl Blockchain {
             );
 
             // Save genesis block
-            self.process_block_utxos(&block).await;
+            let _ = self.process_block_utxos(&block).await;
             self.save_block(&block)?;
             // Genesis is height 0, current_height stays at 0
 
