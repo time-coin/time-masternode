@@ -1392,10 +1392,11 @@ async fn handle_peer(
                                         let start_height = our_height + 1;
                                         let request = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
 
-                                        if let Err(e) = peer_registry.send_to_peer(&ip_str, request).await {
+                                        // Use masternode_address (contains IP:port) instead of ephemeral connection port
+                                        if let Err(e) = peer_registry.send_to_peer(&heartbeat.masternode_address, request).await {
                                             tracing::warn!(
                                                 "Failed to request blocks from {}: {}",
-                                                peer.addr,
+                                                heartbeat.masternode_address,
                                                 e
                                             );
                                         } else {
@@ -1403,7 +1404,7 @@ async fn handle_peer(
                                                 "📨 Requested blocks {}-{} from {}",
                                                 start_height,
                                                 heartbeat.block_height,
-                                                peer.addr
+                                                heartbeat.masternode_address
                                             );
                                         }
                                     }
