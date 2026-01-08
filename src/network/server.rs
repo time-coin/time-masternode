@@ -1182,19 +1182,44 @@ async fn handle_peer(
                                                                             reorg_blocks.last().unwrap().header.height
                                                                         );
 
+                                                                        // CIRCUIT BREAKER: Check fork depth before reorganizing
+                                                                        let fork_depth = our_height.saturating_sub(ancestor);
+                                                                        if fork_depth > 100 {
+                                                                            tracing::error!(
+                                                                                "🚨 [SERVER] DEEP FORK DETECTED: {} blocks deep (ancestor: {}, our height: {})",
+                                                                                fork_depth, ancestor, our_height
+                                                                            );
+                                                                            tracing::error!(
+                                                                                "🚨 [SERVER] Fork is too deep for normal resolution from peer {}", peer.addr
+                                                                            );
+                                                                            continue;
+                                                                        }
+
                                                                         // Perform the actual reorg using the proper function
+                                                                        tracing::info!(
+                                                                            "✅ [SERVER] AI RECOMMENDS: Accept peer {} chain (ancestor: {}, {} blocks)",
+                                                                            peer.addr, ancestor, reorg_blocks.len()
+                                                                        );
+                                                                        tracing::info!(
+                                                                            "🔄 [SERVER] EXECUTING REORGANIZATION: Rolling back to {} and applying {} blocks",
+                                                                            ancestor, reorg_blocks.len()
+                                                                        );
+                                                                        
                                                                         match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
                                                                             Ok(()) => {
-                                                                                tracing::info!("✅ Chain reorganization successful");
+                                                                                let new_height = blockchain.get_height();
+                                                                                tracing::info!("✅✅✅ [SERVER] REORGANIZATION SUCCESSFUL ✅✅✅");
+                                                                                tracing::info!(
+                                                                                    "    Chain switched from height {} → {} (peer: {})",
+                                                                                    ancestor, new_height, peer.addr
+                                                                                );
                                                                             }
                                                                             Err(e) => {
-                                                                                tracing::error!("❌ Chain reorganization failed: {}", e);
-                                                                                // On failure, request more blocks to try again
-                                                                                let request_from = ancestor.saturating_sub(5);
-                                                                                let msg = NetworkMessage::GetBlocks(request_from, end_height);
-                                                                                if let Err(send_err) = peer_registry.send_to_peer(&ip_str, msg).await {
-                                                                                    tracing::error!("Failed to re-request blocks after reorg failure: {}", send_err);
-                                                                                }
+                                                                                tracing::error!("❌❌❌ [SERVER] REORGANIZATION FAILED ❌❌❌");
+                                                                                tracing::error!("    Error: {}", e);
+                                                                                tracing::error!("    Peer: {}, Ancestor: {}", peer.addr, ancestor);
+                                                                                // Don't retry automatically - log for manual investigation
+                                                                                tracing::error!("❌ [SERVER] NOT retrying - may indicate deeper issue");
                                                                             }
                                                                         }
                                                                         continue;
@@ -1258,28 +1283,47 @@ async fn handle_peer(
                                                             if !reorg_blocks.is_empty() {
                                                                 match blockchain.should_accept_fork(&reorg_blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
+                                                                        // CIRCUIT BREAKER: Check fork depth
+                                                                        let fork_depth = our_height.saturating_sub(ancestor);
+                                                                        if fork_depth > 100 {
+                                                                            tracing::error!(
+                                                                                "🚨 [SERVER-2] DEEP FORK DETECTED: {} blocks deep from peer {}",
+                                                                                fork_depth, peer.addr
+                                                                            );
+                                                                            continue;
+                                                                        }
+
                                                                         tracing::info!(
-                                                                            "✅ Accepting fork: reorganizing from height {} with {} blocks",
-                                                                            ancestor, reorg_blocks.len()
+                                                                            "✅ [SERVER-2] AI RECOMMENDS: Accept fork from {} ({} blocks from height {})",
+                                                                            peer.addr, reorg_blocks.len(), ancestor
+                                                                        );
+                                                                        tracing::info!(
+                                                                            "🔄 [SERVER-2] EXECUTING REORGANIZATION..."
                                                                         );
 
                                                                         match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
                                                                             Ok(()) => {
-                                                                                tracing::info!("✅ Chain reorganization successful");
+                                                                                let new_height = blockchain.get_height();
+                                                                                tracing::info!("✅✅✅ [SERVER-2] REORGANIZATION SUCCESSFUL ✅✅✅");
+                                                                                tracing::info!(
+                                                                                    "    Chain switched: {} → {} (peer: {})",
+                                                                                    ancestor, new_height, peer.addr
+                                                                                );
                                                                                 continue;
                                                                             }
                                                                             Err(e) => {
-                                                                                tracing::error!("❌ Chain reorganization failed: {}", e);
+                                                                                tracing::error!("❌❌❌ [SERVER-2] REORGANIZATION FAILED ❌❌❌");
+                                                                                tracing::error!("    Error: {}", e);
                                                                                 continue;
                                                                             }
                                                                         }
                                                                     }
                                                                     Ok(false) => {
-                                                                        tracing::info!("❌ Rejecting fork: our chain is better");
+                                                                        tracing::info!("❌ [SERVER-2] Rejecting fork: our chain is better");
                                                                         continue;
                                                                     }
                                                                     Err(e) => {
-                                                                        tracing::warn!("⚠️ Fork resolution error: {}", e);
+                                                                        tracing::warn!("⚠️ [SERVER-2] Fork resolution error: {}", e);
                                                                         continue;
                                                                     }
                                                                 }

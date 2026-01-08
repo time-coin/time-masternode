@@ -1134,6 +1134,40 @@ impl PeerConnection {
                                             let request_from =
                                                 our_height.saturating_sub(search_depth).max(1);
 
+                                            // CIRCUIT BREAKER: Check if fork is too deep
+                                            if search_depth > 100 {
+                                                error!(
+                                                    "🚨 [WHITELIST] Fork depth exceeds 100 blocks (search_depth: {})",
+                                                    search_depth
+                                                );
+                                                error!("🚨 [WHITELIST] Aborting fork resolution - fork too deep");
+                                                return Ok(());
+                                            }
+
+                                            // Track attempts to prevent infinite loop
+                                            let mut tracker =
+                                                self.fork_resolution_tracker.write().await;
+                                            if let Some(ref mut attempt) = *tracker {
+                                                attempt.increment();
+                                                if attempt.should_give_up() {
+                                                    error!(
+                                                        "🚨 [WHITELIST] Fork resolution retry limit exceeded ({} attempts)",
+                                                        attempt.attempt_count
+                                                    );
+                                                    *tracker = None;
+                                                    return Ok(());
+                                                }
+                                            } else {
+                                                *tracker = Some(ForkResolutionAttempt {
+                                                    fork_height: our_height,
+                                                    attempt_count: 1,
+                                                    last_attempt: std::time::Instant::now(),
+                                                    common_ancestor: None,
+                                                    peer_height: end_height,
+                                                });
+                                            }
+                                            drop(tracker);
+
                                             warn!(
                                                     "⚠️ [WHITELIST] Fork is deeper than height {}. Requesting {} blocks back (from height {}) to find common ancestor.",
                                                     our_height, search_depth, request_from
@@ -1187,6 +1221,43 @@ impl PeerConnection {
                                             let already_searched_back =
                                                 ancestor.saturating_sub(lowest_received);
 
+                                            // CIRCUIT BREAKER: Check fork depth before continuing
+                                            let fork_depth =
+                                                our_height.saturating_sub(lowest_received);
+                                            if fork_depth > 100 {
+                                                error!(
+                                                    "🚨 [WHITELIST] DEEP FORK DETECTED: {} blocks deep (lowest: {}, our height: {})",
+                                                    fork_depth, lowest_received, our_height
+                                                );
+                                                error!("🚨 [WHITELIST] Fork is too deep for normal resolution. Manual intervention required.");
+                                                return Ok(());
+                                            }
+
+                                            // Check fork resolution attempts to prevent infinite loop
+                                            let mut tracker =
+                                                self.fork_resolution_tracker.write().await;
+                                            if let Some(ref mut attempt) = *tracker {
+                                                attempt.increment();
+
+                                                if attempt.should_give_up() {
+                                                    error!(
+                                                        "🚨 [WHITELIST] Fork resolution exceeded retry limit ({} attempts)",
+                                                        attempt.attempt_count
+                                                    );
+                                                    *tracker = None;
+                                                    return Ok(());
+                                                }
+                                            } else {
+                                                *tracker = Some(ForkResolutionAttempt {
+                                                    fork_height: ancestor,
+                                                    attempt_count: 1,
+                                                    last_attempt: std::time::Instant::now(),
+                                                    common_ancestor: None,
+                                                    peer_height: end_height,
+                                                });
+                                            }
+                                            drop(tracker);
+
                                             // Exponentially increase search depth: if we already searched back N blocks, try 2*N more
                                             let additional_depth = if already_searched_back > 0 {
                                                 (already_searched_back * 2).min(100)
@@ -1218,6 +1289,56 @@ impl PeerConnection {
                                         .min()
                                         .unwrap_or(ancestor);
                                     let search_depth = ancestor.saturating_sub(lowest_received);
+
+                                    // CIRCUIT BREAKER: Check fork depth before continuing
+                                    let fork_depth = our_height.saturating_sub(lowest_received);
+                                    if fork_depth > 100 {
+                                        error!(
+                                            "🚨 [WHITELIST] DEEP FORK DETECTED: {} blocks deep (lowest received: {}, our height: {})",
+                                            fork_depth, lowest_received, our_height
+                                        );
+                                        error!(
+                                            "🚨 [WHITELIST] Fork is too deep for normal resolution. Manual intervention required."
+                                        );
+                                        error!(
+                                            "🚨 [WHITELIST] Recommendation: Stop node, backup data, resync from trusted peer."
+                                        );
+                                        return Ok(());
+                                    }
+
+                                    // Check fork resolution attempts to prevent infinite loop
+                                    let mut tracker = self.fork_resolution_tracker.write().await;
+                                    if let Some(ref mut attempt) = *tracker {
+                                        // Update attempt counter
+                                        attempt.increment();
+
+                                        if attempt.should_give_up() {
+                                            error!(
+                                                "🚨 [WHITELIST] Fork resolution exceeded retry limit ({} attempts over {} seconds)",
+                                                attempt.attempt_count,
+                                                attempt.last_attempt.elapsed().as_secs()
+                                            );
+                                            error!("🚨 [WHITELIST] Giving up on fork resolution - fork may be too deep or network issue");
+                                            *tracker = None; // Reset tracker
+                                            return Ok(());
+                                        }
+
+                                        warn!(
+                                            "⏳ [WHITELIST] Fork resolution attempt {}/50, elapsed: {}s",
+                                            attempt.attempt_count,
+                                            attempt.last_attempt.elapsed().as_secs()
+                                        );
+                                    } else {
+                                        // Initialize tracker
+                                        *tracker = Some(ForkResolutionAttempt {
+                                            fork_height: ancestor,
+                                            attempt_count: 1,
+                                            last_attempt: std::time::Instant::now(),
+                                            common_ancestor: None,
+                                            peer_height: end_height,
+                                        });
+                                    }
+                                    drop(tracker);
 
                                     // If we haven't searched back much yet, start with 50 blocks
                                     // Otherwise, double the search depth
@@ -1281,26 +1402,59 @@ impl PeerConnection {
                                 // For whitelisted peers, trust them and perform reorg
                                 // (They are masternodes, so they should have the canonical chain)
                                 info!(
-                                        "✅ [WHITELIST] Accepting fork from trusted masternode, reorganizing from height {} with {} blocks (height {}-{})",
+                                    "✅ [WHITELIST] TRUSTED MASTERNODE: Accepting fork from {}",
+                                    self.peer_ip
+                                );
+                                info!(
+                                        "🔄 [WHITELIST] EXECUTING REORGANIZATION: Rollback to {} and apply {} blocks (height {}-{})",
                                         ancestor, reorg_blocks.len(),
                                         reorg_blocks.first().unwrap().header.height,
                                         reorg_blocks.last().unwrap().header.height
                                     );
 
-                                match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
+                                match blockchain
+                                    .reorganize_to_chain(ancestor, reorg_blocks.clone())
+                                    .await
+                                {
                                     Ok(()) => {
-                                        info!("✅ [WHITELIST] Chain reorganization successful");
+                                        let new_height = blockchain.get_height();
+                                        info!(
+                                            "✅✅✅ [WHITELIST] REORGANIZATION SUCCESSFUL ✅✅✅"
+                                        );
+                                        info!(
+                                            "    Trusted masternode {} provided canonical chain",
+                                            self.peer_ip
+                                        );
+                                        info!(
+                                            "    Chain switched: height {} → {}",
+                                            ancestor, new_height
+                                        );
+                                        info!("    Applied {} blocks", reorg_blocks.len());
                                         return Ok(());
                                     }
                                     Err(e) => {
-                                        warn!("❌ [WHITELIST] Chain reorganization failed: {}", e);
-                                        // On failure, request more blocks going further back
-                                        let request_from = ancestor.saturating_sub(5);
-                                        let msg =
-                                            NetworkMessage::GetBlocks(request_from, end_height);
-                                        if let Err(send_err) = self.send_message(&msg).await {
-                                            warn!("Failed to re-request blocks after reorg failure: {}", send_err);
-                                        }
+                                        error!("❌❌❌ [WHITELIST] REORGANIZATION FAILED ❌❌❌");
+                                        error!("    Trusted masternode: {}", self.peer_ip);
+                                        error!("    Error: {}", e);
+                                        error!(
+                                            "    Attempted: {} blocks from height {} to {}",
+                                            reorg_blocks.len(),
+                                            reorg_blocks
+                                                .first()
+                                                .map(|b| b.header.height)
+                                                .unwrap_or(0),
+                                            reorg_blocks
+                                                .last()
+                                                .map(|b| b.header.height)
+                                                .unwrap_or(0)
+                                        );
+
+                                        // Don't retry - if trusted masternode's chain fails, something is seriously wrong
+                                        error!("❌ [WHITELIST] NOT retrying - trusted peer chain should always be valid");
+                                        return Err(format!(
+                                            "Whitelist reorganization failed: {}",
+                                            e
+                                        ));
                                     }
                                 }
                             }
@@ -1500,28 +1654,62 @@ impl PeerConnection {
                         {
                             Ok(true) => {
                                 info!(
-                                    "🔄 Reorganizing to peer chain from height {} with {} blocks",
+                                    "✅ AI RECOMMENDS: Accept peer chain from {} (common ancestor: {}, {} blocks, peer height: {})",
+                                    self.peer_ip, ancestor, reorg_blocks.len(), peer_tip_height
+                                );
+                                info!(
+                                    "🔄 EXECUTING REORGANIZATION: Rolling back to {} and applying {} peer blocks",
                                     ancestor,
                                     reorg_blocks.len()
                                 );
-                                match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
+                                match blockchain
+                                    .reorganize_to_chain(ancestor, reorg_blocks.clone())
+                                    .await
+                                {
                                     Ok(_) => {
-                                        info!("✅ Chain reorganization successful");
+                                        let new_height = blockchain.get_height();
+                                        info!("✅✅✅ REORGANIZATION SUCCESSFUL ✅✅✅");
+                                        info!(
+                                            "    Chain switched from height {} → {} (accepted {} blocks from {})",
+                                            ancestor, new_height, reorg_blocks.len(), self.peer_ip
+                                        );
                                         *self.fork_resolution_tracker.write().await = None;
                                         return Ok(());
                                     }
                                     Err(e) => {
-                                        error!("❌ Chain reorganization failed: {}", e);
+                                        error!("❌❌❌ REORGANIZATION FAILED ❌❌❌");
+                                        error!("    Error: {}", e);
+                                        error!(
+                                            "    Attempted: {} blocks from peer {}",
+                                            reorg_blocks.len(),
+                                            self.peer_ip
+                                        );
+                                        error!("    Common ancestor: {}", ancestor);
+                                        // Reset tracker on failure
+                                        *self.fork_resolution_tracker.write().await = None;
+                                        return Err(format!("Fork reorganization failed: {}", e));
                                     }
                                 }
                             }
                             Ok(false) => {
-                                info!("❌ Keeping our chain - peer chain rejected");
+                                info!(
+                                    "❌ AI RECOMMENDS: Keep our chain (rejected peer {} at height {} with {} blocks)",
+                                    self.peer_ip, peer_tip_height, reorg_blocks.len()
+                                );
                                 *self.fork_resolution_tracker.write().await = None;
                                 return Ok(());
                             }
                             Err(e) => {
-                                warn!("⚠️ Fork resolution error: {}", e);
+                                error!("⚠️ Fork resolution decision error: {}", e);
+                                error!(
+                                    "    Peer: {}, Height: {}, Blocks: {}",
+                                    self.peer_ip,
+                                    peer_tip_height,
+                                    reorg_blocks.len()
+                                );
+                                // Reset tracker on error
+                                *self.fork_resolution_tracker.write().await = None;
+                                return Err(format!("Fork resolution error: {}", e));
                             }
                         }
                     }
