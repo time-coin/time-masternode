@@ -1751,7 +1751,104 @@ impl PeerConnection {
                                             self.peer_ip
                                         );
                                         error!("    Common ancestor: {}", ancestor);
-                                        // Reset tracker on failure
+
+                                        // CRITICAL FIX: Check if failure is due to incorrect common ancestor
+                                        // If so, request more blocks going further back
+                                        if e.contains("Fork validation failed")
+                                            && e.contains("doesn't build on common ancestor")
+                                        {
+                                            // Calculate lowest block we have
+                                            let lowest_received = reorg_blocks
+                                                .iter()
+                                                .map(|b| b.header.height)
+                                                .min()
+                                                .unwrap_or(ancestor);
+                                            let already_searched_back =
+                                                ancestor.saturating_sub(lowest_received);
+
+                                            warn!(
+                                                "⚠️  Fork validation failed - common ancestor {} appears incorrect. \
+                                                Fork is likely earlier than expected. Lowest received block: {}, searched back: {} blocks",
+                                                ancestor, lowest_received, already_searched_back
+                                            );
+
+                                            // Check fork depth limit
+                                            let fork_depth =
+                                                our_height.saturating_sub(lowest_received);
+                                            if fork_depth > 100 {
+                                                error!(
+                                                    "🚨 DEEP FORK DETECTED: {} blocks deep (lowest: {}, our height: {})",
+                                                    fork_depth, lowest_received, our_height
+                                                );
+                                                error!("🚨 Fork is too deep for normal resolution. Manual intervention may be required.");
+                                                *self.fork_resolution_tracker.write().await = None;
+                                                return Err(format!(
+                                                    "Fork too deep ({} blocks): {}",
+                                                    fork_depth, e
+                                                ));
+                                            }
+
+                                            // Track attempts to prevent infinite loop
+                                            let mut tracker =
+                                                self.fork_resolution_tracker.write().await;
+                                            if let Some(ref mut attempt) = *tracker {
+                                                attempt.increment();
+                                                attempt.update_depth(our_height, lowest_received);
+
+                                                if attempt.should_give_up() {
+                                                    error!(
+                                                        "🚨 Fork resolution exceeded retry limit ({} attempts)",
+                                                        attempt.attempt_count
+                                                    );
+                                                    *tracker = None;
+                                                    return Err(format!(
+                                                        "Fork resolution retry limit exceeded: {}",
+                                                        e
+                                                    ));
+                                                }
+                                            } else {
+                                                *tracker = Some(ForkResolutionAttempt {
+                                                    fork_height: ancestor,
+                                                    attempt_count: 1,
+                                                    last_attempt: std::time::Instant::now(),
+                                                    common_ancestor: None,
+                                                    peer_height: peer_tip_height,
+                                                    max_depth_searched: fork_depth,
+                                                });
+                                            }
+                                            drop(tracker);
+
+                                            // Exponentially increase search depth
+                                            let additional_depth = if already_searched_back > 0 {
+                                                (already_searched_back * 2).min(100)
+                                            } else {
+                                                50 // Default to 50 blocks if we haven't searched back yet
+                                            };
+
+                                            let request_from = lowest_received
+                                                .saturating_sub(additional_depth)
+                                                .max(1);
+
+                                            warn!(
+                                                "🔄 Requesting more history: blocks {}-{} ({} more blocks back) to find true common ancestor",
+                                                request_from, peer_tip_height, additional_depth
+                                            );
+
+                                            let msg = NetworkMessage::GetBlocks(
+                                                request_from,
+                                                peer_tip_height + 1,
+                                            );
+                                            if let Err(e) = self.send_message(&msg).await {
+                                                warn!(
+                                                    "Failed to request deeper block history: {}",
+                                                    e
+                                                );
+                                            }
+
+                                            return Ok(()); // Return OK to continue processing, don't fail permanently
+                                        }
+
+                                        // For other errors, reset tracker and fail
                                         *self.fork_resolution_tracker.write().await = None;
                                         return Err(format!("Fork reorganization failed: {}", e));
                                     }

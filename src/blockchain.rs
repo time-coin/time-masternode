@@ -3950,11 +3950,12 @@ impl Blockchain {
         );
 
         let peer_height = sorted_blocks.last().unwrap().header.height;
+        let peer_lowest = sorted_blocks.first().unwrap().header.height;
         let our_height = self.get_height();
 
         info!(
-            "🔍 Finding common ancestor using exponential+binary search (our: {}, peer: {})",
-            our_height, peer_height
+            "🔍 Finding common ancestor using exponential+binary search (our: {}, peer: {}, peer blocks: {}-{})",
+            our_height, peer_height, peer_lowest, peer_height
         );
 
         // Create network fork resolver for efficient ancestor finding
@@ -3993,6 +3994,16 @@ impl Blockchain {
             .await
         {
             Ok(ancestor) => {
+                // CRITICAL FIX: If ancestor is 0 but peer_lowest is > 100,
+                // the blocks slice likely doesn't go back far enough.
+                // Log a warning so the calling code can detect this and request more blocks.
+                if ancestor == 0 && peer_lowest > 100 {
+                    warn!(
+                        "⚠️ Common ancestor search returned 0, but peer blocks only go back to height {}. \
+                        Actual fork is likely between 0 and {}. Caller should request deeper history.",
+                        peer_lowest, peer_lowest
+                    );
+                }
                 info!("✓ Found common ancestor at height {}", ancestor);
                 ancestor
             }
