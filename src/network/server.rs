@@ -1204,7 +1204,7 @@ async fn handle_peer(
                                                                             "🔄 [SERVER] EXECUTING REORGANIZATION: Rolling back to {} and applying {} blocks",
                                                                             ancestor, reorg_blocks.len()
                                                                         );
-                                                                        
+
                                                                         match blockchain.reorganize_to_chain(ancestor, reorg_blocks).await {
                                                                             Ok(()) => {
                                                                                 let new_height = blockchain.get_height();

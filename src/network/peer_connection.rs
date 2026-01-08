@@ -26,7 +26,13 @@ struct PingState {
     missed_pongs: u32,
 }
 
-/// Fork resolution attempt tracker
+// Circuit breaker limits for fork resolution
+const MAX_FORK_RESOLUTION_DEPTH: u64 = 500; // Don't search more than 500 blocks back
+const MAX_FORK_RESOLUTION_ATTEMPTS: u32 = 20; // Reduced from 50 for faster failure detection
+const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 300; // 5 minutes (reduced from 15 for faster failure)
+const CRITICAL_FORK_DEPTH: u64 = 100; // Require manual intervention if fork > 100 blocks
+
+/// Fork resolution attempt tracker with enhanced circuit breaker
 #[derive(Debug, Clone)]
 struct ForkResolutionAttempt {
     fork_height: u64,
@@ -34,6 +40,7 @@ struct ForkResolutionAttempt {
     last_attempt: std::time::Instant,
     common_ancestor: Option<u64>,
     peer_height: u64,
+    max_depth_searched: u64, // Track deepest search to prevent infinite loops
 }
 
 impl ForkResolutionAttempt {
@@ -44,6 +51,7 @@ impl ForkResolutionAttempt {
             last_attempt: std::time::Instant::now(),
             common_ancestor: None,
             peer_height,
+            max_depth_searched: 0,
         }
     }
 
@@ -54,11 +62,54 @@ impl ForkResolutionAttempt {
     }
 
     fn should_give_up(&self) -> bool {
-        // Give more time for deeper forks - increased to 15 minutes
-        // Large forks (>1000 blocks) need more time on slow connections
         let elapsed = self.last_attempt.elapsed();
-        elapsed.as_secs() > 900 // 15 minutes
-            || self.attempt_count > 50 // Absolute retry limit
+
+        // Give up if any of these conditions are met:
+        // 1. Timeout exceeded (5 minutes)
+        if elapsed.as_secs() > FORK_RESOLUTION_TIMEOUT_SECS {
+            tracing::error!(
+                "🚨 Fork resolution timeout: {} seconds exceeded",
+                FORK_RESOLUTION_TIMEOUT_SECS
+            );
+            return true;
+        }
+
+        // 2. Too many attempts
+        if self.attempt_count > MAX_FORK_RESOLUTION_ATTEMPTS {
+            tracing::error!(
+                "🚨 Fork resolution retry limit: {} attempts exceeded",
+                MAX_FORK_RESOLUTION_ATTEMPTS
+            );
+            return true;
+        }
+
+        // 3. Searched too deep (potential chain divergence)
+        if self.max_depth_searched > MAX_FORK_RESOLUTION_DEPTH {
+            tracing::error!(
+                "🚨 Fork resolution depth limit: searched {} blocks back (max: {})",
+                self.max_depth_searched,
+                MAX_FORK_RESOLUTION_DEPTH
+            );
+            return true;
+        }
+
+        false
+    }
+
+    fn update_depth(&mut self, current_height: u64, search_height: u64) {
+        let depth = current_height.saturating_sub(search_height);
+        if depth > self.max_depth_searched {
+            self.max_depth_searched = depth;
+
+            // Log warning for deep forks
+            if depth > CRITICAL_FORK_DEPTH {
+                tracing::warn!(
+                    "⚠️  Deep fork detected: {} blocks back (critical threshold: {})",
+                    depth,
+                    CRITICAL_FORK_DEPTH
+                );
+            }
+        }
     }
 
     fn increment(&mut self) {
@@ -1169,6 +1220,7 @@ impl PeerConnection {
                                                     last_attempt: std::time::Instant::now(),
                                                     common_ancestor: None,
                                                     peer_height: end_height,
+                                                    max_depth_searched: 0,
                                                 });
                                             }
                                             drop(tracker);
@@ -1259,6 +1311,7 @@ impl PeerConnection {
                                                     last_attempt: std::time::Instant::now(),
                                                     common_ancestor: None,
                                                     peer_height: end_height,
+                                                    max_depth_searched: 0,
                                                 });
                                             }
                                             drop(tracker);
@@ -1341,6 +1394,7 @@ impl PeerConnection {
                                             last_attempt: std::time::Instant::now(),
                                             common_ancestor: None,
                                             peer_height: end_height,
+                                            max_depth_searched: 0,
                                         });
                                     }
                                     drop(tracker);
@@ -1591,6 +1645,7 @@ impl PeerConnection {
                                 last_attempt: std::time::Instant::now(),
                                 common_ancestor: Some(ancestor),
                                 peer_height: peer_tip_height,
+                                max_depth_searched: 0,
                             });
                         }
                         drop(tracker);
@@ -1749,16 +1804,31 @@ impl PeerConnection {
 
                             // Check if we should give up
                             if let Some(ref mut attempt) = *tracker {
+                                // Update depth tracking
+                                attempt.update_depth(our_height, start_height);
+
                                 if start_height < attempt.fork_height {
                                     // We're searching backwards - increment
                                     if attempt.should_give_up() {
+                                        // Capture values before modifying tracker
+                                        let attempts = attempt.attempt_count;
+                                        let elapsed = attempt.last_attempt.elapsed().as_secs();
+
                                         error!(
-                                            "🚨 Fork resolution failed: timeout after {} seconds (searched {} blocks back)",
-                                            attempt.last_attempt.elapsed().as_secs(), search_depth
+                                            "🚨 Fork resolution abandoned: depth={}, attempts={}, elapsed={}s",
+                                            search_depth,
+                                            attempts,
+                                            elapsed
+                                        );
+                                        error!(
+                                            "💡 Manual intervention required: run diagnostic tools or reset from canonical snapshot"
                                         );
                                         *tracker = None;
                                         drop(tracker);
-                                        return Err("Fork resolution failed - timeout".to_string());
+                                        return Err(format!(
+                                            "Fork resolution failed - circuit breaker activated (depth: {}, attempts: {})",
+                                            search_depth, attempts
+                                        ));
                                     }
                                     attempt.increment();
                                     attempt.fork_height = start_height;
@@ -1773,19 +1843,6 @@ impl PeerConnection {
                                 // First attempt
                                 *tracker =
                                     Some(ForkResolutionAttempt::new(start_height, end_height));
-                            }
-
-                            // Safety check - only reject if chains are truly incompatible (>2000 blocks)
-                            if search_depth > 2000 {
-                                error!(
-                                    "🚨 Searched back {} blocks - chains incompatible",
-                                    search_depth
-                                );
-                                *tracker = None;
-                                drop(tracker);
-                                return Err(
-                                    "Deep fork >2000 blocks - chains incompatible".to_string()
-                                );
                             }
 
                             drop(tracker);

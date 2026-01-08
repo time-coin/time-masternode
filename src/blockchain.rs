@@ -338,6 +338,19 @@ impl Blockchain {
             }
             self.current_height.store(height, Ordering::Release);
             tracing::info!("✓ Local blockchain verified (height: {})", height);
+
+            // CRITICAL: Validate genesis hash matches expected canonical hash
+            // This prevents nodes with incompatible chains from connecting
+            if let Err(e) = self.validate_genesis_hash().await {
+                tracing::error!("❌ CRITICAL: Genesis hash validation failed: {}", e);
+                tracing::error!("   This node's blockchain is incompatible with the network");
+                tracing::error!("   Manual intervention required: clear blockchain and resync");
+                return Err(format!(
+                    "Genesis hash mismatch - incompatible blockchain: {}",
+                    e
+                ));
+            }
+
             return Ok(());
         }
 
@@ -446,6 +459,45 @@ impl Blockchain {
                 height
             );
         }
+    }
+
+    /// Validate that our genesis block hash matches the expected canonical hash
+    /// This prevents nodes with incompatible blockchains from joining the network
+    pub async fn validate_genesis_hash(&self) -> Result<(), String> {
+        use crate::block::genesis::GenesisBlock;
+
+        // Get our local genesis block
+        let local_genesis = self
+            .get_block_by_height(0)
+            .await
+            .map_err(|e| format!("Cannot load genesis block: {}", e))?;
+
+        // Load canonical genesis from file to get expected hash
+        let canonical_genesis = GenesisBlock::load_from_file(self.network_type)
+            .map_err(|e| format!("Cannot load canonical genesis: {}", e))?;
+
+        let local_hash = local_genesis.hash();
+        let canonical_hash = canonical_genesis.hash();
+
+        if local_hash != canonical_hash {
+            return Err(format!(
+                "Genesis block mismatch!\n\
+                 Local genesis hash:     {}\n\
+                 Canonical genesis hash: {}\n\
+                 This node has an incompatible blockchain database.\n\
+                 Action required: Delete blockchain data directory and resync from network.",
+                hex::encode(local_hash),
+                hex::encode(canonical_hash)
+            ));
+        }
+
+        tracing::info!(
+            "✅ Genesis hash validated: {} (network: {:?})",
+            hex::encode(&local_hash[..8]),
+            self.network_type
+        );
+
+        Ok(())
     }
 
     /// Clear all block data from storage (for complete reset)
@@ -2727,11 +2779,46 @@ impl Blockchain {
         );
 
         let now = chrono::Utc::now().timestamp();
-        let mut expected_prev_hash = if common_ancestor > 0 {
-            self.get_block_hash(common_ancestor).ok()
+
+        // CRITICAL FIX: Validate that the first block actually builds on common_ancestor
+        // Only check this for the FIRST block, then validate internal chain consistency
+        let common_ancestor_hash = if common_ancestor > 0 {
+            match self.get_block_hash(common_ancestor) {
+                Ok(hash) => {
+                    // Verify first block references this common ancestor
+                    if let Some(first_block) = new_blocks.first() {
+                        if first_block.header.previous_hash != hash {
+                            return Err(format!(
+                                "Fork validation failed: first block {} doesn't build on common ancestor {} \
+                                (expected prev_hash {}, got {}). This suggests the common ancestor was incorrectly identified.",
+                                first_block.header.height,
+                                common_ancestor,
+                                hex::encode(&hash[..8]),
+                                hex::encode(&first_block.header.previous_hash[..8])
+                            ));
+                        }
+                        tracing::info!(
+                            "✅ Verified first block {} builds on common ancestor {} (hash: {})",
+                            first_block.header.height,
+                            common_ancestor,
+                            hex::encode(&hash[..8])
+                        );
+                    }
+                    Some(hash)
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Cannot validate fork: failed to get common ancestor {} hash: {}",
+                        common_ancestor, e
+                    ));
+                }
+            }
         } else {
             None
         };
+
+        // Now validate that the peer's chain is internally consistent
+        let mut expected_prev_hash = common_ancestor_hash;
 
         for (index, block) in new_blocks.iter().enumerate() {
             let expected_height = common_ancestor + 1 + (index as u64);
@@ -2752,11 +2839,12 @@ impl Blockchain {
                 ));
             }
 
-            // Validate previous hash chain continuity
+            // Validate previous hash chain continuity WITHIN peer's chain
             if let Some(prev_hash) = expected_prev_hash {
                 if block.header.previous_hash != prev_hash {
                     return Err(format!(
-                        "Block {} previous_hash mismatch: expected {}, got {}",
+                        "Peer chain not internally consistent: block {} previous_hash mismatch \
+                        (expected {}, got {}). Peer sent invalid/discontinuous chain.",
                         block.header.height,
                         hex::encode(&prev_hash[..8]),
                         hex::encode(&block.header.previous_hash[..8])
@@ -2784,7 +2872,7 @@ impl Blockchain {
                 ));
             }
 
-            // Update expected previous hash for next block
+            // Update expected previous hash for next block in peer's chain
             expected_prev_hash = Some(block.hash());
         }
 
