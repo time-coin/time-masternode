@@ -3936,7 +3936,12 @@ impl Blockchain {
             return 0;
         }
 
-        let fork_start = competing_blocks.first().unwrap().header.height;
+        // CRITICAL FIX: Sort blocks by height before processing
+        // Blocks may arrive out of order from network, and we need the LOWEST height to start search
+        let mut sorted_blocks = competing_blocks.to_vec();
+        sorted_blocks.sort_by_key(|b| b.header.height);
+
+        let fork_start = sorted_blocks.first().unwrap().header.height;
 
         // Start checking from the block before the fork
         if fork_start == 0 {
@@ -3954,7 +3959,7 @@ impl Blockchain {
                 let our_hash = our_block.hash();
 
                 // Check if any competing block directly builds on this block
-                for comp_block in competing_blocks {
+                for comp_block in sorted_blocks.iter() {
                     if comp_block.header.height == height + 1
                         && comp_block.header.previous_hash == our_hash
                     {
