@@ -1073,9 +1073,28 @@ async fn main() {
                 // Check if we have connected peers before producing catchup blocks
                 let connected_peers = block_peer_registry.get_connected_peers().await;
 
-                // If no peers connected, do NOT produce catchup blocks (prevents isolated fork)
+                // CRITICAL SAFETY: Require 2/3 majority of masternodes connected before catchup
+                // This prevents network partitions where small isolated groups fork the chain
+                let total_masternodes = masternodes.len();
+                let min_peers_for_catchup = ((total_masternodes * 2) / 3).max(3); // 2/3 majority, minimum 3
+
                 if connected_peers.is_empty() {
                     tracing::warn!("⚠️  No connected peers - waiting for connections before producing catchup blocks");
+                    continue;
+                }
+
+                if connected_peers.len() < min_peers_for_catchup {
+                    tracing::warn!(
+                        "⚠️  Insufficient peer connectivity for safe catchup: {}/{} connected peers (need {}/{}+ for 2/3 majority)",
+                        connected_peers.len(),
+                        total_masternodes,
+                        min_peers_for_catchup,
+                        total_masternodes
+                    );
+                    tracing::warn!(
+                        "    Waiting for more peer connections to prevent isolated fork (connected: {:?})",
+                        connected_peers.iter().take(5).collect::<Vec<_>>()
+                    );
                     continue;
                 }
 
