@@ -27,10 +27,10 @@ struct PingState {
 }
 
 // Circuit breaker limits for fork resolution
-const MAX_FORK_RESOLUTION_DEPTH: u64 = 500; // Don't search more than 500 blocks back
-const MAX_FORK_RESOLUTION_ATTEMPTS: u32 = 20; // Reduced from 50 for faster failure detection
-const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 300; // 5 minutes (reduced from 15 for faster failure)
-const CRITICAL_FORK_DEPTH: u64 = 100; // Require manual intervention if fork > 100 blocks
+const MAX_FORK_RESOLUTION_DEPTH: u64 = 5000; // Allow searching up to 5000 blocks back for deep forks
+const MAX_FORK_RESOLUTION_ATTEMPTS: u32 = 50; // Allow more attempts for iterative deepening
+const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 600; // 10 minutes to allow for deep fork resolution
+const CRITICAL_FORK_DEPTH: u64 = 100; // Log warning if fork > 100 blocks (but don't stop)
 
 /// Fork resolution attempt tracker with enhanced circuit breaker
 #[derive(Debug, Clone)]
@@ -1766,26 +1766,21 @@ impl PeerConnection {
                                             let already_searched_back =
                                                 ancestor.saturating_sub(lowest_received);
 
-                                            warn!(
-                                                "⚠️  Fork validation failed - common ancestor {} appears incorrect. \
-                                                Fork is likely earlier than expected. Lowest received block: {}, searched back: {} blocks",
-                                                ancestor, lowest_received, already_searched_back
-                                            );
-
-                                            // Check fork depth limit
                                             let fork_depth =
                                                 our_height.saturating_sub(lowest_received);
+
+                                            warn!(
+                                                "⚠️  Fork validation failed - common ancestor {} appears incorrect. \
+                                                Fork is likely earlier than expected. Lowest received block: {}, searched back: {} blocks, fork depth: {}",
+                                                ancestor, lowest_received, already_searched_back, fork_depth
+                                            );
+
+                                            // Log deep forks but don't stop - keep trying to find common ancestor
                                             if fork_depth > 100 {
-                                                error!(
-                                                    "🚨 DEEP FORK DETECTED: {} blocks deep (lowest: {}, our height: {})",
+                                                warn!(
+                                                    "🔍 DEEP FORK: {} blocks deep (lowest: {}, our height: {}). Continuing to search for common ancestor...",
                                                     fork_depth, lowest_received, our_height
                                                 );
-                                                error!("🚨 Fork is too deep for normal resolution. Manual intervention may be required.");
-                                                *self.fork_resolution_tracker.write().await = None;
-                                                return Err(format!(
-                                                    "Fork too deep ({} blocks): {}",
-                                                    fork_depth, e
-                                                ));
                                             }
 
                                             // Track attempts to prevent infinite loop
