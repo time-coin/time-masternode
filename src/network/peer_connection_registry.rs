@@ -4,7 +4,6 @@
 
 #![allow(dead_code)]
 
-use crate::block::types::Block;
 use crate::consensus::ConsensusEngine;
 use crate::network::message::NetworkMessage;
 use arc_swap::ArcSwapOption;
@@ -67,8 +66,7 @@ pub struct PeerConnectionRegistry {
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
     // TSDC consensus resources (shared from server)
     tsdc_consensus: Arc<RwLock<Option<Arc<ConsensusEngine>>>>,
-    #[allow(clippy::type_complexity)]
-    tsdc_block_cache: Arc<RwLock<Option<Arc<DashMap<[u8; 32], Block>>>>>,
+    tsdc_block_cache: Arc<RwLock<Option<Arc<crate::network::block_cache::BlockCache>>>>,
     tsdc_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
     // Blacklist reference for checking whitelist status
     blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
@@ -123,7 +121,7 @@ impl PeerConnectionRegistry {
     pub async fn set_tsdc_resources(
         &self,
         consensus: Arc<ConsensusEngine>,
-        block_cache: Arc<DashMap<[u8; 32], Block>>,
+        block_cache: Arc<crate::network::block_cache::BlockCache>,
         broadcast_tx: broadcast::Sender<NetworkMessage>,
     ) {
         *self.tsdc_consensus.write().await = Some(consensus);
@@ -136,7 +134,7 @@ impl PeerConnectionRegistry {
         &self,
     ) -> (
         Option<Arc<ConsensusEngine>>,
-        Option<Arc<DashMap<[u8; 32], Block>>>,
+        Option<Arc<crate::network::block_cache::BlockCache>>,
         Option<broadcast::Sender<NetworkMessage>>,
     ) {
         (

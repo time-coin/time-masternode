@@ -164,6 +164,234 @@ impl ForkResolver {
         Self::new(MAX_CONCURRENT_RESOLUTIONS)
     }
 
+    /// Find common ancestor height using exponential search + binary search
+    ///
+    /// This is a two-phase algorithm:
+    /// 1. **Exponential Search**: Jump backwards exponentially (1, 2, 4, 8, 16...)
+    ///    to find a range where the common ancestor exists
+    /// 2. **Binary Search**: Search within that range to find exact ancestor
+    ///
+    /// # Performance
+    /// - 1000-block fork: ~20 requests (vs 1000 with linear search)
+    /// - 10000-block fork: ~30 requests (vs 10000 with linear search)
+    ///
+    /// # Arguments
+    /// * `our_height` - Our current blockchain height
+    /// * `peer_height` - Peer's reported blockchain height  
+    /// * `check_fn` - Function to check if peer has same block hash at height
+    ///
+    /// # Returns
+    /// Height of common ancestor, or 0 if no common ancestor found
+    pub async fn find_common_ancestor<F, Fut>(
+        &self,
+        our_height: u64,
+        peer_height: u64,
+        mut check_fn: F,
+    ) -> Result<u64, String>
+    where
+        F: FnMut(u64) -> Fut,
+        Fut: std::future::Future<Output = Result<bool, String>>,
+    {
+        // Start from the lower of the two heights
+        let search_start = our_height.min(peer_height);
+
+        tracing::debug!(
+            "🔍 Starting exponential search from height {} (our: {}, peer: {})",
+            search_start,
+            our_height,
+            peer_height
+        );
+
+        // Phase 1: Exponential backward search to find a matching height
+        let mut step = 1u64;
+        let lower_bound; // Will be set when we find a match
+
+        // Check if the starting point matches
+        match check_fn(search_start).await {
+            Ok(true) => {
+                // Chains match at this height - this is our answer
+                tracing::info!("✓ Chains match at height {}", search_start);
+                return Ok(search_start);
+            }
+            Ok(false) => {
+                // Different at start - need to search backwards
+                tracing::debug!("  ✗ Mismatch at starting height {}", search_start);
+            }
+            Err(e) => {
+                return Err(format!("Error checking height {}: {}", search_start, e));
+            }
+        }
+
+        // Search backwards exponentially
+        loop {
+            let check_height = search_start.saturating_sub(step);
+
+            if check_height == 0 {
+                // Reached genesis - check it
+                match check_fn(0).await {
+                    Ok(true) => {
+                        lower_bound = 0;
+                        break;
+                    }
+                    Ok(false) => {
+                        // Completely incompatible chains
+                        return Ok(0);
+                    }
+                    Err(e) => {
+                        return Err(format!("Error checking genesis: {}", e));
+                    }
+                }
+            }
+
+            tracing::debug!("  Checking height {} (step: {})", check_height, step);
+
+            match check_fn(check_height).await {
+                Ok(true) => {
+                    // Found a matching height - ancestor is between check_height and search_start
+                    lower_bound = check_height;
+                    tracing::debug!("  ✓ Match at height {}", check_height);
+                    break;
+                }
+                Ok(false) => {
+                    // Still different - continue searching backwards
+                    tracing::debug!("  ✗ Mismatch at height {}", check_height);
+                }
+                Err(e) => {
+                    return Err(format!("Error checking height {}: {}", check_height, e));
+                }
+            }
+
+            // Double the step for next iteration
+            step = step.saturating_mul(2);
+
+            // Safety limit: if step gets too large, cap it
+            if step > 100_000 {
+                step = 100_000;
+            }
+        }
+
+        // Phase 2: Binary search between lower_bound and search_start
+        let mut low = lower_bound;
+        let mut high = search_start;
+
+        tracing::debug!(
+            "🔍 Binary search between {} and {} (range: {})",
+            low,
+            high,
+            high - low
+        );
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+
+            tracing::debug!("  Checking mid-point {}", mid);
+
+            match check_fn(mid).await {
+                Ok(true) => {
+                    // Match at mid - ancestor might be higher
+                    low = mid + 1;
+                    tracing::debug!("  ✓ Match at {}, search upper half", mid);
+                }
+                Ok(false) => {
+                    // Mismatch at mid - ancestor is below mid
+                    high = mid;
+                    tracing::debug!("  ✗ Mismatch at {}, search lower half", mid);
+                }
+                Err(e) => {
+                    return Err(format!("Error checking height {}: {}", mid, e));
+                }
+            }
+        }
+
+        // The ancestor is at low - 1 (last matching height)
+        let ancestor = if low > 0 { low - 1 } else { 0 };
+
+        tracing::info!("✓ Found common ancestor at height {}", ancestor);
+
+        Ok(ancestor)
+    }
+
+    /// Find common ancestor with request counting (for testing/metrics)
+    ///
+    /// Same as `find_common_ancestor` but tracks number of requests made
+    #[allow(dead_code)]
+    pub async fn find_common_ancestor_with_metrics<F, Fut>(
+        &self,
+        our_height: u64,
+        peer_height: u64,
+        mut check_fn: F,
+    ) -> Result<(u64, usize), String>
+    where
+        F: FnMut(u64) -> Fut,
+        Fut: std::future::Future<Output = Result<bool, String>>,
+    {
+        let mut request_count = 0;
+        let search_start = our_height.min(peer_height);
+
+        // Wrapper to count requests
+        let mut counted_check = |height: u64| {
+            request_count += 1;
+            check_fn(height)
+        };
+
+        // Phase 1: Check starting point
+        match counted_check(search_start).await {
+            Ok(true) => return Ok((search_start, request_count)),
+            Ok(false) => {}
+            Err(e) => return Err(format!("Error checking height {}: {}", search_start, e)),
+        }
+
+        // Phase 1: Exponential search
+        let mut step = 1u64;
+        let lower_bound; // Will be set when we find a match
+
+        loop {
+            let check_height = search_start.saturating_sub(step);
+
+            if check_height == 0 {
+                match counted_check(0).await {
+                    Ok(true) => {
+                        lower_bound = 0;
+                        break;
+                    }
+                    Ok(false) => return Ok((0, request_count)),
+                    Err(e) => return Err(format!("Error checking genesis: {}", e)),
+                }
+            }
+
+            match counted_check(check_height).await {
+                Ok(true) => {
+                    lower_bound = check_height;
+                    break;
+                }
+                Ok(false) => {}
+                Err(e) => return Err(format!("Error checking height {}: {}", check_height, e)),
+            }
+
+            step = step.saturating_mul(2);
+            if step > 100_000 {
+                step = 100_000;
+            }
+        }
+
+        // Phase 2: Binary search
+        let mut low = lower_bound;
+        let mut high = search_start;
+
+        while low < high {
+            let mid = low + (high - low) / 2;
+
+            match counted_check(mid).await {
+                Ok(true) => low = mid + 1,
+                Ok(false) => high = mid,
+                Err(e) => return Err(format!("Error checking height {}: {}", mid, e)),
+            }
+        }
+
+        let ancestor = if low > 0 { low - 1 } else { 0 };
+        Ok((ancestor, request_count))
+    }
+
     /// Start a new fork resolution
     /// Returns false if at capacity or resolution already exists for peer
     pub fn start_resolution(
@@ -449,5 +677,214 @@ mod tests {
         assert_eq!(stuck.len(), 1);
         assert_eq!(stuck[0], "peer1");
         assert_eq!(resolver.active_count(), 1);
+    }
+
+    // Tests for exponential search algorithm
+
+    #[tokio::test]
+    async fn test_find_ancestor_exact_match() {
+        let resolver = ForkResolver::default();
+
+        // Simulate peer with identical chain
+        let check_fn = |_height: u64| async move { Ok(true) };
+
+        let ancestor = resolver.find_common_ancestor(1000, 1000, check_fn).await;
+        assert_eq!(ancestor.unwrap(), 1000);
+    }
+
+    #[tokio::test]
+    async fn test_find_ancestor_deep_fork() {
+        let resolver = ForkResolver::default();
+
+        // Simulate fork at height 100 (everything below matches, above differs)
+        let fork_point = 100u64;
+        let check_fn = |height: u64| async move { Ok(height <= fork_point) };
+
+        let (ancestor, requests) = resolver
+            .find_common_ancestor_with_metrics(1000, 1000, check_fn)
+            .await
+            .unwrap();
+
+        assert_eq!(ancestor, fork_point);
+
+        // With 900-block fork, exponential + binary should use ~20-30 requests
+        // vs 900 with linear search
+        assert!(
+            requests < 35,
+            "Expected <35 requests for 900-block fork, got {}",
+            requests
+        );
+        println!("✓ Deep fork (900 blocks): {} requests", requests);
+    }
+
+    #[tokio::test]
+    async fn test_find_ancestor_recent_fork() {
+        let resolver = ForkResolver::default();
+
+        // Simulate recent fork (last 10 blocks differ)
+        let fork_point = 990u64;
+        let check_fn = |height: u64| async move { Ok(height <= fork_point) };
+
+        let (ancestor, requests) = resolver
+            .find_common_ancestor_with_metrics(1000, 1000, check_fn)
+            .await
+            .unwrap();
+
+        assert_eq!(ancestor, fork_point);
+
+        // Recent fork should be found very quickly
+        assert!(
+            requests < 15,
+            "Expected <15 requests for recent fork, got {}",
+            requests
+        );
+        println!("✓ Recent fork (10 blocks): {} requests", requests);
+    }
+
+    #[tokio::test]
+    async fn test_find_ancestor_genesis_fork() {
+        let resolver = ForkResolver::default();
+
+        // Completely incompatible chains (no common ancestor except genesis)
+        let check_fn = |height: u64| async move { Ok(height == 0) };
+
+        let (ancestor, requests) = resolver
+            .find_common_ancestor_with_metrics(1000, 1000, check_fn)
+            .await
+            .unwrap();
+
+        assert_eq!(ancestor, 0);
+
+        // Should still be efficient
+        assert!(
+            requests < 25,
+            "Expected <25 requests for genesis fork, got {}",
+            requests
+        );
+        println!("✓ Genesis fork: {} requests", requests);
+    }
+
+    #[tokio::test]
+    async fn test_find_ancestor_different_heights() {
+        let resolver = ForkResolver::default();
+
+        // Our chain: 500 blocks, peer chain: 1000 blocks
+        // Fork at height 400
+        let fork_point = 400u64;
+        let check_fn = |height: u64| async move { Ok(height <= fork_point) };
+
+        let (ancestor, requests) = resolver
+            .find_common_ancestor_with_metrics(500, 1000, check_fn)
+            .await
+            .unwrap();
+
+        assert_eq!(ancestor, fork_point);
+
+        // Should search from min(500, 1000) = 500
+        assert!(requests < 20, "Expected <20 requests, got {}", requests);
+        println!("✓ Different heights (500 vs 1000): {} requests", requests);
+    }
+
+    #[tokio::test]
+    async fn test_find_ancestor_very_deep_fork() {
+        let resolver = ForkResolver::default();
+
+        // Simulate extremely deep fork (10,000 blocks)
+        let fork_point = 100u64;
+        let check_fn = |height: u64| async move { Ok(height <= fork_point) };
+
+        let (ancestor, requests) = resolver
+            .find_common_ancestor_with_metrics(10_100, 10_100, check_fn)
+            .await
+            .unwrap();
+
+        assert_eq!(ancestor, fork_point);
+
+        // Even with 10,000 block fork, should stay under 40 requests
+        // Exponential search: ~14 steps to get from 10000 to <100 (2^14 = 16384)
+        // Binary search: ~7 steps within final range
+        // Total: ~21 requests expected
+        assert!(
+            requests < 40,
+            "Expected <40 requests for 10,000-block fork, got {}",
+            requests
+        );
+        println!("✓ Very deep fork (10,000 blocks): {} requests", requests);
+    }
+
+    #[tokio::test]
+    async fn test_find_ancestor_peer_ahead() {
+        let resolver = ForkResolver::default();
+
+        // Peer is ahead of us, fork at height 50
+        let fork_point = 50u64;
+        let check_fn = |height: u64| async move { Ok(height <= fork_point) };
+
+        let (ancestor, requests) = resolver
+            .find_common_ancestor_with_metrics(100, 500, check_fn)
+            .await
+            .unwrap();
+
+        assert_eq!(ancestor, fork_point);
+
+        // Should search from min(100, 500) = 100
+        assert!(requests < 15, "Expected <15 requests, got {}", requests);
+        println!("✓ Peer ahead (100 vs 500): {} requests", requests);
+    }
+
+    #[tokio::test]
+    async fn test_exponential_search_efficiency() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let resolver = ForkResolver::default();
+
+        // Test various fork depths and measure efficiency
+        let test_cases = vec![
+            (50, "50-block fork"),
+            (100, "100-block fork"),
+            (1000, "1000-block fork"),
+            (10000, "10000-block fork"),
+        ];
+
+        for (fork_depth, description) in test_cases {
+            let counter = AtomicUsize::new(0);
+            let fork_point = 100u64;
+
+            let check_fn = |height: u64| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                async move { Ok(height <= fork_point) }
+            };
+
+            let ancestor = resolver
+                .find_common_ancestor(100 + fork_depth, 100 + fork_depth, check_fn)
+                .await
+                .unwrap();
+
+            let requests = counter.load(Ordering::Relaxed);
+            let efficiency = requests as f64 / fork_depth as f64 * 100.0;
+
+            assert_eq!(ancestor, fork_point);
+
+            println!(
+                "✓ {}: {} requests ({:.2}% of linear search)",
+                description, requests, efficiency
+            );
+
+            // Verify exponential is much better than linear
+            // Should use < 20% of linear search requests for larger forks
+            let max_expected = if fork_depth < 100 {
+                fork_depth // Small forks might not benefit as much
+            } else {
+                fork_depth / 5 // Larger forks should use < 20%
+            };
+
+            assert!(
+                requests <= max_expected as usize,
+                "{}: used {} requests (expected <= {})",
+                description,
+                requests,
+                max_expected
+            );
+        }
     }
 }

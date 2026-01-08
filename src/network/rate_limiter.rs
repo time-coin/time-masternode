@@ -2,9 +2,19 @@
 //!
 //! Phase 2.2: DoS Protection - Message Rate Limiting
 //! Implements per-peer message rate limits to prevent resource exhaustion attacks.
+//!
+//! # Memory Protection
+//! - Hard limit of MAX_RATE_LIMIT_ENTRIES enforced
+//! - Periodic cleanup every 10 seconds
+//! - Emergency cleanup if approaching limit
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+/// Maximum number of rate limit entries before forced cleanup
+/// Protects against memory exhaustion during DDoS attacks
+/// Each entry is ~48 bytes, so 50k entries = ~2.4MB
+const MAX_RATE_LIMIT_ENTRIES: usize = 50_000;
 
 pub struct RateLimiter {
     limits: HashMap<String, (Duration, u32)>,
@@ -54,7 +64,26 @@ impl RateLimiter {
 
         let now = Instant::now();
 
-        // Cleanup expired entries every 10 seconds (prevents unbounded memory growth)
+        // Emergency cleanup if approaching hard limit (DDoS protection)
+        if self.counters.len() >= MAX_RATE_LIMIT_ENTRIES {
+            let max_age = Duration::from_secs(300); // Keep last 5 minutes
+            let before_count = self.counters.len();
+            self.counters
+                .retain(|_, (last_reset, _)| now.duration_since(*last_reset) < max_age);
+            self.last_cleanup = now;
+
+            let removed = before_count - self.counters.len();
+            if removed > 0 {
+                tracing::warn!(
+                    "⚠️ Rate limiter emergency cleanup: removed {} entries ({} -> {})",
+                    removed,
+                    before_count,
+                    self.counters.len()
+                );
+            }
+        }
+
+        // Regular cleanup every 10 seconds
         if now.duration_since(self.last_cleanup) > Duration::from_secs(10) {
             let max_age = window * 10; // Keep entries for 10x the window duration
             self.counters
@@ -75,5 +104,18 @@ impl RateLimiter {
             *count += 1;
             true
         }
+    }
+
+    /// Get current number of tracked rate limit entries (for monitoring)
+    pub fn entry_count(&self) -> usize {
+        self.counters.len()
+    }
+
+    /// Force cleanup of old entries (for testing or manual maintenance)
+    pub fn force_cleanup(&mut self, max_age: Duration) {
+        let now = Instant::now();
+        self.counters
+            .retain(|_, (last_reset, _)| now.duration_since(*last_reset) < max_age);
+        self.last_cleanup = now;
     }
 }

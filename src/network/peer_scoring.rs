@@ -251,20 +251,28 @@ impl PeerScoringSystem {
         })
     }
 
-    /// Save a peer's stats to disk
+    /// Save a peer's stats to disk asynchronously (non-blocking)
+    /// Spawns background task to avoid holding lock during I/O
     async fn save_to_disk(&self, peer_ip: &str, stats: &PeerPerformanceStats) {
-        match bincode::serialize(stats) {
-            Ok(bytes) => {
-                if let Err(e) = self.storage.insert(peer_ip.as_bytes(), bytes) {
-                    warn!("Failed to save peer stats to disk for {}: {}", peer_ip, e);
-                } else {
-                    debug!("💾 Saved AI scores for peer: {}", peer_ip);
+        let stats_clone = stats.clone();
+        let peer_ip = peer_ip.to_string();
+        let storage = self.storage.clone();
+
+        // Spawn background task - don't block on disk I/O
+        tokio::spawn(async move {
+            match bincode::serialize(&stats_clone) {
+                Ok(bytes) => {
+                    if let Err(e) = storage.insert(peer_ip.as_bytes(), bytes) {
+                        warn!("Failed to save peer stats to disk for {}: {}", peer_ip, e);
+                    } else {
+                        debug!("💾 Saved AI scores for peer: {}", peer_ip);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to serialize peer stats for {}: {}", peer_ip, e);
                 }
             }
-            Err(e) => {
-                warn!("Failed to serialize peer stats for {}: {}", peer_ip, e);
-            }
-        }
+        });
     }
 
     /// Flush all pending writes to disk

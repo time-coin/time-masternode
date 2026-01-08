@@ -10,7 +10,6 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use dashmap::DashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
@@ -40,7 +39,7 @@ pub struct MessageContext {
     pub masternode_registry: Arc<MasternodeRegistry>,
     #[allow(dead_code)]
     pub consensus: Option<Arc<ConsensusEngine>>,
-    pub block_cache: Option<Arc<DashMap<[u8; 32], Block>>>,
+    pub block_cache: Option<Arc<crate::network::block_cache::BlockCache>>,
     pub broadcast_tx: Option<broadcast::Sender<NetworkMessage>>,
 }
 
@@ -549,7 +548,7 @@ impl MessageHandler {
             // Phase 3E.3: Finalization Callback
             // 1. Retrieve the block from cache
             if let Some(cache) = &context.block_cache {
-                if let Some((_, block)) = cache.remove(&block_hash) {
+                if let Some(block) = cache.remove(&block_hash) {
                     // 2. Collect precommit signatures for finality proof
                     //
                     // TODO: Implement signature collection

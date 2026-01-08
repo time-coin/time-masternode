@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -432,6 +432,79 @@ impl AnomalyDetector {
             .map_err(|e| format!("Failed to flush anomaly data: {}", e))?;
         debug!("💾 Flushed anomaly detection data to disk");
         Ok(())
+    }
+
+    /// Cleanup stale peers not seen in the specified duration
+    /// Also enforces a hard limit on total tracked peers
+    ///
+    /// # Arguments
+    /// * `max_age` - Maximum age before peer is considered stale (e.g., 24 hours)
+    ///
+    /// # Implementation Notes
+    /// - Removes peers with last_activity older than max_age
+    /// - If still over MAX_TRACKED_PEERS, removes lowest-scored peers
+    /// - Prevents unbounded memory growth
+    pub async fn cleanup_stale_peers(&self, max_age: Duration) {
+        const MAX_TRACKED_PEERS: usize = 10_000;
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let max_age_secs = max_age.as_secs();
+
+        let mut metrics = self.peer_metrics.write().await;
+
+        // Phase 1: Remove stale entries
+        let initial_count = metrics.len();
+        metrics.retain(|_ip, m| now - m.last_activity <= max_age_secs);
+        let after_stale_removal = metrics.len();
+
+        if initial_count > after_stale_removal {
+            info!(
+                "🧹 Removed {} stale peers (not seen in {}h)",
+                initial_count - after_stale_removal,
+                max_age.as_secs() / 3600
+            );
+        }
+
+        // Phase 2: Enforce hard limit by removing lowest-scored peers
+        if metrics.len() > MAX_TRACKED_PEERS {
+            let mut entries: Vec<_> = metrics
+                .iter()
+                .map(|(ip, m)| (ip.clone(), m.last_anomaly_score))
+                .collect();
+            entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            let to_remove = entries
+                .iter()
+                .take(metrics.len() - MAX_TRACKED_PEERS)
+                .map(|(ip, _)| ip.clone())
+                .collect::<Vec<_>>();
+
+            for ip in &to_remove {
+                metrics.remove(ip);
+                // Also remove from disk
+                let _ = self.storage.remove(ip.as_bytes());
+            }
+
+            warn!(
+                "⚠️ Enforced peer limit: removed {} lowest-scored peers ({} -> {})",
+                to_remove.len(),
+                after_stale_removal,
+                MAX_TRACKED_PEERS
+            );
+        }
+
+        debug!(
+            "🛡️ Anomaly detection cleanup complete: tracking {} peers",
+            metrics.len()
+        );
+    }
+
+    /// Get total number of tracked peers
+    pub async fn tracked_peer_count(&self) -> usize {
+        self.peer_metrics.read().await.len()
     }
 }
 

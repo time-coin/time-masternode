@@ -4,15 +4,15 @@
 //! only used by the binary (main.rs). The NetworkServer is created and run
 //! in main() for handling all P2P network communication.
 
-use crate::block::types::Block;
 use crate::consensus::ConsensusEngine;
 use crate::network::blacklist::IPBlacklist;
+use crate::network::block_cache::BlockCache;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 use crate::network::peer_connection::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
-use crate::types::{Hash256, Masternode, OutPoint};
+use crate::types::{Masternode, OutPoint};
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -62,7 +62,7 @@ pub struct NetworkServer {
     #[allow(dead_code)]
     pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
-    pub block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Cache blocks during voting
+    pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TSDC voting
     pub attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
 }
@@ -166,7 +166,10 @@ impl NetworkServer {
             peer_registry,
             peer_state,
             local_ip,
-            block_cache: Arc::new(DashMap::new()), // Phase 3E.1: Initialize block cache
+            block_cache: Arc::new(BlockCache::new_with_expiration(
+                1000,                     // Max 1000 blocks
+                Duration::from_secs(300), // 5 minute expiration
+            )), // Phase 3E.1: Bounded LRU cache
             attestation_system,
             peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
         })
@@ -180,6 +183,24 @@ impl NetworkServer {
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(300)).await; // Every 5 minutes
                 blacklist_cleanup.write().await.cleanup();
+            }
+        });
+
+        // Spawn cleanup task for block cache
+        let block_cache_cleanup = self.block_cache.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await; // Every minute
+                let removed = block_cache_cleanup.cleanup_expired();
+                if removed > 0 {
+                    let stats = block_cache_cleanup.stats();
+                    tracing::debug!(
+                        "📊 Block cache: {} blocks ({}% full), removed {} expired",
+                        stats.current_size,
+                        stats.usage_percent as u32,
+                        removed
+                    );
+                }
             }
         });
 
@@ -352,7 +373,7 @@ async fn handle_peer(
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     _local_ip: Option<String>,
-    block_cache: Arc<DashMap<Hash256, Block>>, // Phase 3E.1: Block cache parameter
+    block_cache: Arc<BlockCache>, // Phase 3E.1: Block cache parameter
     attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker
     _is_whitelisted: bool, // Phase 1: Whitelist status for relaxed timeouts (used in future enhancements)

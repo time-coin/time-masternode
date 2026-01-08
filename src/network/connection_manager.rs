@@ -573,6 +573,55 @@ pub struct ConnectionQuality {
     pub bytes_received: u64,
 }
 
+impl ConnectionManager {
+    /// Update whitelist status for a specific peer
+    /// Call this when masternode registry changes
+    pub fn update_whitelist_status(&self, peer_ip: &str, is_whitelisted: bool) {
+        if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            let old_status = entry.is_whitelisted;
+            entry.is_whitelisted = is_whitelisted;
+
+            if old_status != is_whitelisted {
+                tracing::info!(
+                    "🔄 Updated whitelist status for {}: {} → {}",
+                    peer_ip,
+                    old_status,
+                    is_whitelisted
+                );
+            }
+        }
+    }
+
+    /// Bulk sync whitelist status from masternode registry
+    /// Call this periodically or when masternode set changes
+    ///
+    /// # Arguments
+    /// * `masternode_ips` - List of current masternode IP addresses
+    pub fn sync_whitelist_from_registry(&self, masternode_ips: &[String]) {
+        use std::collections::HashSet;
+
+        let whitelist_set: HashSet<_> = masternode_ips.iter().map(|s| s.as_str()).collect();
+        let mut updated_count = 0;
+
+        for mut entry in self.connections.iter_mut() {
+            let ip = entry.key().as_str();
+            let should_be_whitelisted = whitelist_set.contains(ip);
+
+            if entry.is_whitelisted != should_be_whitelisted {
+                entry.is_whitelisted = should_be_whitelisted;
+                updated_count += 1;
+            }
+        }
+
+        if updated_count > 0 {
+            tracing::info!(
+                "🔄 Synced whitelist status: updated {} connections from masternode registry",
+                updated_count
+            );
+        }
+    }
+}
+
 impl Default for ConnectionManager {
     fn default() -> Self {
         Self::new()
