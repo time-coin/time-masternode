@@ -1229,9 +1229,23 @@ async fn main() {
                     continue;
                 }
 
+                // CRITICAL: Re-check height after acquiring lock to prevent race condition
+                // Another task may have produced/received the block while we waited for the lock
+                let current_height_after_lock = block_blockchain.get_height();
+                if current_height_after_lock >= expected_height {
+                    is_producing.store(false, Ordering::SeqCst);
+                    tracing::info!(
+                        "✓ Height {} already reached after lock acquisition (was {}, now {}), skipping catchup",
+                        expected_height,
+                        current_height,
+                        current_height_after_lock
+                    );
+                    continue;
+                }
+
                 tracing::info!(
                     "🎯 Producing {} catchup blocks as TSDC leader to reach height {}",
-                    blocks_behind,
+                    expected_height.saturating_sub(current_height_after_lock),
                     expected_height
                 );
 
@@ -1239,7 +1253,7 @@ async fn main() {
                 let mut catchup_produced = 0u64;
                 let genesis_timestamp = block_blockchain.genesis_timestamp();
 
-                for target_height in (current_height + 1)..=expected_height {
+                for target_height in (current_height_after_lock + 1)..=expected_height {
                     // CRITICAL TIME COIN REQUIREMENT: Never produce blocks ahead of schedule
                     // Check current time against this block's scheduled time
                     let expected_timestamp = genesis_timestamp + (target_height as i64 * 600);
@@ -1653,6 +1667,8 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // Every 10 minutes
         loop {
             interval.tick().await;
+
+            // Clean up consensus finalized transactions
             let removed = cleanup_consensus.cleanup_old_finalized(3600); // Keep 1 hour
             if removed > 0 {
                 let stats = cleanup_consensus.memory_stats();
@@ -1664,6 +1680,11 @@ async fn main() {
                     stats.finalized_txs
                 );
             }
+
+            // Clean up transaction pool rejected transactions (older than 1 hour)
+            cleanup_consensus.tx_pool.cleanup_rejected(3600);
+
+            tracing::debug!("🧹 Memory cleanup completed");
         }
     });
     shutdown_manager.register_task(cleanup_handle);
