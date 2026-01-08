@@ -8,6 +8,7 @@ use crate::blockchain_validation::BlockValidator;
 use crate::consensus::ConsensusEngine;
 use crate::constants;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
+use crate::network::fork_resolver::ForkResolver as NetworkForkResolver;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{OutPoint, Transaction, TxInput, TxOutput, UTXO};
@@ -3930,74 +3931,76 @@ impl Blockchain {
     }
 
     /// Find common ancestor between our chain and competing blocks (for fork resolution)
-    /// This method keeps going back through the chain until a common ancestor is found.
+    /// Uses exponential + binary search algorithm for efficiency (O(log n) vs O(n))
     async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> u64 {
         if competing_blocks.is_empty() {
             return 0;
         }
 
-        // CRITICAL FIX: Sort blocks by height before processing
-        // Blocks may arrive out of order from network, and we need the LOWEST height to start search
+        // Sort blocks by height to find the starting point
         let mut sorted_blocks = competing_blocks.to_vec();
         sorted_blocks.sort_by_key(|b| b.header.height);
 
-        let fork_start = sorted_blocks.first().unwrap().header.height;
-
-        // Start checking from the block before the fork
-        if fork_start == 0 {
-            return 0;
-        }
-
-        info!(
-            "Finding common ancestor for fork starting at height {}",
-            fork_start
+        // Build a map of peer's blocks for fast lookup (wrapped in Arc for closure)
+        let peer_blocks = Arc::new(
+            sorted_blocks
+                .iter()
+                .map(|b| (b.header.height, b.hash()))
+                .collect::<std::collections::HashMap<u64, [u8; 32]>>(),
         );
 
-        // Walk backwards through our chain to find where it connects to competing blocks
-        for height in (0..fork_start).rev() {
-            if let Ok(our_block) = self.get_block(height) {
-                let our_hash = our_block.hash();
+        let peer_height = sorted_blocks.last().unwrap().header.height;
+        let our_height = self.get_height();
 
-                // Check if any competing block directly builds on this block
-                for comp_block in sorted_blocks.iter() {
-                    if comp_block.header.height == height + 1
-                        && comp_block.header.previous_hash == our_hash
-                    {
-                        info!("Found common ancestor at height {} (competing block {} builds on our block)", 
-                              height, comp_block.header.height);
-                        return height;
-                    }
+        info!(
+            "🔍 Finding common ancestor using exponential+binary search (our: {}, peer: {})",
+            our_height, peer_height
+        );
 
-                    // Also check if this competing block IS at this height and matches
-                    if comp_block.header.height == height && comp_block.hash() == our_hash {
-                        info!("Found common ancestor at height {} (exact match)", height);
-                        return height;
-                    }
+        // Create network fork resolver for efficient ancestor finding
+        let network_resolver = NetworkForkResolver::default();
+
+        // Check function: returns true if peer has same block hash at height
+        // Clone Arc references for the closure
+        let peer_blocks_ref = Arc::clone(&peer_blocks);
+        let blockchain_ref = self;
+
+        let check_fn = move |height: u64| {
+            let peer_blocks = Arc::clone(&peer_blocks_ref);
+            async move {
+                // Get our block hash at this height
+                let our_hash = match blockchain_ref.get_block_hash(height) {
+                    Ok(hash) => hash,
+                    Err(_) => return Ok(false), // Can't find our block at this height
+                };
+
+                // Check if peer has a block at this height
+                if let Some(peer_hash) = peer_blocks.get(&height) {
+                    // Peer has block at this height - check if hashes match
+                    Ok(our_hash == *peer_hash)
+                } else {
+                    // Peer doesn't have this height in the provided blocks.
+                    // We can't make assumptions - return false to indicate we need more data.
+                    // This will cause the search to either find a lower match or return 0 (genesis).
+                    Ok(false)
                 }
+            }
+        };
 
-                // CRITICAL FIX: Don't assume height H is common ancestor just because competing blocks are all > H.
-                // We must verify that the FIRST competing block (at height+1) actually builds on our block at height H.
-                // Otherwise, our block at height H might be different from the network's block at height H (a fork).
-                //
-                // OLD BUGGY LOGIC (REMOVED):
-                // if competing_blocks.iter().all(|b| b.header.height > height) {
-                //     return height; // WRONG: Doesn't verify the blocks actually connect!
-                // }
-                //
-                // The correct approach is handled above: we only return when we find a competing block that
-                // explicitly builds on (previous_hash matches) or matches (same hash) our block.
-            } else {
-                // If we can't find our block at this height, keep going back
-                warn!(
-                    "Could not find our block at height {} while searching for common ancestor",
-                    height
-                );
+        // Use the efficient exponential + binary search algorithm
+        match network_resolver
+            .find_common_ancestor(our_height, peer_height, check_fn)
+            .await
+        {
+            Ok(ancestor) => {
+                info!("✓ Found common ancestor at height {}", ancestor);
+                ancestor
+            }
+            Err(e) => {
+                warn!("Error finding common ancestor: {}, defaulting to 0", e);
+                0
             }
         }
-
-        // If we made it here, genesis (height 0) is the common ancestor
-        info!("Reached genesis block as common ancestor");
-        0
     }
 
     /// Get chain work at a specific height
