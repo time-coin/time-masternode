@@ -1068,11 +1068,16 @@ impl PeerConnection {
                             blocks.len(), fork_height
                         );
 
+                        // CRITICAL FIX: Sort blocks before scanning to ensure we find true common ancestor
+                        // Blocks may arrive out of order from network, and we need to scan from lowest to highest
+                        let mut sorted_scan_blocks = blocks.clone();
+                        sorted_scan_blocks.sort_by_key(|b| b.header.height);
+
                         // Find common ancestor by scanning blocks
                         let mut common_ancestor: Option<u64> = None;
                         let mut actual_fork_height: Option<u64> = None;
 
-                        for block in blocks.iter() {
+                        for block in sorted_scan_blocks.iter() {
                             let height = block.header.height;
                             if height <= our_height {
                                 if let Ok(our_block) = blockchain.get_block_by_height(height).await
