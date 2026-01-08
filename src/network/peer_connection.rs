@@ -1134,10 +1134,11 @@ impl PeerConnection {
                                 if let Ok(our_block) = blockchain.get_block_by_height(height).await
                                 {
                                     if our_block.hash() == block.hash() {
-                                        // Blocks match - this is common ancestor
+                                        // Blocks match - this is common ancestor (keep updating as we scan forward)
                                         common_ancestor = Some(height);
                                     } else {
                                         // Fork detected at this height
+                                        // If we found matching blocks before this, common_ancestor is already set
                                         actual_fork_height = Some(height);
                                         warn!(
                                             "🔀 [WHITELIST] Fork at height {}: our {} vs peer {}",
@@ -1145,7 +1146,12 @@ impl PeerConnection {
                                             hex::encode(&our_block.hash()[..8]),
                                             hex::encode(&block.hash()[..8])
                                         );
-                                        break;
+                                        // Don't break yet - we need to check if we have a valid common_ancestor
+                                        // Only break if we haven't found one yet, otherwise we have what we need
+                                        if common_ancestor.is_some() {
+                                            break; // We found the fork point and have the common ancestor
+                                        }
+                                        // If no common ancestor yet, keep scanning backwards in case blocks are sparse
                                     }
                                 }
                             } else if height == our_height + 1 {
