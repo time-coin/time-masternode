@@ -1089,10 +1089,32 @@ impl PeerConnection {
                     if fork_detected && blocks.len() > 1 {
                         let fork_height = blocks[0].header.height;
 
-                        // Lightweight consensus: Check if at least 1 other peer agrees
-                        let agreement_count = self
-                            .check_fork_agreement(peer_registry, fork_height, &self.peer_ip)
-                            .await?;
+                        // CRITICAL: For VERY deep forks (>50 blocks), check TIP consensus instead of fork height consensus
+                        // When fork is 100 blocks deep, other peers won't have data at that height,
+                        // but they DO agree on the current tip height
+                        let peer_tip_height = blocks
+                            .last()
+                            .map(|b| b.header.height)
+                            .unwrap_or(fork_height);
+                        let fork_depth = peer_tip_height.saturating_sub(fork_height);
+
+                        let agreement_count = if fork_depth > 50 {
+                            // For deep forks, check agreement at CURRENT height, not fork height
+                            warn!(
+                                "⚠️  [WHITELIST] DEEP FORK detected: {} blocks deep (from {} to {})",
+                                fork_depth, fork_height, peer_tip_height
+                            );
+                            warn!(
+                                "⚠️  [WHITELIST] Checking consensus at TIP height {} instead of fork height {}",
+                                peer_tip_height, fork_height
+                            );
+                            self.check_fork_agreement(peer_registry, peer_tip_height, &self.peer_ip)
+                                .await?
+                        } else {
+                            // Normal fork: check agreement at fork height
+                            self.check_fork_agreement(peer_registry, fork_height, &self.peer_ip)
+                                .await?
+                        };
 
                         if agreement_count == 0 {
                             warn!(
@@ -1103,8 +1125,14 @@ impl PeerConnection {
                         }
 
                         info!(
-                            "✅ [WHITELIST] Fork from {} confirmed by {} other peer(s)",
-                            self.peer_ip, agreement_count
+                            "✅ [WHITELIST] Fork from {} confirmed by {} other peer(s){}",
+                            self.peer_ip,
+                            agreement_count,
+                            if fork_depth > 50 {
+                                " (deep fork - checked at tip)"
+                            } else {
+                                ""
+                            }
                         );
                         // CRITICAL: Always process forks from trusted peers, no threshold
                         // We MUST find the common ancestor regardless of fork depth
@@ -2493,10 +2521,16 @@ impl PeerConnection {
                         // CRITICAL: Fork loop detection - prevent repeated failed attempts
                         let mut fork_loop = self.fork_loop_tracker.write().await;
                         let now = std::time::Instant::now();
-                        const FORK_LOOP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60); // 1 minute cooldown
+                        const FORK_LOOP_COOLDOWN: std::time::Duration =
+                            std::time::Duration::from_secs(60); // 1 minute cooldown
                         const MAX_FORK_ATTEMPTS: u32 = 3; // Max 3 attempts before cooldown
 
-                        let should_attempt_resolution = if let Some((last_height, count, last_seen)) = *fork_loop {
+                        let should_attempt_resolution = if let Some((
+                            last_height,
+                            count,
+                            last_seen,
+                        )) = *fork_loop
+                        {
                             if last_height == *height {
                                 // Same fork height detected again
                                 if now.duration_since(last_seen) < FORK_LOOP_COOLDOWN {
