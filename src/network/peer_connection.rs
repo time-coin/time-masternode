@@ -27,10 +27,9 @@ struct PingState {
 }
 
 // Circuit breaker limits for fork resolution
-const MAX_FORK_RESOLUTION_DEPTH: u64 = 5000; // Allow searching up to 5000 blocks back for deep forks
-const MAX_FORK_RESOLUTION_ATTEMPTS: u32 = 50; // Allow more attempts for iterative deepening
-const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 600; // 10 minutes to allow for deep fork resolution
+const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 1800; // 30 minutes - only hard limit
 const CRITICAL_FORK_DEPTH: u64 = 100; // Log warning if fork > 100 blocks (but don't stop)
+const PROGRESS_LOG_INTERVAL: u32 = 10; // Log progress every 10 attempts
 
 /// Fork resolution attempt tracker with enhanced circuit breaker
 #[derive(Debug, Clone)]
@@ -64,33 +63,33 @@ impl ForkResolutionAttempt {
     fn should_give_up(&self) -> bool {
         let elapsed = self.last_attempt.elapsed();
 
-        // Give up if any of these conditions are met:
-        // 1. Timeout exceeded (5 minutes)
+        // Only give up on timeout - no attempt or depth limits
         if elapsed.as_secs() > FORK_RESOLUTION_TIMEOUT_SECS {
             tracing::error!(
-                "🚨 Fork resolution timeout: {} seconds exceeded",
-                FORK_RESOLUTION_TIMEOUT_SECS
+                "🚨 Fork resolution timeout: {} seconds exceeded (attempt {}, depth {})",
+                FORK_RESOLUTION_TIMEOUT_SECS,
+                self.attempt_count,
+                self.max_depth_searched
             );
             return true;
         }
 
-        // 2. Too many attempts
-        if self.attempt_count > MAX_FORK_RESOLUTION_ATTEMPTS {
-            tracing::error!(
-                "🚨 Fork resolution retry limit: {} attempts exceeded",
-                MAX_FORK_RESOLUTION_ATTEMPTS
-            );
-            return true;
-        }
-
-        // 3. Searched too deep (potential chain divergence)
-        if self.max_depth_searched > MAX_FORK_RESOLUTION_DEPTH {
-            tracing::error!(
-                "🚨 Fork resolution depth limit: searched {} blocks back (max: {})",
+        // Log progress periodically to show we're still working
+        if self.attempt_count % PROGRESS_LOG_INTERVAL == 0 {
+            tracing::warn!(
+                "🔄 Fork resolution in progress: attempt {}, searched {} blocks back, fork at height {}",
+                self.attempt_count,
                 self.max_depth_searched,
-                MAX_FORK_RESOLUTION_DEPTH
+                self.fork_height
             );
-            return true;
+        }
+
+        // Warn if fork is very deep but keep going
+        if self.max_depth_searched > CRITICAL_FORK_DEPTH && self.max_depth_searched % 100 == 0 {
+            tracing::warn!(
+                "⚠️ Deep fork: searched {} blocks back - this may take a while",
+                self.max_depth_searched
+            );
         }
 
         false
