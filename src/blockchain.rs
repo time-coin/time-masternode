@@ -195,6 +195,8 @@ pub struct Blockchain {
     reorg_history: Arc<RwLock<Vec<ReorgMetrics>>>,
     /// Current fork resolution state
     fork_state: Arc<RwLock<ForkResolutionState>>,
+    /// Fork resolution mutex to prevent concurrent fork resolutions (race condition protection)
+    fork_resolution_lock: Arc<tokio::sync::Mutex<()>>,
     /// Two-tier block cache for efficient memory usage (10-50x faster reads)
     block_cache: Arc<BlockCacheManager>,
     /// Block validator for validation logic
@@ -255,6 +257,7 @@ impl Blockchain {
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
             fork_state: Arc::new(RwLock::new(ForkResolutionState::None)),
+            fork_resolution_lock: Arc::new(tokio::sync::Mutex::new(())),
             block_cache,
             validator,
         }
@@ -3022,7 +3025,22 @@ impl Blockchain {
 
     /// Periodic chain comparison with peers to detect forks
     /// Requests block height from peers and compares
+    /// 
+    /// **PRIMARY FORK RESOLUTION ENTRY POINT**
+    /// This is the recommended way to detect and resolve forks.
+    /// It runs periodically and queries all peers for consensus.
+    /// 
+    /// Benefits over on-demand resolution:
+    /// - Queries all peers for complete picture
+    /// - Detects forks before receiving unsolicited blocks
+    /// - Uses peer consensus for better decisions
+    /// - Single code path = no race conditions
     pub async fn compare_chain_with_peers(&self) -> Option<(u64, String)> {
+        // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
+        // This is important because this method runs periodically and could conflict with
+        // on-demand fork resolution triggered by incoming blocks
+        let _lock = self.fork_resolution_lock.lock().await;
+        
         let peer_registry = self.peer_registry.read().await;
         let registry = match peer_registry.as_ref() {
             Some(r) => r,
@@ -3033,6 +3051,11 @@ impl Blockchain {
         if connected_peers.is_empty() {
             return None;
         }
+
+        tracing::debug!(
+            "🔍 [LOCKED] PRIMARY FORK RESOLUTION: Periodic check with {} peers", 
+            connected_peers.len()
+        );
 
         // Request chain tips (height + hash) from all peers
         for peer in &connected_peers {
@@ -3652,12 +3675,33 @@ impl Blockchain {
 
     /// AI-powered fork resolution with fallback to traditional rules
     /// Returns true if we should accept the new blocks (they extend a better chain)
+    /// 
+    /// **DEPRECATED**: This method creates duplicate fork resolution paths.
+    /// Prefer using the unified fork resolution through periodic chain comparison.
+    /// This method will be removed in a future version.
+    /// 
+    /// Current issue: Multiple code paths can trigger fork resolution simultaneously:
+    /// - This method (when receiving blocks)
+    /// - compare_chain_with_peers() (periodic check)
+    /// - Causes race conditions and conflicting decisions
+    #[deprecated(
+        note = "Use unified fork resolution. This creates race conditions with periodic checks."
+    )]
     pub async fn should_accept_fork(
         &self,
         competing_blocks: &[Block],
         peer_claimed_height: u64,
         peer_ip: &str,
     ) -> Result<bool, String> {
+        // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
+        // This prevents race conditions when multiple peers send competing chains simultaneously
+        let _lock = self.fork_resolution_lock.lock().await;
+        
+        warn!(
+            "⚠️ DEPRECATED: should_accept_fork called for peer {} (use unified resolution instead)",
+            peer_ip
+        );
+        
         if competing_blocks.is_empty() {
             return Ok(false);
         }
@@ -3666,7 +3710,7 @@ impl Blockchain {
         let fork_height = competing_blocks.first().unwrap().header.height;
 
         tracing::info!(
-            "🔀 Fork resolution: comparing chains at height {} (our height: {}, peer height: {})",
+            "🔀 [LOCKED] Fork resolution: comparing chains at height {} (our height: {}, peer height: {})",
             fork_height,
             our_height,
             peer_claimed_height
@@ -3749,12 +3793,32 @@ impl Blockchain {
     /// Early fork evaluation with minimal information
     /// Called when we detect a fork but don't have complete block data yet
     /// Returns: (should_investigate, confidence_message)
+    /// 
+    /// **DEPRECATED**: This method makes decisions with incomplete data.
+    /// It can accept/reject forks before having actual block data, leading to
+    /// incorrect decisions. Use unified fork resolution instead.
+    /// 
+    /// Issues:
+    /// - Estimates peer work without seeing blocks
+    /// - Can conflict with should_accept_fork() later
+    /// - No tip hash for deterministic tiebreaker
+    #[deprecated(
+        note = "Makes decisions with incomplete data. Use unified resolution with full block data."
+    )]
     pub async fn should_investigate_fork(
         &self,
         fork_height: u64,
         peer_claimed_height: u64,
         peer_ip: &str,
     ) -> (bool, String) {
+        // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
+        let _lock = self.fork_resolution_lock.lock().await;
+        
+        warn!(
+            "⚠️ DEPRECATED: should_investigate_fork called for peer {} (incomplete data)",
+            peer_ip
+        );
+        
         let our_height = self.get_height();
 
         // If peer has significantly longer chain, investigate
@@ -4287,6 +4351,7 @@ impl Clone for Blockchain {
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
             fork_state: self.fork_state.clone(),
+            fork_resolution_lock: self.fork_resolution_lock.clone(),
             block_cache: self.block_cache.clone(),
             validator: BlockValidator::new(self.network_type),
         }

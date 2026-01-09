@@ -1591,12 +1591,21 @@ async fn main() {
                             || time_since_expected >= 300;
 
                         if should_catchup {
-                            tracing::info!(
-                                "📊 Status: Height={}, Active Masternodes={} | ⚠️ {} blocks behind, {}s past expected - attempting sync",
+                            tracing::warn!(
+                                "📊 ═══════════════════════════════════════════════════════════════",
+                            );
+                            tracing::warn!(
+                                "📊 NODE STATUS | Height: {} | Active Masternodes: {} | ⚠️ {} BLOCKS BEHIND",
                                 height,
                                 mn_count,
-                                blocks_behind,
+                                blocks_behind
+                            );
+                            tracing::warn!(
+                                "📊 Sync Status: {}s past expected block time - attempting sync",
                                 time_since_expected
+                            );
+                            tracing::warn!(
+                                "📊 ═══════════════════════════════════════════════════════════════",
                             );
 
                             // Try to sync from peers first
@@ -1638,10 +1647,16 @@ async fn main() {
                                 }
                             }
                         } else {
-                            tracing::info!(
-                                "📊 Status: Height={}, Active Masternodes={}",
+                            tracing::warn!(
+                                "📊 ═══════════════════════════════════════════════════════════════",
+                            );
+                            tracing::warn!(
+                                "📊 NODE STATUS | Height: {} | Active Masternodes: {} | ✅ ON TRACK",
                                 height,
                                 mn_count
+                            );
+                            tracing::warn!(
+                                "📊 ═══════════════════════════════════════════════════════════════",
                             );
 
                             // Log cache statistics every 5 checks (every ~25 minutes)

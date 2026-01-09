@@ -602,30 +602,27 @@ impl PeerConnection {
         &self,
         _peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) -> bool {
-        let mut state = self.ping_state.write().await;
-
-        // Use relaxed timeouts for whitelisted masternodes
-        let (max_missed, timeout_duration) = if self.is_whitelisted {
-            (
-                Self::WHITELISTED_MAX_MISSED_PONGS,
-                Self::WHITELISTED_PONG_TIMEOUT,
-            )
-        } else {
-            (Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT)
-        };
-
-        if state.check_timeout(max_missed, timeout_duration) {
-            if self.is_whitelisted {
+        // CRITICAL FIX: Whitelisted masternodes should NEVER be disconnected due to timeout
+        // They are essential network infrastructure and must maintain persistent connections
+        if self.is_whitelisted {
+            let state = self.ping_state.read().await;
+            // Log warning for monitoring but DO NOT disconnect
+            if state.missed_pongs > Self::WHITELISTED_MAX_MISSED_PONGS {
                 warn!(
-                    "⚠️ [{:?}] WHITELIST VIOLATION: Masternode {} unresponsive after {} missed pongs (relaxed timeout: {}s)",
-                    self.direction, self.peer_ip, state.missed_pongs, timeout_duration.as_secs()
-                );
-            } else {
-                warn!(
-                    "⚠️ [{:?}] Peer {} unresponsive after {} missed pongs",
+                    "⚠️ [{:?}] Whitelisted masternode {} has {} missed pongs (NOT disconnecting - protected)",
                     self.direction, self.peer_ip, state.missed_pongs
                 );
             }
+            return false; // ✅ FIX: Never disconnect whitelisted nodes
+        }
+
+        // Non-whitelisted peers: Use normal timeout logic
+        let mut state = self.ping_state.write().await;
+        if state.check_timeout(Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT) {
+            warn!(
+                "❌ [{:?}] Disconnecting non-whitelisted peer {} after {} missed pongs",
+                self.direction, self.peer_ip, state.missed_pongs
+            );
             true
         } else {
             false
