@@ -1229,7 +1229,25 @@ async fn handle_peer(
                                                                         continue;
                                                                     }
                                                                     Err(e) => {
-                                                                        tracing::warn!("⚠️ Fork resolution failed: {}", e);
+                                                                        // Check if error is due to insufficient block history
+                                                                        if e.contains("Insufficient block history") {
+                                                                            tracing::warn!("⚠️ {}", e);
+                                                                            tracing::info!("📥 Requesting deeper block history from {}", peer.addr);
+
+                                                                            // Request blocks starting from a much lower height
+                                                                            // Go back at least to the lowest peer block minus a safety margin
+                                                                            let lowest_peer_height = blocks.first().map(|b| b.header.height).unwrap_or(start_height);
+                                                                            let request_from = lowest_peer_height.saturating_sub(500);
+
+                                                                            let msg = NetworkMessage::GetBlocks(request_from, end_height);
+                                                                            if let Err(send_err) = peer_registry.send_to_peer(&ip_str, msg).await {
+                                                                                tracing::error!("Failed to request deeper block history: {}", send_err);
+                                                                            } else {
+                                                                                tracing::info!("✅ Requested blocks {}-{} from {}", request_from, end_height, peer.addr);
+                                                                            }
+                                                                        } else {
+                                                                            tracing::warn!("⚠️ Fork resolution failed: {}", e);
+                                                                        }
                                                                         continue;
                                                                     }
                                                                 }

@@ -3686,7 +3686,17 @@ impl Blockchain {
             .await;
 
         // Find common ancestor
-        let common_ancestor = self.find_fork_common_ancestor(competing_blocks).await;
+        let common_ancestor = match self.find_fork_common_ancestor(competing_blocks).await {
+            Ok(ancestor) => ancestor,
+            Err(e) => {
+                // Peer didn't provide enough block history - reject this attempt
+                warn!(
+                    "Cannot determine common ancestor: {}. Rejecting peer chain.",
+                    e
+                );
+                return Ok(false);
+            }
+        };
 
         // Get peer's tip timestamp for future-block validation
         let peer_tip_timestamp = competing_blocks.last().map(|b| b.header.timestamp);
@@ -3932,9 +3942,10 @@ impl Blockchain {
 
     /// Find common ancestor between our chain and competing blocks (for fork resolution)
     /// Uses exponential + binary search algorithm for efficiency (O(log n) vs O(n))
-    async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> u64 {
+    /// Returns error if peer blocks don't go back far enough to find true common ancestor
+    async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> Result<u64, String> {
         if competing_blocks.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         // Sort blocks by height to find the starting point
@@ -3989,29 +4000,25 @@ impl Blockchain {
         };
 
         // Use the efficient exponential + binary search algorithm
-        match network_resolver
+        let ancestor = network_resolver
             .find_common_ancestor(our_height, peer_height, check_fn)
             .await
-        {
-            Ok(ancestor) => {
-                // CRITICAL FIX: If ancestor is 0 but peer_lowest is > 100,
-                // the blocks slice likely doesn't go back far enough.
-                // Log a warning so the calling code can detect this and request more blocks.
-                if ancestor == 0 && peer_lowest > 100 {
-                    warn!(
-                        "⚠️ Common ancestor search returned 0, but peer blocks only go back to height {}. \
-                        Actual fork is likely between 0 and {}. Caller should request deeper history.",
-                        peer_lowest, peer_lowest
-                    );
-                }
-                info!("✓ Found common ancestor at height {}", ancestor);
-                ancestor
-            }
-            Err(e) => {
-                warn!("Error finding common ancestor: {}, defaulting to 0", e);
-                0
-            }
+            .map_err(|e| format!("Error in common ancestor search: {}", e))?;
+
+        // CRITICAL FIX: If ancestor is 0 but peer_lowest is > 100,
+        // the blocks slice doesn't go back far enough to find the true common ancestor.
+        // Return an error to force the peer to send deeper block history.
+        if ancestor == 0 && peer_lowest > 100 {
+            return Err(format!(
+                "Insufficient block history: peer blocks only go back to height {}, \
+                but common ancestor was not found. Peer must provide blocks starting from a lower height \
+                (fork likely occurred between height 0 and {}).",
+                peer_lowest, peer_lowest
+            ));
         }
+
+        info!("✓ Found common ancestor at height {}", ancestor);
+        Ok(ancestor)
     }
 
     /// Get chain work at a specific height
