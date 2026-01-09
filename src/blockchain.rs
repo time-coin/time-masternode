@@ -3025,11 +3025,11 @@ impl Blockchain {
 
     /// Periodic chain comparison with peers to detect forks
     /// Requests block height from peers and compares
-    /// 
+    ///
     /// **PRIMARY FORK RESOLUTION ENTRY POINT**
     /// This is the recommended way to detect and resolve forks.
     /// It runs periodically and queries all peers for consensus.
-    /// 
+    ///
     /// Benefits over on-demand resolution:
     /// - Queries all peers for complete picture
     /// - Detects forks before receiving unsolicited blocks
@@ -3040,7 +3040,7 @@ impl Blockchain {
         // This is important because this method runs periodically and could conflict with
         // on-demand fork resolution triggered by incoming blocks
         let _lock = self.fork_resolution_lock.lock().await;
-        
+
         let peer_registry = self.peer_registry.read().await;
         let registry = match peer_registry.as_ref() {
             Some(r) => r,
@@ -3053,7 +3053,7 @@ impl Blockchain {
         }
 
         tracing::debug!(
-            "🔍 [LOCKED] PRIMARY FORK RESOLUTION: Periodic check with {} peers", 
+            "🔍 [LOCKED] PRIMARY FORK RESOLUTION: Periodic check with {} peers",
             connected_peers.len()
         );
 
@@ -3675,11 +3675,11 @@ impl Blockchain {
 
     /// AI-powered fork resolution with fallback to traditional rules
     /// Returns true if we should accept the new blocks (they extend a better chain)
-    /// 
+    ///
     /// **DEPRECATED**: This method creates duplicate fork resolution paths.
     /// Prefer using the unified fork resolution through periodic chain comparison.
     /// This method will be removed in a future version.
-    /// 
+    ///
     /// Current issue: Multiple code paths can trigger fork resolution simultaneously:
     /// - This method (when receiving blocks)
     /// - compare_chain_with_peers() (periodic check)
@@ -3696,12 +3696,12 @@ impl Blockchain {
         // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
         // This prevents race conditions when multiple peers send competing chains simultaneously
         let _lock = self.fork_resolution_lock.lock().await;
-        
+
         warn!(
             "⚠️ DEPRECATED: should_accept_fork called for peer {} (use unified resolution instead)",
             peer_ip
         );
-        
+
         if competing_blocks.is_empty() {
             return Ok(false);
         }
@@ -3793,11 +3793,11 @@ impl Blockchain {
     /// Early fork evaluation with minimal information
     /// Called when we detect a fork but don't have complete block data yet
     /// Returns: (should_investigate, confidence_message)
-    /// 
+    ///
     /// **DEPRECATED**: This method makes decisions with incomplete data.
     /// It can accept/reject forks before having actual block data, leading to
     /// incorrect decisions. Use unified fork resolution instead.
-    /// 
+    ///
     /// Issues:
     /// - Estimates peer work without seeing blocks
     /// - Can conflict with should_accept_fork() later
@@ -3813,12 +3813,12 @@ impl Blockchain {
     ) -> (bool, String) {
         // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
         let _lock = self.fork_resolution_lock.lock().await;
-        
+
         warn!(
             "⚠️ DEPRECATED: should_investigate_fork called for peer {} (incomplete data)",
             peer_ip
         );
-        
+
         let our_height = self.get_height();
 
         // If peer has significantly longer chain, investigate

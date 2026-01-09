@@ -1103,6 +1103,7 @@ async fn handle_peer(
                                                                 );
 
                                                                 // Check if we should accept this fork
+                                                                #[allow(deprecated)]
                                                                 match blockchain.should_accept_fork(blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
                                                                         // Accept the fork - find common ancestor and perform reorg
@@ -1299,6 +1300,7 @@ async fn handle_peer(
                                                                 .collect();
 
                                                             if !reorg_blocks.is_empty() {
+                                                                #[allow(deprecated)]
                                                                 match blockchain.should_accept_fork(&reorg_blocks, end_height, &peer.addr).await {
                                                                     Ok(true) => {
                                                                         // CIRCUIT BREAKER: Check fork depth

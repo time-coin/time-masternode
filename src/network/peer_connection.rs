@@ -1711,6 +1711,7 @@ impl PeerConnection {
                         }
 
                         // We have complete chain - decide if we should reorganize
+                        #[allow(deprecated)]
                         match blockchain
                             .should_accept_fork(&reorg_blocks, peer_tip_height, &self.peer_ip)
                             .await
