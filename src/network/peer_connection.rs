@@ -1738,6 +1738,7 @@ impl PeerConnection {
                                             ancestor, new_height, reorg_blocks.len(), self.peer_ip
                                         );
                                         *self.fork_resolution_tracker.write().await = None;
+                                        *self.fork_loop_tracker.write().await = None; // Reset fork loop tracker on success
                                         return Ok(());
                                     }
                                     Err(e) => {
@@ -2487,6 +2488,55 @@ impl PeerConnection {
                             if let Err(e) = self.send_message(&alert).await {
                                 warn!("Failed to send fork alert: {}", e);
                             }
+                        }
+
+                        // CRITICAL: Fork loop detection - prevent repeated failed attempts
+                        let mut fork_loop = self.fork_loop_tracker.write().await;
+                        let now = std::time::Instant::now();
+                        const FORK_LOOP_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60); // 1 minute cooldown
+                        const MAX_FORK_ATTEMPTS: u32 = 3; // Max 3 attempts before cooldown
+
+                        let should_attempt_resolution = if let Some((last_height, count, last_seen)) = *fork_loop {
+                            if last_height == *height {
+                                // Same fork height detected again
+                                if now.duration_since(last_seen) < FORK_LOOP_COOLDOWN {
+                                    // Within cooldown period
+                                    if count >= MAX_FORK_ATTEMPTS {
+                                        // Already tried too many times, skip
+                                        warn!(
+                                            "🚫 [{:?}] Fork loop detected with {} at height {} ({} attempts in {}s) - SKIPPING to prevent loop",
+                                            self.direction,
+                                            self.peer_ip,
+                                            height,
+                                            count,
+                                            now.duration_since(last_seen).as_secs()
+                                        );
+                                        false
+                                    } else {
+                                        // Update count and continue
+                                        *fork_loop = Some((*height, count + 1, now));
+                                        true
+                                    }
+                                } else {
+                                    // Cooldown expired, reset counter
+                                    *fork_loop = Some((*height, 1, now));
+                                    true
+                                }
+                            } else {
+                                // Different height, reset tracker
+                                *fork_loop = Some((*height, 1, now));
+                                true
+                            }
+                        } else {
+                            // First fork detection
+                            *fork_loop = Some((*height, 1, now));
+                            true
+                        };
+                        drop(fork_loop); // Release lock before network operations
+
+                        if !should_attempt_resolution {
+                            // Skip this fork attempt to prevent loop
+                            return Ok(());
                         }
 
                         // Request blocks to determine which chain to follow
