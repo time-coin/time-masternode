@@ -35,7 +35,7 @@ const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 const PEER_SYNC_TIMEOUT_SECS: u64 = 60; // Short timeout to allow heartbeats (1 min)
 const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
 const MASTERNODE_SYNC_TIMEOUT_SECS: u64 = 600; // 10 minutes for masternode sync
-const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 60; // Check sync every 60 seconds
+const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 30; // Check sync every 30 seconds (reduced from 60s for faster fork detection)
 
 // Chain work constants - each block adds work based on validator count
 const BASE_WORK_PER_BLOCK: u128 = 1_000_000;
@@ -1009,10 +1009,9 @@ impl Blockchain {
             loop {
                 interval.tick().await;
 
-                // Skip if already syncing
-                if self.is_syncing.load(Ordering::Acquire) {
-                    continue;
-                }
+                // ALWAYS run fork detection even if syncing - this is critical for fork resolution
+                // Only skip the other sync logic if already syncing
+                let already_syncing = self.is_syncing.load(Ordering::Acquire);
 
                 let our_height = self.get_height();
                 let time_expected = self.calculate_expected_height();
@@ -1046,6 +1045,31 @@ impl Blockchain {
                 // Wait for responses to arrive
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
+                // ALWAYS check for consensus fork first - this is critical for fork resolution
+                // This uses fresh chain tip data we just requested
+                if let Some((_consensus_height, sync_peer)) = self.compare_chain_with_peers().await
+                {
+                    // Fork detected by consensus mechanism
+                    info!(
+                        "🔀 Sync coordinator: Fork detected via consensus, syncing from {}",
+                        sync_peer
+                    );
+                    if !already_syncing {
+                        let blockchain_clone = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            if let Err(e) = blockchain_clone.sync_from_peers().await {
+                                warn!("⚠️  Consensus fork sync failed: {}", e);
+                            }
+                        });
+                    }
+                    continue; // Skip other sync logic this round
+                }
+
+                // If already syncing, skip the rest of the sync logic
+                if already_syncing {
+                    continue;
+                }
+
                 // Find the best masternode to sync from
                 let mut best_masternode: Option<(String, u64)> = None;
 
@@ -1072,24 +1096,6 @@ impl Blockchain {
                             }
                         }
                     }
-                }
-
-                // Check for consensus fork before syncing
-                // This uses fresh chain tip data we just requested
-                if let Some((_consensus_height, sync_peer)) = self.compare_chain_with_peers().await
-                {
-                    // Fork detected by consensus mechanism
-                    info!(
-                        "🔀 Sync coordinator: Fork detected via consensus, syncing from {}",
-                        sync_peer
-                    );
-                    let blockchain_clone = Arc::clone(&self);
-                    tokio::spawn(async move {
-                        if let Err(e) = blockchain_clone.sync_from_peers().await {
-                            warn!("⚠️  Consensus fork sync failed: {}", e);
-                        }
-                    });
-                    continue; // Skip other sync logic this round
                 }
 
                 // If we found a better masternode, sync from it

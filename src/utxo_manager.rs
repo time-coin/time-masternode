@@ -79,8 +79,20 @@ impl UTXOStateManager {
     pub async fn add_utxo(&self, utxo: UTXO) -> Result<(), UtxoError> {
         let outpoint = utxo.outpoint.clone();
 
-        if self.utxo_states.contains_key(&outpoint) {
-            return Err(UtxoError::AlreadySpent);
+        // Check if UTXO already exists
+        if let Some(existing_state) = self.utxo_states.get(&outpoint) {
+            match existing_state.value() {
+                UTXOState::Unspent => {
+                    // UTXO already exists and is unspent - this is OK during fork resolution
+                    // when the same block might be processed multiple times
+                    tracing::debug!("UTXO {:?} already exists in Unspent state - treating as success", outpoint);
+                    return Ok(());
+                }
+                _ => {
+                    // UTXO exists but in a different state (spent, locked, etc.)
+                    return Err(UtxoError::AlreadySpent);
+                }
+            }
         }
 
         self.storage.add_utxo(utxo).await?;
