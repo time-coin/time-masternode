@@ -109,9 +109,10 @@ impl ForkResolutionState {
 
     /// Get missing block ranges that need to be requested
     pub fn get_missing_ranges(&self) -> Vec<(u64, u64)> {
+        let start = self.common_ancestor.unwrap_or(self.fork_height);
+        
         if self.blocks_received.is_empty() {
-            // Need entire range
-            let start = self.common_ancestor.unwrap_or(self.fork_height);
+            // Need entire range including common ancestor for validation
             return vec![(start, self.target_height)];
         }
 
@@ -119,10 +120,18 @@ impl ForkResolutionState {
         sorted.sort_by_key(|b| b.header.height);
 
         let mut ranges = Vec::new();
-        let start = self.common_ancestor.unwrap_or(self.fork_height);
 
         // Find gaps in sequence
-        let mut expected = start;
+        // If we have blocks, check if we need the common ancestor block
+        let first_block_height = sorted[0].header.height;
+        let mut expected = if self.common_ancestor.is_some() && first_block_height <= start + 1 {
+            // If first received block is at common_ancestor+1 or lower, we've validated the ancestor
+            first_block_height.max(start + 1)
+        } else {
+            // Otherwise start from common_ancestor/fork_height
+            start
+        };
+        
         for block in &sorted {
             if block.header.height > expected {
                 // Gap found
