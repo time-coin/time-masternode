@@ -3082,6 +3082,20 @@ impl Blockchain {
             return None;
         }
 
+        // DEBUG: Log what we received from peers
+        tracing::info!(
+            "🔍 [DEBUG] Received chain tips from {} peers:",
+            peer_tips.len()
+        );
+        for (peer_ip, (height, hash)) in &peer_tips {
+            tracing::info!(
+                "   Peer {}: height {} hash {}",
+                peer_ip,
+                height,
+                hex::encode(&hash[..8])
+            );
+        }
+
         let our_height = self.get_height();
         let our_hash = match self.get_block_hash(our_height) {
             Ok(hash) => hash,
@@ -3105,6 +3119,16 @@ impl Blockchain {
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
+
+        // DEBUG: Log consensus decision
+        tracing::info!(
+            "🔍 [DEBUG] Consensus: height {} hash {} ({} peers agree). Our height: {} hash {}",
+            consensus_height,
+            hex::encode(&consensus_hash[..8]),
+            consensus_peers.len(),
+            our_height,
+            hex::encode(&our_hash[..8])
+        );
 
         // Case 1: Consensus chain is longer - definitely switch
         if consensus_height > our_height {
@@ -3193,12 +3217,35 @@ impl Blockchain {
 
         // Case 3: We're ahead of consensus
         if our_height > consensus_height {
+            // Check if we're alone on our chain (potential minority fork)
+            let our_chain_peer_count = chain_counts
+                .get(&(our_height, our_hash))
+                .map(|peers| peers.len())
+                .unwrap_or(0); // Don't count ourselves
+
             tracing::warn!(
-                "⚠️  We appear to be ahead of consensus: our height {} > consensus {} ({} peers)",
+                "⚠️  We appear to be ahead of consensus: our height {} > consensus {} ({} peers, we have {} peers on our chain)",
                 our_height,
                 consensus_height,
-                consensus_peers.len()
+                consensus_peers.len(),
+                our_chain_peer_count
             );
+
+            // If we're alone (no other peers on our chain) and consensus is strong (3+ peers),
+            // we're likely on a minority fork and should roll back
+            if our_chain_peer_count == 0 && consensus_peers.len() >= 2 {
+                tracing::error!(
+                    "🚨 MINORITY FORK DETECTED: We're at {} but alone. Consensus at {} with {} peers. Rolling back to consensus.",
+                    our_height,
+                    consensus_height,
+                    consensus_peers.len()
+                );
+
+                // Trigger rollback by returning consensus as target
+                // This will cause the sync mechanism to rollback and resync
+                return Some((consensus_height, consensus_peers[0].clone()));
+            }
+
             return None;
         }
 
