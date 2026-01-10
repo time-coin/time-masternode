@@ -2698,15 +2698,64 @@ impl Blockchain {
     }
 
     /// Check if we should switch to peer's chain based on work comparison
+    /// Enhanced with masternode authority analysis
     pub async fn should_switch_by_work(
         &self,
         peer_work: u128,
         peer_height: u64,
         peer_tip_hash: &[u8; 32],
+        peer_ip: Option<&str>,
     ) -> bool {
         let our_work = *self.cumulative_work.read().await;
         let our_height = self.current_height.load(Ordering::Acquire);
 
+        // If we have peer IP and heights are equal or close, use masternode authority
+        if let (Some(ip), true) = (peer_ip, peer_height.abs_diff(our_height) <= 2) {
+            if let Ok(our_tip) = self.get_block_by_height(our_height).await {
+                let our_hash = our_tip.hash();
+
+                // Analyze masternode authority
+                let our_authority = crate::masternode_authority::CanonicalChainSelector::analyze_our_chain_authority(
+                    &self.masternode_registry,
+                    self.connection_manager.read().await.as_ref().map(|v| &**v),
+                    self.peer_registry.read().await.as_ref().map(|v| &**v),
+                ).await;
+
+                // For peer, we only know the single peer IP, so limited analysis
+                let peer_authority = crate::masternode_authority::CanonicalChainSelector::analyze_peer_chain_authority(
+                    &[ip.to_string()],
+                    &self.masternode_registry,
+                    self.peer_registry.read().await.as_ref().map(|v| &**v),
+                ).await;
+
+                let (should_switch, reason) = crate::masternode_authority::CanonicalChainSelector::should_switch_to_peer_chain(
+                    &our_authority,
+                    &peer_authority,
+                    our_work,
+                    peer_work,
+                    our_height,
+                    peer_height,
+                    &our_hash,
+                    peer_tip_hash,
+                );
+
+                tracing::info!(
+                    "📊 Chain comparison with {}:\n   Our: {} work={} height={}\n   Peer: {} work={} height={}\n   → {}",
+                    ip,
+                    our_authority.format_summary(),
+                    our_work,
+                    our_height,
+                    peer_authority.format_summary(),
+                    peer_work,
+                    peer_height,
+                    reason
+                );
+
+                return should_switch;
+            }
+        }
+
+        // Fallback to traditional chain work comparison
         if peer_work > our_work {
             tracing::info!(
                 "📊 Peer has more chain work: {} vs our {} (heights: {} vs {})",
@@ -3143,74 +3192,72 @@ impl Blockchain {
 
         // Case 2: Same height but different hash - fork at same height!
         if consensus_height == our_height && consensus_hash != our_hash {
-            // Use AI fork resolver for intelligent decision making
-            let our_chain_peer_count = chain_counts
-                .get(&(our_height, our_hash))
-                .map(|peers| peers.len())
-                .unwrap_or(1); // Count ourselves
-
-            let our_timestamp = self
-                .get_block_by_height(our_height)
-                .await
-                .ok()
-                .map(|b| b.header.timestamp);
-
-            // Get approximate peer timestamp (would need to fetch actual block)
-            let peer_timestamp = None; // TODO: Fetch from peer
-
-            // Use AI fork resolver for intelligent decision
-            // CRITICAL: At same height, use consensus (peer count) as primary signal
-            // since we don't have peer's actual cumulative work
-            let fork_params = crate::ai::fork_resolver::ForkResolutionParams {
-                our_height,
-                our_chain_work: *self.cumulative_work.read().await,
-                peer_height: consensus_height,
-                // At same height with same work per block, use equal work but rely on consensus
-                peer_chain_work: *self.cumulative_work.read().await,
-                peer_ip: consensus_peers[0].clone(),
-                supporting_peers: peer_tips
-                    .iter()
-                    .map(|(ip, (h, _))| (ip.clone(), *h, 0u128))
-                    .collect(),
-                common_ancestor: consensus_height.saturating_sub(1),
-                peer_tip_timestamp: peer_timestamp, // Fixed variable name
-                our_tip_hash: Some(our_hash),
-                peer_tip_hash: Some(consensus_hash),
-                peer_is_whitelisted: true, // Check actual whitelist status
-                our_tip_timestamp: our_timestamp, // Fixed variable name
-                fork_depth: 0,             // Same height fork
-            };
-
-            let resolution = self.fork_resolver.resolve_fork(fork_params).await;
-
             warn!(
-                "🔀 Fork at same height {}: our hash {} ({} peers) vs consensus hash {} ({} peers)",
+                "🔀 Fork at same height {}: our hash {} vs consensus hash {} ({} peers)",
                 consensus_height,
                 hex::encode(&our_hash[..8]),
-                our_chain_peer_count,
                 hex::encode(&consensus_hash[..8]),
                 consensus_peers.len()
             );
+
+            // PHASE 1: Analyze masternode authority (PRIMARY DECISION)
+            let _our_chain_peers = chain_counts
+                .get(&(our_height, our_hash)).cloned()
+                .unwrap_or_default();
+
+            // Analyze our chain's masternode support
+            let our_authority =
+                crate::masternode_authority::CanonicalChainSelector::analyze_our_chain_authority(
+                    &self.masternode_registry,
+                    self.connection_manager.read().await.as_ref().map(|v| &**v),
+                    self.peer_registry.read().await.as_ref().map(|v| &**v),
+                )
+                .await;
+
+            // Analyze consensus chain's masternode support
+            let consensus_authority =
+                crate::masternode_authority::CanonicalChainSelector::analyze_peer_chain_authority(
+                    &consensus_peers,
+                    &self.masternode_registry,
+                    self.peer_registry.read().await.as_ref().map(|v| &**v),
+                )
+                .await;
+
+            info!(
+                "📊 Masternode Authority Analysis:\n   Our chain: {}\n   Consensus: {}",
+                our_authority.format_summary(),
+                consensus_authority.format_summary()
+            );
+
+            // Determine canonical chain based on masternode authority
+            let our_chain_work = *self.cumulative_work.read().await;
+            let peer_chain_work = our_chain_work; // Same height = approximately equal work
+
+            let (should_switch, reason) =
+                crate::masternode_authority::CanonicalChainSelector::should_switch_to_peer_chain(
+                    &our_authority,
+                    &consensus_authority,
+                    our_chain_work,
+                    peer_chain_work,
+                    our_height,
+                    consensus_height,
+                    &our_hash,
+                    &consensus_hash,
+                );
+
             warn!(
-                "   AI Resolution: {} (confidence: {:.0}%, risk: {:?})",
-                if resolution.accept_peer_chain {
-                    "ACCEPT consensus chain"
+                "   Decision: {} - {}",
+                if should_switch {
+                    "SWITCH to consensus"
                 } else {
                     "KEEP our chain"
                 },
-                resolution.confidence * 100.0,
-                resolution.risk_level
+                reason
             );
 
-            // Log reasoning
-            for reason in &resolution.reasoning {
-                info!("   • {}", reason);
-            }
-
-            if resolution.accept_peer_chain {
+            if should_switch {
                 return Some((consensus_height, consensus_peers[0].clone()));
             } else {
-                // Keep our chain based on AI decision
                 return None;
             }
         }

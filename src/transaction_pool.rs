@@ -31,6 +31,8 @@ struct PoolEntry {
     #[allow(dead_code)]
     added_at: Instant,
     size: usize,
+    /// IP address of the peer that submitted this transaction
+    submitter_ip: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -75,6 +77,16 @@ impl TransactionPool {
 
     /// Add transaction to pending pool with fee (atomic operation)
     pub fn add_pending(&self, tx: Transaction, fee: u64) -> Result<(), PoolError> {
+        self.add_pending_with_submitter(tx, fee, None)
+    }
+
+    /// Add transaction to pending pool with fee and submitter IP (atomic operation)
+    pub fn add_pending_with_submitter(
+        &self,
+        tx: Transaction,
+        fee: u64,
+        submitter_ip: Option<String>,
+    ) -> Result<(), PoolError> {
         let txid = tx.txid();
 
         // Fast path: Check if already exists BEFORE expensive serialization
@@ -113,6 +125,7 @@ impl TransactionPool {
             fee,
             added_at: Instant::now(),
             size: tx_size,
+            submitter_ip,
         };
 
         self.pending.insert(txid, entry);
@@ -182,6 +195,24 @@ impl TransactionPool {
     /// Get all pending transactions
     pub fn get_all_pending(&self) -> Vec<Transaction> {
         self.pending.iter().map(|e| e.value().tx.clone()).collect()
+    }
+
+    /// Get all pending transactions with metadata for priority sorting
+    pub fn get_all_pending_with_metadata(
+        &self,
+    ) -> Vec<(Transaction, u64, Option<String>, Instant)> {
+        self.pending
+            .iter()
+            .map(|e| {
+                let entry = e.value();
+                (
+                    entry.tx.clone(),
+                    entry.fee,
+                    entry.submitter_ip.clone(),
+                    entry.added_at,
+                )
+            })
+            .collect()
     }
 
     /// Get a specific pending transaction by ID (O(1), no full pool clone)
