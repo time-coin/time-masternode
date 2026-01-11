@@ -3392,6 +3392,53 @@ impl Blockchain {
                                 consensus_peer
                             );
                         }
+                    } else if consensus_height < our_height {
+                        // MINORITY FORK: We're ahead of consensus - need to roll back
+                        tracing::error!(
+                            "🚨 MINORITY FORK DETECTED in periodic check: We're at {} but consensus is at {}, rolling back",
+                            our_height,
+                            consensus_height
+                        );
+
+                        // Rollback to consensus height to realign with network
+                        match blockchain.rollback_to_height(consensus_height).await {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "✅ Rolled back to consensus height {}",
+                                    consensus_height
+                                );
+
+                                // Request blocks from consensus peer to fill our chain
+                                if let Some(peer_registry) =
+                                    blockchain.peer_registry.read().await.as_ref()
+                                {
+                                    let request_from = consensus_height.saturating_sub(10).max(1);
+                                    let req = NetworkMessage::GetBlocks(
+                                        request_from,
+                                        consensus_height + 10,
+                                    );
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&consensus_peer, req).await
+                                    {
+                                        tracing::warn!(
+                                            "⚠️  Failed to request blocks from {}: {}",
+                                            consensus_peer,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "📤 Requested blocks {}-{} from consensus peer {}",
+                                            request_from,
+                                            consensus_height + 10,
+                                            consensus_peer
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to rollback from minority fork: {}", e);
+                            }
+                        }
                     }
                 }
             }

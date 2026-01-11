@@ -1075,16 +1075,22 @@ impl PeerConnection {
                             skipped += 1;
                         }
                         Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
-                            // Fork detected - log it and let periodic resolution handle it
+                            // Fork detected - trigger immediate resolution check
                             if !fork_detected {
                                 warn!(
                                     "🔀 Fork detected with peer {} at height {}: {}",
                                     self.peer_ip, block.header.height, e
                                 );
-                                warn!(
-                                    "   Deferring to periodic fork resolution (compare_chain_with_peers)"
-                                );
+                                info!("   Triggering immediate fork resolution check");
                                 fork_detected = true;
+
+                                // Spawn immediate fork resolution check
+                                let blockchain_clone = Arc::clone(blockchain);
+                                tokio::spawn(async move {
+                                    // Give it a moment for peer to update chain tip, then check consensus
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                    let _ = blockchain_clone.compare_chain_with_peers().await;
+                                });
                             }
                             skipped += 1;
                         }
@@ -1121,11 +1127,11 @@ impl PeerConnection {
                     );
                 }
 
-                // If fork was detected, don't disconnect - let periodic resolution handle it
+                // If fork was detected, immediate resolution was triggered
                 // This applies to BOTH whitelisted and non-whitelisted peers
                 if fork_detected {
                     info!(
-                        "🔄 Fork with {} will be resolved by periodic compare_chain_with_peers() task",
+                        "🔄 Fork with {} - immediate resolution check initiated",
                         self.peer_ip
                     );
                 }
