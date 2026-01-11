@@ -1131,21 +1131,34 @@ impl PeerConnection {
                 }
             }
             NetworkMessage::BlockInventory(block_height) => {
-                // Handle block inventory announcement - only request if we need it
+                // Handle block inventory announcement - request immediately to stay synced
                 let our_height = blockchain.get_height();
 
                 if *block_height > our_height {
-                    // Check if the gap is too large (more than 1 block)
+                    // Check if the gap is large (more than 1 block)
                     let gap = block_height - our_height;
 
                     if gap > 1 {
-                        // We're far behind - don't request this specific block
-                        // Instead, let the sync mechanism handle catchup
+                        // We're behind - request range immediately for fast sync
                         debug!(
-                            "📊 [{:?}] Peer {} announced block {} but we're at {} (gap: {}). Ignoring - will sync via GetBlocks.",
+                            "📊 [{:?}] Peer {} announced block {} but we're at {} (gap: {}). Requesting range immediately.",
                             self.direction, self.peer_ip, block_height, our_height, gap
                         );
-                        // No action - the sync loop will handle catching up
+                        // Request the full range to catch up immediately
+                        let start = our_height + 1;
+                        let end = *block_height;
+                        let request = NetworkMessage::GetBlocks(start, end);
+                        if let Err(e) = self.send_message(&request).await {
+                            warn!(
+                                "⚠️ [{:?}] Failed to request blocks {}-{} from {}: {}",
+                                self.direction, start, end, self.peer_ip, e
+                            );
+                        } else {
+                            debug!(
+                                "📤 [{:?}] Requested blocks {}-{} from {} for immediate sync",
+                                self.direction, start, end, self.peer_ip
+                            );
+                        }
                     } else {
                         // Gap is 1 - this is the next block we need
                         debug!(

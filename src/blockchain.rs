@@ -756,14 +756,14 @@ impl Blockchain {
                     break;
                 }
 
-                // Wait for blocks to arrive (with longer timeout per batch to reduce spurious retries)
+                // Wait for blocks to arrive with reduced timeout for faster sync
                 let batch_start_time = std::time::Instant::now();
-                let batch_timeout = std::time::Duration::from_secs(30); // Increased from 15s
+                let batch_timeout = std::time::Duration::from_secs(10); // Reduced for immediate sync
                 let mut last_height = current;
                 let mut made_progress = false;
 
                 while batch_start_time.elapsed() < batch_timeout {
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     let now_height = self.current_height.load(Ordering::Acquire);
 
                     if now_height >= time_expected {
@@ -851,7 +851,7 @@ impl Blockchain {
                             let retry_timeout = std::time::Duration::from_secs(retry_timeout_secs);
 
                             while retry_start.elapsed() < retry_timeout {
-                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                                 let retry_height = self.current_height.load(Ordering::Acquire);
 
                                 if retry_height > last_height {
@@ -3312,7 +3312,7 @@ impl Blockchain {
     /// Start periodic chain comparison task
     pub fn start_chain_comparison_task(blockchain: Arc<Blockchain>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60)); // Every 1 minute
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15)); // Every 15 seconds for immediate sync
 
             loop {
                 interval.tick().await;

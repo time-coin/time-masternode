@@ -615,9 +615,9 @@ async fn main() {
 
         tracing::info!("✓ Genesis block loaded, now syncing remaining blocks from peers");
 
-        // STEP 2: Wait for peer connections to sync remaining blocks
+        // STEP 2: Wait for peer connections to sync remaining blocks (reduced for faster startup)
         let mut wait_seconds = 0u64;
-        let max_wait = 60u64; // Wait up to 60 seconds for peers
+        let max_wait = 20u64; // Reduced from 60s - start syncing as soon as peers connect
         while wait_seconds < max_wait {
             let connected = peer_registry_for_sync.get_connected_peers().await.len();
             if connected > 0 {
@@ -634,9 +634,9 @@ async fn main() {
             }
         }
 
-        // STEP 3: Start fork detection BEFORE syncing (run immediately then every 1 min)
+        // STEP 3: Start fork detection BEFORE syncing (run immediately then every 15 seconds for immediate sync)
         Blockchain::start_chain_comparison_task(blockchain_init.clone());
-        tracing::info!("✓ Fork detection task started (checks immediately, then every 1 minute)");
+        tracing::info!("✓ Fork detection task started (checks immediately, then every 15 seconds)");
 
         // Run initial fork detection before syncing
         tracing::info!("🔍 Running initial fork detection...");
@@ -836,8 +836,8 @@ async fn main() {
         let leader_timeout = std::time::Duration::from_secs(10);
 
         // Give time for initial blockchain sync to complete before starting block production
-        // This prevents race conditions where both init sync and production loop call sync_from_peers()
-        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+        // Reduced from 120s to 30s for faster startup and catchup response
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
 
         // Time-based catchup trigger: Check if we're behind schedule
         // Use time rather than block count to determine when to trigger catchup
@@ -1568,7 +1568,7 @@ async fn main() {
 
     println!("🌐 Starting P2P network server...");
 
-    // Periodic status report - logs every 5 minutes at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55
+    // Periodic status report - logs every 1 minute for immediate sync detection
     // Also handles responsive catchup checks more frequently than 10-minute block production interval
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
@@ -1580,37 +1580,14 @@ async fn main() {
     let status_handle = tokio::spawn(async move {
         let mut tick_count = 0u64; // Track ticks for cache monitoring
         loop {
-            // Wait until next 5-minute mark (:00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55)
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let minute = (now / 60) % 60;
-            let second = now % 60;
-
-            // Calculate seconds until next 5-minute mark
-            let next_5min_mark = ((minute / 5) + 1) * 5;
-            let target_minute = if next_5min_mark >= 60 {
-                0
-            } else {
-                next_5min_mark
-            };
-
-            let minutes_until = if target_minute > minute {
-                target_minute - minute
-            } else {
-                60 - minute + target_minute
-            };
-
-            let seconds_until = (minutes_until * 60) - second;
-
+            // Check every 60 seconds for immediate sync response
             tokio::select! {
                 _ = shutdown_token_status.cancelled() => {
                     tracing::debug!("🛑 Status report task shutting down gracefully");
                     break;
                 }
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(seconds_until)) => {
-                    tick_count += 1; // Increment for cache monitoring
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                    tick_count += 1;
 
                     let height = status_blockchain.get_height();
                     let mn_count = status_registry.list_active().await.len();
