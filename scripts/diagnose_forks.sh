@@ -14,12 +14,33 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Detect network type and set ports
-if [ -f "config.toml" ]; then
-    NETWORK=$(grep '^network = ' config.toml | head -1 | cut -d'"' -f2)
-elif [ -f "../config.toml" ]; then
-    NETWORK=$(grep '^network = ' ../config.toml | head -1 | cut -d'"' -f2)
+# Check multiple config locations in order of priority
+CONFIG_LOCATIONS=(
+    "$HOME/.timecoin/testnet/config.toml"
+    "$HOME/.timecoin/mainnet/config.toml"
+    "$HOME/.timecoin/config.toml"
+    "./config.toml"
+    "../config.toml"
+)
+
+NETWORK="mainnet"  # default
+CONFIG_FILE=""
+
+for config in "${CONFIG_LOCATIONS[@]}"; do
+    if [ -f "$config" ]; then
+        NETWORK=$(grep '^network = ' "$config" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [ -n "$NETWORK" ]; then
+            CONFIG_FILE="$config"
+            break
+        fi
+    fi
+done
+
+if [ -z "$CONFIG_FILE" ]; then
+    echo -e "${YELLOW}⚠ No config file found, assuming mainnet${NC}"
+    NETWORK="mainnet"
 else
-    NETWORK="mainnet"  # default
+    echo "Using config: $CONFIG_FILE"
 fi
 
 if [ "$NETWORK" = "mainnet" ]; then
@@ -179,10 +200,12 @@ echo ""
 # 7. Check recent log entries for fork warnings
 echo "7. Checking recent logs for fork warnings..."
 LOG_PATHS=(
+    "$HOME/.timecoin/testnet/logs/timed.log"
+    "$HOME/.timecoin/mainnet/logs/timed.log"
+    "$HOME/.timecoin/logs/timed.log"
     "/var/log/timed/timed.log"
     "./logs/mainnet-node.log"
     "./logs/testnet-node.log"
-    "$HOME/.timecoin/logs/timed.log"
 )
 
 LOG_FILE=""
@@ -196,15 +219,29 @@ done
 if [ -n "$LOG_FILE" ]; then
     echo "Log file: $LOG_FILE"
     echo ""
-    echo "Recent fork detections (last 10):"
-    grep "Fork detected\|MINORITY FORK\|ahead of consensus" "$LOG_FILE" 2>/dev/null | tail -10
-    echo ""
     
-    echo "Recent sync attempts (last 5):"
-    grep "Syncing from\|sync completed\|Failed to sync" "$LOG_FILE" 2>/dev/null | tail -5
+    # Check if there are any fork-related messages
+    FORK_COUNT=$(grep -c "Fork detected\|MINORITY FORK\|ahead of consensus" "$LOG_FILE" 2>/dev/null || echo "0")
+    if [ "$FORK_COUNT" -gt 0 ]; then
+        echo "Recent fork detections (last 10):"
+        grep "Fork detected\|MINORITY FORK\|ahead of consensus" "$LOG_FILE" 2>/dev/null | tail -10
+        echo ""
+    else
+        echo "No fork warnings found (this is good!)"
+    fi
+    
+    # Check sync status
+    SYNC_COUNT=$(grep -c "Syncing from\|sync completed\|Failed to sync" "$LOG_FILE" 2>/dev/null || echo "0")
+    if [ "$SYNC_COUNT" -gt 0 ]; then
+        echo "Recent sync attempts (last 5):"
+        grep "Syncing from\|sync completed\|Failed to sync" "$LOG_FILE" 2>/dev/null | tail -5
+    fi
 else
     echo -e "${YELLOW}⚠ Log file not found in common locations${NC}"
-    echo "  Checked: /var/log/timed/, ./logs/, ~/.timecoin/logs/"
+    echo "  Checked:"
+    for path in "${LOG_PATHS[@]}"; do
+        echo "    - $path"
+    done
 fi
 echo ""
 
