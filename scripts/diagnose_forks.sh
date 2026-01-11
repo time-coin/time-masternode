@@ -323,24 +323,40 @@ echo "SUMMARY & RECOMMENDATIONS"
 echo "========================================"
 echo ""
 
-# Calculate expected height
-GENESIS_TIME=1767225600  # 2026-01-01 00:00:00 UTC
+# Calculate expected height based on CORRECT genesis time for network
+if [ "$NETWORK" = "mainnet" ]; then
+    GENESIS_TIME=1767225600  # 2026-01-01 00:00:00 UTC (from src/network_type.rs:43)
+elif [ "$NETWORK" = "testnet" ]; then
+    GENESIS_TIME=1764547200  # 2025-12-01 00:00:00 UTC (from src/network_type.rs:44)
+else
+    GENESIS_TIME=1767225600  # Default to mainnet if unknown
+fi
+
 CURRENT_UNIX=$(date +%s)
 EXPECTED_HEIGHT=$(( ($CURRENT_UNIX - $GENESIS_TIME) / 600 ))
 
 if [ -n "$HEIGHT" ] && [ "$HEIGHT" -gt 0 ]; then
     BLOCKS_BEHIND=$(( $EXPECTED_HEIGHT - $HEIGHT ))
     
-    echo "Expected height based on time: $EXPECTED_HEIGHT"
-    echo "Your current height: $HEIGHT"
+    echo "Network: $NETWORK"
+    echo "Genesis time: $(date -u -d @$GENESIS_TIME '+%Y-%m-%d %H:%M:%S UTC')"
+    echo "Current time: $(date -u -d @$CURRENT_UNIX '+%Y-%m-%d %H:%M:%S UTC')"
+    echo ""
+    echo "Expected height: $EXPECTED_HEIGHT"
+    echo "Your height: $HEIGHT"
+    echo "Difference: $BLOCKS_BEHIND blocks"
+    echo ""
     
     if [ "$BLOCKS_BEHIND" -gt 10 ]; then
         echo -e "${RED}⚠ You are $BLOCKS_BEHIND blocks behind schedule!${NC}"
         echo "  This indicates sync issues or frequent forks."
     elif [ "$BLOCKS_BEHIND" -gt 0 ]; then
         echo -e "${YELLOW}⚠ You are $BLOCKS_BEHIND blocks behind schedule.${NC}"
+    elif [ "$BLOCKS_BEHIND" -lt -5 ]; then
+        echo -e "${YELLOW}⚠ You are $((-BLOCKS_BEHIND)) blocks AHEAD of schedule.${NC}"
+        echo "  This is unusual - check if your system clock is correct."
     else
-        echo -e "${GREEN}✓ You are on schedule (or ahead).${NC}"
+        echo -e "${GREEN}✓ You are on schedule!${NC}"
     fi
 else
     echo -e "${YELLOW}⚠ Could not determine if node is on schedule (height unknown)${NC}"
