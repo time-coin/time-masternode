@@ -1084,12 +1084,34 @@ impl PeerConnection {
                                 info!("   Triggering immediate fork resolution check");
                                 fork_detected = true;
 
-                                // Spawn immediate fork resolution check
+                                // Spawn immediate fork resolution check and handle result
                                 let blockchain_clone = Arc::clone(blockchain);
                                 tokio::spawn(async move {
                                     // Give it a moment for peer to update chain tip, then check consensus
                                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                                    let _ = blockchain_clone.compare_chain_with_peers().await;
+
+                                    // If compare_chain_with_peers returns Some, it means we need to sync to consensus
+                                    // This handles all cases: minority fork, majority fork, or falling behind
+                                    if let Some((consensus_height, consensus_peer)) =
+                                        blockchain_clone.compare_chain_with_peers().await
+                                    {
+                                        let our_height = blockchain_clone.get_height();
+                                        tracing::info!(
+                                            "🔀 Immediate fork resolution: syncing from {} (our height: {}, consensus: {})",
+                                            consensus_peer, our_height, consensus_height
+                                        );
+
+                                        // sync_from_specific_peer handles both rollback and sync
+                                        if let Err(e) = blockchain_clone
+                                            .sync_from_specific_peer(&consensus_peer)
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                "❌ Failed to sync during fork resolution: {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 });
                             }
                             skipped += 1;
