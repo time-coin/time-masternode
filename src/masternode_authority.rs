@@ -247,12 +247,14 @@ impl CanonicalChainSelector {
         if peer_tip_hash < our_tip_hash {
             (
                 true,
-                "SWITCH: All metrics equal, peer hash is smaller (deterministic tiebreaker)".to_string(),
+                "SWITCH: All metrics equal, peer hash is smaller (deterministic tiebreaker)"
+                    .to_string(),
             )
         } else {
             (
                 false,
-                "KEEP: All metrics equal, our hash is smaller or equal (deterministic tiebreaker)".to_string(),
+                "KEEP: All metrics equal, our hash is smaller or equal (deterministic tiebreaker)"
+                    .to_string(),
             )
         }
     }

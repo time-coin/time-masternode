@@ -3208,7 +3208,8 @@ impl Blockchain {
 
             // PHASE 1: Analyze masternode authority (PRIMARY DECISION)
             let _our_chain_peers = chain_counts
-                .get(&(our_height, our_hash)).cloned()
+                .get(&(our_height, our_hash))
+                .cloned()
                 .unwrap_or_default();
 
             // Analyze our chain's masternode support
@@ -3288,7 +3289,7 @@ impl Blockchain {
             // we're likely on a minority fork and should roll back
             // CRITICAL FIX: Changed from >= 2 to >= 1 to handle mainnet fork where nodes
             // see "1 peers agree" but never roll back because threshold was too high
-            if our_chain_peer_count == 0 && consensus_peers.len() >= 1 {
+            if our_chain_peer_count == 0 && !consensus_peers.is_empty() {
                 tracing::error!(
                     "🚨 MINORITY FORK DETECTED: We're at {} but alone. Consensus at {} with {} peers. Rolling back to consensus.",
                     our_height,

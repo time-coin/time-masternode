@@ -831,8 +831,9 @@ async fn main() {
             (String, std::time::Instant, u64),
         > = std::collections::HashMap::new();
         // Reduced timeout for faster rotation when network is stalled
-        // Leaders have 30 seconds to produce blocks before we rotate to backup
-        let leader_timeout = std::time::Duration::from_secs(30);
+        // Leaders have 10 seconds to produce blocks before we rotate to backup
+        // This prevents long waits when offline masternodes are selected
+        let leader_timeout = std::time::Duration::from_secs(10);
 
         // Give time for initial blockchain sync to complete before starting block production
         // This prevents race conditions where both init sync and production loop call sync_from_peers()
@@ -1198,16 +1199,36 @@ async fn main() {
                         std::time::Duration::from_secs(0)
                     };
 
+                    // OPTIMIZATION: Check if leader is connected before waiting
+                    // If leader is not connected, immediately rotate to backup
+                    let leader_ip = tsdc_leader.id.split(':').next().unwrap_or(&tsdc_leader.id);
+                    let leader_connected = block_peer_registry
+                        .get_connected_peers()
+                        .await
+                        .iter()
+                        .any(|p| p.contains(leader_ip));
+
+                    if !leader_connected && wait_duration >= std::time::Duration::from_secs(5) {
+                        tracing::warn!(
+                            "⚠️  Leader {} not connected after {}s - rotating to backup leader",
+                            tsdc_leader.id,
+                            wait_duration.as_secs()
+                        );
+                        catchup_leader_tracker.remove(&expected_height);
+                        continue;
+                    }
+
                     tracing::info!(
-                        "⏳ Waiting for catchup leader {} to produce blocks (we are {}, waited: {}s)",
+                        "⏳ Waiting for catchup leader {} to produce blocks (we are {}, waited: {}s, connected: {})",
                         tsdc_leader.id,
                         our_desc,
-                        wait_duration.as_secs()
+                        wait_duration.as_secs(),
+                        leader_connected
                     );
 
                     // Sleep briefly then check if blocks were produced
-                    // This allows the leader time to produce while avoiding 10-minute wait
-                    tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                    // Reduced to 5s for faster detection of offline leaders
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
                     // After waiting, check if the leader made progress
                     let height_after_wait = block_blockchain.get_height();
@@ -1240,6 +1261,21 @@ async fn main() {
                     "🎯 SELECTED AS CATCHUP LEADER for height {} (via TSDC consensus)",
                     expected_height
                 );
+
+                // OPTIMIZATION: If we're the leader but have few connected peers,
+                // we might be isolated/offline. Skip to let a backup leader try.
+                let connected_peers = block_peer_registry.get_connected_peers().await;
+                if connected_peers.len() < 2 {
+                    tracing::warn!(
+                        "⚠️  We're selected as leader but only {} peer(s) connected - likely offline/isolated, skipping to let backup leader try",
+                        connected_peers.len()
+                    );
+                    // Force rotation by removing tracker
+                    catchup_leader_tracker.remove(&expected_height);
+                    // Small delay before continuing to avoid tight loop
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue;
+                }
 
                 // We are the leader - produce catchup blocks with TSDC coordination
                 // Acquire block production lock (P2P best practice #8)

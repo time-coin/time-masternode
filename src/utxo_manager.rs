@@ -85,7 +85,10 @@ impl UTXOStateManager {
                 UTXOState::Unspent => {
                     // UTXO already exists and is unspent - this is OK during fork resolution
                     // when the same block might be processed multiple times
-                    tracing::debug!("UTXO {:?} already exists in Unspent state - treating as success", outpoint);
+                    tracing::debug!(
+                        "UTXO {:?} already exists in Unspent state - treating as success",
+                        outpoint
+                    );
                     return Ok(());
                 }
                 _ => {
