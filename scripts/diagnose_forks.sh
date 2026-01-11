@@ -1,6 +1,6 @@
 #!/bin/bash
-# Fork Diagnostic Script for TimeCoin Mainnet
-# Run this on each masternode to diagnose fork causes
+# Fork Diagnostic Script for TimeCoin
+# Run this locally on your node to diagnose fork issues
 
 echo "========================================"
 echo "TimeCoin Fork Diagnostic Tool"
@@ -34,7 +34,7 @@ fi
 
 echo "Network: $NETWORK"
 echo "P2P Port: $P2P_PORT"
-echo "RPC Port: $RPC_PORT"
+echo "RPC URL: $RPC_URL"
 echo ""
 
 # Find time-cli binary
@@ -42,6 +42,8 @@ if [ -f "./time-cli" ]; then
     CLI="./time-cli --rpc-url $RPC_URL"
 elif [ -f "./target/release/time-cli" ]; then
     CLI="./target/release/time-cli --rpc-url $RPC_URL"
+elif [ -f "./target/release/time-cli.exe" ]; then
+    CLI="./target/release/time-cli.exe --rpc-url $RPC_URL"
 elif command -v time-cli &> /dev/null; then
     CLI="time-cli --rpc-url $RPC_URL"
 else
@@ -52,12 +54,17 @@ fi
 
 # 1. Check if timed is running
 echo "1. Checking if timed is running..."
-if pgrep -x "timed" > /dev/null; then
+if pgrep -x "timed" > /dev/null 2>&1; then
     echo -e "${GREEN}✓ timed is running${NC}"
     PID=$(pgrep -x "timed")
     echo "  PID: $PID"
+elif pgrep -f "timed" > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ timed is running${NC}"
+    PID=$(pgrep -f "timed" | head -1)
+    echo "  PID: $PID"
 else
     echo -e "${RED}✗ timed is NOT running${NC}"
+    echo "  Start it with: cargo run --release --bin timed"
     exit 1
 fi
 echo ""
@@ -65,11 +72,13 @@ echo ""
 # 2. Check blockchain height
 echo "2. Checking blockchain height..."
 if [ -n "$CLI" ]; then
-    HEIGHT=$($CLI get-block-count 2>/dev/null | grep -o '[0-9]*' | head -1)
-    if [ -n "$HEIGHT" ]; then
+    HEIGHT_OUTPUT=$($CLI get-block-count 2>&1)
+    HEIGHT=$(echo "$HEIGHT_OUTPUT" | grep -o '[0-9]\+' | head -1)
+    if [ -n "$HEIGHT" ] && [ "$HEIGHT" -gt 0 ] 2>/dev/null; then
         echo -e "${GREEN}✓ Current height: $HEIGHT${NC}"
     else
-        echo -e "${RED}✗ Could not get block height (RPC may not be ready)${NC}"
+        echo -e "${RED}✗ Could not get block height${NC}"
+        echo "  Error: $HEIGHT_OUTPUT"
         HEIGHT=""
     fi
 else
@@ -81,7 +90,8 @@ echo ""
 # 3. Check block hash at current height
 echo "3. Checking block hash..."
 if [ -n "$CLI" ] && [ -n "$HEIGHT" ]; then
-    HASH=$($CLI get-block $HEIGHT 2>/dev/null | grep -oP '"hash":\s*"\K[^"]+' | head -1)
+    BLOCK_OUTPUT=$($CLI get-block $HEIGHT 2>&1)
+    HASH=$(echo "$BLOCK_OUTPUT" | grep -oP '"hash":\s*"\K[^"]+' | head -1)
     if [ -n "$HASH" ]; then
         echo -e "${GREEN}✓ Hash at height $HEIGHT: ${HASH:0:16}...${NC}"
     else
@@ -92,25 +102,28 @@ else
 fi
 echo ""
 
-# 4. Check connected peers
-echo "4. Checking connected peers..."
+# 4. Check peer/masternode information
+echo "4. Checking peer/masternode information..."
 if [ -n "$CLI" ]; then
-    PEER_OUTPUT=$($CLI get-peer-info 2>/dev/null)
-    PEER_COUNT=$(echo "$PEER_OUTPUT" | grep -c "addr" 2>/dev/null || echo "0")
+    PEER_OUTPUT=$($CLI get-peer-info 2>&1)
+    # Count masternodes (each has "addr" field)
+    PEER_COUNT=$(echo "$PEER_OUTPUT" | grep -o '"addr"' | wc -l)
     
     if [ "$PEER_COUNT" -gt 0 ]; then
-        if [ "$PEER_COUNT" -ge 3 ]; then
-            echo -e "${GREEN}✓ Connected to $PEER_COUNT peers (good for 5-node network)${NC}"
-        elif [ "$PEER_COUNT" -ge 2 ]; then
-            echo -e "${YELLOW}⚠ Connected to $PEER_COUNT peers (minimum met, but low)${NC}"
+        if [ "$PEER_COUNT" -ge 4 ]; then
+            echo -e "${GREEN}✓ Found $PEER_COUNT masternodes (good for 5-node network)${NC}"
+        elif [ "$PEER_COUNT" -ge 3 ]; then
+            echo -e "${YELLOW}⚠ Found $PEER_COUNT masternodes (okay, but could be better)${NC}"
         else
-            echo -e "${RED}✗ Only $PEER_COUNT peer(s) connected (need at least 2!)${NC}"
+            echo -e "${RED}✗ Only $PEER_COUNT masternode(s) (need at least 3!)${NC}"
         fi
         echo ""
-        echo "Peer details:"
-        echo "$PEER_OUTPUT" | head -20
+        echo "Masternode details:"
+        echo "$PEER_OUTPUT"
     else
-        echo -e "${RED}✗ No peers connected or could not get peer list${NC}"
+        echo -e "${RED}✗ No masternodes found${NC}"
+        echo "  Error: $PEER_OUTPUT"
+        PEER_COUNT=0
     fi
 else
     echo -e "${YELLOW}⚠ Skipping (time-cli not available)${NC}"
@@ -138,57 +151,29 @@ else
 fi
 echo ""
 
-# 6. Check network connectivity to other masternodes
-echo "6. Checking network connectivity..."
-# You should replace these with your actual masternode IPs
-MASTERNODES=(
-    "lw-michigan.example.com"
-    "lw-london.example.com"
-    "lw-michigan2.example.com"
-    "lw-arizona.example.com"
-)
-
-# Detect network type and port from config
-if [ -f "config.toml" ]; then
-    NETWORK=$(grep '^network = ' config.toml | head -1 | cut -d'"' -f2)
-elif [ -f "../config.toml" ]; then
-    NETWORK=$(grep '^network = ' ../config.toml | head -1 | cut -d'"' -f2)
-else
-    NETWORK="mainnet"  # default
-fi
-
-if [ "$NETWORK" = "mainnet" ]; then
-    P2P_PORT=24000
-    RPC_PORT=24001
-else
-    P2P_PORT=24100
-    RPC_PORT=24101
-fi
-
-echo "Detected network: $NETWORK (P2P port: $P2P_PORT)"
-echo ""
-echo "Testing connectivity to known masternodes:"
-for mn in "${MASTERNODES[@]}"; do
-    # Skip self
-    HOSTNAME=$(hostname)
-    if [[ "$mn" == *"$HOSTNAME"* ]]; then
-        continue
-    fi
-    
-    # Ping test
-    if ping -c 1 -W 2 "$mn" &> /dev/null; then
-        echo -e "  ${GREEN}✓${NC} $mn is reachable"
+# 6. Check P2P port status (local only - no SSH to other nodes)
+echo "6. Checking P2P port accessibility..."
+if command -v netstat &> /dev/null; then
+    LISTENING=$(netstat -an 2>/dev/null | grep ":$P2P_PORT " | grep "LISTEN")
+    if [ -n "$LISTENING" ]; then
+        echo -e "${GREEN}✓ P2P port $P2P_PORT is listening${NC}"
+        echo "$LISTENING"
     else
-        echo -e "  ${RED}✗${NC} $mn is NOT reachable"
+        echo -e "${RED}✗ P2P port $P2P_PORT is NOT listening${NC}"
+        echo "  Check if timed is properly configured"
     fi
-    
-    # P2P port test (use detected port)
-    if nc -z -w 2 "$mn" $P2P_PORT &> /dev/null; then
-        echo -e "    ${GREEN}✓${NC} Port $P2P_PORT is open"
+elif command -v ss &> /dev/null; then
+    LISTENING=$(ss -an 2>/dev/null | grep ":$P2P_PORT " | grep "LISTEN")
+    if [ -n "$LISTENING" ]; then
+        echo -e "${GREEN}✓ P2P port $P2P_PORT is listening${NC}"
+        echo "$LISTENING"
     else
-        echo -e "    ${RED}✗${NC} Port $P2P_PORT is NOT accessible"
+        echo -e "${RED}✗ P2P port $P2P_PORT is NOT listening${NC}"
+        echo "  Check if timed is properly configured"
     fi
-done
+else
+    echo -e "${YELLOW}⚠ netstat/ss not available, skipping port check${NC}"
+fi
 echo ""
 
 # 7. Check recent log entries for fork warnings
@@ -278,11 +263,12 @@ if [ -z "$CLI" ]; then
 fi
 
 if [ "$PEER_COUNT" -lt 3 ] || [ -z "$PEER_COUNT" ]; then
-    echo -e "${RED}1. FIX NETWORK CONNECTIVITY${NC}"
-    echo "   - Check firewall rules (allow port $P2P_PORT)"
-    echo "   - Verify masternodes can reach each other"
-    echo "   - Check peer list in config"
-    echo "   - Test: nc -zv <masternode_ip> $P2P_PORT"
+    echo -e "${RED}1. FIX MASTERNODE CONNECTIVITY${NC}"
+    echo "   - Only $PEER_COUNT masternodes visible"
+    echo "   - Check if other masternodes are running"
+    echo "   - Verify P2P port $P2P_PORT is accessible"
+    echo "   - Check firewall rules on YOUR node"
+    echo "   - Check network configuration (NAT, routing)"
 fi
 
 if [ "$SYNC_STATUS" != "yes" ]; then
