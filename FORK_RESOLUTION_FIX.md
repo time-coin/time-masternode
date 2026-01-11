@@ -206,15 +206,70 @@ Watch for these log patterns:
 
 ✅ **Compiled successfully** with `cargo build --release` (2m 30s)
 
+---
+
+## UPDATE: Additional Fix Required (2025-01-20)
+
+### Fix 5: Lower Consensus Threshold for Minority Fork Detection
+
+**Problem Identified**: Despite the previous fixes, mainnet nodes remained stuck in a fork deadlock. Log analysis revealed:
+
+```
+⚠️  We appear to be ahead of consensus: our height 5913 > consensus 5912 (1 peers, we have 0 peers on our chain)
+```
+
+The periodic fork resolution was detecting that nodes were alone on their chains, but the threshold for rolling back was too high.
+
+**Root Cause**: 
+- **Location**: `src/blockchain.rs:3289`
+- **Problem**: Required `consensus_peers.len() >= 2` before rolling back from minority fork
+- **Impact**: In a 5-node network with fragmentation, nodes often saw "1 peers agree" which didn't meet threshold
+- **Result**: Every node correctly detected isolation but never rolled back → permanent deadlock
+
+**The Fix**:
+```rust
+// Before (BUGGY):
+if our_chain_peer_count == 0 && consensus_peers.len() >= 2 {
+    // Roll back to consensus
+}
+
+// After (FIXED):
+if our_chain_peer_count == 0 && consensus_peers.len() >= 1 {
+    // Roll back to consensus
+    tracing::error!(
+        "🚨 MINORITY FORK DETECTED: We're at {} but alone. Consensus at {} with {} peers. Rolling back to consensus.",
+        our_height, consensus_height, consensus_peers.len()
+    );
+    return Some((consensus_height, consensus_peers[0].clone()));
+}
+```
+
+**Why This Matters**:
+- In small networks (5-7 nodes), fragmentation can result in only 1-2 peers per consensus group
+- The old threshold (`>= 2`) meant even correctly detected minority forks wouldn't resolve
+- New threshold (`>= 1`) means: "If I'm alone and ANY peer has a different height, I'm probably wrong"
+
+**Safety**:
+- Still requires `our_chain_peer_count == 0` (must be completely alone)
+- Peer blocks are still validated before acceptance
+- Masternode authority and AI fork resolver still apply
+- This only affects the minority fork **detection threshold**, not validation
+
+**Expected Impact**:
+- Nodes showing "1 peers agree" will now roll back instead of staying stuck
+- Fork resolution should complete in 60-120 seconds (1-2 periodic checks)
+- Eliminates the specific deadlock pattern seen in mainnet logs
+
 ## Notes
 
 - These fixes address the **immediate deadlock issue** but don't change the fundamental consensus mechanism
 - Masternode authority scoring may still show "Authority=None" if all scores are 0 - this should be investigated separately
 - The network should now be able to recover from forks through the periodic resolution mechanism
+- **Fix 5 is critical for small networks** where peer count per consensus group may be only 1-2 nodes
 - Consider adding metrics/telemetry to track fork resolution success rates in production
 
 ---
 
-**Version**: 1.0.0  
+**Version**: 1.1.0  
 **Date**: 2025-01-20  
-**Status**: ✅ Implemented and built successfully
+**Status**: ✅ Implemented (Fixes 1-5) - Ready for testing
