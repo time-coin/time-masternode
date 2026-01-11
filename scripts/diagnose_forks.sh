@@ -13,51 +13,106 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-# Detect network type and set ports
-# Check multiple config locations in order of priority
-# Mainnet: ~/.timecoin/ (base directory)
-# Testnet: ~/.timecoin/testnet/ (subdirectory)
-CONFIG_LOCATIONS=(
-    "$HOME/.timecoin/testnet/config.toml"  # Testnet runtime location
-    "$HOME/.timecoin/config.toml"          # Mainnet runtime location
-    "./config.toml"                         # Development - repo root
-    "../config.toml"                        # Development - subdirectory
-)
+# Try to detect which config the running timed is using
+echo "Detecting running timed configuration..."
+TIMED_PROCESS=$(ps aux | grep -E "[t]imed" | grep -v grep)
 
-NETWORK="mainnet"  # default
-CONFIG_FILE=""
-
-for config in "${CONFIG_LOCATIONS[@]}"; do
-    if [ -f "$config" ]; then
-        DETECTED_NET=$(grep '^network = ' "$config" 2>/dev/null | head -1 | cut -d'"' -f2)
-        if [ -n "$DETECTED_NET" ]; then
-            NETWORK="$DETECTED_NET"
-            CONFIG_FILE="$config"
-            break
-        fi
-    fi
-done
-
-if [ -z "$CONFIG_FILE" ]; then
-    echo -e "${YELLOW}⚠ No config file found, assuming mainnet${NC}"
-    NETWORK="mainnet"
-else
-    echo "Using config: $CONFIG_FILE"
+if [ -z "$TIMED_PROCESS" ]; then
+    echo -e "${RED}✗ timed is NOT running${NC}"
+    exit 1
 fi
 
+echo -e "${GREEN}✓ timed is running${NC}"
+echo "Process: $TIMED_PROCESS"
+echo ""
+
+# Check if process has --config argument
+CONFIG_ARG=$(echo "$TIMED_PROCESS" | grep -oP '\-\-config\s+\S+' | awk '{print $2}')
+if [ -n "$CONFIG_ARG" ]; then
+    echo "Config from process args: $CONFIG_ARG"
+    CONFIG_FILE="$CONFIG_ARG"
+else
+    # Check working directory of timed process
+    TIMED_PID=$(echo "$TIMED_PROCESS" | awk '{print $2}')
+    TIMED_CWD=$(pwdx $TIMED_PID 2>/dev/null | awk '{print $2}')
+    
+    if [ -n "$TIMED_CWD" ] && [ -f "$TIMED_CWD/config.toml" ]; then
+        echo "Config from working directory: $TIMED_CWD/config.toml"
+        CONFIG_FILE="$TIMED_CWD/config.toml"
+    else
+        echo -e "${YELLOW}⚠ Cannot determine config file used by timed${NC}"
+        echo "  Trying common locations..."
+        
+        # Try common locations
+        CONFIG_LOCATIONS=(
+            "$HOME/.timecoin/testnet/config.toml"
+            "$HOME/.timecoin/config.toml"
+            "./config.toml"
+        )
+        
+        CONFIG_FILE=""
+        for config in "${CONFIG_LOCATIONS[@]}"; do
+            if [ -f "$config" ]; then
+                CONFIG_FILE="$config"
+                echo "  Found: $CONFIG_FILE"
+                break
+            fi
+        done
+    fi
+fi
+
+if [ -z "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
+    echo -e "${RED}✗ Could not find config file${NC}"
+    echo ""
+    echo "Please specify RPC port manually:"
+    echo "  For mainnet: export RPC_URL=http://127.0.0.1:24001"
+    echo "  For testnet: export RPC_URL=http://127.0.0.1:24101"
+    echo "  Then run: ./target/release/time-cli --rpc-url \$RPC_URL get-block-count"
+    exit 1
+fi
+
+# Read network type from config
+NETWORK=$(grep '^network = ' "$CONFIG_FILE" 2>/dev/null | head -1 | cut -d'"' -f2)
+if [ -z "$NETWORK" ]; then
+    echo -e "${YELLOW}⚠ Could not read network from config, trying both ports${NC}"
+    NETWORK="unknown"
+fi
+
+# Set ports based on network
 if [ "$NETWORK" = "mainnet" ]; then
     P2P_PORT=24000
     RPC_PORT=24001
     RPC_URL="http://127.0.0.1:24001"
-else
+elif [ "$NETWORK" = "testnet" ]; then
     P2P_PORT=24100
     RPC_PORT=24101
     RPC_URL="http://127.0.0.1:24101"
+else
+    # Try to auto-detect by testing both ports
+    echo "Testing RPC ports..."
+    if timeout 2 curl -s http://127.0.0.1:24101 >/dev/null 2>&1; then
+        NETWORK="testnet"
+        P2P_PORT=24100
+        RPC_PORT=24101
+        RPC_URL="http://127.0.0.1:24101"
+        echo "  Detected testnet (port 24101 responding)"
+    elif timeout 2 curl -s http://127.0.0.1:24001 >/dev/null 2>&1; then
+        NETWORK="mainnet"
+        P2P_PORT=24000
+        RPC_PORT=24001
+        RPC_URL="http://127.0.0.1:24001"
+        echo "  Detected mainnet (port 24001 responding)"
+    else
+        echo -e "${RED}✗ No RPC port responding${NC}"
+        exit 1
+    fi
 fi
 
+echo ""
 echo "Network: $NETWORK"
-echo "P2P Port: $P2P_PORT"
+echo "Config: $CONFIG_FILE"
 echo "RPC URL: $RPC_URL"
+echo "P2P Port: $P2P_PORT"
 echo ""
 
 # Find time-cli binary
