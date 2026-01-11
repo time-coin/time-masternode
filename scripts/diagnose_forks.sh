@@ -15,12 +15,13 @@ NC='\033[0m' # No Color
 
 # Detect network type and set ports
 # Check multiple config locations in order of priority
+# Mainnet: ~/.timecoin/ (base directory)
+# Testnet: ~/.timecoin/testnet/ (subdirectory)
 CONFIG_LOCATIONS=(
-    "$HOME/.timecoin/testnet/config.toml"
-    "$HOME/.timecoin/mainnet/config.toml"
-    "$HOME/.timecoin/config.toml"
-    "./config.toml"
-    "../config.toml"
+    "$HOME/.timecoin/testnet/config.toml"  # Testnet runtime location
+    "$HOME/.timecoin/config.toml"          # Mainnet runtime location
+    "./config.toml"                         # Development - repo root
+    "../config.toml"                        # Development - subdirectory
 )
 
 NETWORK="mainnet"  # default
@@ -28,8 +29,9 @@ CONFIG_FILE=""
 
 for config in "${CONFIG_LOCATIONS[@]}"; do
     if [ -f "$config" ]; then
-        NETWORK=$(grep '^network = ' "$config" 2>/dev/null | head -1 | cut -d'"' -f2)
-        if [ -n "$NETWORK" ]; then
+        DETECTED_NET=$(grep '^network = ' "$config" 2>/dev/null | head -1 | cut -d'"' -f2)
+        if [ -n "$DETECTED_NET" ]; then
+            NETWORK="$DETECTED_NET"
             CONFIG_FILE="$config"
             break
         fi
@@ -199,13 +201,14 @@ echo ""
 
 # 7. Check recent log entries for fork warnings
 echo "7. Checking recent logs for fork warnings..."
+# Mainnet: ~/.timecoin/logs/
+# Testnet: ~/.timecoin/testnet/logs/
 LOG_PATHS=(
-    "$HOME/.timecoin/testnet/logs/timed.log"
-    "$HOME/.timecoin/mainnet/logs/timed.log"
-    "$HOME/.timecoin/logs/timed.log"
-    "/var/log/timed/timed.log"
-    "./logs/mainnet-node.log"
-    "./logs/testnet-node.log"
+    "$HOME/.timecoin/testnet/logs/timed.log"  # Testnet default
+    "$HOME/.timecoin/logs/timed.log"          # Mainnet default
+    "/var/log/timed/timed.log"                 # System log location
+    "./logs/testnet-node.log"                  # Development
+    "./logs/mainnet-node.log"                  # Development
 )
 
 LOG_FILE=""
