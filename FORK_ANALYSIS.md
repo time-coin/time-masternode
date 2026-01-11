@@ -86,6 +86,12 @@ time-cli peer list
 
 # Expected: Should see 4+ other masternodes connected
 # If <3 peers: Network connectivity issue
+
+# Test connectivity to specific masternodes:
+# Mainnet uses port 24000, Testnet uses port 24100
+nc -zv <masternode_ip> 24000  # For mainnet
+# OR
+nc -zv <masternode_ip> 24100  # For testnet
 ```
 
 ### 2. **Clock Synchronization**

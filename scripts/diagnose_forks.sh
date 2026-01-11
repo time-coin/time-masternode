@@ -94,6 +94,25 @@ MASTERNODES=(
     "lw-arizona.example.com"
 )
 
+# Detect network type and port from config
+if [ -f "config.toml" ]; then
+    NETWORK=$(grep '^network = ' config.toml | head -1 | cut -d'"' -f2)
+elif [ -f "../config.toml" ]; then
+    NETWORK=$(grep '^network = ' ../config.toml | head -1 | cut -d'"' -f2)
+else
+    NETWORK="mainnet"  # default
+fi
+
+if [ "$NETWORK" = "mainnet" ]; then
+    P2P_PORT=24000
+    RPC_PORT=24001
+else
+    P2P_PORT=24100
+    RPC_PORT=24101
+fi
+
+echo "Detected network: $NETWORK (P2P port: $P2P_PORT)"
+echo ""
 echo "Testing connectivity to known masternodes:"
 for mn in "${MASTERNODES[@]}"; do
     # Skip self
@@ -109,11 +128,11 @@ for mn in "${MASTERNODES[@]}"; do
         echo -e "  ${RED}✗${NC} $mn is NOT reachable"
     fi
     
-    # P2P port test (assuming port 8333)
-    if nc -z -w 2 "$mn" 8333 &> /dev/null; then
-        echo -e "    ${GREEN}✓${NC} Port 8333 is open"
+    # P2P port test (use detected port)
+    if nc -z -w 2 "$mn" $P2P_PORT &> /dev/null; then
+        echo -e "    ${GREEN}✓${NC} Port $P2P_PORT is open"
     else
-        echo -e "    ${RED}✗${NC} Port 8333 is NOT accessible"
+        echo -e "    ${RED}✗${NC} Port $P2P_PORT is NOT accessible"
     fi
 done
 echo ""
@@ -174,9 +193,10 @@ echo ""
 echo "RECOMMENDATIONS:"
 if [ $PEER_COUNT -lt 3 ]; then
     echo -e "${RED}1. FIX NETWORK CONNECTIVITY${NC}"
-    echo "   - Check firewall rules (allow port 8333)"
+    echo "   - Check firewall rules (allow port $P2P_PORT)"
     echo "   - Verify masternodes can reach each other"
-    echo "   - Check peer list in config.toml"
+    echo "   - Check peer list in config"
+    echo "   - Test: nc -zv <masternode_ip> $P2P_PORT"
 fi
 
 if [ "$SYNC_STATUS" != "yes" ]; then
