@@ -164,6 +164,52 @@ impl Block {
         build_merkle_root(hashes)
     }
 
+    /// Add VRF proof to this block using the block leader's signing key
+    ///
+    /// This should be called after block creation but before broadcasting.
+    /// It generates a cryptographic VRF proof that proves the block leader
+    /// was legitimately selected for this slot.
+    ///
+    /// # Arguments
+    /// * `signing_key` - Block leader's ed25519 signing key
+    ///
+    /// # Returns
+    /// Ok(()) if VRF was successfully generated and added
+    pub fn add_vrf(&mut self, signing_key: &ed25519_dalek::SigningKey) -> Result<(), String> {
+        use crate::block::vrf::generate_block_vrf;
+
+        let (vrf_proof, vrf_output, vrf_score) =
+            generate_block_vrf(signing_key, self.header.height, &self.header.previous_hash);
+
+        self.header.vrf_proof = vrf_proof;
+        self.header.vrf_output = vrf_output;
+        self.header.vrf_score = vrf_score;
+
+        Ok(())
+    }
+
+    /// Verify the VRF proof in this block
+    ///
+    /// This should be called during block validation to ensure the block leader
+    /// was legitimately selected and didn't manipulate the randomness.
+    ///
+    /// # Arguments
+    /// * `verifying_key` - Block leader's ed25519 public key
+    ///
+    /// # Returns
+    /// Ok(()) if VRF proof is valid or block predates VRF (proof empty)
+    pub fn verify_vrf(&self, verifying_key: &ed25519_dalek::VerifyingKey) -> Result<(), String> {
+        use crate::block::vrf::verify_block_vrf;
+
+        verify_block_vrf(
+            verifying_key,
+            self.header.height,
+            &self.header.previous_hash,
+            &self.header.vrf_proof,
+            &self.header.vrf_output,
+        )
+    }
+
     /// Get count of masternodes with valid attestations in this block
     pub fn attested_masternode_count(&self) -> usize {
         self.time_attestations.len()

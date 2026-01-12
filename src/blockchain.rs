@@ -1733,14 +1733,20 @@ impl Blockchain {
 
     /// Calculate the VRF score for a single block.
     ///
-    /// Uses block hash as a proxy for VRF randomness until full VRF is implemented.
-    /// This provides deterministic "randomness" for chain comparison.
+    /// Prefers the block's stored VRF score if available (cryptographically generated).
+    /// Falls back to hash-based score for old blocks without VRF.
     pub fn calculate_block_vrf_score(&self, block: &Block) -> u64 {
-        // Check if block has VRF score set (future blocks)
+        // Check if block has VRF score set (blocks with ECVRF)
         if block.header.vrf_score > 0 {
             return block.header.vrf_score;
         }
-        // Fallback: use first 8 bytes of block hash as score
+
+        // Check if block has VRF output but no score calculated yet
+        if block.header.vrf_output != [0u8; 32] {
+            return crate::block::vrf::vrf_output_to_score(&block.header.vrf_output);
+        }
+
+        // Fallback: use block hash for old blocks without VRF
         let hash = block.hash();
         u64::from_be_bytes(hash[0..8].try_into().unwrap_or([0u8; 8]))
     }
