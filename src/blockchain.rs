@@ -1441,20 +1441,37 @@ impl Blockchain {
             ));
         }
 
-        // Check 2: Verify previous hash chain (if not genesis)
+        // Check 2: CRITICAL - Verify previous hash chain (if not genesis)
+        // We MUST have the previous block before accepting a new block
         if block.header.height > 0 {
-            if let Ok(prev_block) = self.get_block(block.header.height - 1) {
-                let expected_prev_hash = prev_block.hash();
-                if block.header.previous_hash != expected_prev_hash {
-                    tracing::error!(
-                        "❌ CORRUPT BLOCK DETECTED: Block {} previous_hash chain broken: expected {}, got {}",
+            match self.get_block(block.header.height - 1) {
+                Ok(prev_block) => {
+                    let expected_prev_hash = prev_block.hash();
+                    if block.header.previous_hash != expected_prev_hash {
+                        tracing::error!(
+                            "❌ CORRUPT BLOCK DETECTED: Block {} previous_hash chain broken: expected {}, got {}",
+                            block.header.height,
+                            hex::encode(&expected_prev_hash[..8]),
+                            hex::encode(&block.header.previous_hash[..8])
+                        );
+                        return Err(format!(
+                            "Block {} previous_hash doesn't match previous block hash",
+                            block.header.height
+                        ));
+                    }
+                }
+                Err(_) => {
+                    // CRITICAL: Cannot add block if we don't have the previous block
+                    // This prevents accepting blocks with gaps in the chain
+                    tracing::warn!(
+                        "⚠️ Cannot add block {} - previous block {} not found. Sync from peers first.",
                         block.header.height,
-                        hex::encode(&expected_prev_hash[..8]),
-                        hex::encode(&block.header.previous_hash[..8])
+                        block.header.height - 1
                     );
                     return Err(format!(
-                        "Block {} previous_hash doesn't match previous block hash",
-                        block.header.height
+                        "Cannot add block {} - missing previous block {}. Chain must be continuous.",
+                        block.header.height,
+                        block.header.height - 1
                     ));
                 }
             }
