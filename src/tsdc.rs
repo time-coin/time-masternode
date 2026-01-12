@@ -634,6 +634,7 @@ impl TSCDConsensus {
             leader: String::new(),
             attestation_root: [0u8; 32],
             masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
+            ..Default::default()
         };
 
         Ok(Block {
@@ -1114,6 +1115,7 @@ mod tests {
                 leader: String::new(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
+                ..Default::default()
             },
             transactions: vec![],
             masternode_rewards: vec![],
@@ -1131,6 +1133,7 @@ mod tests {
                 leader: String::new(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: crate::block::types::MasternodeTierCounts::default(),
+                ..Default::default()
             },
             transactions: vec![],
             masternode_rewards: vec![],

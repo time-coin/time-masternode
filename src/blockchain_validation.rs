@@ -194,6 +194,7 @@ mod tests {
                 leader: "test".to_string(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: Default::default(),
+                ..Default::default()
             },
             transactions,
             masternode_rewards: vec![],

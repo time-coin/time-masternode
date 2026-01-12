@@ -585,6 +585,7 @@ mod tests {
                     silver: 0,
                     gold: 0,
                 },
+                ..Default::default()
             },
             transactions: vec![],
             masternode_rewards: vec![],

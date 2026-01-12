@@ -130,6 +130,17 @@ pub struct ReorgMetrics {
     pub duration_ms: u64,
 }
 
+/// Result of canonical chain comparison for deterministic fork resolution
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanonicalChoice {
+    /// Keep our current chain
+    KeepOurs,
+    /// Switch to peer's chain
+    AdoptPeers,
+    /// Chains are identical
+    Identical,
+}
+
 /// Fork resolution state machine
 #[derive(Debug, Clone)]
 enum ForkResolutionState {
@@ -1402,6 +1413,7 @@ impl Blockchain {
                 leader: String::new(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
+                ..Default::default()
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
@@ -1628,6 +1640,133 @@ impl Blockchain {
     /// Get block hash at height
     pub async fn get_block_hash_at_height(&self, height: u64) -> Option<[u8; 32]> {
         self.get_block_hash(height).ok()
+    }
+
+    // =========================================================================
+    // CANONICAL CHAIN SELECTION (Fork Resolution)
+    // =========================================================================
+
+    /// Determine which of two competing chains is canonical using deterministic rules.
+    ///
+    /// Rules (in order of precedence):
+    /// 1. Longer chain wins (most work)
+    /// 2. Higher cumulative VRF score wins (when equal length)
+    /// 3. Lower tip hash wins (deterministic tiebreaker when equal scores)
+    ///
+    /// This function MUST be deterministic - all nodes must make the same decision
+    /// given the same inputs.
+    pub fn choose_canonical_chain(
+        our_height: u64,
+        our_tip_hash: [u8; 32],
+        our_cumulative_score: u128,
+        peer_height: u64,
+        peer_tip_hash: [u8; 32],
+        peer_cumulative_score: u128,
+    ) -> (CanonicalChoice, String) {
+        // Rule 1: Longer chain wins (most work)
+        if peer_height > our_height {
+            return (
+                CanonicalChoice::AdoptPeers,
+                format!(
+                    "Peer chain is longer: {} > {} blocks",
+                    peer_height, our_height
+                ),
+            );
+        }
+        if our_height > peer_height {
+            return (
+                CanonicalChoice::KeepOurs,
+                format!(
+                    "Our chain is longer: {} > {} blocks",
+                    our_height, peer_height
+                ),
+            );
+        }
+
+        // Heights are equal - use Rule 2: Higher cumulative VRF score wins
+        if peer_cumulative_score > our_cumulative_score {
+            return (
+                CanonicalChoice::AdoptPeers,
+                format!(
+                    "Equal height {}, but peer has higher VRF score: {} > {}",
+                    our_height, peer_cumulative_score, our_cumulative_score
+                ),
+            );
+        }
+        if our_cumulative_score > peer_cumulative_score {
+            return (
+                CanonicalChoice::KeepOurs,
+                format!(
+                    "Equal height {}, our VRF score is higher: {} > {}",
+                    our_height, our_cumulative_score, peer_cumulative_score
+                ),
+            );
+        }
+
+        // Scores are equal - use Rule 3: Lexicographically smaller hash wins
+        // This is a deterministic tiebreaker that all nodes will agree on
+        if peer_tip_hash < our_tip_hash {
+            return (
+                CanonicalChoice::AdoptPeers,
+                format!(
+                    "Equal height {} and score {}, peer has smaller tip hash",
+                    our_height, our_cumulative_score
+                ),
+            );
+        }
+        if our_tip_hash < peer_tip_hash {
+            return (
+                CanonicalChoice::KeepOurs,
+                format!(
+                    "Equal height {} and score {}, our tip hash is smaller",
+                    our_height, our_cumulative_score
+                ),
+            );
+        }
+
+        // Hashes are identical - same chain
+        (
+            CanonicalChoice::Identical,
+            format!("Chains are identical at height {}", our_height),
+        )
+    }
+
+    /// Calculate the VRF score for a single block.
+    ///
+    /// Uses block hash as a proxy for VRF randomness until full VRF is implemented.
+    /// This provides deterministic "randomness" for chain comparison.
+    pub fn calculate_block_vrf_score(&self, block: &Block) -> u64 {
+        // Check if block has VRF score set (future blocks)
+        if block.header.vrf_score > 0 {
+            return block.header.vrf_score;
+        }
+        // Fallback: use first 8 bytes of block hash as score
+        let hash = block.hash();
+        u64::from_be_bytes(hash[0..8].try_into().unwrap_or([0u8; 8]))
+    }
+
+    /// Calculate cumulative VRF score for a range of blocks.
+    ///
+    /// Cumulative score = sum of all individual block VRF scores in the range.
+    /// This is used for chain comparison when heights are equal.
+    pub async fn calculate_chain_vrf_score(&self, from_height: u64, to_height: u64) -> u128 {
+        let mut total_score: u128 = 0;
+
+        for height in from_height..=to_height {
+            if let Ok(block) = self.get_block(height) {
+                total_score += self.calculate_block_vrf_score(&block) as u128;
+            }
+        }
+
+        total_score
+    }
+
+    /// Calculate VRF score for a list of blocks (used for peer chain evaluation)
+    pub fn calculate_blocks_vrf_score(&self, blocks: &[Block]) -> u128 {
+        blocks
+            .iter()
+            .map(|b| self.calculate_block_vrf_score(b) as u128)
+            .sum()
     }
 
     /// Check consensus with peer
