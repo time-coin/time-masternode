@@ -885,38 +885,35 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_secs(initial_wait as u64)).await;
         }
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // 10 minutes
+        // Use a short interval (1 second) and check timing internally
+        // This allows rapid catchup when behind while still respecting 10-minute marks when synced
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_block_period_started: u64 = 0; // Track which block period we've started
 
         loop {
-            // Track whether we were triggered vs regular interval
-            // Triggered = status check already tried sync, skip to production
-            // Regular = normal flow, attempt sync first
-            let triggered_by_status_check: bool;
-
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
                     tracing::debug!("🛑 Block production task shutting down gracefully");
                     break;
                 }
                 _ = catchup_trigger_producer.notified() => {
-                    // Triggered by 5-minute status check when catchup is needed
+                    // Triggered by status check - immediate check
                     tracing::info!("🔔 Catchup production triggered by status check");
-                    triggered_by_status_check = true;
-                    // Fall through to production logic below
                 }
                 _ = interval.tick() => {
-                    triggered_by_status_check = false;
-                    // Mark start of new block period (regular interval only)
+                    // Regular 1-second check
                 }
             }
 
-            // Production logic continues here for both triggered and regular cases
-            if !triggered_by_status_check {
+            // Mark start of new block period (only once per period)
+            let current_height = block_blockchain.get_height();
+            let expected_period = current_height + 1;
+            if expected_period > last_block_period_started {
                 block_registry.start_new_block_period().await;
+                last_block_period_started = expected_period;
             }
 
-            let current_height = block_blockchain.get_height();
             let expected_height = block_blockchain.calculate_expected_height();
 
             // Get masternodes eligible for rewards
@@ -1177,6 +1174,20 @@ async fn main() {
                         block_height,
                         connected_peers.len()
                     );
+
+                    // Check if we're still behind and need to continue immediately
+                    let new_height = block_blockchain.get_height();
+                    let new_expected = block_blockchain.calculate_expected_height();
+                    let still_behind = new_expected.saturating_sub(new_height);
+                    if still_behind > 0 {
+                        tracing::info!(
+                            "🔄 Still {} blocks behind, continuing immediately",
+                            still_behind
+                        );
+                        is_producing.store(false, Ordering::SeqCst);
+                        interval.reset(); // Reset interval to avoid double-tick
+                        continue; // Skip waiting, loop immediately
+                    }
                 }
                 Err(e) => {
                     tracing::error!("❌ Failed to produce block: {}", e);
