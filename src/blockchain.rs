@@ -2336,7 +2336,7 @@ impl Blockchain {
 
                     // Restore spent UTXOs from undo log
                     for (outpoint, utxo) in undo_log.spent_utxos {
-                        if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                        if let Err(e) = self.utxo_manager.restore_utxo(utxo).await {
                             tracing::warn!(
                                 "Could not restore UTXO {:?} at height {}: {}",
                                 outpoint,

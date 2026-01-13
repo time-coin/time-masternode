@@ -132,6 +132,49 @@ impl UTXOStateManager {
         Ok(())
     }
 
+    /// Restore a UTXO during rollback (handles spent state)
+    /// Unlike add_utxo, this forces the UTXO back to Unspent even if it was previously spent
+    pub async fn restore_utxo(&self, utxo: UTXO) -> Result<(), UtxoError> {
+        let outpoint = utxo.outpoint.clone();
+
+        // During rollback, we need to restore UTXOs that were spent
+        // Clear any existing state (including SpentFinalized) and restore to Unspent
+        if let Some(existing_state) = self.utxo_states.get(&outpoint) {
+            match existing_state.value() {
+                UTXOState::Unspent => {
+                    // Already unspent - check if storage has it
+                    if self.storage.get_utxo(&outpoint).await.is_some() {
+                        tracing::debug!(
+                            "UTXO {:?} already exists in Unspent state during restore",
+                            outpoint
+                        );
+                        return Ok(());
+                    }
+                    // State says unspent but not in storage - add it
+                }
+                UTXOState::SpentFinalized { .. }
+                | UTXOState::SpentPending { .. }
+                | UTXOState::Confirmed { .. } => {
+                    // This is the rollback case - UTXO was spent but we're undoing it
+                    tracing::debug!("Restoring spent UTXO {:?} during rollback", outpoint);
+                }
+                UTXOState::Locked { txid, .. } => {
+                    // Locked UTXO being restored - clear the lock
+                    tracing::warn!(
+                        "Restoring locked UTXO {:?} (was locked by tx {:?})",
+                        outpoint,
+                        hex::encode(txid)
+                    );
+                }
+            }
+        }
+
+        // Add to storage and set state to Unspent
+        self.storage.add_utxo(utxo).await?;
+        self.utxo_states.insert(outpoint, UTXOState::Unspent);
+        Ok(())
+    }
+
     /// Atomically lock a UTXO for a pending transaction
     pub fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
         use dashmap::mapref::entry::Entry;
@@ -736,6 +779,37 @@ mod tests {
         match result {
             Err(UtxoError::LockMismatch) => {} // Expected
             _ => panic!("Expected LockMismatch error"),
+        }
+    }
+
+    /// Test: restore_utxo can restore spent UTXOs during rollback
+    #[tokio::test]
+    async fn test_restore_spent_utxo_during_rollback() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(8);
+        let utxo = create_test_utxo(8);
+
+        // Add and then spend the UTXO
+        manager.add_utxo(utxo.clone()).await.unwrap();
+        manager.spend_utxo(&outpoint).await.unwrap();
+
+        // Verify it's now in SpentFinalized state
+        match manager.get_state(&outpoint) {
+            Some(UTXOState::SpentFinalized { .. }) => {} // Expected
+            other => panic!("Expected SpentFinalized state, got {:?}", other),
+        }
+
+        // Regular add_utxo should fail
+        let add_result = manager.add_utxo(utxo.clone()).await;
+        assert!(add_result.is_err());
+
+        // restore_utxo should succeed
+        assert!(manager.restore_utxo(utxo).await.is_ok());
+
+        // Verify it's back to Unspent
+        match manager.get_state(&outpoint) {
+            Some(UTXOState::Unspent) => {} // Expected
+            other => panic!("Expected Unspent state after restore, got {:?}", other),
         }
     }
 }
