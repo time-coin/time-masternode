@@ -809,7 +809,6 @@ async fn main() {
     let block_registry = registry.clone();
     let block_blockchain = blockchain.clone();
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
-    let block_tsdc = tsdc_consensus.clone(); // For TSDC leader selection in catchup
     let block_masternode_address = masternode_address.clone(); // For leader comparison
     let shutdown_token_block = shutdown_token.clone();
 
@@ -823,17 +822,6 @@ async fn main() {
 
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
-
-        // Track catchup leader timeout
-        // Maps expected_height -> (leader_id, selection_timestamp, attempt_number)
-        let mut catchup_leader_tracker: std::collections::HashMap<
-            u64,
-            (String, std::time::Instant, u64),
-        > = std::collections::HashMap::new();
-        // Reduced timeout for faster rotation when network is stalled
-        // Leaders have 10 seconds to produce blocks before we rotate to backup
-        // This prevents long waits when offline masternodes are selected
-        let leader_timeout = std::time::Duration::from_secs(10);
 
         // Give time for initial blockchain sync to complete before starting block production
         // Reduced from 120s to 30s for faster startup and catchup response
@@ -1024,394 +1012,90 @@ async fn main() {
             }
 
             if should_catchup {
-                // Behind schedule - trigger TSDC coordinated catchup
+                // ═══════════════════════════════════════════════════════════════════════════
+                // FORK PREVENTION FIX: SYNC-ONLY CATCHUP (NO LOCAL BLOCK PRODUCTION)
+                // ═══════════════════════════════════════════════════════════════════════════
+                //
+                // ROOT CAUSE OF FORKS: Multiple nodes producing their own catchup blocks
+                // when behind schedule, creating competing chains at the same heights.
+                //
+                // SOLUTION: When behind, ONLY sync from peers. Never produce blocks locally.
+                // This ensures all nodes converge on the same chain.
+                //
+                // If ALL nodes are behind (no blocks exist on the network):
+                // - The sync will fail/timeout
+                // - Normal block production (below) will handle producing the next block
+                // - Only ONE node (the deterministically selected leader) will produce
+                // ═══════════════════════════════════════════════════════════════════════════
+
                 tracing::info!(
-                    "🧱 Catching up: height {} → {} ({} blocks behind, {}s past expected) at {} ({}:{}0) with {} eligible masternodes",
+                    "🔄 SYNC-ONLY CATCHUP: height {} → {} ({} blocks behind, {}s past expected)",
                     current_height,
                     expected_height,
                     blocks_behind,
-                    time_since_expected,
-                    timestamp,
-                    now.hour(),
-                    (now.minute() / 10),
-                    masternodes.len()
+                    time_since_expected
                 );
 
-                // CRITICAL: When triggered by status check, skip sync attempt
-                // The status check already tried sync_from_peers() and it failed
-                // Retrying here creates a deadlock where we never reach production
-                if !triggered_by_status_check {
-                    // First, try to sync from peers asynchronously
-                    // Don't wait - if they have blocks, they'll send them and we'll receive via handlers
-                    let connected_peers = block_peer_registry.get_connected_peers().await;
-
-                    if !connected_peers.is_empty() {
-                        let current_height_check = block_blockchain.get_height();
-                        let probe_start = current_height_check + 1;
-                        let probe_end = expected_height;
-
-                        tracing::info!(
-                            "🔍 Sending GetBlocks({}-{}) to {} peer(s) asynchronously",
-                            probe_start,
-                            probe_end,
-                            connected_peers.len()
-                        );
-
-                        // Send GetBlocks requests to all peers - responses handled asynchronously
-                        for peer_ip in &connected_peers {
-                            let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
-                            if let Err(e) = block_peer_registry.send_to_peer(peer_ip, msg).await {
-                                tracing::debug!("Failed to query peer {}: {}", peer_ip, e);
-                            }
-                        }
-
-                        // Don't wait - continue immediately. If peers respond with blocks,
-                        // the message handler will process them asynchronously and update our height.
-                        // On the next loop iteration, we'll see the new height and adjust accordingly.
-                        tracing::info!("📤 Sync requests sent, continuing without blocking");
-                    } else {
-                        tracing::warn!("⚠️  No connected peers for sync verification");
-                    }
-                }
-
-                // Check if we have connected peers before producing catchup blocks
                 let connected_peers = block_peer_registry.get_connected_peers().await;
-
-                // CRITICAL SAFETY: Require 2/3 majority of masternodes connected before catchup
-                // This prevents network partitions where small isolated groups fork the chain
-                let total_masternodes = masternodes.len();
-                let min_peers_for_catchup = ((total_masternodes * 2) / 3).max(3); // 2/3 majority, minimum 3
 
                 if connected_peers.is_empty() {
-                    tracing::warn!("⚠️  No connected peers - waiting for connections before producing catchup blocks");
-                    continue;
-                }
-
-                if connected_peers.len() < min_peers_for_catchup {
-                    tracing::warn!(
-                        "⚠️  Insufficient peer connectivity for safe catchup: {}/{} connected peers (need {}/{}+ for 2/3 majority)",
-                        connected_peers.len(),
-                        total_masternodes,
-                        min_peers_for_catchup,
-                        total_masternodes
-                    );
-                    tracing::warn!(
-                        "    Waiting for more peer connections to prevent isolated fork (connected: {:?})",
-                        connected_peers.iter().take(5).collect::<Vec<_>>()
-                    );
-                    continue;
-                }
-
-                // REVISED APPROACH: Use TSDC consensus for coordinated catchup
-                //
-                // Previous issue: Disabling ALL catchup meant network stalls when all nodes behind
-                // Solution: Use TSDC leader election for catchup blocks
-                //
-                // Key principles:
-                // 1. ONLY the TSDC-selected leader produces catchup blocks
-                // 2. All nodes agree on leader via deterministic selection
-                // 3. Non-leaders wait for leader's blocks
-                // 4. This prevents competing blocks at same height (fork prevention)
-                //
-                // Benefits:
-                // - Coordinated catchup when all nodes behind
-                // - No solo block production (prevents forks)
-                // - Deterministic and predictable
-
-                // Determine catchup leader using TSDC for expected_height
-                // CRITICAL: Use select_leader_for_catchup() which uses expected_height
-                // for deterministic leader selection. The slot parameter is NOT used
-                // (ignored internally) to ensure ALL nodes agree on the same leader
-                // regardless of when they check, preventing rotating leadership deadlock.
-                //
-                // LEADER TIMEOUT: If the primary leader doesn't respond within timeout,
-                // select a backup leader to prevent network stalls.
-                let mut attempt = 0u64;
-
-                // Check if we have a tracked leader for this height
-                if let Some((tracked_leader_id, selection_time, previous_attempt)) =
-                    catchup_leader_tracker.get(&expected_height)
-                {
-                    // Check if leader has timed out
-                    if selection_time.elapsed() > leader_timeout {
-                        tracing::warn!(
-                            "⚠️  Catchup leader {} timed out after {:?} - selecting backup leader (attempt {})",
-                            tracked_leader_id,
-                            selection_time.elapsed(),
-                            previous_attempt + 1
-                        );
-                        // Increment attempt to select next leader in rotation
-                        attempt = previous_attempt + 1;
-                        // Remove from tracker so we can track the new leader
-                        catchup_leader_tracker.remove(&expected_height);
-                    } else {
-                        // Leader hasn't timed out yet, keep the same attempt
-                        attempt = *previous_attempt;
-                    }
-                }
-
-                // Select leader with attempt offset (0 = primary, 1+ = backups)
-                let tsdc_leader = match block_tsdc
-                    .select_leader_for_catchup(attempt, expected_height)
-                    .await
-                {
-                    Ok(leader) => leader,
-                    Err(e) => {
-                        tracing::warn!("⚠️  Cannot select TSDC catchup leader: {} - NO ONE CAN PRODUCE BLOCKS!", e);
-                        continue;
-                    }
-                };
-
-                // Track this leader selection if not already tracked
-                catchup_leader_tracker
-                    .entry(expected_height)
-                    .or_insert_with(|| {
-                        (tsdc_leader.id.clone(), std::time::Instant::now(), attempt)
-                    });
-
-                // Check if we are the selected leader for this catchup operation
-                let is_catchup_leader = if let Some(ref our_addr) = block_masternode_address {
-                    let is_leader = tsdc_leader.id == *our_addr;
-                    tracing::info!(
-                        "🎲 Catchup leader selection for height {}: selected={}, we are {}, match={}",
-                        expected_height,
-                        tsdc_leader.id,
-                        our_addr,
-                        is_leader
-                    );
-                    is_leader
-                } else {
-                    tracing::debug!("Not a masternode, cannot be catchup leader");
-                    false // Not a masternode, can't be leader
-                };
-
-                if !is_catchup_leader {
-                    let our_desc = block_masternode_address
-                        .as_deref()
-                        .unwrap_or("non-masternode");
-
-                    // Check how long we've been waiting for this leader
-                    let wait_duration = if let Some((_, selection_time, _)) =
-                        catchup_leader_tracker.get(&expected_height)
-                    {
-                        selection_time.elapsed()
-                    } else {
-                        std::time::Duration::from_secs(0)
-                    };
-
-                    // OPTIMIZATION: Check if leader is connected before waiting
-                    // If leader is not connected, immediately rotate to backup
-                    let leader_ip = tsdc_leader.id.split(':').next().unwrap_or(&tsdc_leader.id);
-                    let leader_connected = block_peer_registry
-                        .get_connected_peers()
-                        .await
-                        .iter()
-                        .any(|p| p.contains(leader_ip));
-
-                    if !leader_connected && wait_duration >= std::time::Duration::from_secs(5) {
-                        tracing::warn!(
-                            "⚠️  Leader {} not connected after {}s - rotating to backup leader",
-                            tsdc_leader.id,
-                            wait_duration.as_secs()
-                        );
-                        catchup_leader_tracker.remove(&expected_height);
-                        continue;
-                    }
-
-                    tracing::info!(
-                        "⏳ Waiting for catchup leader {} to produce blocks (we are {}, waited: {}s, connected: {})",
-                        tsdc_leader.id,
-                        our_desc,
-                        wait_duration.as_secs(),
-                        leader_connected
-                    );
-
-                    // Sleep briefly then check if blocks were produced
-                    // Reduced to 5s for faster detection of offline leaders
+                    tracing::warn!("⚠️  No connected peers - cannot sync, waiting for connections");
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-                    // After waiting, check if the leader made progress
-                    let height_after_wait = block_blockchain.get_height();
-                    if height_after_wait > current_height {
-                        tracing::info!(
-                            "✅ Leader {} produced block(s), height advanced: {} → {}",
-                            tsdc_leader.id,
-                            current_height,
-                            height_after_wait
-                        );
-                        // Progress made - leader is working, continue to next iteration
-                        continue;
-                    }
-
-                    // No progress made - check if we should rotate leader
-                    if wait_duration >= leader_timeout {
-                        tracing::warn!(
-                            "⚠️  No progress after waiting {}s for leader {} - will rotate to backup leader",
-                            wait_duration.as_secs(),
-                            tsdc_leader.id
-                        );
-                        // The rotation will happen at the top of the next iteration
-                    }
-
-                    // Loop back to re-check leader selection (which will rotate if timed out)
                     continue;
                 }
+
+                // Request blocks from all connected peers
+                let probe_start = current_height + 1;
+                let probe_end = expected_height.min(current_height + 100); // Limit batch size
 
                 tracing::info!(
-                    "🎯 SELECTED AS CATCHUP LEADER for height {} (via TSDC consensus)",
-                    expected_height
+                    "📤 Requesting blocks {}-{} from {} peer(s)",
+                    probe_start,
+                    probe_end,
+                    connected_peers.len()
                 );
 
-                // OPTIMIZATION: If we're the leader but have few connected peers,
-                // we might be isolated/offline. Skip to let a backup leader try.
-                let connected_peers = block_peer_registry.get_connected_peers().await;
-                if connected_peers.len() < 2 {
-                    tracing::warn!(
-                        "⚠️  We're selected as leader but only {} peer(s) connected - likely offline/isolated, skipping to let backup leader try",
-                        connected_peers.len()
-                    );
-                    // Force rotation by removing tracker
-                    catchup_leader_tracker.remove(&expected_height);
-                    // Small delay before continuing to avoid tight loop
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
+                for peer_ip in &connected_peers {
+                    let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
+                    if let Err(e) = block_peer_registry.send_to_peer(peer_ip, msg).await {
+                        tracing::debug!("Failed to request from {}: {}", peer_ip, e);
+                    }
                 }
 
-                // We are the leader - produce catchup blocks with TSDC coordination
-                // Acquire block production lock (P2P best practice #8)
-                if is_producing
-                    .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_err()
-                {
-                    tracing::warn!("⚠️  Block production already in progress, skipping catchup");
-                    continue;
-                }
+                // Wait for blocks to arrive (async processing via message handlers)
+                // Use exponential backoff: 5s, then 10s, then 15s
+                let wait_time = std::time::Duration::from_secs(5 + (blocks_behind.min(10) as u64));
+                tracing::info!("⏳ Waiting {:?} for peer responses...", wait_time);
+                tokio::time::sleep(wait_time).await;
 
-                // CRITICAL: Re-check height after acquiring lock to prevent race condition
-                // Another task may have produced/received the block while we waited for the lock
-                let current_height_after_lock = block_blockchain.get_height();
-                if current_height_after_lock >= expected_height {
-                    is_producing.store(false, Ordering::SeqCst);
+                // Check if we made progress
+                let new_height = block_blockchain.get_height();
+                if new_height > current_height {
                     tracing::info!(
-                        "✓ Height {} already reached after lock acquisition (was {}, now {}), skipping catchup",
-                        expected_height,
+                        "✅ Sync progress: {} → {} ({} blocks received)",
                         current_height,
-                        current_height_after_lock
+                        new_height,
+                        new_height - current_height
                     );
-                    continue;
-                }
+                } else {
+                    tracing::warn!(
+                        "⚠️  No sync progress after waiting - peers may not have blocks yet"
+                    );
 
-                tracing::info!(
-                    "🎯 Producing {} catchup blocks as TSDC leader to reach height {}",
-                    expected_height.saturating_sub(current_height_after_lock),
-                    expected_height
-                );
-
-                // Produce catchup blocks with rate limiting
-                let mut catchup_produced = 0u64;
-                let genesis_timestamp = block_blockchain.genesis_timestamp();
-
-                for target_height in (current_height_after_lock + 1)..=expected_height {
-                    // CRITICAL TIME COIN REQUIREMENT: Never produce blocks ahead of schedule
-                    // Check current time against this block's scheduled time
-                    let expected_timestamp = genesis_timestamp + (target_height as i64 * 600);
-                    let now = chrono::Utc::now().timestamp();
-
-                    if expected_timestamp > now {
-                        // Haven't reached the scheduled time yet
-                        let wait_seconds = expected_timestamp - now;
-
-                        if wait_seconds > 60 {
-                            // More than 1 minute until scheduled - stop catchup
-                            // Regular block production will handle this at the proper time
-                            tracing::info!(
-                                "⏰ Stopping catchup: block {} not due for {}s",
-                                target_height,
-                                wait_seconds
-                            );
-                            break;
-                        }
-
-                        // Less than 1 minute - wait for EXACT scheduled time
-                        tracing::info!(
-                            "⏱️  Waiting {}s for block {} scheduled time (TIME COIN precision)",
-                            wait_seconds,
-                            target_height
-                        );
-                        tokio::time::sleep(tokio::time::Duration::from_secs(wait_seconds as u64))
-                            .await;
-
-                        // Re-check time after waiting to ensure precision
-                        let now_after_wait = chrono::Utc::now().timestamp();
-                        if expected_timestamp > now_after_wait {
-                            tracing::warn!(
-                                "⚠️  Time check failed after wait - block {} still not due, skipping",
-                                target_height
-                            );
-                            continue;
-                        }
-                    }
-
-                    // Double-check: NEVER produce if current blockchain height >= target
-                    let current_height_check = block_blockchain.get_height();
-                    if current_height_check >= target_height {
-                        tracing::info!(
-                            "✓ Block {} already exists (height: {}), skipping",
-                            target_height,
-                            current_height_check
-                        );
-                        continue;
-                    }
-
-                    match block_blockchain
-                        .produce_block_at_height(Some(target_height))
-                        .await
-                    {
-                        Ok(block) => {
-                            // Add block to our chain
-                            if let Err(e) = block_blockchain.add_block(block.clone()).await {
-                                tracing::error!("❌ Catchup block {} failed: {}", target_height, e);
-                                break;
-                            }
-
-                            // Broadcast to peers
-                            block_registry.broadcast_block(block.clone()).await;
-                            catchup_produced += 1;
-
-                            if catchup_produced % 10 == 0 || block.header.height == expected_height
-                            {
-                                tracing::info!(
-                                    "📦 Catchup progress: {}/{} blocks (height: {})",
-                                    catchup_produced,
-                                    blocks_behind,
-                                    block.header.height
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            // Check if error is due to timestamp in future
-                            if e.contains("timestamp") && e.contains("future") {
-                                tracing::info!("⏰ Catch-up stopped: reached real-time schedule");
-                                break;
-                            }
-                            tracing::error!("❌ Failed to produce catchup block: {}", e);
-                            break;
+                    // If no progress and we're significantly behind, try sync_from_peers()
+                    // which has more sophisticated peer selection and retry logic
+                    if blocks_behind > 5 && !triggered_by_status_check {
+                        tracing::info!("🔄 Attempting full sync_from_peers()...");
+                        if let Err(e) = block_blockchain.sync_from_peers().await {
+                            tracing::warn!("⚠️  sync_from_peers failed: {}", e);
                         }
                     }
                 }
 
-                // Release block production lock
-                is_producing.store(false, Ordering::SeqCst);
-
-                // Clear catchup leader tracker for completed heights
-                let final_height = block_blockchain.get_height();
-                catchup_leader_tracker.retain(|&height, _| height > final_height);
-
-                tracing::info!(
-                    "✅ Catchup complete: produced {} blocks, height now: {}",
-                    catchup_produced,
-                    final_height
-                );
+                // Continue to next iteration - will re-check if still behind
+                // If ALL nodes are behind (network bootstrap), normal production below
+                // will handle it with proper leader election
+                continue;
             } else {
                 // Either at expected height or behind but within 5-minute grace period
                 // Use normal block production - no race with catchup mode
