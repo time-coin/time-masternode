@@ -916,14 +916,6 @@ async fn main() {
                 block_registry.start_new_block_period().await;
             }
 
-            let now = chrono::Utc::now();
-            let timestamp = now
-                .date_naive()
-                .and_hms_opt(now.hour(), (now.minute() / 10) * 10, 0)
-                .unwrap()
-                .and_utc()
-                .timestamp();
-
             let current_height = block_blockchain.get_height();
             let expected_height = block_blockchain.calculate_expected_height();
 
@@ -955,39 +947,12 @@ async fn main() {
             // Sort deterministically by address for consistent leader election across all nodes
             sort_masternodes_canonical(&mut masternodes);
 
-            // Calculate time-based catchup trigger
+            // Calculate time-based values for block production
             let genesis_timestamp = block_blockchain.genesis_timestamp();
             let now_timestamp = chrono::Utc::now().timestamp();
-            let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
-            let time_since_expected = now_timestamp - expected_block_time;
-            let catchup_delay_threshold = 300; // 5 minutes
 
-            // Log when next block is actually due
-            if blocks_behind == 0 {
-                let next_block_due = genesis_timestamp + ((current_height + 1) as i64 * 600);
-                let wait_time = next_block_due - now_timestamp;
-                if wait_time > 0 {
-                    tracing::debug!(
-                        "📅 At expected height {} - next block due in {}s at {}",
-                        current_height,
-                        wait_time,
-                        chrono::DateTime::from_timestamp(next_block_due, 0)
-                            .map(|dt| dt.format("%H:%M:%S").to_string())
-                            .unwrap_or_else(|| "unknown".to_string())
-                    );
-                }
-            }
-
-            // Smart catchup trigger:
-            // - If many blocks behind (>1): Catch up immediately
-            // - If 1 block behind: Use 5-minute grace period
-            let should_catchup = blocks_behind > 1
-                || (blocks_behind > 0 && time_since_expected >= catchup_delay_threshold);
-
-            // Allow single-node bootstrap during initial catchup (height 0)
-            // For catchup mode, allow fewer masternodes (network may be degraded)
-            // For normal production, require at least 3 masternodes
-            if masternodes.len() < 3 && current_height > 0 && !should_catchup {
+            // Require minimum masternodes for production (except during bootstrap)
+            if masternodes.len() < 3 && current_height > 0 {
                 // Log periodically (every 60s) to avoid spam
                 static LAST_WARN: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
@@ -1011,262 +976,214 @@ async fn main() {
                 continue;
             }
 
-            if should_catchup {
-                // ═══════════════════════════════════════════════════════════════════════════
-                // FORK PREVENTION FIX: SYNC-ONLY CATCHUP (NO LOCAL BLOCK PRODUCTION)
-                // ═══════════════════════════════════════════════════════════════════════════
-                //
-                // ROOT CAUSE OF FORKS: Multiple nodes producing their own catchup blocks
-                // when behind schedule, creating competing chains at the same heights.
-                //
-                // SOLUTION: When behind, ONLY sync from peers. Never produce blocks locally.
-                // This ensures all nodes converge on the same chain.
-                //
-                // If ALL nodes are behind (no blocks exist on the network):
-                // - The sync will fail/timeout
-                // - Normal block production (below) will handle producing the next block
-                // - Only ONE node (the deterministically selected leader) will produce
-                // ═══════════════════════════════════════════════════════════════════════════
+            // ═══════════════════════════════════════════════════════════════════════════════
+            // UNIFIED BLOCK PRODUCTION - All nodes move forward together
+            // ═══════════════════════════════════════════════════════════════════════════════
+            //
+            // Single production mode with these rules:
+            // 1. If at expected height: wait for next scheduled time
+            // 2. If behind by 1+ blocks and 60s past scheduled: produce the block
+            // 3. If way behind (network was down): sync first, then produce together
+            // 4. Minority nodes that won't sync don't block majority progress
+            // 5. Use TSDC/Avalanche consensus for leader election
+            // ═══════════════════════════════════════════════════════════════════════════════
 
+            let next_height = current_height + 1;
+            let next_block_scheduled_time = genesis_timestamp + (next_height as i64 * 600); // 600 seconds (10 min) per block
+            let time_past_scheduled = now_timestamp - next_block_scheduled_time;
+
+            // Grace period: 60 seconds after scheduled time before we produce
+            const GRACE_PERIOD_SECS: i64 = 60;
+
+            // Sync threshold: if more than this many blocks behind, try to sync first
+            const SYNC_THRESHOLD_BLOCKS: u64 = 5;
+
+            // Case 1: Next block not due yet (more than grace period away) - wait
+            if time_past_scheduled < -GRACE_PERIOD_SECS {
+                let wait_secs = (-time_past_scheduled) - GRACE_PERIOD_SECS;
+                tracing::debug!(
+                    "📅 Block {} not due for {}s (will produce at scheduled + {}s grace)",
+                    next_height,
+                    wait_secs,
+                    GRACE_PERIOD_SECS
+                );
+                continue;
+            }
+
+            // Case 2: Way behind - try to sync first before producing
+            if blocks_behind >= SYNC_THRESHOLD_BLOCKS {
                 tracing::info!(
-                    "🔄 SYNC-ONLY CATCHUP: height {} → {} ({} blocks behind, {}s past expected)",
-                    current_height,
-                    expected_height,
-                    blocks_behind,
-                    time_since_expected
+                    "🔄 {} blocks behind - attempting sync before production",
+                    blocks_behind
                 );
 
                 let connected_peers = block_peer_registry.get_connected_peers().await;
 
-                if connected_peers.is_empty() {
-                    tracing::warn!("⚠️  No connected peers - cannot sync, waiting for connections");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue;
-                }
+                if !connected_peers.is_empty() {
+                    // Request blocks from peers
+                    let probe_start = current_height + 1;
+                    let probe_end = expected_height.min(current_height + 50);
 
-                // Request blocks from all connected peers
-                let probe_start = current_height + 1;
-                let probe_end = expected_height.min(current_height + 100); // Limit batch size
-
-                tracing::info!(
-                    "📤 Requesting blocks {}-{} from {} peer(s)",
-                    probe_start,
-                    probe_end,
-                    connected_peers.len()
-                );
-
-                for peer_ip in &connected_peers {
-                    let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
-                    if let Err(e) = block_peer_registry.send_to_peer(peer_ip, msg).await {
-                        tracing::debug!("Failed to request from {}: {}", peer_ip, e);
-                    }
-                }
-
-                // Wait for blocks to arrive (async processing via message handlers)
-                // Use exponential backoff: 5s, then 10s, then 15s
-                let wait_time = std::time::Duration::from_secs(5 + (blocks_behind.min(10) as u64));
-                tracing::info!("⏳ Waiting {:?} for peer responses...", wait_time);
-                tokio::time::sleep(wait_time).await;
-
-                // Check if we made progress
-                let new_height = block_blockchain.get_height();
-                if new_height > current_height {
                     tracing::info!(
-                        "✅ Sync progress: {} → {} ({} blocks received)",
-                        current_height,
-                        new_height,
-                        new_height - current_height
-                    );
-                } else {
-                    tracing::warn!(
-                        "⚠️  No sync progress after waiting - peers may not have blocks yet"
+                        "📤 Requesting blocks {}-{} from {} peer(s)",
+                        probe_start,
+                        probe_end,
+                        connected_peers.len()
                     );
 
-                    // If no progress and we're significantly behind, try sync_from_peers()
-                    // which has more sophisticated peer selection and retry logic
-                    if blocks_behind > 5 && !triggered_by_status_check {
-                        tracing::info!("🔄 Attempting full sync_from_peers()...");
-                        if let Err(e) = block_blockchain.sync_from_peers().await {
-                            tracing::warn!("⚠️  sync_from_peers failed: {}", e);
-                        }
+                    for peer_ip in &connected_peers {
+                        let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
+                        let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
                     }
+
+                    // Wait briefly for sync responses
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+
+                    // Check if we synced
+                    let new_height = block_blockchain.get_height();
+                    if new_height > current_height {
+                        tracing::info!(
+                            "✅ Synced {} blocks: {} → {}",
+                            new_height - current_height,
+                            current_height,
+                            new_height
+                        );
+                        // Loop back to re-evaluate with new height
+                        continue;
+                    }
+
+                    // No sync progress - peers don't have blocks either
+                    // Fall through to produce the block ourselves (majority moves forward)
+                    tracing::warn!(
+                        "⚠️  No sync progress - peers may not have blocks. Majority will produce."
+                    );
                 }
+            }
 
-                // Continue to next iteration - will re-check if still behind
-                // If ALL nodes are behind (network bootstrap), normal production below
-                // will handle it with proper leader election
-                continue;
-            } else {
-                // Either at expected height or behind but within 5-minute grace period
-                // Use normal block production - no race with catchup mode
+            // Case 3: Within grace period or sync failed - time to produce
+            // Use TSDC consensus for leader election
 
-                // CRITICAL: Before producing, verify we're on the consensus chain
-                // This prevents perpetuating forks when we have a different block than peers
-                if let Some((consensus_height, _consensus_peer)) =
+            // First: Verify we're on the consensus chain (prevent fork perpetuation)
+            let connected_peers = block_peer_registry.get_connected_peers().await;
+            let min_peers_for_consensus = (masternodes.len() / 2).max(2); // Majority or at least 2
+
+            if connected_peers.len() >= min_peers_for_consensus {
+                // Check if we're on the same chain as majority
+                if let Some((consensus_height, _)) =
                     block_blockchain.compare_chain_with_peers().await
                 {
                     if consensus_height == current_height {
-                        // Same height fork detected - we're on a minority chain
+                        // Same height but different hash - we're on minority chain
                         tracing::warn!(
-                            "🔀 Fork detected at height {}: we're on minority chain, syncing instead of producing",
+                            "🔀 Fork detected at height {}: syncing to majority chain before producing",
                             current_height
                         );
-                        // Trigger sync to get on the right chain
                         if let Err(e) = block_blockchain.sync_from_peers().await {
-                            tracing::warn!("⚠️  Sync failed: {}", e);
+                            tracing::warn!("⚠️  Sync to majority failed: {}", e);
                         }
                         continue;
                     }
-                }
-
-                // Use deterministic leader selection based on previous block hash
-                let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        tracing::error!("Failed to get previous block hash: {}", e);
-                        continue;
-                    }
-                };
-
-                // CRITICAL: Use (current_height + 1) for leader selection
-                // This is the height we're about to produce, not the current tip
-                let next_height = current_height + 1;
-
-                // Use deterministic leader selection based on previous block hash
-                // This provides fair rotation without expensive VDF computation
-                use sha2::{Digest, Sha256};
-                let mut hasher = Sha256::new();
-                hasher.update(prev_block_hash);
-                hasher.update(next_height.to_le_bytes()); // Use next_height, not current_height
-                let selection_hash: [u8; 32] = hasher.finalize().into();
-
-                // Select producer: hash mod masternode_count
-                let producer_index = {
-                    let mut val = 0u64;
-                    for (i, &byte) in selection_hash.iter().take(8).enumerate() {
-                        val |= (byte as u64) << (i * 8);
-                    }
-                    (val % masternodes.len() as u64) as usize
-                };
-
-                let selected_producer = &masternodes[producer_index];
-                let is_producer = block_masternode_address
-                    .as_ref()
-                    .map(|addr| addr == &selected_producer.address)
-                    .unwrap_or(false);
-
-                if is_producer {
-                    // CRITICAL: Do NOT produce blocks if we're significantly behind
-                    // This prevents creating forks when out of sync
-                    if blocks_behind > 10 {
-                        tracing::warn!(
-                            "⚠️ Skipping normal block production: {} blocks behind ({}. Expected: {}). Must sync first.",
-                            blocks_behind,
-                            current_height,
-                            expected_height
-                        );
-                        continue;
-                    }
-
-                    // Validate chain time before producing
-                    if let Err(e) = block_blockchain.validate_chain_time().await {
-                        tracing::warn!("⚠️  Chain time validation failed: {}", e);
-                        tracing::warn!("⚠️  Skipping block production until time catches up");
-                        continue;
-                    }
-
-                    // Check if we have enough synced peers (minimum 2 peers = 3 nodes total including us)
-                    let connected_peers = block_peer_registry.get_connected_peers().await;
-                    if connected_peers.len() < 2 {
-                        tracing::warn!(
-                            "⚠️ Skipping block production: only {} connected peer(s) (minimum 2 required for 3-node sync)",
-                            connected_peers.len()
-                        );
-                        continue;
-                    }
-
-                    // Acquire block production lock (P2P best practice #8)
-                    if is_producing
-                        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_err()
-                    {
-                        tracing::warn!("⚠️  Block production already in progress, skipping");
-                        continue;
-                    }
-
-                    tracing::info!(
-                        "🎯 Selected as block producer for height {} at {} ({}:{}0)",
-                        next_height,
-                        timestamp,
-                        now.hour(),
-                        (now.minute() / 10),
-                    );
-
-                    match block_blockchain.produce_block().await {
-                        Ok(block) => {
-                            let block_height = block.header.height;
-                            tracing::info!(
-                                "✅ Block {} produced: {} transactions, {} masternode rewards",
-                                block_height,
-                                block.transactions.len(),
-                                block.masternode_rewards.len()
-                            );
-
-                            // Add block to our own chain first
-                            if let Err(e) = block_blockchain.add_block(block.clone()).await {
-                                tracing::error!("❌ Failed to add block to chain: {}", e);
-                                is_producing.store(false, Ordering::SeqCst);
-                                continue;
-                            }
-
-                            tracing::info!(
-                                "✅ Block {} added to chain, height now: {}",
-                                block_height,
-                                block_blockchain.get_height()
-                            );
-
-                            // Broadcast block to all peers
-                            block_registry.broadcast_block(block).await;
-                            tracing::info!("📡 Block {} broadcast to peers", block_height);
-                        }
-                        Err(e) => {
-                            tracing::error!("❌ Failed to produce block: {}", e);
-                        }
-                    }
-
-                    // Release block production lock
-                    is_producing.store(false, Ordering::SeqCst);
-                } else {
-                    tracing::debug!(
-                        "⏸️  Not selected for block {} (producer: {})",
-                        current_height + 1,
-                        selected_producer.address
-                    );
                 }
             }
 
-            // Handle case where we're ahead of expected height
-            if current_height > expected_height {
-                // Height is ahead of expected - this can happen if:
-                // 1. Clock skew caused blocks to be produced early
-                // 2. We received blocks from a peer with clock skew
-                // Just wait silently for time to catch up - only log once per minute
-                static LAST_AHEAD_LOG: std::sync::atomic::AtomicI64 =
-                    std::sync::atomic::AtomicI64::new(0);
-                let now_secs = chrono::Utc::now().timestamp();
-                let last_log = LAST_AHEAD_LOG.load(Ordering::Relaxed);
-                if now_secs - last_log >= 60 {
-                    LAST_AHEAD_LOG.store(now_secs, Ordering::Relaxed);
-                    let blocks_ahead = current_height.saturating_sub(expected_height);
-                    let wait_minutes = blocks_ahead * 10; // 10 minutes per block
+            // Get previous block hash for leader selection
+            let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
+                Ok(hash) => hash,
+                Err(e) => {
+                    tracing::error!("Failed to get previous block hash: {}", e);
+                    continue;
+                }
+            };
+
+            // Deterministic leader selection using TSDC
+            // Hash(prev_block_hash || next_height) determines the leader
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(prev_block_hash);
+            hasher.update(next_height.to_le_bytes());
+            let selection_hash: [u8; 32] = hasher.finalize().into();
+
+            let producer_index = {
+                let mut val = 0u64;
+                for (i, &byte) in selection_hash.iter().take(8).enumerate() {
+                    val |= (byte as u64) << (i * 8);
+                }
+                (val % masternodes.len() as u64) as usize
+            };
+
+            let selected_producer = &masternodes[producer_index];
+            let is_producer = block_masternode_address
+                .as_ref()
+                .map(|addr| addr == &selected_producer.address)
+                .unwrap_or(false);
+
+            if !is_producer {
+                tracing::debug!(
+                    "⏸️  Not selected for block {} (producer: {})",
+                    next_height,
+                    selected_producer.address
+                );
+                continue;
+            }
+
+            // We are the selected producer!
+            tracing::info!(
+                "🎯 Selected as block producer for height {} ({}s past scheduled time)",
+                next_height,
+                time_past_scheduled
+            );
+
+            // Safety checks before producing
+            if connected_peers.len() < 2 {
+                tracing::warn!(
+                    "⚠️ Only {} peer(s) connected - waiting for more peers before producing",
+                    connected_peers.len()
+                );
+                continue;
+            }
+
+            // Acquire block production lock
+            if is_producing
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                tracing::warn!("⚠️  Block production already in progress, skipping");
+                continue;
+            }
+
+            // Produce the block
+            match block_blockchain.produce_block().await {
+                Ok(block) => {
+                    let block_height = block.header.height;
                     tracing::info!(
-                        "⏳ Chain height {} is {} blocks ahead of time, waiting ~{} minutes for time to catch up",
-                        current_height,
-                        blocks_ahead,
-                        wait_minutes
+                        "✅ Block {} produced: {} transactions, {} rewards",
+                        block_height,
+                        block.transactions.len(),
+                        block.masternode_rewards.len()
+                    );
+
+                    // Add to our chain
+                    if let Err(e) = block_blockchain.add_block(block.clone()).await {
+                        tracing::error!("❌ Failed to add block to chain: {}", e);
+                        is_producing.store(false, Ordering::SeqCst);
+                        continue;
+                    }
+
+                    // Broadcast to all peers
+                    block_registry.broadcast_block(block.clone()).await;
+
+                    tracing::info!(
+                        "📤 Block {} broadcast to {} peers",
+                        block_height,
+                        connected_peers.len()
                     );
                 }
+                Err(e) => {
+                    tracing::error!("❌ Failed to produce block: {}", e);
+                }
             }
+
+            is_producing.store(false, Ordering::SeqCst);
         }
     });
     shutdown_manager.register_task(block_production_handle);
