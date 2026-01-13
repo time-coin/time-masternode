@@ -1100,7 +1100,26 @@ async fn main() {
                 // Either at expected height or behind but within 5-minute grace period
                 // Use normal block production - no race with catchup mode
 
-                // Use VDF to select block producer deterministically
+                // CRITICAL: Before producing, verify we're on the consensus chain
+                // This prevents perpetuating forks when we have a different block than peers
+                if let Some((consensus_height, _consensus_peer)) =
+                    block_blockchain.compare_chain_with_peers().await
+                {
+                    if consensus_height == current_height {
+                        // Same height fork detected - we're on a minority chain
+                        tracing::warn!(
+                            "🔀 Fork detected at height {}: we're on minority chain, syncing instead of producing",
+                            current_height
+                        );
+                        // Trigger sync to get on the right chain
+                        if let Err(e) = block_blockchain.sync_from_peers().await {
+                            tracing::warn!("⚠️  Sync failed: {}", e);
+                        }
+                        continue;
+                    }
+                }
+
+                // Use deterministic leader selection based on previous block hash
                 let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
                     Ok(hash) => hash,
                     Err(e) => {
@@ -1109,12 +1128,16 @@ async fn main() {
                     }
                 };
 
+                // CRITICAL: Use (current_height + 1) for leader selection
+                // This is the height we're about to produce, not the current tip
+                let next_height = current_height + 1;
+
                 // Use deterministic leader selection based on previous block hash
                 // This provides fair rotation without expensive VDF computation
                 use sha2::{Digest, Sha256};
                 let mut hasher = Sha256::new();
                 hasher.update(prev_block_hash);
-                hasher.update(current_height.to_le_bytes());
+                hasher.update(next_height.to_le_bytes()); // Use next_height, not current_height
                 let selection_hash: [u8; 32] = hasher.finalize().into();
 
                 // Select producer: hash mod masternode_count
@@ -1173,7 +1196,7 @@ async fn main() {
 
                     tracing::info!(
                         "🎯 Selected as block producer for height {} at {} ({}:{}0)",
-                        current_height + 1,
+                        next_height,
                         timestamp,
                         now.hour(),
                         (now.minute() / 10),
