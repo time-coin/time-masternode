@@ -655,17 +655,22 @@ async fn handle_peer(
                                         }
                                     }
                                 }
-                                NetworkMessage::UTXOStateQuery(outpoints) => {
+                                NetworkMessage::UTXOStateQuery(_) => {
                                     check_rate_limit!("utxo_query");
 
-                                    let mut responses = Vec::new();
-                                    for op in outpoints {
-                                        if let Some(state) = utxo_mgr.get_state(op) {
-                                            responses.push((op.clone(), state));
-                                        }
+                                    // Use unified message handler
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+                                    context.utxo_manager = Some(Arc::clone(&utxo_mgr));
+
+                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
-                                    let reply = NetworkMessage::UTXOStateResponse(responses);
-                                    let _ = peer_registry.send_to_peer(&ip_str, reply).await;
                                 }
                                 NetworkMessage::Subscribe(sub) => {
                                     check_rate_limit!("subscribe");
@@ -863,34 +868,36 @@ async fn handle_peer(
 
                                     let _ = handler.handle_message(&msg, &context).await;
                                 }
-                                NetworkMessage::BlockInventory(block_height) => {
+                                NetworkMessage::BlockInventory(_) => {
                                     check_rate_limit!("block");
 
-                                    let our_height = blockchain.get_height();
+                                    // Use unified message handler
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
 
-                                    // Only request if we need it
-                                    if *block_height > our_height {
-                                        tracing::debug!("📦 Received inventory for block {} from {}, requesting", block_height, peer.addr);
-
-                                        // Request the full block via peer registry
-                                        let request = NetworkMessage::BlockRequest(*block_height);
-                                        let _ = peer_registry.send_to_peer(&ip_str, request).await;
-                                    } else {
-                                        tracing::debug!("⏭️ Ignoring inventory for block {} from {} (we're at {})", block_height, peer.addr, our_height);
+                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
                                 }
-                                NetworkMessage::BlockRequest(block_height) => {
+                                NetworkMessage::BlockRequest(_) => {
                                     check_rate_limit!("block");
 
-                                    tracing::debug!("📨 Received block request for height {} from {}", block_height, peer.addr);
+                                    // Use unified message handler
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
 
-                                    // Send the requested block if we have it
-                                    if let Ok(block) = blockchain.get_block_by_height(*block_height).await {
-                                        let response = NetworkMessage::BlockResponse(block);
+                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
-                                        tracing::debug!("✅ Sent block {} to {}", block_height, peer.addr);
-                                    } else {
-                                        tracing::debug!("⚠️ Don't have block {} requested by {}", block_height, peer.addr);
                                     }
                                 }
                                 NetworkMessage::BlockResponse(block) => {
@@ -1127,121 +1134,54 @@ async fn handle_peer(
                                             skipped, peer.addr);
                                     }
                                 }
-                                NetworkMessage::HeartbeatBroadcast(heartbeat) => {
-                                    tracing::info!("💓 [Inbound] Received heartbeat from {} seq {} at height {}",
-                                        heartbeat.masternode_address, heartbeat.sequence_number, heartbeat.block_height);
+                                NetworkMessage::HeartbeatBroadcast(_) => {
+                                    // Use unified message handler with full context
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::with_consensus(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                        Arc::clone(&consensus),
+                                        Arc::clone(&block_cache),
+                                        broadcast_tx.clone(),
+                                    );
+                                    context.attestation_system = Some(Arc::clone(&attestation_system));
 
-                                    // Check for opportunistic sync if peer has higher block height
-                                    let our_height = blockchain.get_height();
-                                    if heartbeat.block_height > our_height {
-                                        tracing::info!(
-                                            "🔄 Opportunistic sync: peer {} at height {} (we're at {})",
-                                            heartbeat.masternode_address,
-                                            heartbeat.block_height,
-                                            our_height
-                                        );
-
-                                        // Request blocks from this peer
-                                        // Start from our current height + 1 to catch up
-                                        let start_height = our_height + 1;
-                                        let request = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
-
-                                        // Use masternode_address (contains IP:port) instead of ephemeral connection port
-                                        if let Err(e) = peer_registry.send_to_peer(&heartbeat.masternode_address, request).await {
-                                            tracing::warn!(
-                                                "Failed to request blocks from {}: {}",
-                                                heartbeat.masternode_address,
-                                                e
-                                            );
-                                        } else {
-                                            tracing::info!(
-                                                "📨 Requested blocks {}-{} from {}",
-                                                start_height,
-                                                heartbeat.block_height,
-                                                heartbeat.masternode_address
-                                            );
-                                        }
-                                    }
-
-                                    // Process heartbeat through masternode registry
-                                    // TODO: Pass health_ai for AI learning
-                                    if let Err(e) = masternode_registry.receive_heartbeat_broadcast(heartbeat.clone(), None).await {
-                                        tracing::warn!("Failed to process heartbeat: {}", e);
-                                    }
-
-                                    // Process through attestation system - creates witness attestation if we're a masternode
-                                    match attestation_system.receive_heartbeat(heartbeat.clone()).await {
-                                        Ok(Some(attestation)) => {
-                                            // We created a witness attestation - broadcast it
-                                            let attest_msg = NetworkMessage::HeartbeatAttestation(attestation);
-                                            let _ = masternode_registry.broadcast_message(attest_msg).await;
-                                        }
-                                        Ok(None) => {
-                                            // No attestation created (our own heartbeat or not a masternode)
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!("Attestation not created: {}", e);
-                                        }
-                                    }
-
-                                    // Re-broadcast to other peers (gossip propagation)
-                                    let msg = NetworkMessage::HeartbeatBroadcast(heartbeat.clone());
-                                    let _ = masternode_registry.broadcast_message(msg).await;
+                                    let _ = handler.handle_message(&msg, &context).await;
                                 }
-                                NetworkMessage::HeartbeatAttestation(attestation) => {
-                                    tracing::info!("✍️ [Inbound] Received witness attestation from {} for heartbeat",
-                                        attestation.witness_address);
+                                NetworkMessage::HeartbeatAttestation(_) => {
+                                    // Use unified message handler with full context
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::with_consensus(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                        Arc::clone(&consensus),
+                                        Arc::clone(&block_cache),
+                                        broadcast_tx.clone(),
+                                    );
+                                    context.attestation_system = Some(Arc::clone(&attestation_system));
 
-                                    // Add attestation to the attestation system
-                                    if let Err(e) = attestation_system.add_attestation(attestation.clone()).await {
-                                        tracing::debug!("Failed to add attestation: {}", e);
-                                    }
-
-                                    // Process attestation through masternode registry
-                                    if let Err(e) = masternode_registry.receive_attestation_broadcast(attestation.clone()).await {
-                                        tracing::warn!("Failed to process attestation: {}", e);
-                                    }
-
-                                    // Re-broadcast to other peers (gossip propagation)
-                                    let msg = NetworkMessage::HeartbeatAttestation(attestation.clone());
-                                    let _ = masternode_registry.broadcast_message(msg).await;
+                                    let _ = handler.handle_message(&msg, &context).await;
                                 }
-                                // Health Check Messages
-                                NetworkMessage::Ping { nonce, timestamp: _, height } => {
+                                // Health Check Messages  
+                                NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
                                     check_rate_limit!("ping");
 
-                                    // Phase 3: Update peer height if provided
-                                    if let Some(h) = height {
-                                        peer_registry.update_peer_height(&ip_str, *h).await;
-                                    }
+                                    // Use unified message handler
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
 
-                                    // Phase 3: Get our height to include in pong response
-                                    let our_height = blockchain.get_height();
-
-                                    // Respond to ping with pong
-                                    let pong_msg = NetworkMessage::Pong {
-                                        nonce: *nonce,
-                                        timestamp: chrono::Utc::now().timestamp(),
-                                        height: Some(our_height), // Phase 3: Include our height
-                                    };
-                                    tracing::info!("📨 [Inbound] Received ping from {} (nonce: {})", peer.addr, nonce);
-
-                                    match peer_registry.send_to_peer(&ip_str, pong_msg).await {
-                                        Ok(()) => {
-                                            tracing::info!("✅ [Inbound] Sent pong to {} (nonce: {})", peer.addr, nonce);
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("❌ [Inbound] Failed to send pong to {}: {}", peer.addr, e);
-                                        }
+                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
-                                }
-                                NetworkMessage::Pong { nonce, timestamp: _, height } => {
-                                    // Phase 3: Update peer height if provided
-                                    if let Some(h) = height {
-                                        peer_registry.update_peer_height(&ip_str, *h).await;
-                                    }
-                                    // Inbound connections don't send pings, just log if we receive a pong
-                                    tracing::debug!("📥 [Inbound] Received pong from {} (nonce: {})", peer.addr, nonce);
                                 }
                                 NetworkMessage::TransactionVoteRequest { txid } => {
                                     check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
