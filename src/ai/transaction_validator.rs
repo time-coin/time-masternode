@@ -61,7 +61,6 @@ impl AITransactionValidator {
 
         // Extract transaction features
         let total_value: u64 = tx.outputs.iter().map(|o| o.value).sum();
-        let fee = self.calculate_fee(tx);
 
         // Check for suspicious patterns
         let mut spam_indicators = 0;
@@ -87,17 +86,9 @@ impl AITransactionValidator {
             );
         }
 
-        // 3. Check fee-to-value ratio (too low = spam)
-        total_checks += 1;
-        if total_value > 0 {
-            let fee_ratio = fee as f64 / total_value as f64;
-            if fee_ratio < 0.0001 {
-                spam_indicators += 1;
-                debug!("🚨 Low fee ratio detected: {:.6}", fee_ratio);
-            }
-        }
+        // Note: Fee ratio check removed - fees are protocol-defined at 0.01%
 
-        // 4. Learn from transaction patterns per address
+        // 3. Learn from transaction patterns per address
         for (idx, output) in tx.outputs.iter().enumerate() {
             // Extract address from script_pubkey (simplified - just use hex of script)
             let address = hex::encode(&output.script_pubkey);
@@ -108,7 +99,7 @@ impl AITransactionValidator {
                 .or_insert(TransactionPattern {
                     address: address.clone(),
                     avg_value: 0.0,
-                    avg_fee: 0.0,
+                    avg_fee: 0.0, // Unused - fees are protocol-defined at 0.01%
                     tx_count: 0,
                     last_seen: now,
                     spam_score: 0.0,
@@ -117,7 +108,6 @@ impl AITransactionValidator {
             // Update running averages
             let alpha = 0.3; // Learning rate
             pattern.avg_value = (1.0 - alpha) * pattern.avg_value + alpha * (total_value as f64);
-            pattern.avg_fee = (1.0 - alpha) * pattern.avg_fee + alpha * (fee as f64);
             pattern.tx_count += 1;
             pattern.last_seen = now;
 
@@ -136,7 +126,7 @@ impl AITransactionValidator {
                 }
             }
 
-            // 5. Check for rapid-fire transactions (spam pattern)
+            // 4. Check for rapid-fire transactions (spam pattern)
             total_checks += 1;
             if pattern.tx_count > 10 {
                 let time_delta = now.saturating_sub(pattern.last_seen);
@@ -189,13 +179,6 @@ impl AITransactionValidator {
         }
 
         Ok(())
-    }
-
-    fn calculate_fee(&self, tx: &Transaction) -> u64 {
-        // Fee = inputs - outputs (simplified, would need UTXO lookup in real impl)
-        let outputs_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-        // Return minimum fee for now since we don't have input values
-        outputs_sum.saturating_div(1000).max(1000)
     }
 
     pub fn get_metrics(&self) -> ValidationMetrics {
