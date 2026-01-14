@@ -96,14 +96,15 @@ impl NetworkClient {
                 tracing::info!("🏠 Local IP: {} (will skip self-connections)", ip);
             }
 
-            // PHASE 1: Connect to all active masternodes FIRST (priority) - PARALLEL
-            let masternodes = masternode_registry.list_active().await;
+            // PHASE 1: Connect to all registered masternodes FIRST (priority) - PARALLEL
+            // Use list_all() to include offline masternodes - they may come online
+            let masternodes = masternode_registry.list_all().await;
             let masternode_ips: Vec<&str> = masternodes
                 .iter()
                 .map(|m| m.masternode.address.as_str())
                 .collect();
             tracing::info!(
-                "🎯 Connecting to {} active masternode(s) with priority (parallel): {:?}",
+                "🎯 Connecting to {} registered masternode(s) with priority (parallel): {:?}",
                 masternodes.len(),
                 masternode_ips
             );
@@ -246,6 +247,13 @@ impl NetworkClient {
                         continue;
                     }
 
+                    // Check if this IP is a registered masternode (even if not active)
+                    // This ensures masternodes always get whitelist protection
+                    let all_masternodes = masternode_registry.list_all().await;
+                    let is_registered_masternode = all_masternodes
+                        .iter()
+                        .any(|mn| mn.masternode.address == *ip);
+
                     if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
                         tracing::debug!("Already connected to {}", ip);
                         continue;
@@ -256,7 +264,14 @@ impl NetworkClient {
                         continue;
                     }
 
-                    tracing::info!("🔗 [PHASE2-PEER] Connecting to: {}", ip);
+                    if is_registered_masternode {
+                        tracing::info!(
+                            "🔗 [PHASE2-MN-LATE] Connecting to registered masternode: {}",
+                            ip
+                        );
+                    } else {
+                        tracing::info!("🔗 [PHASE2-PEER] Connecting to: {}", ip);
+                    }
 
                     let ip_clone = ip.clone();
                     let conn_mgr = connection_manager.clone();
@@ -278,7 +293,7 @@ impl NetworkClient {
                             attest,
                             peer_mgr,
                             peer_reg,
-                            false, // regular peer
+                            is_registered_masternode, // treat registered masternodes as whitelisted
                             local_ip_clone,
                         );
                     });
@@ -308,14 +323,18 @@ impl NetworkClient {
             loop {
                 sleep(peer_discovery_interval).await;
 
-                // Always check masternodes first
-                let masternodes = masternode_registry.list_active().await;
+                // Use list_all() to get ALL known masternodes, not just active ones
+                // This ensures we attempt to reconnect to masternodes that went offline
+                // (their status will be restored once we reconnect and receive heartbeats)
+                let all_masternodes = masternode_registry.list_all().await;
+                let active_count = masternode_registry.list_active().await.len();
                 let connected_count = connection_manager.connected_count();
 
                 tracing::info!(
-                    "🔍 Peer check: {} connected, {} active masternodes, {} total slots",
+                    "🔍 Peer check: {} connected, {} known masternodes ({} active), {} total slots",
                     connected_count,
-                    masternodes.len(),
+                    all_masternodes.len(),
+                    active_count,
                     max_peers
                 );
 
@@ -323,7 +342,7 @@ impl NetworkClient {
                 // Note: For masternodes, we want BOTH nodes to establish outbound connections
                 // to ensure full mesh redundancy. Only check if we have an outbound connection,
                 // so both nodes will attempt outbound connections to each other.
-                for mn in masternodes.iter().take(reserved_masternode_slots) {
+                for mn in all_masternodes.iter().take(reserved_masternode_slots) {
                     let ip = &mn.masternode.address;
 
                     // Skip if this is our own IP

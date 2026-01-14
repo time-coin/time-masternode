@@ -948,8 +948,12 @@ async fn main() {
             let genesis_timestamp = block_blockchain.genesis_timestamp();
             let now_timestamp = chrono::Utc::now().timestamp();
 
-            // Require minimum masternodes for production (except during bootstrap)
-            if masternodes.len() < 3 && current_height > 0 {
+            // Require minimum masternodes for production
+            // Exception: During catchup when we're behind, allow production with fewer nodes
+            // to prevent deadlock where network can't progress because no masternodes,
+            // and can't get masternodes because network isn't progressing
+            if masternodes.len() < 3 && current_height > 0 && blocks_behind == 0 {
+                // Only enforce minimum when we're caught up (normal operation)
                 // Log periodically (every 60s) to avoid spam
                 static LAST_WARN: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
@@ -969,7 +973,18 @@ async fn main() {
 
             // During initial bootstrap (height 0), allow 1 masternode to produce blocks
             if masternodes.is_empty() {
-                tracing::warn!("⚠️ Skipping block production: no masternodes registered");
+                // Log periodically (every 60s) to avoid spam
+                static LAST_EMPTY_WARN: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(0);
+                let now_secs = chrono::Utc::now().timestamp();
+                let last_warn = LAST_EMPTY_WARN.load(Ordering::Relaxed);
+                if now_secs - last_warn >= 60 {
+                    LAST_EMPTY_WARN.store(now_secs, Ordering::Relaxed);
+                    tracing::warn!(
+                        "⚠️ Skipping block production: no masternodes registered. Height: {}, Expected: {}, Behind: {}",
+                        current_height, expected_height, blocks_behind
+                    );
+                }
                 continue;
             }
 

@@ -274,12 +274,12 @@ impl MessageLoopConfig {
 impl PeerConnection {
     const PING_INTERVAL: Duration = Duration::from_secs(30);
     const TIMEOUT_CHECK_INTERVAL: Duration = Duration::from_secs(10);
-    const PONG_TIMEOUT: Duration = Duration::from_secs(90);
-    const MAX_MISSED_PONGS: u32 = 3;
+    const PONG_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes - very generous
+    const MAX_MISSED_PONGS: u32 = 10; // Allow many missed pongs before disconnect
 
     // Phase 1: Relaxed timeouts for whitelisted masternodes
-    const WHITELISTED_PONG_TIMEOUT: Duration = Duration::from_secs(180); // 3 minutes
-    const WHITELISTED_MAX_MISSED_PONGS: u32 = 6; // Allow more missed pongs
+    const WHITELISTED_PONG_TIMEOUT: Duration = Duration::from_secs(600); // 10 minutes
+    const WHITELISTED_MAX_MISSED_PONGS: u32 = 20; // Allow even more missed pongs
 
     /// Create a new outbound connection to a peer
     pub async fn new_outbound(

@@ -169,9 +169,12 @@ impl MasternodeRegistry {
                         }
                     }
                 } else {
-                    // If offline for more than 1 hour, remove completely
+                    // If offline for more than 24 hours, remove completely
+                    // This is generous to allow network recovery after outages
+                    // Masternodes that reconnect will be re-added automatically
                     let time_since_heartbeat = now - info.last_heartbeat;
-                    if time_since_heartbeat > 3600 {
+                    if time_since_heartbeat > 86400 {
+                        // 24 hours
                         to_remove.push(address.clone());
                     }
                 }
@@ -182,7 +185,7 @@ impl MasternodeRegistry {
                 masternodes.remove(&address);
                 let key = format!("masternode:{}", address);
                 let _ = self.db.remove(key.as_bytes());
-                info!("🗑️  Removed stale masternode {} (offline >1hr)", address);
+                info!("🗑️  Removed stale masternode {} (offline >24hr)", address);
             }
         }
     }

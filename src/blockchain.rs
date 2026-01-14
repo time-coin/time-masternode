@@ -3329,10 +3329,15 @@ impl Blockchain {
                 .push(peer_ip.clone());
         }
 
-        // Find the chain (height + hash) with the most peers
+        // Find the best chain: prioritize HEIGHT first, then peer count
+        // This prevents "stuck" peers from overriding nodes that have progressed
         let consensus_chain = chain_counts
             .iter()
-            .max_by_key(|(_, peers)| peers.len())
+            .max_by(|((h1, _), peers1), ((h2, _), peers2)| {
+                // Primary: higher height wins
+                // Secondary: more peers wins (at same height)
+                h1.cmp(h2).then_with(|| peers1.len().cmp(&peers2.len()))
+            })
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
