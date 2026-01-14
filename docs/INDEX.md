@@ -10,12 +10,12 @@
 ### New to TIME Coin?
 1. Start with [README.md](README.md) - Project overview and features
 2. Follow [QUICKSTART.md](QUICKSTART.md) - Build and deploy your first node
-3. Read [COMPILATION_COMPLETE.md](COMPILATION_COMPLETE.md) - Build status and requirements
+3. Read [CLI_GUIDE.md](CLI_GUIDE.md) - Command-line interface guide
 
 ### Ready to Deploy?
 - [QUICKSTART.md](QUICKSTART.md) - Complete deployment guide
-- [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) - Network configuration
-- [config.toml](config.toml) - Default configuration example
+- [NETWORK_CONFIG.md](NETWORK_CONFIG.md) - Network configuration
+- [LINUX_INSTALLATION.md](LINUX_INSTALLATION.md) - Linux setup guide
 
 ---
 
@@ -25,11 +25,10 @@
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) | Complete protocol specification | Developers, Researchers |
-| [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) | Network layer design & modules | Network Developers |
-| [docs/AI_PEER_SELECTION.md](docs/AI_PEER_SELECTION.md) | AI-powered peer selection system | All Developers |
-| [docs/FORK_RESOLUTION_GUIDE.md](docs/FORK_RESOLUTION_GUIDE.md) | Fork detection and resolution guide | Node Operators, Developers |
-| [QUICK_REFERENCE.md](analysis/QUICK_REFERENCE.md) | Command reference & quick facts | All Users |
+| [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) | Complete protocol specification | Developers, Researchers |
+| [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) | Network layer design & modules | Network Developers |
+| [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) | System architecture overview | All Developers |
+| [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Command reference & quick facts | All Users |
 
 ### Operational Guides
 
@@ -43,9 +42,8 @@
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| [COMPILATION_COMPLETE.md](COMPILATION_COMPLETE.md) | Build status & artifacts | DevOps, CI/CD |
-| [analysis/COMPILATION_COMPLETE_FINAL.md](analysis/COMPILATION_COMPLETE_FINAL.md) | Detailed build report | Developers |
-| [analysis/NETWORK_CONSOLIDATION_PROGRESS.md](analysis/NETWORK_CONSOLIDATION_PROGRESS.md) | Refactoring status | Architects |
+| [QUICKSTART.md](QUICKSTART.md) | Build and deployment guide | DevOps, CI/CD |
+| [LINUX_INSTALLATION.md](LINUX_INSTALLATION.md) | Linux installation guide | Node Operators |
 
 ---
 
@@ -119,10 +117,10 @@ analysis/
 → [QUICKSTART.md - Masternode Setup](QUICKSTART.md#-masternode-setup)
 
 #### Understand the protocol
-→ [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md)
+→ [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)
 
 #### Contribute to development
-→ [CONTRIBUTING.md](CONTRIBUTING.md) + [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)
+→ [CONTRIBUTING.md](CONTRIBUTING.md) + [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md)
 
 #### Set up a multi-node network
 → [QUICKSTART.md - Multi-Node Setup](QUICKSTART.md#-multi-node-network-setup)
@@ -134,8 +132,8 @@ analysis/
 → [CHANGELOG.md](CHANGELOG.md)
 
 #### Understand the codebase
-→ [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) for network
-→ [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) for consensus
+→ [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) for network
+→ [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) for consensus
 
 #### See performance metrics
 → [MASTER_STATUS.md](analysis/MASTER_STATUS.md)
@@ -177,26 +175,24 @@ analysis/
 ### For Node Operators
 1. [README.md](README.md) - What is TIME Coin?
 2. [QUICKSTART.md](QUICKSTART.md) - How to run a node
-3. [QUICKSTART.md - Troubleshooting](QUICKSTART.md#-troubleshooting) - Fix issues
-4. [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) - How network works
+3. [CLI_GUIDE.md](CLI_GUIDE.md) - Command-line usage
+4. [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) - How network works
 
 ### For Developers
 1. [README.md](README.md) - Project overview
 2. [CONTRIBUTING.md](CONTRIBUTING.md) - Development guidelines
-3. [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) - Code structure
-4. [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) - How consensus works
+3. [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) - Code structure
+4. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) - How consensus works
 
 ### For Researchers
-1. [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md) - Complete specification
-2. [analysis/MASTER_STATUS.md](analysis/MASTER_STATUS.md) - Implementation status
-3. [CHANGELOG.md](CHANGELOG.md) - What's been implemented
-4. [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) - Network design
+1. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) - Complete specification
+2. [CRYPTOGRAPHY_RATIONALE.md](CRYPTOGRAPHY_RATIONALE.md) - Cryptographic choices
+3. [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) - Network design
 
 ### For Operations
 1. [QUICKSTART.md](QUICKSTART.md) - Deployment guide
-2. [COMPILATION_COMPLETE.md](COMPILATION_COMPLETE.md) - Build artifacts
-3. [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) - Configuration
-4. [QUICKSTART.md - Performance Tuning](QUICKSTART.md#-performance-tuning) - Optimization
+2. [LINUX_INSTALLATION.md](LINUX_INSTALLATION.md) - Linux setup
+3. [NETWORK_CONFIG.md](NETWORK_CONFIG.md) - Configuration
 
 ---
 
@@ -281,26 +277,25 @@ analysis/
 ### Core Documentation
 - [README.md](README.md)
 - [QUICKSTART.md](QUICKSTART.md)
-- [CHANGELOG.md](CHANGELOG.md)
+- [CLI_GUIDE.md](CLI_GUIDE.md)
+- [WALLET_COMMANDS.md](WALLET_COMMANDS.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
-- [COMPILATION_COMPLETE.md](COMPILATION_COMPLETE.md)
 
 ### Technical Documentation
-- [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md)
-- [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)
-- [docs/AI_PEER_SELECTION.md](docs/AI_PEER_SELECTION.md)
+- [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)
+- [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md)
+- [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)
+- [CRYPTOGRAPHY_RATIONALE.md](CRYPTOGRAPHY_RATIONALE.md)
+- [SECURITY.md](SECURITY.md)
 
-### Configuration
-- [config.toml](config.toml) - Testnet config
-- [config.mainnet.toml](config.mainnet.toml) - Mainnet config
-- [genesis.testnet.json](genesis.testnet.json) - Testnet genesis
+### Configuration & Deployment
+- [NETWORK_CONFIG.md](NETWORK_CONFIG.md) - Network configuration
+- [LINUX_INSTALLATION.md](LINUX_INSTALLATION.md) - Linux setup
+- [INTEGRATION_QUICKSTART.md](INTEGRATION_QUICKSTART.md) - Integration guide
 
-### Analysis & Research
-- [analysis/MASTER_STATUS.md](analysis/MASTER_STATUS.md)
-- [analysis/PRODUCTION_READY.md](analysis/PRODUCTION_READY.md)
-- [analysis/BLOCK_TIME_OPTIMIZATION.md](analysis/BLOCK_TIME_OPTIMIZATION.md)
-- [analysis/NETWORK_CONSOLIDATION_PROGRESS.md](analysis/NETWORK_CONSOLIDATION_PROGRESS.md)
-- [analysis/](analysis/) - 150+ analysis documents
+### Reference
+- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - Quick reference
+- [ROADMAP.md](ROADMAP.md) - Development roadmap
 
 ---
 
