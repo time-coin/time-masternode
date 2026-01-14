@@ -8,7 +8,7 @@ use crate::consensus::ConsensusEngine;
 use crate::network::message::NetworkMessage;
 use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -70,6 +70,8 @@ pub struct PeerConnectionRegistry {
     tsdc_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
     // Blacklist reference for checking whitelist status
     blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
+    // Discovered peer candidates from peer exchange
+    discovered_peers: Arc<RwLock<HashSet<String>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -95,6 +97,7 @@ impl PeerConnectionRegistry {
             tsdc_block_cache: Arc::new(RwLock::new(None)),
             tsdc_broadcast: Arc::new(RwLock::new(None)),
             blacklist: Arc::new(RwLock::new(None)),
+            discovered_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -672,6 +675,34 @@ impl PeerConnectionRegistry {
         // Selective gossip is handled by the network server
         // Return the configured fan-out as indication
         fan_out
+    }
+
+    /// Add discovered peers from peer exchange
+    pub async fn add_discovered_peers(&self, peers: &[String]) {
+        let mut discovered = self.discovered_peers.write().await;
+        let mut added = 0;
+        for peer in peers {
+            // Extract IP only (remove port if present)
+            let ip = extract_ip(peer);
+            if discovered.insert(ip.to_string()) {
+                added += 1;
+            }
+        }
+        if added > 0 {
+            debug!("📥 Added {} new discovered peer candidate(s)", added);
+        }
+    }
+
+    /// Get and clear discovered peers (for network client to process)
+    pub async fn take_discovered_peers(&self) -> Vec<String> {
+        let mut discovered = self.discovered_peers.write().await;
+        let peers: Vec<String> = discovered.drain().collect();
+        peers
+    }
+
+    /// Get discovered peers count
+    pub async fn discovered_peers_count(&self) -> usize {
+        self.discovered_peers.read().await.len()
     }
 }
 

@@ -1752,13 +1752,57 @@ impl PeerConnection {
             }
             NetworkMessage::TransactionBroadcast(tx) => {
                 // Handle transaction broadcast from peer
-                // Note: Full transaction processing happens in server.rs with consensus access
+                let txid = tx.txid();
                 debug!(
                     "📥 [{:?}] Received transaction broadcast from {}: {}",
                     self.direction,
                     self.peer_ip,
-                    hex::encode(&tx.txid()[..8])
+                    hex::encode(&txid[..8])
                 );
+
+                // Get consensus engine to process the transaction
+                let (consensus, _block_cache, broadcast_tx) =
+                    peer_registry.get_tsdc_resources().await;
+
+                if let Some(consensus) = consensus {
+                    match consensus.process_transaction(tx.clone()).await {
+                        Ok(_) => {
+                            debug!(
+                                "✅ [{:?}] Transaction {} processed from {}",
+                                self.direction,
+                                hex::encode(&txid[..8]),
+                                self.peer_ip
+                            );
+
+                            // Gossip to other peers
+                            if let Some(broadcast_tx) = broadcast_tx {
+                                let msg = NetworkMessage::TransactionBroadcast(tx.clone());
+                                if let Ok(receivers) = broadcast_tx.send(msg) {
+                                    debug!(
+                                        "🔄 [{:?}] Gossiped transaction {} to {} peer(s)",
+                                        self.direction,
+                                        hex::encode(&txid[..8]),
+                                        receivers.saturating_sub(1)
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            debug!(
+                                "⚠️ [{:?}] Transaction {} from {} rejected: {}",
+                                self.direction,
+                                hex::encode(&txid[..8]),
+                                self.peer_ip,
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    debug!(
+                        "⚠️ [{:?}] No consensus engine available to process transaction",
+                        self.direction
+                    );
+                }
             }
             NetworkMessage::GetBlockHeight => {
                 // Respond with our current block height
@@ -1793,14 +1837,15 @@ impl PeerConnection {
                 }
             }
             NetworkMessage::PeersResponse(peers) => {
-                // Received peer list from remote
+                // Received peer list from remote - store for network client to process
                 debug!(
                     "📥 [{:?}] Received PeersResponse from {} with {} peers",
                     self.direction,
                     self.peer_ip,
                     peers.len()
                 );
-                // Could add these to peer manager for future connections
+                // Add to discovered peers for network client to connect to later
+                peer_registry.add_discovered_peers(peers).await;
             }
             NetworkMessage::HeartbeatBroadcast(heartbeat) => {
                 // Handle masternode heartbeat
