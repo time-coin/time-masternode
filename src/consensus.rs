@@ -1102,6 +1102,11 @@ impl ConsensusEngine {
         self.masternodes.store(Arc::new(masternodes));
     }
 
+    /// Get the signing key for this node (for VRF generation in block production)
+    pub fn get_signing_key(&self) -> Option<ed25519_dalek::SigningKey> {
+        self.identity.get().map(|id| id.signing_key.clone())
+    }
+
     // ========================================================================
     // FINALITY VOTE GENERATION (Per Protocol §8.5)
     // ========================================================================

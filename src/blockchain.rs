@@ -1433,6 +1433,25 @@ impl Blockchain {
         // Compute attestation root after attestations are set
         block.header.attestation_root = block.compute_attestation_root();
 
+        // Add VRF proof for fork resolution (if we have signing key)
+        if let Some(signing_key) = self.consensus.get_signing_key() {
+            if let Err(e) = block.add_vrf(&signing_key) {
+                tracing::warn!("⚠️ Failed to add VRF to block {}: {}", next_height, e);
+            } else {
+                tracing::debug!(
+                    "🎲 Block {} VRF: score={}, output={}...",
+                    next_height,
+                    block.header.vrf_score,
+                    hex::encode(&block.header.vrf_output[..4])
+                );
+            }
+        } else {
+            tracing::debug!(
+                "⚠️ Block {} produced without VRF (no signing key available)",
+                next_height
+            );
+        }
+
         Ok(block)
     }
 
@@ -2617,6 +2636,37 @@ impl Blockchain {
             ));
         }
 
+        // 6. VRF validation (Phase 2: verify proof if present)
+        // Note: VRF verification requires leader's public key from masternode registry.
+        // For backward compatibility, empty vrf_proof is allowed (pre-VRF blocks).
+        // Full verification with leader lookup will be added when all masternodes
+        // have public keys in the registry.
+        if !block.header.vrf_proof.is_empty() {
+            // Basic sanity check: VRF proof should be 80 bytes (ECVRF standard)
+            if block.header.vrf_proof.len() != 80 {
+                return Err(format!(
+                    "Block {} has invalid VRF proof length: {} (expected 80)",
+                    block.header.height,
+                    block.header.vrf_proof.len()
+                ));
+            }
+
+            // Verify vrf_score matches vrf_output
+            let expected_score = crate::block::vrf::vrf_output_to_score(&block.header.vrf_output);
+            if block.header.vrf_score != expected_score {
+                return Err(format!(
+                    "Block {} VRF score mismatch: header says {}, computed {}",
+                    block.header.height, block.header.vrf_score, expected_score
+                ));
+            }
+
+            tracing::debug!(
+                "✅ Block {} has VRF proof (score={}), full verification deferred to leader lookup",
+                block.header.height,
+                block.header.vrf_score
+            );
+        }
+
         Ok(())
     }
 
@@ -3471,17 +3521,55 @@ impl Blockchain {
                     &consensus_hash,
                 );
 
+            // VRF-BASED TIEBREAKER: When masternode authority reaches hash tiebreaker,
+            // use VRF scores instead for cryptographically fair selection
+            let (final_should_switch, final_reason) =
+                if reason.contains("deterministic tiebreaker") {
+                    // Calculate VRF scores for both chains
+                    let our_vrf_score = self.calculate_chain_vrf_score(0, our_height).await;
+
+                    // For peer chain, we estimate score based on their tip hash
+                    // (full VRF comparison would require requesting peer blocks)
+                    // Use first 16 bytes of hash as proxy for peer VRF score
+                    let peer_vrf_score = u128::from_be_bytes(
+                        consensus_hash[0..16].try_into().unwrap_or([0u8; 16]),
+                    );
+
+                    let (vrf_choice, vrf_reason) = Self::choose_canonical_chain(
+                        our_height,
+                        our_hash,
+                        our_vrf_score,
+                        consensus_height,
+                        consensus_hash,
+                        peer_vrf_score,
+                    );
+
+                    match vrf_choice {
+                        CanonicalChoice::AdoptPeers => (
+                            true,
+                            format!("SWITCH (VRF): {} | Our VRF: {}, Peer VRF: {}", vrf_reason, our_vrf_score, peer_vrf_score),
+                        ),
+                        CanonicalChoice::KeepOurs => (
+                            false,
+                            format!("KEEP (VRF): {} | Our VRF: {}, Peer VRF: {}", vrf_reason, our_vrf_score, peer_vrf_score),
+                        ),
+                        CanonicalChoice::Identical => (should_switch, reason),
+                    }
+                } else {
+                    (should_switch, reason)
+                };
+
             warn!(
                 "   Decision: {} - {}",
-                if should_switch {
+                if final_should_switch {
                     "SWITCH to consensus"
                 } else {
                     "KEEP our chain"
                 },
-                reason
+                final_reason
             );
 
-            if should_switch {
+            if final_should_switch {
                 return Some((consensus_height, consensus_peers[0].clone()));
             } else {
                 return None;
