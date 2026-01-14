@@ -1750,6 +1750,114 @@ impl PeerConnection {
                     }
                 }
             }
+            NetworkMessage::TransactionBroadcast(tx) => {
+                // Handle transaction broadcast from peer
+                // Note: Full transaction processing happens in server.rs with consensus access
+                debug!(
+                    "📥 [{:?}] Received transaction broadcast from {}: {}",
+                    self.direction,
+                    self.peer_ip,
+                    hex::encode(&tx.txid()[..8])
+                );
+            }
+            NetworkMessage::GetBlockHeight => {
+                // Respond with our current block height
+                let height = blockchain.get_height();
+                debug!(
+                    "📥 [{:?}] Received GetBlockHeight from {}, responding with {}",
+                    self.direction, self.peer_ip, height
+                );
+                let reply = NetworkMessage::BlockHeightResponse(height);
+                if let Err(e) = self.send_message(&reply).await {
+                    warn!(
+                        "⚠️ [{:?}] Failed to send BlockHeightResponse to {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+            }
+            NetworkMessage::GetPeers => {
+                // Respond with our known peers
+                let peers = peer_registry.get_connected_peers().await;
+                debug!(
+                    "📥 [{:?}] Received GetPeers from {}, responding with {} peers",
+                    self.direction,
+                    self.peer_ip,
+                    peers.len()
+                );
+                let reply = NetworkMessage::PeersResponse(peers);
+                if let Err(e) = self.send_message(&reply).await {
+                    warn!(
+                        "⚠️ [{:?}] Failed to send PeersResponse to {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+            }
+            NetworkMessage::PeersResponse(peers) => {
+                // Received peer list from remote
+                debug!(
+                    "📥 [{:?}] Received PeersResponse from {} with {} peers",
+                    self.direction,
+                    self.peer_ip,
+                    peers.len()
+                );
+                // Could add these to peer manager for future connections
+            }
+            NetworkMessage::HeartbeatBroadcast(heartbeat) => {
+                // Handle masternode heartbeat
+                debug!(
+                    "💓 [{:?}] Received heartbeat from {} (height {})",
+                    self.direction, heartbeat.masternode_address, heartbeat.block_height
+                );
+                // Verify and process the heartbeat (no AI in this context)
+                if let Err(e) = masternode_registry
+                    .receive_heartbeat_broadcast(heartbeat.clone(), None)
+                    .await
+                {
+                    debug!(
+                        "⚠️ [{:?}] Failed to process heartbeat from {}: {}",
+                        self.direction, heartbeat.masternode_address, e
+                    );
+                }
+            }
+            NetworkMessage::HeartbeatAttestation(attestation) => {
+                // Handle heartbeat attestation from another masternode
+                debug!(
+                    "📝 [{:?}] Received heartbeat attestation from {}",
+                    self.direction, attestation.witness_address
+                );
+                if let Err(e) = masternode_registry
+                    .receive_attestation_broadcast(attestation.clone())
+                    .await
+                {
+                    debug!(
+                        "⚠️ [{:?}] Failed to process attestation: {}",
+                        self.direction, e
+                    );
+                }
+            }
+            NetworkMessage::GetBlockRange {
+                start_height,
+                end_height,
+            } => {
+                // Respond with a range of blocks
+                debug!(
+                    "📥 [{:?}] Received GetBlockRange from {} for heights {}-{}",
+                    self.direction, self.peer_ip, start_height, end_height
+                );
+                let mut blocks = Vec::new();
+                for height in *start_height..=*end_height {
+                    if let Ok(block) = blockchain.get_block_by_height(height).await {
+                        blocks.push(block);
+                    }
+                }
+                let reply = NetworkMessage::BlockRangeResponse(blocks);
+                if let Err(e) = self.send_message(&reply).await {
+                    warn!(
+                        "⚠️ [{:?}] Failed to send BlockRangeResponse to {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+            }
             NetworkMessage::TSCDBlockProposal { .. }
             | NetworkMessage::TSCDPrepareVote { .. }
             | NetworkMessage::TSCDPrecommitVote { .. } => {
