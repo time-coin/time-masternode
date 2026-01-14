@@ -1689,6 +1689,25 @@ impl PeerConnection {
                     );
                 }
             }
+            NetworkMessage::GetChainTip => {
+                // Respond with our current chain tip
+                let height = blockchain.get_height();
+                let hash = blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
+                tracing::info!(
+                    "📥 [{:?}] Received GetChainTip from {}, responding with height {} hash {}",
+                    self.direction,
+                    self.peer_ip,
+                    height,
+                    hex::encode(&hash[..8])
+                );
+                let reply = NetworkMessage::ChainTipResponse { height, hash };
+                if let Err(e) = self.send_message(&reply).await {
+                    warn!(
+                        "⚠️ [{:?}] Failed to send ChainTipResponse to {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+            }
             NetworkMessage::GetMasternodes => {
                 // Use unified message handler
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
@@ -1915,6 +1934,13 @@ impl PeerConnection {
                     self.direction, self.peer_ip
                 );
             }
+            NetworkMessage::GetChainTip => {
+                // GetChainTip needs blockchain access - handled by full message loop only
+                debug!(
+                    "📥 [{:?}] Received GetChainTip from {} (no blockchain in this handler)",
+                    self.direction, self.peer_ip
+                );
+            }
             _ => {
                 debug!(
                     "📨 [{:?}] Received message from {} (type: {})",
@@ -1980,6 +2006,13 @@ impl PeerConnection {
                 );
                 // NOTE: Full processing happens in NetworkServer for inbound connections
                 // For outbound connections, we just log - NetworkServer handles the registration
+            }
+            NetworkMessage::GetChainTip => {
+                // GetChainTip needs blockchain access - handled by full message loop only
+                debug!(
+                    "📥 [{:?}] Received GetChainTip from {} (no blockchain in this handler)",
+                    self.direction, self.peer_ip
+                );
             }
             NetworkMessage::GetMasternodes => {
                 // Outbound connection received GetMasternodes request
