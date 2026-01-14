@@ -1615,97 +1615,44 @@ impl PeerConnection {
                     );
                 }
             }
-            NetworkMessage::MasternodeAnnouncement {
-                address,
-                reward_address,
-                tier,
-                public_key,
-            } => {
-                // Register masternode from announcement
-                let masternode = crate::types::Masternode {
-                    address: address.clone(),
-                    wallet_address: reward_address.clone(),
-                    tier: *tier,
-                    public_key: *public_key,
-                    collateral: 0,
-                    registered_at: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                };
-                if let Err(e) = masternode_registry
-                    .register(masternode, reward_address.clone())
-                    .await
-                {
-                    warn!(
-                        "⚠️ [{:?}] Failed to register masternode {} from announcement: {:?}",
-                        self.direction, address, e
-                    );
-                } else {
-                    info!(
-                        "✅ [{:?}] Registered masternode {} from announcement",
-                        self.direction, address
-                    );
-                }
-            }
-            NetworkMessage::MasternodesResponse(masternodes) => {
-                // Register all masternodes from response
-                info!(
-                    "📥 [{:?}] Processing MasternodesResponse from {} with {} masternode(s)",
-                    self.direction,
-                    self.peer_ip,
-                    masternodes.len()
+            NetworkMessage::MasternodeAnnouncement { .. } => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
                 );
 
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
+                let _ = handler.handle_message(&message, &context).await;
+            }
+            NetworkMessage::MasternodesResponse(_) => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
 
-                let mut registered = 0;
-                for mn_data in masternodes {
-                    let masternode = crate::types::Masternode {
-                        address: mn_data.address.clone(),
-                        wallet_address: mn_data.reward_address.clone(),
-                        tier: mn_data.tier,
-                        public_key: mn_data.public_key,
-                        collateral: 0,
-                        registered_at: now,
-                    };
-
-                    if masternode_registry
-                        .register_internal(masternode, mn_data.reward_address.clone(), false)
-                        .await
-                        .is_ok()
-                    {
-                        registered += 1;
-                    }
-                }
-
-                if registered > 0 {
-                    info!(
-                        "✅ [{:?}] Registered {} masternode(s) from response",
-                        self.direction, registered
-                    );
-                }
+                let _ = handler.handle_message(&message, &context).await;
             }
             NetworkMessage::GetChainTip => {
-                // Respond with our current chain tip
-                let height = blockchain.get_height();
-                let hash = blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
-                tracing::info!(
-                    "📥 [{:?}] Received GetChainTip from {}, responding with height {} hash {}",
-                    self.direction,
-                    self.peer_ip,
-                    height,
-                    hex::encode(&hash[..8])
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
                 );
-                let reply = NetworkMessage::ChainTipResponse { height, hash };
-                if let Err(e) = self.send_message(&reply).await {
-                    warn!(
-                        "⚠️ [{:?}] Failed to send ChainTipResponse to {}: {}",
-                        self.direction, self.peer_ip, e
-                    );
+
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send ChainTipResponse to {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
                 }
             }
             NetworkMessage::GetMasternodes => {
@@ -1744,157 +1691,140 @@ impl PeerConnection {
                     }
                 }
             }
-            NetworkMessage::TransactionBroadcast(tx) => {
-                // Handle transaction broadcast from peer
-                let txid = tx.txid();
-                debug!(
-                    "📥 [{:?}] Received transaction broadcast from {}: {}",
-                    self.direction,
-                    self.peer_ip,
-                    hex::encode(&txid[..8])
-                );
-
-                // Get consensus engine to process the transaction
-                let (consensus, _block_cache, broadcast_tx) =
+            NetworkMessage::TransactionBroadcast(_) => {
+                // Use unified message handler with consensus context
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let (consensus, block_cache, broadcast_tx) =
                     peer_registry.get_tsdc_resources().await;
 
-                if let Some(consensus) = consensus {
-                    match consensus.process_transaction(tx.clone()).await {
-                        Ok(_) => {
-                            debug!(
-                                "✅ [{:?}] Transaction {} processed from {}",
-                                self.direction,
-                                hex::encode(&txid[..8]),
-                                self.peer_ip
-                            );
+                let mut context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+                context.consensus = consensus;
+                context.block_cache = block_cache;
+                context.broadcast_tx = broadcast_tx;
 
-                            // Gossip to other peers
-                            if let Some(broadcast_tx) = broadcast_tx {
-                                let msg = NetworkMessage::TransactionBroadcast(tx.clone());
-                                if let Ok(receivers) = broadcast_tx.send(msg) {
-                                    debug!(
-                                        "🔄 [{:?}] Gossiped transaction {} to {} peer(s)",
-                                        self.direction,
-                                        hex::encode(&txid[..8]),
-                                        receivers.saturating_sub(1)
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            debug!(
-                                "⚠️ [{:?}] Transaction {} from {} rejected: {}",
-                                self.direction,
-                                hex::encode(&txid[..8]),
-                                self.peer_ip,
-                                e
-                            );
-                        }
-                    }
-                } else {
-                    debug!(
-                        "⚠️ [{:?}] No consensus engine available to process transaction",
-                        self.direction
+                if let Err(e) = handler.handle_message(&message, &context).await {
+                    warn!(
+                        "⚠️ [{:?}] Error handling transaction from {}: {}",
+                        self.direction, self.peer_ip, e
                     );
                 }
             }
             NetworkMessage::GetBlockHeight => {
-                // Respond with our current block height
-                let height = blockchain.get_height();
-                debug!(
-                    "📥 [{:?}] Received GetBlockHeight from {}, responding with {}",
-                    self.direction, self.peer_ip, height
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
                 );
-                let reply = NetworkMessage::BlockHeightResponse(height);
-                if let Err(e) = self.send_message(&reply).await {
-                    warn!(
-                        "⚠️ [{:?}] Failed to send BlockHeightResponse to {}: {}",
-                        self.direction, self.peer_ip, e
-                    );
+
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send BlockHeightResponse to {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
                 }
             }
             NetworkMessage::GetPeers => {
-                // Respond with our known peers
-                let peers = peer_registry.get_connected_peers().await;
-                debug!(
-                    "📥 [{:?}] Received GetPeers from {}, responding with {} peers",
-                    self.direction,
-                    self.peer_ip,
-                    peers.len()
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
                 );
-                let reply = NetworkMessage::PeersResponse(peers);
-                if let Err(e) = self.send_message(&reply).await {
-                    warn!(
-                        "⚠️ [{:?}] Failed to send PeersResponse to {}: {}",
-                        self.direction, self.peer_ip, e
-                    );
-                }
-            }
-            NetworkMessage::PeersResponse(peers) => {
-                // Received peer list from remote - store for network client to process
-                debug!(
-                    "📥 [{:?}] Received PeersResponse from {} with {} peers",
-                    self.direction,
-                    self.peer_ip,
-                    peers.len()
-                );
-                // Add to discovered peers for network client to connect to later
-                peer_registry.add_discovered_peers(peers).await;
-            }
-            NetworkMessage::HeartbeatBroadcast(heartbeat) => {
-                // Handle masternode heartbeat
-                debug!(
-                    "💓 [{:?}] Received heartbeat from {} (height {})",
-                    self.direction, heartbeat.masternode_address, heartbeat.block_height
-                );
-                // Verify and process the heartbeat (no AI in this context)
-                if let Err(e) = masternode_registry
-                    .receive_heartbeat_broadcast(heartbeat.clone(), None)
-                    .await
-                {
-                    debug!(
-                        "⚠️ [{:?}] Failed to process heartbeat from {}: {}",
-                        self.direction, heartbeat.masternode_address, e
-                    );
-                }
-            }
-            NetworkMessage::HeartbeatAttestation(attestation) => {
-                // Handle heartbeat attestation from another masternode
-                debug!(
-                    "📝 [{:?}] Received heartbeat attestation from {}",
-                    self.direction, attestation.witness_address
-                );
-                if let Err(e) = masternode_registry
-                    .receive_attestation_broadcast(attestation.clone())
-                    .await
-                {
-                    debug!(
-                        "⚠️ [{:?}] Failed to process attestation: {}",
-                        self.direction, e
-                    );
-                }
-            }
-            NetworkMessage::GetBlockRange {
-                start_height,
-                end_height,
-            } => {
-                // Respond with a range of blocks
-                debug!(
-                    "📥 [{:?}] Received GetBlockRange from {} for heights {}-{}",
-                    self.direction, self.peer_ip, start_height, end_height
-                );
-                let mut blocks = Vec::new();
-                for height in *start_height..=*end_height {
-                    if let Ok(block) = blockchain.get_block_by_height(height).await {
-                        blocks.push(block);
+
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send PeersResponse to {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
                     }
                 }
-                let reply = NetworkMessage::BlockRangeResponse(blocks);
-                if let Err(e) = self.send_message(&reply).await {
-                    warn!(
-                        "⚠️ [{:?}] Failed to send BlockRangeResponse to {}: {}",
-                        self.direction, self.peer_ip, e
+            }
+            NetworkMessage::PeersResponse(_) => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+
+                // MessageHandler handles adding to discovered_peers
+                let _ = handler.handle_message(&message, &context).await;
+            }
+            NetworkMessage::HeartbeatBroadcast(heartbeat) => {
+                // Use unified message handler with broadcast capability
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let (consensus, block_cache, broadcast_tx) =
+                    peer_registry.get_tsdc_resources().await;
+
+                let mut context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+                context.consensus = consensus;
+                context.block_cache = block_cache;
+                context.broadcast_tx = broadcast_tx;
+
+                let _ = handler.handle_message(&message, &context).await;
+
+                // Check for opportunistic sync - peer has higher block height
+                let our_height = blockchain.get_height();
+                if heartbeat.block_height > our_height {
+                    info!(
+                        "🔄 [{:?}] Opportunistic sync: peer {} at height {} (we're at {})",
+                        self.direction, heartbeat.masternode_address, heartbeat.block_height, our_height
                     );
+                    let start_height = our_height + 1;
+                    let msg = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
+                    if let Err(e) = self.send_message(&msg).await {
+                        debug!("Failed to request blocks: {}", e);
+                    }
+                }
+            }
+            NetworkMessage::HeartbeatAttestation(_) => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let (consensus, block_cache, broadcast_tx) =
+                    peer_registry.get_tsdc_resources().await;
+
+                let mut context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+                context.consensus = consensus;
+                context.block_cache = block_cache;
+                context.broadcast_tx = broadcast_tx;
+
+                let _ = handler.handle_message(&message, &context).await;
+            }
+            NetworkMessage::GetBlockRange { .. } => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
+                        warn!(
+                            "⚠️ [{:?}] Failed to send BlockRangeResponse to {}: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
                 }
             }
             NetworkMessage::TSCDBlockProposal { .. }
