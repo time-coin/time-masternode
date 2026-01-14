@@ -853,7 +853,7 @@ async fn handle_peer(
 
                                     let _ = handler.handle_message(&msg, &context).await;
 
-                                    // Log statistics 
+                                    // Log statistics
                                     tracing::debug!("📥 Received PeersResponse from {} with {} peer(s)", peer.addr, peers.len());
                                 }
                                 NetworkMessage::MasternodesResponse(_) => {
@@ -1166,7 +1166,7 @@ async fn handle_peer(
 
                                     let _ = handler.handle_message(&msg, &context).await;
                                 }
-                                // Health Check Messages  
+                                // Health Check Messages
                                 NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
                                     check_rate_limit!("ping");
 

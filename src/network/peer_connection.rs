@@ -1783,7 +1783,10 @@ impl PeerConnection {
                 if heartbeat.block_height > our_height {
                     info!(
                         "🔄 [{:?}] Opportunistic sync: peer {} at height {} (we're at {})",
-                        self.direction, heartbeat.masternode_address, heartbeat.block_height, our_height
+                        self.direction,
+                        heartbeat.masternode_address,
+                        heartbeat.block_height,
+                        our_height
                     );
                     let start_height = our_height + 1;
                     let msg = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);

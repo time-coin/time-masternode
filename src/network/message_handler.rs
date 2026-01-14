@@ -49,6 +49,8 @@ pub struct MessageContext {
     pub attestation_system: Option<Arc<HeartbeatAttestationSystem>>,
     pub seen_blocks: Option<Arc<DeduplicationFilter>>,
     pub seen_transactions: Option<Arc<DeduplicationFilter>>,
+    // Node identity for voting
+    pub node_masternode_address: Option<String>,
 }
 
 impl MessageContext {
@@ -70,6 +72,7 @@ impl MessageContext {
             attestation_system: None,
             seen_blocks: None,
             seen_transactions: None,
+            node_masternode_address: None,
         }
     }
 
@@ -94,6 +97,7 @@ impl MessageContext {
             attestation_system: None,
             seen_blocks: None,
             seen_transactions: None,
+            node_masternode_address: None,
         }
     }
 }
@@ -349,7 +353,10 @@ impl MessageHandler {
 
         // Update peer height if provided
         if let Some(h) = peer_height {
-            context.peer_registry.update_peer_height(&self.peer_ip, h).await;
+            context
+                .peer_registry
+                .update_peer_height(&self.peer_ip, h)
+                .await;
         }
 
         // Include our height in pong response
@@ -383,7 +390,10 @@ impl MessageHandler {
 
         // Update peer height if provided
         if let Some(h) = peer_height {
-            context.peer_registry.update_peer_height(&self.peer_ip, h).await;
+            context
+                .peer_registry
+                .update_peer_height(&self.peer_ip, h)
+                .await;
         }
 
         Ok(None)
@@ -565,10 +575,13 @@ impl MessageHandler {
             debug!("💾 Cached block {} for voting", hex::encode(block_hash));
         }
 
-        // Phase 3E.2: Look up validator weight from masternode registry
-        let validator_id = "validator_node".to_string();
+        // Phase 3E.2: Get our node identity and look up our weight
+        let validator_id = context
+            .node_masternode_address
+            .clone()
+            .unwrap_or_else(|| format!("node_{}", self.peer_ip));
         let validator_weight = match context.masternode_registry.get(&validator_id).await {
-            Some(info) => info.masternode.collateral,
+            Some(info) => info.masternode.collateral.max(1),
             None => 1u64, // Default to 1 if not found
         };
 
@@ -656,9 +669,12 @@ impl MessageHandler {
             );
 
             // Generate precommit vote with actual weight
-            let validator_id = "validator_node".to_string();
+            let validator_id = context
+                .node_masternode_address
+                .clone()
+                .unwrap_or_else(|| format!("node_{}", self.peer_ip));
             let validator_weight = match context.masternode_registry.get(&validator_id).await {
-                Some(info) => info.masternode.collateral,
+                Some(info) => info.masternode.collateral.max(1),
                 None => 1u64,
             };
 
@@ -951,7 +967,10 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let height = context.blockchain.get_height();
-        let hash = context.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
+        let hash = context
+            .blockchain
+            .get_block_hash(height)
+            .unwrap_or([0u8; 32]);
         info!(
             "📥 [{}] Received GetChainTip from {}, responding with height {} hash {}",
             self.direction,
@@ -1187,10 +1206,7 @@ impl MessageHandler {
 
                 match context.blockchain.add_block(block.clone()).await {
                     Ok(()) => {
-                        info!(
-                            "✅ [{}] Genesis block added successfully",
-                            self.direction
-                        );
+                        info!("✅ [{}] Genesis block added successfully", self.direction);
 
                         // Broadcast to other peers
                         if let Some(broadcast_tx) = &context.broadcast_tx {
@@ -1199,18 +1215,12 @@ impl MessageHandler {
                         }
                     }
                     Err(e) => {
-                        warn!(
-                            "❌ [{}] Failed to add genesis block: {}",
-                            self.direction, e
-                        );
+                        warn!("❌ [{}] Failed to add genesis block: {}", self.direction, e);
                     }
                 }
             }
             Err(e) => {
-                warn!(
-                    "⚠️ [{}] Genesis validation failed: {}",
-                    self.direction, e
-                );
+                warn!("⚠️ [{}] Genesis validation failed: {}", self.direction, e);
             }
         }
 
@@ -1494,15 +1504,15 @@ impl MessageHandler {
             .receive_heartbeat_broadcast(heartbeat.clone(), None)
             .await
         {
-            debug!(
-                "⚠️ [{}] Failed to process heartbeat: {}",
-                self.direction, e
-            );
+            debug!("⚠️ [{}] Failed to process heartbeat: {}", self.direction, e);
         }
 
         // Process through attestation system if available
         if let Some(attestation_system) = &context.attestation_system {
-            if let Ok(Some(attestation)) = attestation_system.receive_heartbeat(heartbeat.clone()).await {
+            if let Ok(Some(attestation)) = attestation_system
+                .receive_heartbeat(heartbeat.clone())
+                .await
+            {
                 // Broadcast attestation
                 if let Some(broadcast_tx) = &context.broadcast_tx {
                     let msg = NetworkMessage::HeartbeatAttestation(attestation);
@@ -1533,11 +1543,11 @@ impl MessageHandler {
 
         // Add attestation to the attestation system
         if let Some(attestation_system) = &context.attestation_system {
-            if let Err(e) = attestation_system.add_attestation(attestation.clone()).await {
-                debug!(
-                    "⚠️ [{}] Failed to add attestation: {}",
-                    self.direction, e
-                );
+            if let Err(e) = attestation_system
+                .add_attestation(attestation.clone())
+                .await
+            {
+                debug!("⚠️ [{}] Failed to add attestation: {}", self.direction, e);
             }
         }
 

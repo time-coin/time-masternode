@@ -811,6 +811,7 @@ async fn main() {
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let block_masternode_address = masternode_address.clone(); // For leader comparison
     let shutdown_token_block = shutdown_token.clone();
+    let block_consensus_engine = consensus_engine.clone(); // For TSDC voting
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
     let is_producing_block = Arc::new(AtomicBool::new(false));
@@ -1011,7 +1012,8 @@ async fn main() {
             const SYNC_THRESHOLD_BLOCKS: u64 = 5;
 
             // Case 1: Next block not due yet (more than grace period away) - wait
-            if time_past_scheduled < -GRACE_PERIOD_SECS {
+            // BUT: Skip this check during catchup mode (when far behind)
+            if time_past_scheduled < -GRACE_PERIOD_SECS && blocks_behind < SYNC_THRESHOLD_BLOCKS {
                 let wait_secs = (-time_past_scheduled) - GRACE_PERIOD_SECS;
                 tracing::debug!(
                     "📅 Block {} not due for {}s (will produce at scheduled + {}s grace)",
@@ -1146,7 +1148,13 @@ async fn main() {
             );
 
             // Safety checks before producing
-            if connected_peers.len() < 2 {
+            // During catchup (far behind), relax peer requirement since all nodes need to catch up together
+            let min_peers_required = if blocks_behind >= SYNC_THRESHOLD_BLOCKS {
+                0
+            } else {
+                2
+            };
+            if connected_peers.len() < min_peers_required {
                 tracing::warn!(
                     "⚠️ Only {} peer(s) connected - waiting for more peers before producing",
                     connected_peers.len()
@@ -1167,28 +1175,148 @@ async fn main() {
             match block_blockchain.produce_block().await {
                 Ok(block) => {
                     let block_height = block.header.height;
+                    let block_hash = block.hash();
+
                     tracing::info!(
-                        "✅ Block {} produced: {} transactions, {} rewards",
+                        "📦 Block {} produced: {} txs, {} rewards - broadcasting for consensus",
                         block_height,
                         block.transactions.len(),
                         block.masternode_rewards.len()
                     );
 
-                    // Add to our chain
-                    if let Err(e) = block_blockchain.add_block(block.clone()).await {
-                        tracing::error!("❌ Failed to add block to chain: {}", e);
-                        is_producing.store(false, Ordering::SeqCst);
-                        continue;
+                    // TSDC Consensus Flow:
+                    // 1. Cache block locally for finalization
+                    // 2. Broadcast TSCDBlockProposal to all peers (NOT add to chain yet)
+                    // 3. All nodes (including us) validate and vote
+                    // 4. When >50% prepare votes → precommit phase
+                    // 5. When >50% precommit votes → block finalized, all add to chain
+
+                    // Step 1: Cache the block for finalization (leader must also cache)
+                    let (_, block_cache_opt, _) = block_peer_registry.get_tsdc_resources().await;
+                    if let Some(cache) = &block_cache_opt {
+                        cache.insert(block_hash, block.clone());
+                        tracing::debug!("💾 Leader cached block {} for consensus", block_height);
                     }
 
-                    // Broadcast to all peers
-                    block_registry.broadcast_block(block.clone()).await;
+                    // Step 2: Broadcast proposal to all peers
+                    let proposal = crate::network::message::NetworkMessage::TSCDBlockProposal {
+                        block: block.clone(),
+                    };
+                    block_peer_registry.broadcast(proposal).await;
 
                     tracing::info!(
-                        "📤 Block {} broadcast to {} peers",
+                        "📤 TSCDBlockProposal broadcast for block {} (hash: {}...)",
                         block_height,
-                        connected_peers.len()
+                        hex::encode(&block_hash[..4])
                     );
+
+                    // Step 3: Generate our own prepare vote (leader participates in voting)
+                    if let Some(ref our_addr) = block_masternode_address {
+                        // Look up our weight from masternode registry
+                        let our_weight = match block_registry.get(our_addr).await {
+                            Some(info) => info.masternode.collateral.max(1),
+                            None => 1u64,
+                        };
+
+                        // Record our prepare vote in consensus engine
+                        block_consensus_engine.avalanche.accumulate_prepare_vote(
+                            block_hash,
+                            our_addr.clone(),
+                            our_weight,
+                        );
+
+                        // Broadcast our prepare vote
+                        let vote = crate::network::message::NetworkMessage::TSCDPrepareVote {
+                            block_hash,
+                            voter_id: our_addr.clone(),
+                            signature: vec![], // TODO: Sign with masternode key
+                        };
+                        block_peer_registry.broadcast(vote).await;
+
+                        tracing::info!(
+                            "🗳️  Cast prepare vote for block {} (our weight: {})",
+                            block_height,
+                            our_weight
+                        );
+                    }
+
+                    // Step 4: Wait for consensus to finalize the block
+                    // The message_handler will add the block when precommit consensus is reached
+                    // We poll here to track progress and handle timeout
+
+                    let consensus_timeout = std::time::Duration::from_secs(30);
+                    let consensus_start = std::time::Instant::now();
+                    let check_interval = std::time::Duration::from_millis(500);
+
+                    loop {
+                        tokio::time::sleep(check_interval).await;
+
+                        // Check if block was added (consensus reached via message handler)
+                        let new_height = block_blockchain.get_height();
+                        if new_height >= block_height {
+                            tracing::info!(
+                                "✅ Block {} finalized via Avalanche consensus!",
+                                block_height
+                            );
+                            break;
+                        }
+
+                        // Log consensus progress
+                        let prepare_weight = block_consensus_engine
+                            .avalanche
+                            .get_prepare_weight(block_hash);
+                        let precommit_weight = block_consensus_engine
+                            .avalanche
+                            .get_precommit_weight(block_hash);
+
+                        if consensus_start.elapsed().as_secs() % 5 == 0
+                            && consensus_start.elapsed().as_millis() < 600
+                        {
+                            tracing::debug!(
+                                "🗳️  Consensus progress for block {}: prepare={}, precommit={}",
+                                block_height,
+                                prepare_weight,
+                                precommit_weight
+                            );
+                        }
+
+                        // Check timeout
+                        if consensus_start.elapsed() > consensus_timeout {
+                            tracing::warn!(
+                                "⏰ Consensus timeout for block {} after {}s (prepare={}, precommit={})",
+                                block_height,
+                                consensus_timeout.as_secs(),
+                                prepare_weight,
+                                precommit_weight
+                            );
+
+                            // Fallback: If we're the leader and have SOME votes, add block anyway
+                            // This prevents network stall when peers are slow/offline
+                            if prepare_weight > 0 {
+                                tracing::warn!(
+                                    "⚡ Fallback: Adding block {} with partial consensus (prepare_weight={})",
+                                    block_height,
+                                    prepare_weight
+                                );
+                                if let Err(e) = block_blockchain.add_block(block.clone()).await {
+                                    tracing::error!("❌ Failed to add block in fallback: {}", e);
+                                } else {
+                                    // Broadcast the finalized block for late-joining nodes
+                                    block_registry.broadcast_block(block.clone()).await;
+                                    tracing::info!(
+                                        "✅ Block {} added via fallback, broadcast to peers",
+                                        block_height
+                                    );
+                                }
+                            }
+
+                            // Clear consensus state for this block
+                            block_consensus_engine
+                                .avalanche
+                                .cleanup_block_votes(block_hash);
+                            break;
+                        }
+                    }
 
                     // Check if we're still behind and need to continue immediately
                     let new_height = block_blockchain.get_height();
@@ -1196,8 +1324,9 @@ async fn main() {
                     let still_behind = new_expected.saturating_sub(new_height);
                     if still_behind > 0 {
                         tracing::info!(
-                            "🔄 Still {} blocks behind, continuing immediately",
-                            still_behind
+                            "🔄 Still {} blocks behind expected height {}, continuing catchup",
+                            still_behind,
+                            new_expected
                         );
                         is_producing.store(false, Ordering::SeqCst);
                         interval.reset(); // Reset interval to avoid double-tick
