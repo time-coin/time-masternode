@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+use crate::ai::adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionConfig};
 use crate::blockchain::Blockchain;
 use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
@@ -36,6 +37,8 @@ pub struct NetworkClient {
     reserved_masternode_slots: usize,
     local_ip: Option<String>,
     blacklisted_peers: HashSet<String>,
+    /// AI-powered adaptive reconnection
+    reconnection_ai: Arc<AdaptiveReconnectionAI>,
 }
 
 impl NetworkClient {
@@ -55,6 +58,9 @@ impl NetworkClient {
     ) -> Self {
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
 
+        // Initialize AI-powered reconnection system
+        let reconnection_ai = Arc::new(AdaptiveReconnectionAI::new(ReconnectionConfig::default()));
+
         Self {
             peer_manager,
             masternode_registry,
@@ -68,6 +74,7 @@ impl NetworkClient {
             reserved_masternode_slots,
             local_ip,
             blacklisted_peers: blacklisted_peers.into_iter().collect(),
+            reconnection_ai,
         }
     }
 
@@ -84,6 +91,7 @@ impl NetworkClient {
         let reserved_masternode_slots = self.reserved_masternode_slots;
         let local_ip = self.local_ip.clone();
         let blacklisted_peers = self.blacklisted_peers.clone();
+        let reconnection_ai = self.reconnection_ai.clone();
 
         tokio::spawn(async move {
             tracing::info!(
@@ -91,6 +99,7 @@ impl NetworkClient {
                 max_peers,
                 reserved_masternode_slots
             );
+            tracing::info!("🧠 AI-powered adaptive reconnection enabled");
 
             if let Some(ref ip) = local_ip {
                 tracing::info!("🏠 Local IP: {} (will skip self-connections)", ip);
@@ -156,6 +165,7 @@ impl NetworkClient {
                 let peer_mgr = peer_manager.clone();
                 let peer_reg = peer_registry.clone();
                 let local_ip_clone = local_ip.clone();
+                let recon_ai = reconnection_ai.clone();
 
                 // Spawn task without waiting for it to complete
                 let task = tokio::spawn(async move {
@@ -170,6 +180,7 @@ impl NetworkClient {
                         peer_reg,
                         true, // is_masternode flag
                         local_ip_clone,
+                        recon_ai,
                     );
                 });
 
@@ -281,6 +292,7 @@ impl NetworkClient {
                     let peer_mgr = peer_manager.clone();
                     let peer_reg = peer_registry.clone();
                     let local_ip_clone = local_ip.clone();
+                    let recon_ai = reconnection_ai.clone();
 
                     // Spawn task without waiting
                     let task = tokio::spawn(async move {
@@ -295,6 +307,7 @@ impl NetworkClient {
                             peer_reg,
                             is_registered_masternode, // treat registered masternodes as whitelisted
                             local_ip_clone,
+                            recon_ai,
                         );
                     });
 
@@ -378,6 +391,7 @@ impl NetworkClient {
                             peer_registry.clone(),
                             true,
                             local_ip.clone(),
+                            reconnection_ai.clone(),
                         );
                     }
                 }
@@ -463,6 +477,7 @@ impl NetworkClient {
                             peer_registry.clone(),
                             false,
                             local_ip.clone(),
+                            reconnection_ai.clone(),
                         );
 
                         sleep(Duration::from_millis(100)).await;
@@ -511,17 +526,30 @@ fn spawn_connection_task(
     peer_registry: Arc<PeerConnectionRegistry>,
     is_masternode: bool,
     local_ip: Option<String>,
+    reconnection_ai: Arc<AdaptiveReconnectionAI>,
 ) {
     let tag = if is_masternode { "[MASTERNODE]" } else { "" };
     tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
 
     tokio::spawn(async move {
-        // Phase 2: Aggressive reconnection for whitelisted masternodes
-        let mut retry_delay = if is_masternode { 2 } else { 5 }; // Masternodes reconnect faster (2s vs 5s)
-        let mut consecutive_failures = 0;
-        let max_failures = if is_masternode { 50 } else { 10 }; // Masternodes get many more retries (50 vs 10)
+        let mut session_start: Option<std::time::Instant> = None;
 
         loop {
+            // Get AI-powered reconnection advice
+            let advice = reconnection_ai.get_reconnection_advice(&ip, is_masternode);
+
+            if !advice.should_attempt {
+                tracing::info!(
+                    "🧠 [AI] Skipping reconnection to {}: {}",
+                    ip,
+                    advice.reasoning
+                );
+                connection_manager.clear_reconnecting(&ip);
+                break;
+            }
+
+            let connect_start = std::time::Instant::now();
+
             match maintain_peer_connection(
                 &ip,
                 port,
@@ -537,62 +565,59 @@ fn spawn_connection_task(
             .await
             {
                 Ok(_) => {
+                    let connect_time = connect_start.elapsed().as_millis() as u64;
+                    reconnection_ai.record_connection_success(&ip, is_masternode, connect_time);
+
+                    // Record session duration if we had a session
+                    if let Some(start) = session_start {
+                        reconnection_ai.record_session_end(&ip, start.elapsed().as_secs());
+                    }
+                    session_start = Some(std::time::Instant::now());
+
                     let tag = if is_masternode { "[MASTERNODE]" } else { "" };
                     tracing::info!("{} Connection to {} ended gracefully", tag, ip);
-                    consecutive_failures = 0;
-                    retry_delay = if is_masternode { 2 } else { 5 }; // Reset to initial delay
                 }
                 Err(e) => {
-                    consecutive_failures += 1;
-                    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-                    tracing::warn!(
-                        "{} Connection to {} failed (attempt {}): {}",
-                        tag,
-                        ip,
-                        consecutive_failures,
-                        e
-                    );
+                    reconnection_ai.record_connection_failure(&ip, is_masternode, &e);
 
-                    if consecutive_failures >= max_failures {
-                        tracing::error!(
-                            "{} Giving up on {} after {} failed attempts",
-                            tag,
-                            ip,
-                            consecutive_failures
-                        );
-                        connection_manager.clear_reconnecting(&ip);
-                        break;
+                    // Record session duration if we had a session
+                    if let Some(start) = session_start {
+                        reconnection_ai.record_session_end(&ip, start.elapsed().as_secs());
                     }
+                    session_start = None;
 
-                    // Phase 2: Exponential backoff with lower max for masternodes
-                    // Masternodes: 2s -> 4s -> 8s -> 16s -> 32s -> 60s (cap at 60s)
-                    // Regular peers: 5s -> 10s -> 20s -> 40s -> 80s -> 160s -> 300s (cap at 5min)
-                    retry_delay = if is_masternode {
-                        (retry_delay * 2).min(60) // Cap at 1 minute for masternodes
-                    } else {
-                        (retry_delay * 2).min(300) // Cap at 5 minutes for regular peers
-                    };
+                    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+                    tracing::warn!("{} Connection to {} failed: {}", tag, ip, e);
                 }
             }
 
             connection_manager.mark_disconnected(&ip);
 
             // If this is a masternode connection, mark it as inactive in the registry
-            // This ensures it won't receive rewards while disconnected
             if is_masternode {
                 if let Err(e) = masternode_registry.mark_inactive_on_disconnect(&ip).await {
                     tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
                 }
             }
 
-            let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-            tracing::info!("{} Reconnecting to {} in {}s...", tag, ip, retry_delay);
+            // Get updated advice after recording the result
+            let advice = reconnection_ai.get_reconnection_advice(&ip, is_masternode);
+            let retry_delay = advice.delay_secs;
 
-            // Mark peer as in reconnection backoff to prevent duplicate connection attempts
+            let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+            tracing::info!(
+                "{} 🧠 [AI] Reconnecting to {} in {}s (priority={:?})",
+                tag,
+                ip,
+                retry_delay,
+                advice.priority
+            );
+
+            // Mark peer as in reconnection backoff
             connection_manager.mark_reconnecting(
                 &ip,
                 std::time::Duration::from_secs(retry_delay),
-                consecutive_failures,
+                0, // AI handles failure tracking internally
             );
 
             sleep(Duration::from_secs(retry_delay)).await;

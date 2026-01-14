@@ -1,4 +1,6 @@
+pub mod adaptive_reconnection;
 pub mod anomaly_detector;
+pub mod consensus_health;
 pub mod fork_resolver;
 pub mod masternode_health;
 pub mod network_optimizer;
@@ -8,7 +10,11 @@ pub mod resource_manager;
 pub mod transaction_analyzer;
 pub mod transaction_validator;
 
+pub use adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionAdvice, ReconnectionPriority};
 pub use anomaly_detector::AnomalyDetector;
+pub use consensus_health::{
+    ConsensusHealthMonitor, ConsensusMetrics, HealthPrediction as ConsensusHealthPrediction,
+};
 pub use fork_resolver::ForkResolver;
 pub use masternode_health::{HealthPrediction, MasternodeHealthAI, NetworkHealth};
 pub use network_optimizer::NetworkOptimizer;

@@ -2,6 +2,9 @@
 
 #![allow(dead_code)]
 
+use crate::ai::consensus_health::{
+    ConsensusHealthConfig, ConsensusHealthMonitor, ConsensusMetrics,
+};
 use crate::block::types::{Block, BlockHeader};
 use crate::block_cache::BlockCacheManager;
 use crate::blockchain_validation::BlockValidator;
@@ -212,6 +215,8 @@ pub struct Blockchain {
     block_cache: Arc<BlockCacheManager>,
     /// Block validator for validation logic
     validator: BlockValidator,
+    /// AI-powered consensus health monitoring
+    consensus_health: Arc<ConsensusHealthMonitor>,
 }
 
 impl Blockchain {
@@ -251,6 +256,10 @@ impl Blockchain {
         // Initialize block validator
         let validator = BlockValidator::new(network_type);
 
+        // Initialize AI consensus health monitor
+        let consensus_health =
+            Arc::new(ConsensusHealthMonitor::new(ConsensusHealthConfig::default()));
+
         Self {
             storage,
             consensus,
@@ -271,6 +280,7 @@ impl Blockchain {
             fork_resolution_lock: Arc::new(tokio::sync::Mutex::new(())),
             block_cache,
             validator,
+            consensus_health,
         }
     }
 
@@ -3311,6 +3321,8 @@ impl Blockchain {
                 height,
                 hex::encode(&hash[..8])
             );
+            // Record chain tip for AI consensus health monitoring
+            self.consensus_health.record_chain_tip(*height, *hash);
         }
 
         let our_height = self.get_height();
@@ -3341,6 +3353,46 @@ impl Blockchain {
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
+
+        // AI Consensus Health: Calculate and record metrics
+        let heights: Vec<u64> = peer_tips.values().map(|(h, _)| *h).collect();
+        let height_mean = heights.iter().sum::<u64>() as f64 / heights.len() as f64;
+        let height_variance = (heights
+            .iter()
+            .map(|h| (*h as f64 - height_mean).powi(2))
+            .sum::<f64>()
+            / heights.len() as f64)
+            .sqrt();
+
+        let peer_agreement_ratio = consensus_peers.len() as f64 / peer_tips.len() as f64;
+        let fork_count = chain_counts.len() as u32;
+        let response_rate = peer_tips.len() as f64 / connected_peers.len() as f64;
+
+        let metrics = ConsensusMetrics {
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            height: consensus_height,
+            peer_agreement_ratio,
+            height_variance,
+            fork_count,
+            response_rate,
+            block_propagation_time: None,
+        };
+        self.consensus_health.record_metrics(metrics);
+
+        // AI Health Prediction: Log warnings if health is degraded
+        let health = self.consensus_health.predict_health();
+        if health.health_score < 0.7 {
+            warn!(
+                "🧠 [AI] Consensus health warning: score={:.2}, fork_prob={:.2}, action={:?}",
+                health.health_score, health.fork_probability, health.recommended_action
+            );
+            for reason in &health.reasoning {
+                warn!("   Reason: {}", reason);
+            }
+        }
 
         // DEBUG: Log consensus decision
         tracing::info!(
@@ -4671,6 +4723,7 @@ impl Clone for Blockchain {
             fork_resolution_lock: self.fork_resolution_lock.clone(),
             block_cache: self.block_cache.clone(),
             validator: BlockValidator::new(self.network_type),
+            consensus_health: self.consensus_health.clone(),
         }
     }
 }
