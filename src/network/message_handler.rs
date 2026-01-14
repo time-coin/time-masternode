@@ -7,9 +7,13 @@
 use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::consensus::ConsensusEngine;
+use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
+use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
+use crate::peer_manager::PeerManager;
+use crate::utxo_manager::UTXOStateManager;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
@@ -34,13 +38,64 @@ impl std::fmt::Display for ConnectionDirection {
 /// Context containing all dependencies needed for message handling
 pub struct MessageContext {
     pub blockchain: Arc<Blockchain>,
-    #[allow(dead_code)]
     pub peer_registry: Arc<PeerConnectionRegistry>,
     pub masternode_registry: Arc<MasternodeRegistry>,
-    #[allow(dead_code)]
     pub consensus: Option<Arc<ConsensusEngine>>,
     pub block_cache: Option<Arc<crate::network::block_cache::BlockCache>>,
     pub broadcast_tx: Option<broadcast::Sender<NetworkMessage>>,
+    // Extended context for full message handling
+    pub utxo_manager: Option<Arc<UTXOStateManager>>,
+    pub peer_manager: Option<Arc<PeerManager>>,
+    pub attestation_system: Option<Arc<HeartbeatAttestationSystem>>,
+    pub seen_blocks: Option<Arc<DeduplicationFilter>>,
+    pub seen_transactions: Option<Arc<DeduplicationFilter>>,
+}
+
+impl MessageContext {
+    /// Create a minimal context with only required fields
+    pub fn minimal(
+        blockchain: Arc<Blockchain>,
+        peer_registry: Arc<PeerConnectionRegistry>,
+        masternode_registry: Arc<MasternodeRegistry>,
+    ) -> Self {
+        Self {
+            blockchain,
+            peer_registry,
+            masternode_registry,
+            consensus: None,
+            block_cache: None,
+            broadcast_tx: None,
+            utxo_manager: None,
+            peer_manager: None,
+            attestation_system: None,
+            seen_blocks: None,
+            seen_transactions: None,
+        }
+    }
+
+    /// Create context with consensus resources for transaction/block handling
+    pub fn with_consensus(
+        blockchain: Arc<Blockchain>,
+        peer_registry: Arc<PeerConnectionRegistry>,
+        masternode_registry: Arc<MasternodeRegistry>,
+        consensus: Arc<ConsensusEngine>,
+        block_cache: Arc<crate::network::block_cache::BlockCache>,
+        broadcast_tx: broadcast::Sender<NetworkMessage>,
+    ) -> Self {
+        Self {
+            blockchain,
+            peer_registry,
+            masternode_registry,
+            consensus: Some(consensus),
+            block_cache: Some(block_cache),
+            broadcast_tx: Some(broadcast_tx),
+            utxo_manager: None,
+            peer_manager: None,
+            attestation_system: None,
+            seen_blocks: None,
+            seen_transactions: None,
+        }
+    }
 }
 
 /// Tracks repeated GetBlocks requests to detect loops
@@ -84,32 +139,116 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         match msg {
+            // === Health Check Messages ===
             NetworkMessage::Ping {
                 nonce,
                 timestamp,
-                height: _,
-            } => self.handle_ping(*nonce, *timestamp).await,
+                height,
+            } => self.handle_ping(*nonce, *timestamp, *height, context).await,
             NetworkMessage::Pong {
                 nonce,
                 timestamp,
-                height: _,
-            } => self.handle_pong(*nonce, *timestamp).await,
+                height,
+            } => self.handle_pong(*nonce, *timestamp, *height, context).await,
+
+            // === Block Sync Messages ===
             NetworkMessage::GetBlocks(start, end) => {
                 self.handle_get_blocks(*start, *end, context).await
             }
+            NetworkMessage::GetBlockHeight => self.handle_get_block_height(context).await,
+            NetworkMessage::GetChainTip => self.handle_get_chain_tip(context).await,
+            NetworkMessage::GetBlockRange {
+                start_height,
+                end_height,
+            } => {
+                self.handle_get_block_range(*start_height, *end_height, context)
+                    .await
+            }
+            NetworkMessage::GetBlockHash(height) => {
+                self.handle_get_block_hash(*height, context).await
+            }
+            NetworkMessage::BlockRequest(height) => {
+                self.handle_block_request(*height, context).await
+            }
+            NetworkMessage::BlockInventory(height) => {
+                self.handle_block_inventory(*height, context).await
+            }
+            NetworkMessage::BlockResponse(block) => {
+                self.handle_block_response(block.clone(), context).await
+            }
+            NetworkMessage::BlockAnnouncement(block) => {
+                self.handle_block_announcement(block.clone(), context).await
+            }
+
+            // === Genesis Messages ===
+            NetworkMessage::RequestGenesis => self.handle_request_genesis(context).await,
+            NetworkMessage::GenesisAnnouncement(block) => {
+                self.handle_genesis_announcement(block.clone(), context)
+                    .await
+            }
+
+            // === Transaction Messages ===
+            NetworkMessage::TransactionBroadcast(tx) => {
+                self.handle_transaction_broadcast(tx.clone(), context).await
+            }
+
+            // === Peer Exchange Messages ===
+            NetworkMessage::GetPeers => self.handle_get_peers(context).await,
+            NetworkMessage::PeersResponse(peers) => {
+                self.handle_peers_response(peers.clone(), context).await
+            }
+
+            // === Masternode Messages ===
             NetworkMessage::GetMasternodes => self.handle_get_masternodes(context).await,
-            NetworkMessage::BlockHeightResponse(_) => {
-                // Handled by caller (no response needed)
-                Ok(None)
+            NetworkMessage::MasternodeAnnouncement {
+                address,
+                reward_address,
+                tier,
+                public_key,
+            } => {
+                self.handle_masternode_announcement(
+                    address.clone(),
+                    reward_address.clone(),
+                    *tier,
+                    *public_key,
+                    context,
+                )
+                .await
             }
-            NetworkMessage::BlocksResponse(_) | NetworkMessage::BlockRangeResponse(_) => {
-                // Handled by caller (no response needed)
-                Ok(None)
+            NetworkMessage::MasternodesResponse(masternodes) => {
+                self.handle_masternodes_response(masternodes.clone(), context)
+                    .await
             }
-            NetworkMessage::MasternodesResponse(_) => {
-                // Handled by caller (no response needed)
-                Ok(None)
+
+            // === Heartbeat Messages ===
+            NetworkMessage::HeartbeatBroadcast(heartbeat) => {
+                self.handle_heartbeat_broadcast(heartbeat.clone(), context)
+                    .await
             }
+            NetworkMessage::HeartbeatAttestation(attestation) => {
+                self.handle_heartbeat_attestation(attestation.clone(), context)
+                    .await
+            }
+
+            // === UTXO Messages ===
+            NetworkMessage::UTXOStateQuery(outpoints) => {
+                self.handle_utxo_state_query(outpoints.clone(), context)
+                    .await
+            }
+            NetworkMessage::GetUTXOStateHash => self.handle_get_utxo_state_hash(context).await,
+            NetworkMessage::GetUTXOSet => self.handle_get_utxo_set(context).await,
+
+            // === Consensus Query Messages ===
+            NetworkMessage::ConsensusQuery { height, block_hash } => {
+                self.handle_consensus_query(*height, *block_hash, context)
+                    .await
+            }
+            NetworkMessage::GetChainWork => self.handle_get_chain_work(context).await,
+            NetworkMessage::GetChainWorkAt(height) => {
+                self.handle_get_chain_work_at(*height, context).await
+            }
+
+            // === TSDC Consensus Messages ===
             NetworkMessage::TSCDBlockProposal { block } => {
                 self.handle_tsdc_block_proposal(block.clone(), context)
                     .await
@@ -144,10 +283,51 @@ impl MessageHandler {
                 self.handle_finality_vote_broadcast(vote.clone(), context)
                     .await
             }
+
+            // === Fork Alert ===
+            NetworkMessage::ForkAlert {
+                your_height,
+                your_hash,
+                consensus_height,
+                consensus_hash,
+                consensus_peer_count,
+                message,
+            } => {
+                self.handle_fork_alert(
+                    *your_height,
+                    *your_hash,
+                    *consensus_height,
+                    *consensus_hash,
+                    *consensus_peer_count,
+                    message.clone(),
+                )
+                .await
+            }
+
+            // === Response Messages (handled by caller) ===
+            NetworkMessage::BlockHeightResponse(_)
+            | NetworkMessage::ChainTipResponse { .. }
+            | NetworkMessage::BlocksResponse(_)
+            | NetworkMessage::BlockRangeResponse(_)
+            | NetworkMessage::BlockHashResponse { .. }
+            | NetworkMessage::UTXOStateResponse(_)
+            | NetworkMessage::UTXOSetResponse(_)
+            | NetworkMessage::UTXOStateHashResponse { .. }
+            | NetworkMessage::ConsensusQueryResponse { .. }
+            | NetworkMessage::ChainWorkResponse { .. }
+            | NetworkMessage::ChainWorkAtResponse { .. }
+            | NetworkMessage::PendingTransactionsResponse(_) => {
+                // Response messages - no further action needed in handler
+                Ok(None)
+            }
+
+            // === Messages not handled here ===
             _ => {
                 debug!(
-                    "[{}] Unhandled message type from {}",
-                    self.direction, self.peer_ip
+                    "[{}] Unhandled message type {:?} from {}",
+                    self.direction,
+                    msg.message_type(),
+                    self.peer_ip
                 );
                 Ok(None)
             }
@@ -159,38 +339,53 @@ impl MessageHandler {
         &self,
         nonce: u64,
         _timestamp: i64,
+        peer_height: Option<u64>,
+        context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        info!(
+        debug!(
             "📨 [{}] Received ping from {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
 
-        // Phase 3: MessageHandler doesn't have blockchain access, so we can't include height
-        // This is fine - height will be included in peer_connection and server handlers
+        // Update peer height if provided
+        if let Some(h) = peer_height {
+            context.peer_registry.update_peer_height(&self.peer_ip, h).await;
+        }
+
+        // Include our height in pong response
+        let our_height = context.blockchain.get_height();
         let pong = NetworkMessage::Pong {
             nonce,
             timestamp: chrono::Utc::now().timestamp(),
-            height: None, // Phase 3: No blockchain access in this handler
+            height: Some(our_height),
         };
 
-        info!(
-            "✅ [{}] Sent pong to {} (nonce: {})",
-            self.direction, self.peer_ip, nonce
+        debug!(
+            "✅ [{}] Sent pong to {} (nonce: {}, height: {})",
+            self.direction, self.peer_ip, nonce, our_height
         );
 
         Ok(Some(pong))
     }
 
-    /// Handle Pong message - no response needed
+    /// Handle Pong message - update peer height
     async fn handle_pong(
         &self,
         nonce: u64,
         _timestamp: i64,
+        peer_height: Option<u64>,
+        context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        info!(
+        debug!(
             "📨 [{}] Received pong from {} (nonce: {})",
             self.direction, self.peer_ip, nonce
         );
+
+        // Update peer height if provided
+        if let Some(h) = peer_height {
+            context.peer_registry.update_peer_height(&self.peer_ip, h).await;
+        }
+
         Ok(None)
     }
 
@@ -734,32 +929,830 @@ impl MessageHandler {
 
         Ok(None)
     }
+
+    // ==================== NEW HANDLERS ====================
+
+    /// Handle GetBlockHeight request
+    async fn handle_get_block_height(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let height = context.blockchain.get_height();
+        debug!(
+            "📥 [{}] Received GetBlockHeight from {}, responding with {}",
+            self.direction, self.peer_ip, height
+        );
+        Ok(Some(NetworkMessage::BlockHeightResponse(height)))
+    }
+
+    /// Handle GetChainTip request
+    async fn handle_get_chain_tip(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let height = context.blockchain.get_height();
+        let hash = context.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
+        info!(
+            "📥 [{}] Received GetChainTip from {}, responding with height {} hash {}",
+            self.direction,
+            self.peer_ip,
+            height,
+            hex::encode(&hash[..8])
+        );
+        Ok(Some(NetworkMessage::ChainTipResponse { height, hash }))
+    }
+
+    /// Handle GetBlockRange request
+    async fn handle_get_block_range(
+        &self,
+        start_height: u64,
+        end_height: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received GetBlockRange({}-{}) from {}",
+            self.direction, start_height, end_height, self.peer_ip
+        );
+        let blocks = context
+            .blockchain
+            .get_block_range(start_height, end_height)
+            .await;
+        Ok(Some(NetworkMessage::BlockRangeResponse(blocks)))
+    }
+
+    /// Handle GetBlockHash request
+    async fn handle_get_block_hash(
+        &self,
+        height: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received GetBlockHash({}) from {}",
+            self.direction, height, self.peer_ip
+        );
+        let hash = context.blockchain.get_block_hash_at_height(height).await;
+        Ok(Some(NetworkMessage::BlockHashResponse { height, hash }))
+    }
+
+    /// Handle BlockRequest
+    async fn handle_block_request(
+        &self,
+        height: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📨 [{}] Received block request for height {} from {}",
+            self.direction, height, self.peer_ip
+        );
+
+        if let Ok(block) = context.blockchain.get_block_by_height(height).await {
+            debug!(
+                "✅ [{}] Sending block {} to {}",
+                self.direction, height, self.peer_ip
+            );
+            Ok(Some(NetworkMessage::BlockResponse(block)))
+        } else {
+            debug!(
+                "⚠️ [{}] Don't have block {} requested by {}",
+                self.direction, height, self.peer_ip
+            );
+            Ok(None)
+        }
+    }
+
+    /// Handle BlockInventory - request block if we need it
+    async fn handle_block_inventory(
+        &self,
+        block_height: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let our_height = context.blockchain.get_height();
+
+        if block_height > our_height {
+            debug!(
+                "📦 [{}] Received inventory for block {} from {}, requesting",
+                self.direction, block_height, self.peer_ip
+            );
+            Ok(Some(NetworkMessage::BlockRequest(block_height)))
+        } else {
+            debug!(
+                "⏭️ [{}] Ignoring inventory for block {} from {} (we're at {})",
+                self.direction, block_height, self.peer_ip, our_height
+            );
+            Ok(None)
+        }
+    }
+
+    /// Handle BlockResponse - add block to chain
+    async fn handle_block_response(
+        &self,
+        block: Block,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let block_height = block.header.height;
+
+        // Check for duplicates using dedup filter if available
+        if let Some(seen_blocks) = &context.seen_blocks {
+            let block_height_bytes = block_height.to_le_bytes();
+            if seen_blocks.check_and_insert(&block_height_bytes).await {
+                debug!(
+                    "🔁 [{}] Ignoring duplicate block {} from {}",
+                    self.direction, block_height, self.peer_ip
+                );
+                return Ok(None);
+            }
+        }
+
+        info!(
+            "📥 [{}] Received block {} from {}",
+            self.direction, block_height, self.peer_ip
+        );
+
+        match context
+            .blockchain
+            .add_block_with_fork_handling(block.clone())
+            .await
+        {
+            Ok(true) => {
+                info!(
+                    "✅ [{}] Added block {} from {}",
+                    self.direction, block_height, self.peer_ip
+                );
+
+                // Gossip inventory to other peers
+                if let Some(broadcast_tx) = &context.broadcast_tx {
+                    let msg = NetworkMessage::BlockInventory(block_height);
+                    if let Ok(receivers) = broadcast_tx.send(msg) {
+                        debug!(
+                            "🔄 [{}] Gossiped block {} inventory to {} peer(s)",
+                            self.direction,
+                            block_height,
+                            receivers.saturating_sub(1)
+                        );
+                    }
+                }
+            }
+            Ok(false) => {
+                debug!(
+                    "⏭️ [{}] Skipped block {} (already have or invalid)",
+                    self.direction, block_height
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "❌ [{}] Failed to add block {}: {}",
+                    self.direction, block_height, e
+                );
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle BlockAnnouncement - legacy full block announcement
+    async fn handle_block_announcement(
+        &self,
+        block: Block,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        // Same logic as BlockResponse
+        self.handle_block_response(block, context).await
+    }
+
+    /// Handle RequestGenesis
+    async fn handle_request_genesis(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📥 [{}] Received genesis request from {}",
+            self.direction, self.peer_ip
+        );
+
+        match context.blockchain.get_block_by_height(0).await {
+            Ok(genesis) => {
+                info!(
+                    "📤 [{}] Sending genesis block to {}",
+                    self.direction, self.peer_ip
+                );
+                Ok(Some(NetworkMessage::GenesisAnnouncement(genesis)))
+            }
+            Err(_) => {
+                debug!(
+                    "⚠️ [{}] Cannot fulfill genesis request - we don't have genesis yet",
+                    self.direction
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    /// Handle GenesisAnnouncement
+    async fn handle_genesis_announcement(
+        &self,
+        block: Block,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        // Verify this is actually a genesis block
+        if block.header.height != 0 {
+            warn!(
+                "⚠️ [{}] Received GenesisAnnouncement for non-genesis block {} from {}",
+                self.direction, block.header.height, self.peer_ip
+            );
+            return Ok(None);
+        }
+
+        // Check if we already have genesis
+        if context.blockchain.get_block_by_height(0).await.is_ok() {
+            debug!(
+                "⏭️ [{}] Ignoring genesis announcement (already have genesis) from {}",
+                self.direction, self.peer_ip
+            );
+            return Ok(None);
+        }
+
+        info!(
+            "📦 [{}] Received genesis announcement from {}",
+            self.direction, self.peer_ip
+        );
+
+        // Verify basic genesis structure
+        use crate::block::genesis::GenesisBlock;
+        match GenesisBlock::verify_structure(&block) {
+            Ok(()) => {
+                info!(
+                    "✅ [{}] Genesis structure validation passed, adding to chain",
+                    self.direction
+                );
+
+                match context.blockchain.add_block(block.clone()).await {
+                    Ok(()) => {
+                        info!(
+                            "✅ [{}] Genesis block added successfully",
+                            self.direction
+                        );
+
+                        // Broadcast to other peers
+                        if let Some(broadcast_tx) = &context.broadcast_tx {
+                            let msg = NetworkMessage::GenesisAnnouncement(block);
+                            let _ = broadcast_tx.send(msg);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "❌ [{}] Failed to add genesis block: {}",
+                            self.direction, e
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ [{}] Genesis validation failed: {}",
+                    self.direction, e
+                );
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle TransactionBroadcast
+    async fn handle_transaction_broadcast(
+        &self,
+        tx: crate::types::Transaction,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let txid = tx.txid();
+
+        // Check for duplicates
+        if let Some(seen_transactions) = &context.seen_transactions {
+            if seen_transactions.check_and_insert(&txid).await {
+                debug!(
+                    "🔁 [{}] Ignoring duplicate transaction {} from {}",
+                    self.direction,
+                    hex::encode(&txid[..8]),
+                    self.peer_ip
+                );
+                return Ok(None);
+            }
+        }
+
+        debug!(
+            "📥 [{}] Received transaction {} from {}",
+            self.direction,
+            hex::encode(&txid[..8]),
+            self.peer_ip
+        );
+
+        // Process transaction through consensus
+        if let Some(consensus) = &context.consensus {
+            match consensus.process_transaction(tx.clone()).await {
+                Ok(_) => {
+                    debug!(
+                        "✅ [{}] Transaction {} processed",
+                        self.direction,
+                        hex::encode(&txid[..8])
+                    );
+
+                    // Gossip to other peers
+                    if let Some(broadcast_tx) = &context.broadcast_tx {
+                        let msg = NetworkMessage::TransactionBroadcast(tx);
+                        if let Ok(receivers) = broadcast_tx.send(msg) {
+                            debug!(
+                                "🔄 [{}] Gossiped transaction to {} peer(s)",
+                                self.direction,
+                                receivers.saturating_sub(1)
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        "⚠️ [{}] Transaction {} rejected: {}",
+                        self.direction,
+                        hex::encode(&txid[..8]),
+                        e
+                    );
+                }
+            }
+        } else {
+            debug!(
+                "⚠️ [{}] No consensus engine to process transaction",
+                self.direction
+            );
+        }
+
+        Ok(None)
+    }
+
+    /// Handle GetPeers request
+    async fn handle_get_peers(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received GetPeers request from {}",
+            self.direction, self.peer_ip
+        );
+
+        // Use peer_manager if available, otherwise use peer_registry
+        let peers = if let Some(peer_manager) = &context.peer_manager {
+            peer_manager.get_all_peers().await
+        } else {
+            context.peer_registry.get_connected_peers().await
+        };
+
+        debug!(
+            "📤 [{}] Sending {} peer(s) to {}",
+            self.direction,
+            peers.len(),
+            self.peer_ip
+        );
+        Ok(Some(NetworkMessage::PeersResponse(peers)))
+    }
+
+    /// Handle PeersResponse
+    async fn handle_peers_response(
+        &self,
+        peers: Vec<String>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received PeersResponse from {} with {} peer(s)",
+            self.direction,
+            self.peer_ip,
+            peers.len()
+        );
+
+        // Add to peer_manager if available
+        if let Some(peer_manager) = &context.peer_manager {
+            let mut added = 0;
+            for peer_addr in &peers {
+                if peer_manager.add_peer_candidate(peer_addr.clone()).await {
+                    added += 1;
+                }
+            }
+            if added > 0 {
+                info!(
+                    "✓ [{}] Added {} new peer candidate(s) from {}",
+                    self.direction, added, self.peer_ip
+                );
+            }
+        } else {
+            // Fallback to peer_registry discovered_peers
+            context.peer_registry.add_discovered_peers(&peers).await;
+        }
+
+        Ok(None)
+    }
+
+    /// Handle MasternodeAnnouncement
+    async fn handle_masternode_announcement(
+        &self,
+        address: String,
+        reward_address: String,
+        tier: crate::types::MasternodeTier,
+        public_key: ed25519_dalek::VerifyingKey,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        // Use peer IP instead of announced address for security
+        let peer_ip = self.peer_ip.clone();
+
+        info!(
+            "📨 [{}] Received masternode announcement from {} (announced: {})",
+            self.direction, peer_ip, address
+        );
+
+        let mn = crate::types::Masternode {
+            address: peer_ip.clone(),
+            wallet_address: reward_address.clone(),
+            collateral: tier.collateral(),
+            tier,
+            public_key,
+            registered_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        match context
+            .masternode_registry
+            .register(mn, reward_address)
+            .await
+        {
+            Ok(()) => {
+                let count = context.masternode_registry.total_count().await;
+                info!(
+                    "✅ [{}] Registered masternode {} (total: {})",
+                    self.direction, peer_ip, count
+                );
+
+                // Add to peer_manager for connections
+                if let Some(peer_manager) = &context.peer_manager {
+                    peer_manager.add_peer(peer_ip).await;
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "❌ [{}] Failed to register masternode {}: {}",
+                    self.direction, peer_ip, e
+                );
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle MasternodesResponse
+    async fn handle_masternodes_response(
+        &self,
+        masternodes: Vec<crate::network::message::MasternodeAnnouncementData>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📥 [{}] Received MasternodesResponse from {} with {} masternode(s)",
+            self.direction,
+            self.peer_ip,
+            masternodes.len()
+        );
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut registered = 0;
+        for mn_data in masternodes {
+            let masternode = crate::types::Masternode {
+                address: mn_data.address.clone(),
+                wallet_address: mn_data.reward_address.clone(),
+                tier: mn_data.tier,
+                public_key: mn_data.public_key,
+                collateral: 0,
+                registered_at: now,
+            };
+
+            if context
+                .masternode_registry
+                .register_internal(masternode, mn_data.reward_address, false)
+                .await
+                .is_ok()
+            {
+                registered += 1;
+            }
+        }
+
+        if registered > 0 {
+            info!(
+                "✓ [{}] Registered {} masternode(s) from peer exchange",
+                self.direction, registered
+            );
+        }
+
+        Ok(None)
+    }
+
+    /// Handle HeartbeatBroadcast
+    async fn handle_heartbeat_broadcast(
+        &self,
+        heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "💓 [{}] Received heartbeat from {} (height {})",
+            self.direction, heartbeat.masternode_address, heartbeat.block_height
+        );
+
+        // Check for opportunistic sync
+        let our_height = context.blockchain.get_height();
+        if heartbeat.block_height > our_height {
+            info!(
+                "🔄 [{}] Opportunistic sync: peer {} at height {} (we're at {})",
+                self.direction, heartbeat.masternode_address, heartbeat.block_height, our_height
+            );
+
+            // Request blocks from this peer
+            let start_height = our_height + 1;
+            let request = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
+
+            if let Err(e) = context
+                .peer_registry
+                .send_to_peer(&heartbeat.masternode_address, request)
+                .await
+            {
+                debug!(
+                    "⚠️ [{}] Failed to request blocks from {}: {}",
+                    self.direction, heartbeat.masternode_address, e
+                );
+            }
+        }
+
+        // Process heartbeat through masternode registry
+        if let Err(e) = context
+            .masternode_registry
+            .receive_heartbeat_broadcast(heartbeat.clone(), None)
+            .await
+        {
+            debug!(
+                "⚠️ [{}] Failed to process heartbeat: {}",
+                self.direction, e
+            );
+        }
+
+        // Process through attestation system if available
+        if let Some(attestation_system) = &context.attestation_system {
+            if let Ok(Some(attestation)) = attestation_system.receive_heartbeat(heartbeat.clone()).await {
+                // Broadcast attestation
+                if let Some(broadcast_tx) = &context.broadcast_tx {
+                    let msg = NetworkMessage::HeartbeatAttestation(attestation);
+                    let _ = broadcast_tx.send(msg);
+                }
+            }
+        }
+
+        // Re-broadcast heartbeat to other peers
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
+            let _ = broadcast_tx.send(msg);
+        }
+
+        Ok(None)
+    }
+
+    /// Handle HeartbeatAttestation
+    async fn handle_heartbeat_attestation(
+        &self,
+        attestation: crate::heartbeat_attestation::WitnessAttestation,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📝 [{}] Received heartbeat attestation from {}",
+            self.direction, attestation.witness_address
+        );
+
+        // Add attestation to the attestation system
+        if let Some(attestation_system) = &context.attestation_system {
+            if let Err(e) = attestation_system.add_attestation(attestation.clone()).await {
+                debug!(
+                    "⚠️ [{}] Failed to add attestation: {}",
+                    self.direction, e
+                );
+            }
+        }
+
+        // Process through masternode registry
+        if let Err(e) = context
+            .masternode_registry
+            .receive_attestation_broadcast(attestation.clone())
+            .await
+        {
+            debug!(
+                "⚠️ [{}] Failed to process attestation: {}",
+                self.direction, e
+            );
+        }
+
+        // Re-broadcast to other peers
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let msg = NetworkMessage::HeartbeatAttestation(attestation);
+            let _ = broadcast_tx.send(msg);
+        }
+
+        Ok(None)
+    }
+
+    /// Handle UTXOStateQuery
+    async fn handle_utxo_state_query(
+        &self,
+        outpoints: Vec<crate::types::OutPoint>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received UTXOStateQuery for {} outpoints from {}",
+            self.direction,
+            outpoints.len(),
+            self.peer_ip
+        );
+
+        if let Some(utxo_manager) = &context.utxo_manager {
+            let mut responses = Vec::new();
+            for op in &outpoints {
+                if let Some(state) = utxo_manager.get_state(op) {
+                    responses.push((op.clone(), state));
+                }
+            }
+            Ok(Some(NetworkMessage::UTXOStateResponse(responses)))
+        } else {
+            debug!(
+                "⚠️ [{}] No UTXO manager to handle state query",
+                self.direction
+            );
+            Ok(None)
+        }
+    }
+
+    /// Handle GetUTXOStateHash
+    async fn handle_get_utxo_state_hash(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let height = context.blockchain.get_height();
+        let utxo_hash = context.blockchain.get_utxo_state_hash().await;
+        let utxo_count = context.blockchain.get_utxo_count().await;
+
+        debug!(
+            "📤 [{}] Sending UTXO state hash to {}",
+            self.direction, self.peer_ip
+        );
+        Ok(Some(NetworkMessage::UTXOStateHashResponse {
+            hash: utxo_hash,
+            height,
+            utxo_count,
+        }))
+    }
+
+    /// Handle GetUTXOSet
+    async fn handle_get_utxo_set(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let utxos = context.blockchain.get_all_utxos().await;
+        info!(
+            "📤 [{}] Sending complete UTXO set ({} utxos) to {}",
+            self.direction,
+            utxos.len(),
+            self.peer_ip
+        );
+        Ok(Some(NetworkMessage::UTXOSetResponse(utxos)))
+    }
+
+    /// Handle ConsensusQuery
+    async fn handle_consensus_query(
+        &self,
+        height: u64,
+        block_hash: [u8; 32],
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received ConsensusQuery for height {} from {}",
+            self.direction, height, self.peer_ip
+        );
+
+        let (agrees, our_hash) = context
+            .blockchain
+            .check_consensus_with_peer(height, block_hash)
+            .await;
+        Ok(Some(NetworkMessage::ConsensusQueryResponse {
+            agrees,
+            height,
+            their_hash: our_hash.unwrap_or([0u8; 32]),
+        }))
+    }
+
+    /// Handle GetChainWork
+    async fn handle_get_chain_work(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let height = context.blockchain.get_height();
+        let tip_hash = context
+            .blockchain
+            .get_block_hash_at_height(height)
+            .await
+            .unwrap_or([0u8; 32]);
+        let cumulative_work = context.blockchain.get_cumulative_work().await;
+
+        debug!(
+            "📤 [{}] Sending chain work response to {}: height={}, work={}",
+            self.direction, self.peer_ip, height, cumulative_work
+        );
+        Ok(Some(NetworkMessage::ChainWorkResponse {
+            height,
+            tip_hash,
+            cumulative_work,
+        }))
+    }
+
+    /// Handle GetChainWorkAt
+    async fn handle_get_chain_work_at(
+        &self,
+        height: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let block_hash = context
+            .blockchain
+            .get_block_hash_at_height(height)
+            .await
+            .unwrap_or([0u8; 32]);
+        let cumulative_work = context
+            .blockchain
+            .get_work_at_height(height)
+            .await
+            .unwrap_or(0);
+
+        debug!(
+            "📤 [{}] Sending chain work at height {} to {}",
+            self.direction, height, self.peer_ip
+        );
+        Ok(Some(NetworkMessage::ChainWorkAtResponse {
+            height,
+            block_hash,
+            cumulative_work,
+        }))
+    }
+
+    /// Handle ForkAlert
+    async fn handle_fork_alert(
+        &self,
+        your_height: u64,
+        your_hash: [u8; 32],
+        consensus_height: u64,
+        consensus_hash: [u8; 32],
+        consensus_peer_count: usize,
+        message: String,
+    ) -> Result<Option<NetworkMessage>, String> {
+        warn!(
+            "🚨 [{}] FORK ALERT from {}: {}",
+            self.direction, self.peer_ip, message
+        );
+        warn!(
+            "   Our height {} hash {} vs Consensus height {} hash {} ({} peers)",
+            your_height,
+            hex::encode(&your_hash[..8]),
+            consensus_height,
+            hex::encode(&consensus_hash[..8]),
+            consensus_peer_count
+        );
+
+        // If we're on the minority fork, request consensus chain
+        if your_height == consensus_height && your_hash != consensus_hash {
+            warn!("   ⚠️ We appear to be on minority fork! Requesting consensus chain...");
+            let request_from = consensus_height.saturating_sub(10);
+            return Ok(Some(NetworkMessage::GetBlocks(
+                request_from,
+                consensus_height + 5,
+            )));
+        }
+
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn test_ping_pong() {
+    #[test]
+    fn test_connection_direction_display() {
+        assert_eq!(format!("{}", ConnectionDirection::Inbound), "Inbound");
+        assert_eq!(format!("{}", ConnectionDirection::Outbound), "Outbound");
+    }
+
+    #[test]
+    fn test_message_handler_new() {
         let handler = MessageHandler::new("127.0.0.1".to_string(), ConnectionDirection::Inbound);
-
-        let nonce = 12345u64;
-        let timestamp = chrono::Utc::now().timestamp();
-
-        let result = handler.handle_ping(nonce, timestamp).await;
-        assert!(result.is_ok());
-
-        let response = result.unwrap();
-        assert!(response.is_some());
-
-        if let Some(NetworkMessage::Pong {
-            nonce: pong_nonce, ..
-        }) = response
-        {
-            assert_eq!(pong_nonce, nonce);
-        } else {
-            panic!("Expected Pong response");
-        }
+        assert_eq!(handler.peer_ip, "127.0.0.1");
+        assert_eq!(handler.direction, ConnectionDirection::Inbound);
     }
 }

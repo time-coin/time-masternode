@@ -1711,14 +1711,11 @@ impl PeerConnection {
             NetworkMessage::GetMasternodes => {
                 // Use unified message handler
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
-                let context = MessageContext {
-                    blockchain: Arc::clone(blockchain),
-                    peer_registry: Arc::clone(peer_registry),
-                    masternode_registry: Arc::clone(masternode_registry),
-                    consensus: None, // Not needed for GetMasternodes
-                    block_cache: None,
-                    broadcast_tx: None,
-                };
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
 
                 if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
                     if let Err(e) = self.send_message(&response).await {
@@ -1732,14 +1729,11 @@ impl PeerConnection {
             NetworkMessage::GetBlocks(_start, _end) => {
                 // Use unified message handler
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
-                let context = MessageContext {
-                    blockchain: Arc::clone(blockchain),
-                    peer_registry: Arc::clone(peer_registry),
-                    masternode_registry: Arc::clone(masternode_registry),
-                    consensus: None, // Not needed for GetBlocks
-                    block_cache: None,
-                    broadcast_tx: None,
-                };
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
 
                 if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
                     if let Err(e) = self.send_message(&response).await {
@@ -1913,14 +1907,14 @@ impl PeerConnection {
                 let (consensus, block_cache, broadcast_tx) =
                     peer_registry.get_tsdc_resources().await;
 
-                let context = MessageContext {
-                    blockchain: Arc::clone(blockchain),
-                    peer_registry: Arc::clone(peer_registry),
-                    masternode_registry: Arc::clone(masternode_registry),
-                    consensus,
-                    block_cache,
-                    broadcast_tx,
-                };
+                let mut context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+                context.consensus = consensus;
+                context.block_cache = block_cache;
+                context.broadcast_tx = broadcast_tx;
 
                 if let Err(e) = handler.handle_message(&message, &context).await {
                     warn!(

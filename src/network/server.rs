@@ -697,14 +697,11 @@ async fn handle_peer(
                                     // Use unified message handler
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
                                     let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                    let context = MessageContext {
-                                        blockchain: Arc::clone(&blockchain),
-                                        peer_registry: Arc::clone(&peer_registry),
-                                        masternode_registry: Arc::clone(&masternode_registry),
-                                        consensus: None, // Not needed for GetBlocks
-                                        block_cache: None,
-                                        broadcast_tx: None,
-                                    };
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
 
                                     if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
@@ -797,14 +794,11 @@ async fn handle_peer(
                                     // Use unified message handler
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
                                     let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                    let context = MessageContext {
-                                        blockchain: Arc::clone(&blockchain),
-                                        peer_registry: Arc::clone(&peer_registry),
-                                        masternode_registry: Arc::clone(&masternode_registry),
-                                        consensus: None, // Not needed for GetMasternodes
-                                        block_cache: None,
-                                        broadcast_tx: None,
-                                    };
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
 
                                     if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
@@ -1284,14 +1278,14 @@ async fn handle_peer(
                                 | NetworkMessage::TSCDPrecommitVote { .. } => {
                                     // Use unified message handler for TSDC messages
                                     let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
-                                    let context = MessageContext {
-                                        blockchain: blockchain.clone(),
-                                        peer_registry: peer_registry.clone(),
-                                        masternode_registry: masternode_registry.clone(),
-                                        consensus: Some(consensus.clone()),
-                                        block_cache: Some(block_cache.clone()),
-                                        broadcast_tx: Some(broadcast_tx.clone()),
-                                    };
+                                    let context = MessageContext::with_consensus(
+                                        blockchain.clone(),
+                                        peer_registry.clone(),
+                                        masternode_registry.clone(),
+                                        consensus.clone(),
+                                        block_cache.clone(),
+                                        broadcast_tx.clone(),
+                                    );
 
                                     if let Err(e) = handler.handle_message(&msg, &context).await {
                                         tracing::warn!("[Inbound] Error handling TSDC message from {}: {}", peer.addr, e);
