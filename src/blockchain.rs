@@ -3525,41 +3525,46 @@ impl Blockchain {
 
             // VRF-BASED TIEBREAKER: When masternode authority reaches hash tiebreaker,
             // use VRF scores instead for cryptographically fair selection
-            let (final_should_switch, final_reason) =
-                if reason.contains("deterministic tiebreaker") {
-                    // Calculate VRF scores for both chains
-                    let our_vrf_score = self.calculate_chain_vrf_score(0, our_height).await;
+            let (final_should_switch, final_reason) = if reason.contains("deterministic tiebreaker")
+            {
+                // Calculate VRF scores for both chains
+                let our_vrf_score = self.calculate_chain_vrf_score(0, our_height).await;
 
-                    // For peer chain, we estimate score based on their tip hash
-                    // (full VRF comparison would require requesting peer blocks)
-                    // Use first 16 bytes of hash as proxy for peer VRF score
-                    let peer_vrf_score = u128::from_be_bytes(
-                        consensus_hash[0..16].try_into().unwrap_or([0u8; 16]),
-                    );
+                // For peer chain, we estimate score based on their tip hash
+                // (full VRF comparison would require requesting peer blocks)
+                // Use first 16 bytes of hash as proxy for peer VRF score
+                let peer_vrf_score =
+                    u128::from_be_bytes(consensus_hash[0..16].try_into().unwrap_or([0u8; 16]));
 
-                    let (vrf_choice, vrf_reason) = Self::choose_canonical_chain(
-                        our_height,
-                        our_hash,
-                        our_vrf_score,
-                        consensus_height,
-                        consensus_hash,
-                        peer_vrf_score,
-                    );
+                let (vrf_choice, vrf_reason) = Self::choose_canonical_chain(
+                    our_height,
+                    our_hash,
+                    our_vrf_score,
+                    consensus_height,
+                    consensus_hash,
+                    peer_vrf_score,
+                );
 
-                    match vrf_choice {
-                        CanonicalChoice::AdoptPeers => (
-                            true,
-                            format!("SWITCH (VRF): {} | Our VRF: {}, Peer VRF: {}", vrf_reason, our_vrf_score, peer_vrf_score),
+                match vrf_choice {
+                    CanonicalChoice::AdoptPeers => (
+                        true,
+                        format!(
+                            "SWITCH (VRF): {} | Our VRF: {}, Peer VRF: {}",
+                            vrf_reason, our_vrf_score, peer_vrf_score
                         ),
-                        CanonicalChoice::KeepOurs => (
-                            false,
-                            format!("KEEP (VRF): {} | Our VRF: {}, Peer VRF: {}", vrf_reason, our_vrf_score, peer_vrf_score),
+                    ),
+                    CanonicalChoice::KeepOurs => (
+                        false,
+                        format!(
+                            "KEEP (VRF): {} | Our VRF: {}, Peer VRF: {}",
+                            vrf_reason, our_vrf_score, peer_vrf_score
                         ),
-                        CanonicalChoice::Identical => (should_switch, reason),
-                    }
-                } else {
-                    (should_switch, reason)
-                };
+                    ),
+                    CanonicalChoice::Identical => (should_switch, reason),
+                }
+            } else {
+                (should_switch, reason)
+            };
 
             warn!(
                 "   Decision: {} - {}",

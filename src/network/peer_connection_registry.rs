@@ -133,39 +133,21 @@ impl PeerConnectionRegistry {
     pub async fn mark_incompatible(&self, peer_ip: &str, reason: &str) {
         let ip_only = extract_ip(peer_ip).to_string();
         let mut incompatible = self.incompatible_peers.write().await;
-        
+
         // Check if already marked
         if !incompatible.contains_key(&ip_only) {
             tracing::error!(
                 "🚫 ═══════════════════════════════════════════════════════════════════"
             );
-            tracing::error!(
-                "🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only
-            );
-            tracing::error!(
-                "🚫 Reason: {}", reason
-            );
-            tracing::error!(
-                "🚫 "
-            );
-            tracing::error!(
-                "🚫 This peer is computing different block hashes, likely due to"
-            );
-            tracing::error!(
-                "🚫 running an older version of the software."
-            );
-            tracing::error!(
-                "🚫 "
-            );
-            tracing::error!(
-                "🚫 RECOMMENDATION: The peer should update to the latest version"
-            );
-            tracing::error!(
-                "🚫 and clear their blockchain to resync."
-            );
-            tracing::error!(
-                "🚫 "
-            );
+            tracing::error!("🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only);
+            tracing::error!("🚫 Reason: {}", reason);
+            tracing::error!("🚫 ");
+            tracing::error!("🚫 This peer is computing different block hashes, likely due to");
+            tracing::error!("🚫 running an older version of the software.");
+            tracing::error!("🚫 ");
+            tracing::error!("🚫 RECOMMENDATION: The peer should update to the latest version");
+            tracing::error!("🚫 and clear their blockchain to resync.");
+            tracing::error!("🚫 ");
             tracing::error!(
                 "🚫 This peer will be temporarily ignored for {} minutes, then re-checked.",
                 Self::INCOMPATIBLE_RECHECK_SECS / 60
@@ -174,7 +156,7 @@ impl PeerConnectionRegistry {
                 "🚫 ═══════════════════════════════════════════════════════════════════"
             );
         }
-        
+
         incompatible.insert(ip_only, (std::time::Instant::now(), reason.to_string()));
     }
 
@@ -182,7 +164,7 @@ impl PeerConnectionRegistry {
     pub async fn is_incompatible(&self, peer_ip: &str) -> bool {
         let ip_only = extract_ip(peer_ip);
         let incompatible = self.incompatible_peers.read().await;
-        
+
         if let Some((marked_at, _)) = incompatible.get(ip_only) {
             // Check if enough time has passed to re-check
             if marked_at.elapsed().as_secs() >= Self::INCOMPATIBLE_RECHECK_SECS {
@@ -206,7 +188,13 @@ impl PeerConnectionRegistry {
     /// Clear incompatible status for a peer (when they resync or update)
     pub async fn clear_incompatible(&self, peer_ip: &str) {
         let ip_only = extract_ip(peer_ip).to_string();
-        if self.incompatible_peers.write().await.remove(&ip_only).is_some() {
+        if self
+            .incompatible_peers
+            .write()
+            .await
+            .remove(&ip_only)
+            .is_some()
+        {
             tracing::info!("✅ Peer {} is now compatible - blocks accepted", ip_only);
         }
     }
@@ -224,7 +212,7 @@ impl PeerConnectionRegistry {
                 !expired
             });
         }
-        
+
         let incompatible = self.incompatible_peers.read().await;
         self.connections
             .iter()
