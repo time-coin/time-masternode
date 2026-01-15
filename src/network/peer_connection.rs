@@ -1071,7 +1071,7 @@ impl PeerConnection {
                         Ok(true) => {
                             added += 1;
                             consecutive_fork_errors = 0; // Reset on success
-
+                            
                             // If peer was previously marked incompatible but blocks now work,
                             // clear the incompatible status - they may have updated
                             if added == 1 {
@@ -1084,7 +1084,7 @@ impl PeerConnection {
                         }
                         Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
                             consecutive_fork_errors += 1;
-
+                            
                             // If ALL blocks from this peer cause fork errors, they're likely
                             // on an incompatible chain (different hash calculation)
                             if consecutive_fork_errors >= 3 && added == 0 {
@@ -1099,7 +1099,7 @@ impl PeerConnection {
                                 // Stop processing blocks from this peer for now
                                 break;
                             }
-
+                            
                             // Fork detected - trigger immediate resolution check
                             if !fork_detected {
                                 warn!(

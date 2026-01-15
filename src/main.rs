@@ -1181,60 +1181,13 @@ async fn main() {
                     let block_height = block.header.height;
                     let block_hash = block.hash();
 
-                    // Check if we're in catchup mode (many blocks behind)
-                    let current_height = block_blockchain.get_height();
-                    let expected_height = block_blockchain.calculate_expected_height();
-                    let is_catchup_mode = expected_height.saturating_sub(current_height) > 2;
-
                     tracing::info!(
-                        "📦 Block {} produced: {} txs, {} rewards{}",
+                        "📦 Block {} produced: {} txs, {} rewards - broadcasting for consensus",
                         block_height,
                         block.transactions.len(),
-                        block.masternode_rewards.len(),
-                        if is_catchup_mode {
-                            " (CATCHUP MODE)"
-                        } else {
-                            " - broadcasting for consensus"
-                        }
+                        block.masternode_rewards.len()
                     );
 
-                    // CATCHUP MODE: Skip consensus and add block directly for fast sync
-                    // Normal consensus is too slow when many blocks behind
-                    if is_catchup_mode {
-                        tracing::info!(
-                            "⚡ Catchup mode: adding block {} directly (skipping consensus)",
-                            block_height
-                        );
-                        if let Err(e) = block_blockchain.add_block(block.clone()).await {
-                            tracing::error!("❌ Failed to add catchup block: {}", e);
-                        } else {
-                            // Broadcast the block to peers using TSCDBlockProposal message
-                            let proposal =
-                                crate::network::message::NetworkMessage::TSCDBlockProposal {
-                                    block: block.clone(),
-                                };
-                            block_peer_registry.broadcast(proposal).await;
-                            tracing::info!("✅ Catchup block {} added and broadcast", block_height);
-                        }
-
-                        is_producing.store(false, Ordering::SeqCst);
-
-                        // Continue immediately to next block
-                        let new_expected = block_blockchain.calculate_expected_height();
-                        let still_behind =
-                            new_expected.saturating_sub(block_blockchain.get_height());
-                        if still_behind > 0 {
-                            tracing::info!(
-                                "🔄 Still {} blocks behind, continuing catchup immediately",
-                                still_behind
-                            );
-                            interval.reset();
-                            continue;
-                        }
-                        continue;
-                    }
-
-                    // NORMAL MODE: Use TSDC/Avalanche consensus
                     // TSDC Consensus Flow:
                     // 1. Cache block locally for finalization
                     // 2. Broadcast TSCDBlockProposal to all peers (NOT add to chain yet)
@@ -1345,8 +1298,10 @@ async fn main() {
                             // 1. We have SOME votes (partial consensus), OR
                             // 2. There are very few validators (network bootstrap/recovery)
                             // This prevents network stall when peers are slow/offline
-                            let validator_count =
-                                block_consensus_engine.avalanche.get_validators().len();
+                            let validator_count = block_consensus_engine
+                                .avalanche
+                                .get_validators()
+                                .len();
                             let should_fallback = prepare_weight > 0
                                 || validator_count <= 2
                                 || (validator_count > 0 && prepare_weight == 0);

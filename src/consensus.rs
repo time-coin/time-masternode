@@ -1104,10 +1104,7 @@ impl ConsensusEngine {
 
     /// Sync Avalanche validators from a list of masternodes
     /// This should be called whenever the masternode list changes
-    pub fn sync_validators_from_masternodes(
-        &self,
-        masternodes: &[crate::masternode_registry::MasternodeInfo],
-    ) {
+    pub fn sync_validators_from_masternodes(&self, masternodes: &[crate::masternode_registry::MasternodeInfo]) {
         let validators: Vec<ValidatorInfo> = masternodes
             .iter()
             .filter(|mn| mn.is_active)
