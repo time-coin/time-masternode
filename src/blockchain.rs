@@ -3393,29 +3393,35 @@ impl Blockchain {
                 .push(peer_ip.clone());
         }
 
-        // Find the best chain: require minimum peer support for consensus
+        // Find the best chain: MAJORITY RULES
         // A single peer on a higher height should NOT override majority at lower height
         // This prevents incompatible/forked peers from blocking consensus
-        let min_peers_for_consensus = (peer_tips.len() / 3).max(1); // At least 1/3 of responding peers
 
+        // Debug: log all chains
+        for ((height, hash), peers) in &chain_counts {
+            tracing::debug!(
+                "   Chain: height {} hash {} - {} peers: {:?}",
+                height,
+                hex::encode(&hash[..8]),
+                peers.len(),
+                peers
+            );
+        }
+
+        // Find the chain with the MOST peer support
+        // Only use height as tiebreaker when peer counts are equal
         let consensus_chain = chain_counts
             .iter()
-            // Filter: only consider chains with minimum peer support
-            .filter(|(_, peers)| peers.len() >= min_peers_for_consensus)
             .max_by(|((h1, _), peers1), ((h2, _), peers2)| {
                 // Primary: more peers wins (majority rules)
+                let peer_cmp = peers1.len().cmp(&peers2.len());
+                if peer_cmp != std::cmp::Ordering::Equal {
+                    return peer_cmp;
+                }
                 // Secondary: higher height wins (at same peer count)
-                peers1.len().cmp(&peers2.len()).then_with(|| h1.cmp(h2))
+                h1.cmp(h2)
             })
-            .map(|((height, hash), peers)| (*height, *hash, peers.clone()));
-
-        // If no chain meets minimum support, fall back to finding the most-supported chain
-        let consensus_chain = consensus_chain.or_else(|| {
-            chain_counts
-                .iter()
-                .max_by_key(|(_, peers)| peers.len())
-                .map(|((height, hash), peers)| (*height, *hash, peers.clone()))
-        })?;
+            .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
 

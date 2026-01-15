@@ -204,7 +204,9 @@ impl PeerConnectionRegistry {
     }
 
     /// Threshold of persistent fork errors before marking peer incompatible
-    const FORK_ERROR_THRESHOLD: u32 = 3;
+    /// Lowered from 3 to 2 because peers on incompatible chains typically only send
+    /// 1-2 blocks at a time (e.g., they're only 1 block ahead on their fork)
+    const FORK_ERROR_THRESHOLD: u32 = 2;
 
     /// Record a fork error for a peer (persistent across requests)
     /// Returns true if the peer should now be marked incompatible
@@ -232,8 +234,8 @@ impl PeerConnectionRegistry {
             ).await;
             true
         } else {
-            tracing::debug!(
-                "Fork error {} of {} for peer {} (will mark incompatible at threshold)",
+            tracing::info!(
+                "🔀 Fork error {} of {} for peer {} (will mark incompatible at threshold)",
                 current_count,
                 Self::FORK_ERROR_THRESHOLD,
                 ip_only
