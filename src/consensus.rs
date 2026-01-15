@@ -1102,6 +1102,23 @@ impl ConsensusEngine {
         self.masternodes.store(Arc::new(masternodes));
     }
 
+    /// Sync Avalanche validators from a list of masternodes
+    /// This should be called whenever the masternode list changes
+    pub fn sync_validators_from_masternodes(&self, masternodes: &[crate::masternode_registry::MasternodeInfo]) {
+        let validators: Vec<ValidatorInfo> = masternodes
+            .iter()
+            .filter(|mn| mn.is_active)
+            .map(|mn| ValidatorInfo {
+                address: mn.masternode.address.clone(),
+                weight: mn.masternode.tier.sampling_weight(),
+            })
+            .collect();
+
+        let count = validators.len();
+        self.avalanche.update_validators(validators);
+        tracing::debug!("🔄 Synced {} validators to Avalanche consensus", count);
+    }
+
     /// Get the signing key for this node (for VRF generation in block production)
     pub fn get_signing_key(&self) -> Option<ed25519_dalek::SigningKey> {
         self.identity.get().map(|id| id.signing_key.clone())

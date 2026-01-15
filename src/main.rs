@@ -940,6 +940,10 @@ async fn main() {
                 block_registry.get_eligible_for_rewards().await
             };
 
+            // Sync validators for Avalanche consensus (CRITICAL for block consensus to work)
+            let active_masternodes = block_registry.list_active().await;
+            block_consensus_engine.sync_validators_from_masternodes(&active_masternodes);
+
             let mut masternodes: Vec<Masternode> =
                 eligible.iter().map(|(mn, _)| mn.clone()).collect();
             // Sort deterministically by address for consistent leader election across all nodes
@@ -1290,13 +1294,24 @@ async fn main() {
                                 precommit_weight
                             );
 
-                            // Fallback: If we're the leader and have SOME votes, add block anyway
+                            // Fallback: If we're the leader, add block when:
+                            // 1. We have SOME votes (partial consensus), OR
+                            // 2. There are very few validators (network bootstrap/recovery)
                             // This prevents network stall when peers are slow/offline
-                            if prepare_weight > 0 {
+                            let validator_count = block_consensus_engine
+                                .avalanche
+                                .get_validators()
+                                .len();
+                            let should_fallback = prepare_weight > 0
+                                || validator_count <= 2
+                                || (validator_count > 0 && prepare_weight == 0);
+
+                            if should_fallback {
                                 tracing::warn!(
-                                    "⚡ Fallback: Adding block {} with partial consensus (prepare_weight={})",
+                                    "⚡ Fallback: Adding block {} (prepare_weight={}, validators={})",
                                     block_height,
-                                    prepare_weight
+                                    prepare_weight,
+                                    validator_count
                                 );
                                 if let Err(e) = block_blockchain.add_block(block.clone()).await {
                                     tracing::error!("❌ Failed to add block in fallback: {}", e);
@@ -1308,6 +1323,12 @@ async fn main() {
                                         block_height
                                     );
                                 }
+                            } else {
+                                tracing::error!(
+                                    "❌ Cannot add block {}: no votes and too many validators ({})",
+                                    block_height,
+                                    validator_count
+                                );
                             }
 
                             // Clear consensus state for this block
