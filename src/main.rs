@@ -1298,10 +1298,8 @@ async fn main() {
                             // 1. We have SOME votes (partial consensus), OR
                             // 2. There are very few validators (network bootstrap/recovery)
                             // This prevents network stall when peers are slow/offline
-                            let validator_count = block_consensus_engine
-                                .avalanche
-                                .get_validators()
-                                .len();
+                            let validator_count =
+                                block_consensus_engine.avalanche.get_validators().len();
                             let should_fallback = prepare_weight > 0
                                 || validator_count <= 2
                                 || (validator_count > 0 && prepare_weight == 0);
@@ -1317,7 +1315,11 @@ async fn main() {
                                     tracing::error!("❌ Failed to add block in fallback: {}", e);
                                 } else {
                                     // Broadcast the finalized block for late-joining nodes
-                                    block_registry.broadcast_block(block.clone()).await;
+                                    let finalized_msg =
+                                        crate::network::message::NetworkMessage::TSCDBlockProposal {
+                                            block: block.clone(),
+                                        };
+                                    block_peer_registry.broadcast(finalized_msg).await;
                                     tracing::info!(
                                         "✅ Block {} added via fallback, broadcast to peers",
                                         block_height
