@@ -1047,6 +1047,7 @@ impl PeerConnection {
                 let mut added = 0;
                 let mut skipped = 0;
                 let mut fork_detected = false;
+                let mut consecutive_fork_errors = 0;
 
                 for block in blocks.iter() {
                     // Validate block has non-zero previous_hash (except genesis at height 0)
@@ -1069,12 +1070,36 @@ impl PeerConnection {
                     match blockchain.add_block_with_fork_handling(block.clone()).await {
                         Ok(true) => {
                             added += 1;
+                            consecutive_fork_errors = 0; // Reset on success
+                            
+                            // If peer was previously marked incompatible but blocks now work,
+                            // clear the incompatible status - they may have updated
+                            if added == 1 {
+                                peer_registry.clear_incompatible(&self.peer_ip).await;
+                            }
                         }
                         Ok(false) => {
                             // Block already exists or is not next in chain
                             skipped += 1;
                         }
                         Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
+                            consecutive_fork_errors += 1;
+                            
+                            // If ALL blocks from this peer cause fork errors, they're likely
+                            // on an incompatible chain (different hash calculation)
+                            if consecutive_fork_errors >= 3 && added == 0 {
+                                peer_registry.mark_incompatible(
+                                    &self.peer_ip,
+                                    &format!(
+                                        "Block hash mismatch - peer is computing different hashes. \
+                                        {} consecutive blocks rejected. Peer may be running outdated software.",
+                                        consecutive_fork_errors
+                                    )
+                                ).await;
+                                // Stop processing blocks from this peer for now
+                                break;
+                            }
+                            
                             // Fork detected - trigger immediate resolution check
                             if !fork_detected {
                                 warn!(

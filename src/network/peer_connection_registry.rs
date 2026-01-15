@@ -72,6 +72,10 @@ pub struct PeerConnectionRegistry {
     blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
     // Discovered peer candidates from peer exchange
     discovered_peers: Arc<RwLock<HashSet<String>>>,
+    // Peers on incompatible chains (different hash calculation)
+    // Maps peer IP -> (marked_at_timestamp, reason)
+    // These peers are temporarily ignored for consensus but periodically re-checked
+    incompatible_peers: Arc<RwLock<HashMap<String, (std::time::Instant, String)>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -98,6 +102,7 @@ impl PeerConnectionRegistry {
             tsdc_broadcast: Arc::new(RwLock::new(None)),
             blacklist: Arc::new(RwLock::new(None)),
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
+            incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -118,6 +123,119 @@ impl PeerConnectionRegistry {
             }
         }
         false
+    }
+
+    /// Duration after which incompatible peers are re-checked (5 minutes)
+    const INCOMPATIBLE_RECHECK_SECS: u64 = 300;
+
+    /// Mark a peer as temporarily incompatible (different chain/hash calculation)
+    /// Incompatible peers are ignored for consensus but periodically re-checked
+    pub async fn mark_incompatible(&self, peer_ip: &str, reason: &str) {
+        let ip_only = extract_ip(peer_ip).to_string();
+        let mut incompatible = self.incompatible_peers.write().await;
+        
+        // Check if already marked
+        if !incompatible.contains_key(&ip_only) {
+            tracing::error!(
+                "🚫 ═══════════════════════════════════════════════════════════════════"
+            );
+            tracing::error!(
+                "🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only
+            );
+            tracing::error!(
+                "🚫 Reason: {}", reason
+            );
+            tracing::error!(
+                "🚫 "
+            );
+            tracing::error!(
+                "🚫 This peer is computing different block hashes, likely due to"
+            );
+            tracing::error!(
+                "🚫 running an older version of the software."
+            );
+            tracing::error!(
+                "🚫 "
+            );
+            tracing::error!(
+                "🚫 RECOMMENDATION: The peer should update to the latest version"
+            );
+            tracing::error!(
+                "🚫 and clear their blockchain to resync."
+            );
+            tracing::error!(
+                "🚫 "
+            );
+            tracing::error!(
+                "🚫 This peer will be temporarily ignored for {} minutes, then re-checked.",
+                Self::INCOMPATIBLE_RECHECK_SECS / 60
+            );
+            tracing::error!(
+                "🚫 ═══════════════════════════════════════════════════════════════════"
+            );
+        }
+        
+        incompatible.insert(ip_only, (std::time::Instant::now(), reason.to_string()));
+    }
+
+    /// Check if a peer is marked as incompatible (with automatic expiry)
+    pub async fn is_incompatible(&self, peer_ip: &str) -> bool {
+        let ip_only = extract_ip(peer_ip);
+        let incompatible = self.incompatible_peers.read().await;
+        
+        if let Some((marked_at, _)) = incompatible.get(ip_only) {
+            // Check if enough time has passed to re-check
+            if marked_at.elapsed().as_secs() >= Self::INCOMPATIBLE_RECHECK_SECS {
+                // Time to re-check - return false to allow retry
+                drop(incompatible);
+                // Clear the entry so they get a fresh chance
+                self.incompatible_peers.write().await.remove(ip_only);
+                tracing::info!(
+                    "🔄 Re-checking previously incompatible peer {} ({}min timeout expired)",
+                    ip_only,
+                    Self::INCOMPATIBLE_RECHECK_SECS / 60
+                );
+                return false;
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clear incompatible status for a peer (when they resync or update)
+    pub async fn clear_incompatible(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip).to_string();
+        if self.incompatible_peers.write().await.remove(&ip_only).is_some() {
+            tracing::info!("✅ Peer {} is now compatible - blocks accepted", ip_only);
+        }
+    }
+
+    /// Get list of compatible connected peers (excludes currently incompatible ones)
+    pub async fn get_compatible_peers(&self) -> Vec<String> {
+        // First, clean up expired incompatible entries
+        {
+            let mut incompatible = self.incompatible_peers.write().await;
+            incompatible.retain(|ip, (marked_at, _)| {
+                let expired = marked_at.elapsed().as_secs() >= Self::INCOMPATIBLE_RECHECK_SECS;
+                if expired {
+                    tracing::info!("🔄 Incompatible timeout expired for {}, will re-check", ip);
+                }
+                !expired
+            });
+        }
+        
+        let incompatible = self.incompatible_peers.read().await;
+        self.connections
+            .iter()
+            .map(|e| e.key().clone())
+            .filter(|ip| !incompatible.contains_key(extract_ip(ip)))
+            .collect()
+    }
+
+    /// Get count of incompatible peers (for monitoring)
+    pub async fn incompatible_count(&self) -> usize {
+        self.incompatible_peers.read().await.len()
     }
 
     /// Set TSDC consensus resources (called once after server initialization)

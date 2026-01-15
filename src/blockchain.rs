@@ -3324,13 +3324,15 @@ impl Blockchain {
             None => return None,
         };
 
-        let connected_peers = registry.get_connected_peers().await;
+        // Use only compatible peers (exclude those on incompatible chains)
+        let connected_peers = registry.get_compatible_peers().await;
         if connected_peers.is_empty() {
+            tracing::debug!("No compatible peers connected");
             return None;
         }
 
         tracing::debug!(
-            "🔍 [LOCKED] PRIMARY FORK RESOLUTION: Periodic check with {} peers",
+            "🔍 [LOCKED] PRIMARY FORK RESOLUTION: Periodic check with {} compatible peers",
             connected_peers.len()
         );
 
