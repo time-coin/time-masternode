@@ -3604,26 +3604,53 @@ impl Blockchain {
 
         // Case 3: We're ahead of consensus
         if our_height > consensus_height {
-            // LONGEST CHAIN RULE: We have a longer chain - we should NOT roll back
-            // Other peers should sync TO us, not the other way around
-            // This is fundamental to Nakamoto consensus - longest valid chain wins
+            // Check if we share the same chain history as consensus
+            // Our block at consensus_height should match consensus_hash if we're on the same chain
+            let our_block_at_consensus_height = match self.get_block_hash(consensus_height) {
+                Ok(hash) => hash,
+                Err(_) => {
+                    // Can't verify - don't roll back
+                    return None;
+                }
+            };
 
             let our_chain_peer_count = chain_counts
                 .get(&(our_height, our_hash))
                 .map(|peers| peers.len())
                 .unwrap_or(0);
 
-            tracing::info!(
-                "📈 We're ahead of network: our height {} > consensus {} ({} peers behind, {} peers with us)",
-                our_height,
-                consensus_height,
-                consensus_peers.len(),
-                our_chain_peer_count
-            );
+            if our_block_at_consensus_height == consensus_hash {
+                // We're on the same chain as consensus, just ahead - this is fine
+                // LONGEST CHAIN RULE: We have a longer chain on the SAME fork
+                tracing::info!(
+                    "📈 We're ahead of network: our height {} > consensus {} ({} peers behind, {} peers with us) - same chain ✓",
+                    our_height,
+                    consensus_height,
+                    consensus_peers.len(),
+                    our_chain_peer_count
+                );
+                // Don't roll back - peers will sync to us
+                return None;
+            } else {
+                // CRITICAL: We're on a DIFFERENT FORK than consensus!
+                // Even though we have more blocks, our chain diverged from the majority
+                // This means we're on a minority fork and need to roll back to rejoin the network
+                tracing::error!(
+                    "🚨 FORK DIVERGENCE: We're at height {} but our block at consensus height {} is {} (consensus: {})",
+                    our_height,
+                    consensus_height,
+                    hex::encode(&our_block_at_consensus_height[..8]),
+                    hex::encode(&consensus_hash[..8])
+                );
+                tracing::error!(
+                    "🔄 Rolling back to rejoin consensus chain ({} peers on consensus, {} on our fork)",
+                    consensus_peers.len(),
+                    our_chain_peer_count
+                );
 
-            // Don't roll back - peers will sync to us when they receive our blocks
-            // The block propagation will naturally bring peers up to our height
-            return None;
+                // Return consensus info to trigger rollback and resync
+                return Some((consensus_height, consensus_peers[0].clone()));
+            }
         }
 
         // Case 4: Same height, same hash - no fork
@@ -3714,14 +3741,54 @@ impl Blockchain {
                             );
                         }
                     } else if consensus_height < our_height {
-                        // LONGEST CHAIN RULE: We're ahead - don't roll back
-                        // Peers will sync to us, not the other way around
-                        tracing::info!(
-                            "📈 We're ahead of network consensus: our height {} > consensus {} - peers will sync to us",
+                        // compare_chain_with_peers already checked if we're on the same chain
+                        // If we got here (Some returned), it means we're on a DIFFERENT fork
+                        // and need to roll back to rejoin the consensus chain
+                        tracing::error!(
+                            "🔄 Fork divergence detected: rolling back from {} to {} to rejoin consensus",
                             our_height,
                             consensus_height
                         );
-                        // No rollback - our longer chain is canonical
+
+                        // Rollback to consensus height
+                        match blockchain.rollback_to_height(consensus_height).await {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "✅ Rolled back to consensus height {}",
+                                    consensus_height
+                                );
+
+                                // Request blocks from consensus peer to get their chain
+                                if let Some(peer_registry) =
+                                    blockchain.peer_registry.read().await.as_ref()
+                                {
+                                    let request_from = consensus_height.saturating_sub(5).max(1);
+                                    let req = NetworkMessage::GetBlocks(
+                                        request_from,
+                                        consensus_height + 50,
+                                    );
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&consensus_peer, req).await
+                                    {
+                                        tracing::warn!(
+                                            "⚠️  Failed to request blocks from {}: {}",
+                                            consensus_peer,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "📤 Requested blocks {}-{} from consensus peer {}",
+                                            request_from,
+                                            consensus_height + 50,
+                                            consensus_peer
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to rollback for fork divergence: {}", e);
+                            }
+                        }
                     }
                 }
             }
