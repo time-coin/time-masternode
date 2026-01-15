@@ -1257,6 +1257,9 @@ async fn main() {
             // Produce the block
             match block_blockchain.produce_block().await {
                 Ok(block) => {
+                    // Mark block production time immediately for grace period tracking
+                    block_blockchain.mark_block_produced();
+
                     let block_height = block.header.height;
                     let block_hash = block.hash();
 
