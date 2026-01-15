@@ -925,16 +925,40 @@ async fn main() {
 
             let eligible = if is_catchup_or_bootstrap {
                 // Use all registered masternodes during catchup/bootstrap
-                let all_mns = block_registry
-                    .list_all()
-                    .await
-                    .into_iter()
-                    .map(|info| (info.masternode, info.reward_address))
-                    .collect::<Vec<_>>();
-                if !all_mns.is_empty() {
-                    tracing::debug!("🔄 Catchup/bootstrap mode: using {} registered masternodes (ignoring active status)", all_mns.len());
+                // BUT filter out masternodes that are on incompatible chains (old software)
+                let all_mns = block_registry.list_all().await;
+
+                // Filter out incompatible masternodes to ensure deterministic leader selection
+                // All compatible nodes must agree on the same masternode list
+                let mut compatible_mns: Vec<_> = Vec::new();
+                for info in all_mns {
+                    // Extract IP from masternode address (format: "IP:port" or just "IP")
+                    let ip_only = info
+                        .masternode
+                        .address
+                        .split(':')
+                        .next()
+                        .unwrap_or(&info.masternode.address);
+
+                    // Check if this masternode's peer is on an incompatible chain
+                    if !block_peer_registry.is_incompatible(ip_only).await {
+                        compatible_mns.push((info.masternode, info.reward_address));
+                    } else {
+                        tracing::debug!(
+                            "🚫 Excluding incompatible masternode {} from leader selection",
+                            info.masternode.address
+                        );
+                    }
                 }
-                all_mns
+
+                if !compatible_mns.is_empty() {
+                    tracing::debug!(
+                        "🔄 Catchup/bootstrap mode: using {} compatible masternodes (filtered from {} total)",
+                        compatible_mns.len(),
+                        block_registry.list_all().await.len()
+                    );
+                }
+                compatible_mns
             } else {
                 // Use only active masternodes during normal operation
                 block_registry.get_eligible_for_rewards().await
@@ -1035,7 +1059,8 @@ async fn main() {
                     blocks_behind
                 );
 
-                let connected_peers = block_peer_registry.get_connected_peers().await;
+                // Use only compatible peers for sync (excludes nodes on incompatible chains)
+                let connected_peers = block_peer_registry.get_compatible_peers().await;
 
                 if !connected_peers.is_empty() {
                     // Request blocks from peers
@@ -1082,7 +1107,8 @@ async fn main() {
             // Use TSDC consensus for leader election
 
             // First: Verify we're on the consensus chain (prevent fork perpetuation)
-            let connected_peers = block_peer_registry.get_connected_peers().await;
+            // Use compatible peers only (excludes nodes on incompatible chains like old software)
+            let connected_peers = block_peer_registry.get_compatible_peers().await;
             let min_peers_for_consensus = (masternodes.len() / 2).max(2); // Majority or at least 2
 
             if connected_peers.len() >= min_peers_for_consensus {
