@@ -217,9 +217,6 @@ pub struct Blockchain {
     validator: BlockValidator,
     /// AI-powered consensus health monitoring
     consensus_health: Arc<ConsensusHealthMonitor>,
-    /// Timestamp of when we last produced a block (for rollback grace period)
-    /// Prevents immediate rollback after producing a block - gives time for propagation
-    last_block_produced_at: Arc<AtomicU64>,
 }
 
 impl Blockchain {
@@ -284,7 +281,6 @@ impl Blockchain {
             block_cache,
             validator,
             consensus_health,
-            last_block_produced_at: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -309,37 +305,6 @@ impl Blockchain {
 
     pub fn genesis_timestamp(&self) -> i64 {
         self.genesis_timestamp // Use cached value
-    }
-
-    /// Mark that we just produced a block - starts the rollback grace period
-    /// This prevents immediate rollback after producing a block, giving time for propagation
-    pub fn mark_block_produced(&self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        self.last_block_produced_at
-            .store(now, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Check if we're within the grace period after producing a block
-    /// Returns true if we should NOT roll back (within grace period)
-    pub fn is_within_block_propagation_grace_period(&self) -> bool {
-        const BLOCK_PROPAGATION_GRACE_SECS: u64 = 30; // 30 seconds to propagate
-
-        let last_produced = self
-            .last_block_produced_at
-            .load(std::sync::atomic::Ordering::SeqCst);
-        if last_produced == 0 {
-            return false; // Never produced a block
-        }
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        now.saturating_sub(last_produced) < BLOCK_PROPAGATION_GRACE_SECS
     }
 
     /// Initialize blockchain - load local chain or sync from network
@@ -4823,7 +4788,6 @@ impl Clone for Blockchain {
             block_cache: self.block_cache.clone(),
             validator: BlockValidator::new(self.network_type),
             consensus_health: self.consensus_health.clone(),
-            last_block_produced_at: self.last_block_produced_at.clone(),
         }
     }
 }
