@@ -892,6 +892,13 @@ async fn main() {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_block_period_started: u64 = 0; // Track which block period we've started
 
+        // Leader rotation timeout tracking
+        // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
+        const LEADER_TIMEOUT_SECS: u64 = 60; // Wait 60s before rotating to backup leader
+        let mut waiting_for_height: Option<u64> = None;
+        let mut waiting_since: Option<std::time::Instant> = None;
+        let mut leader_attempt: u64 = 0; // Increments when leader times out
+
         loop {
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
@@ -1139,12 +1146,35 @@ async fn main() {
                 }
             };
 
+            // Leader rotation timeout tracking
+            // Reset attempt counter when we move to a new height
+            if waiting_for_height != Some(next_height) {
+                waiting_for_height = Some(next_height);
+                waiting_since = Some(std::time::Instant::now());
+                leader_attempt = 0;
+            } else if let Some(since) = waiting_since {
+                // Check if we've been waiting too long for this height
+                let elapsed = since.elapsed().as_secs();
+                let expected_attempt = elapsed / LEADER_TIMEOUT_SECS;
+                if expected_attempt > leader_attempt {
+                    leader_attempt = expected_attempt;
+                    tracing::warn!(
+                        "⏱️  Leader timeout for block {} ({}s elapsed) - rotating to backup leader (attempt {})",
+                        next_height,
+                        elapsed,
+                        leader_attempt
+                    );
+                }
+            }
+
             // Deterministic leader selection using TSDC
-            // Hash(prev_block_hash || next_height) determines the leader
+            // Hash(prev_block_hash || next_height || attempt) determines the leader
+            // The attempt counter allows rotation when the primary leader fails to produce
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(prev_block_hash);
             hasher.update(next_height.to_le_bytes());
+            hasher.update(leader_attempt.to_le_bytes()); // Include attempt for leader rotation
             let selection_hash: [u8; 32] = hasher.finalize().into();
 
             let producer_index = {
@@ -1166,23 +1196,29 @@ async fn main() {
                 std::sync::atomic::AtomicI64::new(0);
             let now_secs = chrono::Utc::now().timestamp();
             let last_log = LAST_LEADER_LOG.load(Ordering::Relaxed);
-            if now_secs - last_log >= 30 {
+            if now_secs - last_log >= 30 || leader_attempt > 0 {
                 LAST_LEADER_LOG.store(now_secs, Ordering::Relaxed);
                 tracing::info!(
-                    "🎲 Block {} leader selection: {} of {} masternodes, selected: {} (us: {})",
+                    "🎲 Block {} leader selection: {} of {} masternodes, selected: {} (us: {}){}",
                     next_height,
                     producer_index + 1,
                     masternodes.len(),
                     selected_producer.address,
-                    if is_producer { "YES" } else { "NO" }
+                    if is_producer { "YES" } else { "NO" },
+                    if leader_attempt > 0 {
+                        format!(" [attempt {}]", leader_attempt)
+                    } else {
+                        String::new()
+                    }
                 );
             }
 
             if !is_producer {
                 tracing::debug!(
-                    "⏸️  Not selected for block {} (producer: {})",
+                    "⏸️  Not selected for block {} (producer: {}, attempt: {})",
                     next_height,
-                    selected_producer.address
+                    selected_producer.address,
+                    leader_attempt
                 );
                 continue;
             }
