@@ -1161,6 +1161,23 @@ async fn main() {
                 .map(|addr| addr == &selected_producer.address)
                 .unwrap_or(false);
 
+            // Log leader selection at INFO level every 30 seconds to help debug production issues
+            static LAST_LEADER_LOG: std::sync::atomic::AtomicI64 =
+                std::sync::atomic::AtomicI64::new(0);
+            let now_secs = chrono::Utc::now().timestamp();
+            let last_log = LAST_LEADER_LOG.load(Ordering::Relaxed);
+            if now_secs - last_log >= 30 {
+                LAST_LEADER_LOG.store(now_secs, Ordering::Relaxed);
+                tracing::info!(
+                    "🎲 Block {} leader selection: {} of {} masternodes, selected: {} (us: {})",
+                    next_height,
+                    producer_index + 1,
+                    masternodes.len(),
+                    selected_producer.address,
+                    if is_producer { "YES" } else { "NO" }
+                );
+            }
+
             if !is_producer {
                 tracing::debug!(
                     "⏸️  Not selected for block {} (producer: {})",

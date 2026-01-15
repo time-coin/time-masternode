@@ -1085,9 +1085,10 @@ impl PeerConnection {
                         Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
                             consecutive_fork_errors += 1;
 
-                            // If ALL blocks from this peer cause fork errors, they're likely
-                            // on an incompatible chain (different hash calculation)
-                            if consecutive_fork_errors >= 3 && added == 0 {
+                            // If blocks from this peer cause fork errors (after any successful blocks),
+                            // they're likely on an incompatible chain (different hash calculation)
+                            // Use threshold of 2 since genesis often matches but subsequent blocks don't
+                            if consecutive_fork_errors >= 2 && added == 0 {
                                 peer_registry.mark_incompatible(
                                     &self.peer_ip,
                                     &format!(
