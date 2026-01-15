@@ -76,6 +76,9 @@ pub struct PeerConnectionRegistry {
     // Maps peer IP -> (marked_at_timestamp, reason)
     // These peers are temporarily ignored for consensus but periodically re-checked
     incompatible_peers: Arc<RwLock<HashMap<String, (std::time::Instant, String)>>>,
+    // Persistent fork error counter per peer (tracks errors across multiple block requests)
+    // Maps peer IP -> error count (resets on successful block add)
+    fork_error_counts: DashMap<String, u32>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -103,6 +106,7 @@ impl PeerConnectionRegistry {
             blacklist: Arc::new(RwLock::new(None)),
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
+            fork_error_counts: DashMap::new(),
         }
     }
 
@@ -196,6 +200,56 @@ impl PeerConnectionRegistry {
             .is_some()
         {
             tracing::info!("✅ Peer {} is now compatible - blocks accepted", ip_only);
+        }
+    }
+
+    /// Threshold of persistent fork errors before marking peer incompatible
+    const FORK_ERROR_THRESHOLD: u32 = 3;
+
+    /// Record a fork error for a peer (persistent across requests)
+    /// Returns true if the peer should now be marked incompatible
+    pub async fn record_fork_error(&self, peer_ip: &str) -> bool {
+        let ip_only = extract_ip(peer_ip).to_string();
+
+        // Increment the error count
+        let count = self
+            .fork_error_counts
+            .entry(ip_only.clone())
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+
+        let current_count = *count;
+
+        if current_count >= Self::FORK_ERROR_THRESHOLD {
+            // Mark as incompatible
+            self.mark_incompatible(
+                peer_ip,
+                &format!(
+                    "Persistent fork errors ({} consecutive). Peer is computing different block hashes, \
+                    likely running outdated software without TSDC hash fields.",
+                    current_count
+                )
+            ).await;
+            true
+        } else {
+            tracing::debug!(
+                "Fork error {} of {} for peer {} (will mark incompatible at threshold)",
+                current_count,
+                Self::FORK_ERROR_THRESHOLD,
+                ip_only
+            );
+            false
+        }
+    }
+
+    /// Reset fork error count for a peer (called when blocks are successfully added)
+    pub fn reset_fork_errors(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip);
+        if self.fork_error_counts.remove(ip_only).is_some() {
+            tracing::debug!(
+                "Reset fork error count for peer {} (blocks accepted)",
+                ip_only
+            );
         }
     }
 
