@@ -3639,46 +3639,25 @@ impl Blockchain {
 
         // Case 3: We're ahead of consensus
         if our_height > consensus_height {
-            // Check if we're alone on our chain (potential minority fork)
+            // LONGEST CHAIN RULE: We have a longer chain - we should NOT roll back
+            // Other peers should sync TO us, not the other way around
+            // This is fundamental to Nakamoto consensus - longest valid chain wins
+
             let our_chain_peer_count = chain_counts
                 .get(&(our_height, our_hash))
                 .map(|peers| peers.len())
-                .unwrap_or(0); // Don't count ourselves
+                .unwrap_or(0);
 
-            tracing::warn!(
-                "⚠️  We appear to be ahead of consensus: our height {} > consensus {} ({} peers, we have {} peers on our chain)",
+            tracing::info!(
+                "📈 We're ahead of network: our height {} > consensus {} ({} peers behind, {} peers with us)",
                 our_height,
                 consensus_height,
                 consensus_peers.len(),
                 our_chain_peer_count
             );
 
-            // CRITICAL FIX: Check if we're within the grace period after producing a block
-            // This prevents immediate rollback after block production - gives time for propagation
-            if self.is_within_block_propagation_grace_period() {
-                tracing::info!(
-                    "⏳ Within block propagation grace period - waiting for peers to receive our block before considering rollback"
-                );
-                return None;
-            }
-
-            // If we're alone (no other peers on our chain) and consensus exists (1+ peers),
-            // we're likely on a minority fork and should roll back
-            // CRITICAL FIX: Changed from >= 2 to >= 1 to handle mainnet fork where nodes
-            // see "1 peers agree" but never roll back because threshold was too high
-            if our_chain_peer_count == 0 && !consensus_peers.is_empty() {
-                tracing::error!(
-                    "🚨 MINORITY FORK DETECTED: We're at {} but alone. Consensus at {} with {} peers. Rolling back to consensus.",
-                    our_height,
-                    consensus_height,
-                    consensus_peers.len()
-                );
-
-                // Trigger rollback by returning consensus as target
-                // This will cause the sync mechanism to rollback and resync
-                return Some((consensus_height, consensus_peers[0].clone()));
-            }
-
+            // Don't roll back - peers will sync to us when they receive our blocks
+            // The block propagation will naturally bring peers up to our height
             return None;
         }
 
@@ -3770,52 +3749,14 @@ impl Blockchain {
                             );
                         }
                     } else if consensus_height < our_height {
-                        // MINORITY FORK: We're ahead of consensus - need to roll back
-                        tracing::error!(
-                            "🚨 MINORITY FORK DETECTED in periodic check: We're at {} but consensus is at {}, rolling back",
+                        // LONGEST CHAIN RULE: We're ahead - don't roll back
+                        // Peers will sync to us, not the other way around
+                        tracing::info!(
+                            "📈 We're ahead of network consensus: our height {} > consensus {} - peers will sync to us",
                             our_height,
                             consensus_height
                         );
-
-                        // Rollback to consensus height to realign with network
-                        match blockchain.rollback_to_height(consensus_height).await {
-                            Ok(_) => {
-                                tracing::info!(
-                                    "✅ Rolled back to consensus height {}",
-                                    consensus_height
-                                );
-
-                                // Request blocks from consensus peer to fill our chain
-                                if let Some(peer_registry) =
-                                    blockchain.peer_registry.read().await.as_ref()
-                                {
-                                    let request_from = consensus_height.saturating_sub(10).max(1);
-                                    let req = NetworkMessage::GetBlocks(
-                                        request_from,
-                                        consensus_height + 10,
-                                    );
-                                    if let Err(e) =
-                                        peer_registry.send_to_peer(&consensus_peer, req).await
-                                    {
-                                        tracing::warn!(
-                                            "⚠️  Failed to request blocks from {}: {}",
-                                            consensus_peer,
-                                            e
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            "📤 Requested blocks {}-{} from consensus peer {}",
-                                            request_from,
-                                            consensus_height + 10,
-                                            consensus_peer
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ Failed to rollback from minority fork: {}", e);
-                            }
-                        }
+                        // No rollback - our longer chain is canonical
                     }
                 }
             }
