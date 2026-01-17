@@ -288,6 +288,18 @@ impl MessageHandler {
                     .await
             }
 
+            // === §7.6 Liveness Fallback Protocol Messages ===
+            NetworkMessage::LivenessAlert { alert } => {
+                self.handle_liveness_alert(alert.clone(), context).await
+            }
+            NetworkMessage::FinalityProposal { proposal } => {
+                self.handle_finality_proposal(proposal.clone(), context)
+                    .await
+            }
+            NetworkMessage::FallbackVote { vote } => {
+                self.handle_fallback_vote(vote.clone(), context).await
+            }
+
             // === Fork Alert ===
             NetworkMessage::ForkAlert {
                 your_height,
@@ -2013,6 +2025,147 @@ impl MessageHandler {
                 "⚠️ [{}] All {} blocks skipped from {} (fork detected)",
                 self.direction, block_count, self.peer_ip
             );
+        }
+
+        Ok(None)
+    }
+
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - Message Handlers
+    // ========================================================================
+
+    /// Handle LivenessAlert message (§7.6.2)
+    /// Node receives alert that a transaction has stalled
+    async fn handle_liveness_alert(
+        &self,
+        alert: crate::types::LivenessAlert,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let txid_hex = hex::encode(alert.txid);
+
+        info!(
+            "[{}] Received LivenessAlert for tx {} from {} (stall: {}ms, confidence: {})",
+            self.direction,
+            txid_hex,
+            alert.reporter_mn_id,
+            alert.stall_duration_ms,
+            alert.current_confidence
+        );
+
+        // Verify the alert signature - find masternode by address
+        let masternodes = context.masternode_registry.list_all().await;
+        let masternode = masternodes
+            .iter()
+            .find(|mn| mn.masternode.address == alert.reporter_mn_id)
+            .ok_or_else(|| {
+                format!(
+                    "Reporter {} not in masternode registry",
+                    alert.reporter_mn_id
+                )
+            })?;
+
+        alert
+            .verify(&masternode.masternode.public_key)
+            .map_err(|e| format!("Invalid LivenessAlert signature: {}", e))?;
+
+        // Forward to consensus engine if we have one
+        if let Some(consensus) = &context.consensus {
+            // Check if we also observe this stall
+            if let Some(tx_status) = consensus.get_tx_status(&alert.txid) {
+                if matches!(tx_status, crate::types::TransactionStatus::Sampling { .. }) {
+                    // We also see this transaction in Sampling state
+                    let stalled = consensus.check_stall_timeout(&alert.txid);
+
+                    if stalled {
+                        info!("[{}] Confirming stall for tx {}", self.direction, txid_hex);
+                        // TODO: Accumulate alerts and trigger fallback when f+1 threshold reached
+                        // This will be implemented in Week 5-6
+                    }
+                }
+            }
+        }
+
+        // Relay the alert to other peers (gossip protocol)
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let _ = broadcast_tx.send(NetworkMessage::LivenessAlert { alert });
+        }
+
+        Ok(None)
+    }
+
+    /// Handle FinalityProposal message (§7.6.4 Step 3)
+    /// Deterministic leader proposes Accept/Reject decision
+    async fn handle_finality_proposal(
+        &self,
+        proposal: crate::types::FinalityProposal,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let txid_hex = hex::encode(proposal.txid);
+
+        info!(
+            "[{}] Received FinalityProposal for tx {} from leader {} (decision: {:?})",
+            self.direction, txid_hex, proposal.leader_mn_id, proposal.decision
+        );
+
+        // Verify the proposal signature - find masternode by address
+        let masternodes = context.masternode_registry.list_all().await;
+        let leader = masternodes
+            .iter()
+            .find(|mn| mn.masternode.address == proposal.leader_mn_id)
+            .ok_or_else(|| {
+                format!(
+                    "Leader {} not in masternode registry",
+                    proposal.leader_mn_id
+                )
+            })?;
+
+        proposal
+            .verify(&leader.masternode.public_key)
+            .map_err(|e| format!("Invalid FinalityProposal signature: {}", e))?;
+
+        // TODO: Week 5-6 - Verify this node is deterministic leader
+        // TODO: Week 5-6 - Vote on the proposal
+        // TODO: Week 5-6 - Broadcast our FallbackVote
+
+        // Relay the proposal to other peers
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let _ = broadcast_tx.send(NetworkMessage::FinalityProposal { proposal });
+        }
+
+        Ok(None)
+    }
+
+    /// Handle FallbackVote message (§7.6.4 Step 4)
+    /// AVS member votes on leader's proposal
+    async fn handle_fallback_vote(
+        &self,
+        vote: crate::types::FallbackVote,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let proposal_hex = hex::encode(vote.proposal_hash);
+
+        debug!(
+            "[{}] Received FallbackVote for proposal {} from {} (vote: {:?}, weight: {})",
+            self.direction, proposal_hex, vote.voter_mn_id, vote.vote, vote.voter_weight
+        );
+
+        // Verify the vote signature - find masternode by address
+        let masternodes = context.masternode_registry.list_all().await;
+        let voter = masternodes
+            .iter()
+            .find(|mn| mn.masternode.address == vote.voter_mn_id)
+            .ok_or_else(|| format!("Voter {} not in masternode registry", vote.voter_mn_id))?;
+
+        vote.verify(&voter.masternode.public_key)
+            .map_err(|e| format!("Invalid FallbackVote signature: {}", e))?;
+
+        // TODO: Week 5-6 - Accumulate votes
+        // TODO: Week 5-6 - Check if Q_finality threshold reached
+        // TODO: Week 5-6 - Finalize transaction if threshold met
+
+        // Relay the vote to other peers
+        if let Some(broadcast_tx) = &context.broadcast_tx {
+            let _ = broadcast_tx.send(NetworkMessage::FallbackVote { vote });
         }
 
         Ok(None)
