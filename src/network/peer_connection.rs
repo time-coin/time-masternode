@@ -1115,9 +1115,7 @@ impl PeerConnection {
 
                                     // If persistent fork, verify genesis compatibility first
                                     if needs_genesis_check {
-                                        if let Ok(genesis) =
-                                            blockchain_clone.get_block(0)
-                                        {
+                                        if let Ok(genesis) = blockchain_clone.get_block(0) {
                                             let our_genesis_hash = genesis.hash();
                                             let is_compatible = (*peer_registry_clone)
                                                 .verify_genesis_compatibility(

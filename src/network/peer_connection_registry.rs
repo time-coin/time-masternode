@@ -203,13 +203,16 @@ impl PeerConnectionRegistry {
         }
     }
 
-    /// Threshold of persistent fork errors before marking peer incompatible
-    /// Lowered from 3 to 2 because peers on incompatible chains typically only send
-    /// 1-2 blocks at a time (e.g., they're only 1 block ahead on their fork)
-    const FORK_ERROR_THRESHOLD: u32 = 2;
+    /// Threshold of persistent fork errors before triggering deep fork resolution
+    /// Note: Fork errors alone do NOT mean incompatibility - only genesis hash mismatch does
+    const FORK_ERROR_THRESHOLD: u32 = 3;
 
     /// Record a fork error for a peer (persistent across requests)
-    /// Returns true if the peer should now be marked incompatible
+    /// Returns true if fork resolution should be triggered (NOT incompatibility)
+    ///
+    /// IMPORTANT: Fork errors are NORMAL when nodes are on different forks of the same chain.
+    /// This does NOT mark peers as incompatible - only genesis hash mismatch does that.
+    /// Instead, this triggers fork resolution to find common ancestor and reconcile.
     pub async fn record_fork_error(&self, peer_ip: &str) -> bool {
         let ip_only = extract_ip(peer_ip).to_string();
 
@@ -223,24 +226,136 @@ impl PeerConnectionRegistry {
         let current_count = *count;
 
         if current_count >= Self::FORK_ERROR_THRESHOLD {
-            // Mark as incompatible
-            self.mark_incompatible(
-                peer_ip,
-                &format!(
-                    "Persistent fork errors ({} consecutive). Peer is computing different block hashes, \
-                    likely running outdated software without TSDC hash fields.",
-                    current_count
-                )
-            ).await;
+            // Don't mark as incompatible - forks are normal!
+            // Instead, log that deep fork resolution is needed
+            tracing::warn!(
+                "🔀 Persistent fork with peer {} ({} errors) - needs fork resolution (finding common ancestor)",
+                ip_only,
+                current_count
+            );
+            // Return true to signal that fork resolution should be triggered
+            // But do NOT mark as incompatible - that's only for genesis hash mismatch
             true
         } else {
             tracing::info!(
-                "🔀 Fork error {} of {} for peer {} (will mark incompatible at threshold)",
+                "🔀 Fork error {} of {} for peer {} (will trigger resolution at threshold)",
                 current_count,
                 Self::FORK_ERROR_THRESHOLD,
                 ip_only
             );
             false
+        }
+    }
+
+    /// Mark a peer as truly incompatible (different software/hashing algorithm)
+    /// This should ONLY be called when genesis hash doesn't match
+    pub async fn mark_genesis_incompatible(
+        &self,
+        peer_ip: &str,
+        our_genesis: &str,
+        their_genesis: &str,
+    ) {
+        let ip_only = extract_ip(peer_ip).to_string();
+        let mut incompatible = self.incompatible_peers.write().await;
+
+        if !incompatible.contains_key(&ip_only) {
+            tracing::error!(
+                "🚫 ═══════════════════════════════════════════════════════════════════"
+            );
+            tracing::error!("🚫 INCOMPATIBLE PEER DETECTED: {}", ip_only);
+            tracing::error!("🚫 Reason: Genesis hash mismatch");
+            tracing::error!("🚫   Our genesis:   {}", our_genesis);
+            tracing::error!("🚫   Their genesis: {}", their_genesis);
+            tracing::error!("🚫 ");
+            tracing::error!("🚫 This peer is computing different block hashes, likely due to");
+            tracing::error!("🚫 running an older version of the software.");
+            tracing::error!("🚫 ");
+            tracing::error!("🚫 RECOMMENDATION: The peer should update to the latest version");
+            tracing::error!("🚫 and clear their blockchain to resync.");
+            tracing::error!(
+                "🚫 ═══════════════════════════════════════════════════════════════════"
+            );
+        }
+
+        let reason = format!(
+            "Genesis hash mismatch: ours={}, theirs={}",
+            our_genesis, their_genesis
+        );
+        incompatible.insert(ip_only, (std::time::Instant::now(), reason));
+    }
+
+    /// Verify genesis hash compatibility with a peer
+    /// Returns true if compatible (same genesis hash), false if incompatible
+    /// If incompatible, marks the peer as such
+    pub async fn verify_genesis_compatibility(
+        &self,
+        peer_ip: &str,
+        our_genesis_hash: [u8; 32],
+    ) -> bool {
+        let ip_only = extract_ip(peer_ip);
+
+        // Request the peer's genesis block hash
+        let request = NetworkMessage::GetBlockHash(0);
+
+        match self.send_and_await_response(peer_ip, request, 10).await {
+            Ok(NetworkMessage::BlockHashResponse {
+                height: 0,
+                hash: Some(their_hash),
+            }) => {
+                if our_genesis_hash == their_hash {
+                    tracing::info!(
+                        "✅ Genesis hash matches with peer {} - compatible for fork resolution",
+                        ip_only
+                    );
+                    // Reset fork errors since they're compatible
+                    self.reset_fork_errors(peer_ip);
+                    true
+                } else {
+                    let our_hex = hex::encode(&our_genesis_hash[..8]);
+                    let their_hex = hex::encode(&their_hash[..8]);
+
+                    tracing::error!(
+                        "🚫 Genesis hash MISMATCH with peer {} - incompatible software!",
+                        ip_only
+                    );
+                    tracing::error!("🚫   Our genesis:   {}...", our_hex);
+                    tracing::error!("🚫   Their genesis: {}...", their_hex);
+
+                    // Mark as truly incompatible
+                    self.mark_genesis_incompatible(peer_ip, &our_hex, &their_hex)
+                        .await;
+                    false
+                }
+            }
+            Ok(NetworkMessage::BlockHashResponse {
+                height: 0,
+                hash: None,
+            }) => {
+                tracing::warn!(
+                    "⚠️ Peer {} has no genesis block - skipping compatibility check",
+                    ip_only
+                );
+                // Can't verify, assume compatible for now
+                true
+            }
+            Ok(other) => {
+                tracing::warn!(
+                    "⚠️ Unexpected response from {} for genesis hash: {:?}",
+                    ip_only,
+                    other.message_type()
+                );
+                // Can't verify, assume compatible for now
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ Failed to get genesis hash from {}: {} - assuming compatible",
+                    ip_only,
+                    e
+                );
+                // Can't verify, assume compatible for now
+                true
+            }
         }
     }
 
