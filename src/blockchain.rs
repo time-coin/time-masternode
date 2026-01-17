@@ -792,9 +792,9 @@ impl Blockchain {
                     break;
                 }
 
-                // Wait for blocks to arrive with reduced timeout for faster sync
+                // Wait for blocks to arrive with reasonable timeout for network latency
                 let batch_start_time = std::time::Instant::now();
-                let batch_timeout = std::time::Duration::from_secs(10); // Reduced for immediate sync
+                let batch_timeout = std::time::Duration::from_secs(30); // Allow time for network latency
                 let mut last_height = current;
                 let mut made_progress = false;
 

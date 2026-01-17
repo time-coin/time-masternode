@@ -26,7 +26,7 @@ struct PingState {
 }
 
 // Circuit breaker limits for fork resolution
-const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 1800; // 30 minutes - only hard limit
+const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 60; // 60 seconds - fast fork resolution
 const CRITICAL_FORK_DEPTH: u64 = 100; // Log warning if fork > 100 blocks (but don't stop)
 const PROGRESS_LOG_INTERVAL: u32 = 10; // Log progress every 10 attempts
 
@@ -226,6 +226,9 @@ pub struct PeerConnection {
     /// Fork resolution attempt tracker
     fork_resolution_tracker: Arc<RwLock<Option<ForkResolutionAttempt>>>,
 
+    /// Last opportunistic sync request time (for throttling)
+    last_opportunistic_sync: Arc<RwLock<Option<Instant>>>,
+
     /// Whitelist status - whitelisted masternodes get relaxed ping/pong timeouts
     is_whitelisted: bool,
 }
@@ -321,6 +324,7 @@ impl PeerConnection {
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
             fork_resolution_tracker: Arc::new(RwLock::new(None)),
+            last_opportunistic_sync: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
             is_whitelisted,
@@ -363,6 +367,7 @@ impl PeerConnection {
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
             fork_resolution_tracker: Arc::new(RwLock::new(None)),
+            last_opportunistic_sync: Arc::new(RwLock::new(None)),
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
             is_whitelisted,
@@ -738,6 +743,9 @@ impl PeerConnection {
             }
         }
 
+        // Clear stale peer data on disconnect to prevent reporting old heights
+        peer_registry.clear_peer_data(&self.peer_ip).await;
+
         info!(
             "🔌 [{:?}] Message loop ended for {}",
             self.direction, self.peer_ip
@@ -850,6 +858,9 @@ impl PeerConnection {
                 }
             }
         }
+
+        // Clear stale peer data on disconnect to prevent reporting old heights
+        peer_registry.clear_peer_data(&self.peer_ip).await;
 
         info!(
             "🔌 [{:?}] Message loop ended for {}",
@@ -965,6 +976,9 @@ impl PeerConnection {
                 }
             }
         }
+
+        // Clear stale peer data on disconnect to prevent reporting old heights
+        peer_registry.clear_peer_data(&self.peer_ip).await;
 
         info!(
             "🔌 [{:?}] Message loop ended for {}",
@@ -1110,8 +1124,9 @@ impl PeerConnection {
                                 let needs_genesis_check = needs_deep_resolution;
 
                                 tokio::spawn(async move {
-                                    // Give it a moment for peer to update chain tip, then check consensus
-                                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                    // Brief pause to allow peer to update chain tip
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500))
+                                        .await;
 
                                     // If persistent fork, verify genesis compatibility first
                                     if needs_genesis_check {
@@ -1843,17 +1858,32 @@ impl PeerConnection {
                 // Check for opportunistic sync - peer has higher block height
                 let our_height = blockchain.get_height();
                 if heartbeat.block_height > our_height {
-                    info!(
-                        "🔄 [{:?}] Opportunistic sync: peer {} at height {} (we're at {})",
-                        self.direction,
-                        heartbeat.masternode_address,
-                        heartbeat.block_height,
-                        our_height
-                    );
-                    let start_height = our_height + 1;
-                    let msg = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
-                    if let Err(e) = self.send_message(&msg).await {
-                        debug!("Failed to request blocks: {}", e);
+                    // Throttle opportunistic sync: only request once per 60 seconds
+                    let should_sync = {
+                        let last_sync = self.last_opportunistic_sync.read().await;
+                        match *last_sync {
+                            None => true,
+                            Some(last_time) => last_time.elapsed() > Duration::from_secs(60),
+                        }
+                    };
+
+                    if should_sync {
+                        info!(
+                            "🔄 [{:?}] Opportunistic sync: peer {} at height {} (we're at {})",
+                            self.direction,
+                            heartbeat.masternode_address,
+                            heartbeat.block_height,
+                            our_height
+                        );
+
+                        // Update last sync time
+                        *self.last_opportunistic_sync.write().await = Some(Instant::now());
+
+                        let start_height = our_height + 1;
+                        let msg = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
+                        if let Err(e) = self.send_message(&msg).await {
+                            debug!("Failed to request blocks: {}", e);
+                        }
                     }
                 }
             }
@@ -2501,6 +2531,9 @@ impl PeerConnection {
                 }
             }
         }
+
+        // Clear stale peer data on disconnect to prevent reporting old heights
+        config.peer_registry.clear_peer_data(&self.peer_ip).await;
 
         info!(
             "🔌 [{:?}] Unified message loop ended for {}",

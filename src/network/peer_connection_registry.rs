@@ -568,6 +568,16 @@ impl PeerConnectionRegistry {
                     self.outbound_count.fetch_sub(1, Ordering::Relaxed);
                 }
             }
+            // Clean up stale peer metadata
+            tokio::spawn({
+                let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
+                let peer_heights = Arc::clone(&self.peer_heights);
+                let ip = ip.to_string();
+                async move {
+                    peer_chain_tips.write().await.remove(&ip);
+                    peer_heights.write().await.remove(&ip);
+                }
+            });
         }
     }
 
@@ -581,6 +591,16 @@ impl PeerConnectionRegistry {
                     self.outbound_count.fetch_sub(1, Ordering::Relaxed);
                 }
             }
+            // Clean up stale peer metadata
+            tokio::spawn({
+                let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
+                let peer_heights = Arc::clone(&self.peer_heights);
+                let ip = ip.to_string();
+                async move {
+                    peer_chain_tips.write().await.remove(&ip);
+                    peer_heights.write().await.remove(&ip);
+                }
+            });
         }
     }
 
@@ -589,6 +609,16 @@ impl PeerConnectionRegistry {
             if state.direction == ConnectionDirection::Inbound {
                 self.inbound_count.fetch_sub(1, Ordering::Relaxed);
             }
+            // Clean up stale peer metadata
+            tokio::spawn({
+                let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
+                let peer_heights = Arc::clone(&self.peer_heights);
+                let ip = ip.to_string();
+                async move {
+                    peer_chain_tips.write().await.remove(&ip);
+                    peer_heights.write().await.remove(&ip);
+                }
+            });
         }
     }
 
@@ -702,6 +732,18 @@ impl PeerConnectionRegistry {
     pub async fn get_peer_chain_tip(&self, peer_ip: &str) -> Option<ChainTip> {
         let tips = self.peer_chain_tips.read().await;
         tips.get(peer_ip).copied()
+    }
+
+    /// Clear stale peer data when peer disconnects
+    pub async fn clear_peer_data(&self, peer_ip: &str) {
+        let mut heights = self.peer_heights.write().await;
+        let mut tips = self.peer_chain_tips.write().await;
+        heights.remove(peer_ip);
+        tips.remove(peer_ip);
+        tracing::debug!(
+            "🧹 Cleared stale chain tip data for disconnected peer {}",
+            peer_ip
+        );
     }
 
     pub async fn get_peer_writer(
