@@ -111,9 +111,7 @@ pub enum TransactionStatus {
         started_at: i64, // Unix timestamp in milliseconds
     },
     /// Reached β_local consecutive successful polls (Protocol §7.5)
-    LocallyAccepted {
-        accepted_at: i64,
-    },
+    LocallyAccepted { accepted_at: i64 },
     /// Deterministic fallback resolution in progress (Protocol §7.6)
     FallbackResolution {
         started_at: i64,
@@ -121,20 +119,11 @@ pub enum TransactionStatus {
         alerts_count: u32,
     },
     /// Has valid VFP with ≥ Q_finality weight (Protocol §8)
-    GloballyFinalized {
-        finalized_at: i64,
-        vfp_weight: u64,
-    },
+    GloballyFinalized { finalized_at: i64, vfp_weight: u64 },
     /// Rejected due to conflict or invalidity
-    Rejected {
-        rejected_at: i64,
-        reason: String,
-    },
+    Rejected { rejected_at: i64, reason: String },
     /// Included in TSDC block, can be pruned
-    Archived {
-        block_height: u64,
-        archived_at: i64,
-    },
+    Archived { block_height: u64, archived_at: i64 },
 }
 
 impl TransactionStatus {
@@ -489,13 +478,13 @@ impl FinalityProposal {
     /// Hash of this proposal for voting
     pub fn proposal_hash(&self) -> Hash256 {
         let mut hasher = Sha256::new();
-        hasher.update(&self.chain_id.to_le_bytes());
-        hasher.update(&self.txid);
-        hasher.update(&self.tx_hash_commitment);
-        hasher.update(&self.slot_index.to_le_bytes());
+        hasher.update(self.chain_id.to_le_bytes());
+        hasher.update(self.txid);
+        hasher.update(self.tx_hash_commitment);
+        hasher.update(self.slot_index.to_le_bytes());
         match self.decision {
-            FallbackDecision::Accept => hasher.update(&[1u8]),
-            FallbackDecision::Reject => hasher.update(&[0u8]),
+            FallbackDecision::Accept => hasher.update([1u8]),
+            FallbackDecision::Reject => hasher.update([0u8]),
         }
         hasher.update(self.leader_mn_id.as_bytes());
         hasher.finalize().into()
@@ -570,4 +559,3 @@ impl FallbackVote {
         Ok(())
     }
 }
-
