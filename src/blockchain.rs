@@ -3463,6 +3463,10 @@ impl Blockchain {
     /// This is the recommended way to detect and resolve forks.
     /// It runs periodically and queries all peers for consensus.
     ///
+    /// TODO(refactor): Coordinate with sync_coordinator to prevent duplicate sync requests
+    /// Currently periodic fork resolution can conflict with opportunistic sync
+    /// See: analysis/REFACTORING_ROADMAP.md - Phase 3, Step 3.3
+    ///
     /// Benefits over on-demand resolution:
     /// - Queries all peers for complete picture
     /// - Detects forks before receiving unsolicited blocks

@@ -1676,6 +1676,10 @@ impl PeerConnection {
                     };
 
                     if should_sync {
+                        // TODO(refactor): Remove opportunistic sync from here, use sync_coordinator
+                        // This causes sync request storms visible in logs (5-10 requests per ChainTipResponse)
+                        // See: analysis/REFACTORING_ROADMAP.md - Phase 3, Step 3.2
+
                         info!(
                             "🔄 [{:?}] Opportunistic sync: peer {} at height {} (we're at {})",
                             self.direction,

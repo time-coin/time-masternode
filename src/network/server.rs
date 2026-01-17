@@ -1090,6 +1090,10 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
+                                    // TODO(refactor): Route through message_handler.rs instead of handling directly
+                                    // This creates inconsistent fork detection between inbound/outbound paths
+                                    // See: analysis/REFACTORING_ROADMAP.md - Phase 1, Step 1.2
+
                                     // SIMPLIFIED: Just try to add blocks sequentially
                                     // Fork resolution is handled by periodic compare_chain_with_peers() task
                                     let block_count = blocks.len();
