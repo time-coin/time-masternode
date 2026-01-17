@@ -87,6 +87,101 @@ impl NodeIdentity {
             signature: signature.to_bytes().to_vec(),
         }
     }
+
+    /// Sign a LivenessAlert with this node's key (§7.6.2)
+    #[allow(clippy::too_many_arguments)]
+    fn sign_liveness_alert(
+        &self,
+        chain_id: u32,
+        txid: Hash256,
+        tx_hash_commitment: Hash256,
+        slot_index: u64,
+        poll_history: Vec<PollResult>,
+        stall_duration_ms: u64,
+        current_confidence: u32,
+    ) -> LivenessAlert {
+        use ed25519_dalek::Signer;
+
+        let alert = LivenessAlert {
+            chain_id,
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            poll_history,
+            current_confidence,
+            stall_duration_ms,
+            reporter_mn_id: self.address.clone(),
+            reporter_signature: vec![],
+        };
+
+        let msg = alert.signing_message();
+        let signature = self.signing_key.sign(&msg);
+
+        LivenessAlert {
+            reporter_signature: signature.to_bytes().to_vec(),
+            ..alert
+        }
+    }
+
+    /// Sign a FinalityProposal with this node's key (§7.6.4)
+    fn sign_finality_proposal(
+        &self,
+        chain_id: u32,
+        txid: Hash256,
+        tx_hash_commitment: Hash256,
+        slot_index: u64,
+        decision: FallbackDecision,
+        justification: String,
+    ) -> FinalityProposal {
+        use ed25519_dalek::Signer;
+
+        let proposal = FinalityProposal {
+            chain_id,
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            decision: decision.clone(),
+            justification,
+            leader_mn_id: self.address.clone(),
+            leader_signature: vec![],
+        };
+
+        let msg = proposal.signing_message();
+        let signature = self.signing_key.sign(&msg);
+
+        FinalityProposal {
+            leader_signature: signature.to_bytes().to_vec(),
+            ..proposal
+        }
+    }
+
+    /// Sign a FallbackVote with this node's key (§7.6.4)
+    fn sign_fallback_vote(
+        &self,
+        chain_id: u32,
+        proposal_hash: Hash256,
+        vote: FallbackVoteDecision,
+        voter_weight: u64,
+    ) -> FallbackVote {
+        use ed25519_dalek::Signer;
+
+        let fallback_vote = FallbackVote {
+            chain_id,
+            proposal_hash,
+            vote: vote.clone(),
+            voter_mn_id: self.address.clone(),
+            voter_weight,
+            voter_signature: vec![],
+        };
+
+        let msg = fallback_vote.signing_message();
+        let signature = self.signing_key.sign(&msg);
+
+        FallbackVote {
+            voter_signature: signature.to_bytes().to_vec(),
+            ..fallback_vote
+        }
+    }
 }
 
 // ============================================================================
@@ -1935,6 +2030,182 @@ impl ConsensusEngine {
     /// Get memory usage statistics from consensus engine
     pub fn memory_stats(&self) -> ConsensusMemoryStats {
         self.avalanche.memory_stats()
+    }
+
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - BROADCASTING
+    // ========================================================================
+
+    /// Broadcast a LivenessAlert for a stalled transaction (§7.6.2)
+    /// Called when local node detects a transaction has stalled
+    pub async fn broadcast_liveness_alert(
+        &self,
+        txid: Hash256,
+        slot_index: u64,
+    ) -> Result<(), String> {
+        // Require identity to sign alerts
+        let identity = self
+            .identity
+            .get()
+            .ok_or_else(|| "Node identity not set".to_string())?;
+
+        // Get current transaction state
+        let tx_status = self
+            .avalanche
+            .tx_status
+            .get(&txid)
+            .ok_or_else(|| format!("Transaction {} not found", hex::encode(txid)))?;
+
+        // Extract confidence and stall duration
+        let (current_confidence, stall_duration_ms) = match tx_status.value() {
+            TransactionStatus::Sampling {
+                confidence,
+                started_at,
+                ..
+            } => {
+                let elapsed = chrono::Utc::now().timestamp_millis() - started_at;
+                (*confidence, elapsed.max(0) as u64)
+            }
+            _ => {
+                return Err(format!(
+                    "Transaction {} not in Sampling state",
+                    hex::encode(txid)
+                ))
+            }
+        };
+
+        // Get tx_hash_commitment (use txid for now, will be transaction hash in full implementation)
+        let tx_hash_commitment = txid;
+
+        // Get poll history (empty for now, will be populated from Snowball state)
+        let poll_history = Vec::new();
+
+        // Sign and create the alert
+        let alert = identity.sign_liveness_alert(
+            1, // chain_id = 1 for mainnet
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            poll_history,
+            stall_duration_ms,
+            current_confidence,
+        );
+
+        tracing::warn!(
+            "Broadcasting LivenessAlert for tx {} (stall: {}ms, confidence: {})",
+            hex::encode(txid),
+            stall_duration_ms,
+            current_confidence
+        );
+
+        // Broadcast to network
+        self.broadcast(NetworkMessage::LivenessAlert { alert })
+            .await;
+
+        Ok(())
+    }
+
+    /// Broadcast a FinalityProposal as deterministic leader (§7.6.4 Step 3)
+    /// Called when this node is elected as fallback leader
+    pub async fn broadcast_finality_proposal(
+        &self,
+        txid: Hash256,
+        slot_index: u64,
+        decision: FallbackDecision,
+    ) -> Result<(), String> {
+        // Require identity to sign proposals
+        let identity = self
+            .identity
+            .get()
+            .ok_or_else(|| "Node identity not set".to_string())?;
+
+        // Get tx_hash_commitment (use txid for now)
+        let tx_hash_commitment = txid;
+
+        // Create justification string
+        let justification = format!("Fallback decision for slot {}", slot_index);
+
+        // Sign and create the proposal
+        let proposal = identity.sign_finality_proposal(
+            1, // chain_id = 1 for mainnet
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            decision.clone(),
+            justification,
+        );
+
+        tracing::info!(
+            "Broadcasting FinalityProposal for tx {} (decision: {:?})",
+            hex::encode(txid),
+            decision
+        );
+
+        // Broadcast to network
+        self.broadcast(NetworkMessage::FinalityProposal { proposal })
+            .await;
+
+        Ok(())
+    }
+
+    /// Broadcast a FallbackVote on a leader's proposal (§7.6.4 Step 4)
+    /// Called when AVS member votes on a FinalityProposal
+    pub async fn broadcast_fallback_vote(
+        &self,
+        proposal_hash: Hash256,
+        vote: FallbackVoteDecision,
+        voter_weight: u64,
+    ) -> Result<(), String> {
+        // Require identity to sign votes
+        let identity = self
+            .identity
+            .get()
+            .ok_or_else(|| "Node identity not set".to_string())?;
+
+        // Sign and create the vote
+        let fallback_vote = identity.sign_fallback_vote(
+            1, // chain_id = 1 for mainnet
+            proposal_hash,
+            vote.clone(),
+            voter_weight,
+        );
+
+        tracing::debug!(
+            "Broadcasting FallbackVote for proposal {} (vote: {:?}, weight: {})",
+            hex::encode(proposal_hash),
+            vote,
+            voter_weight
+        );
+
+        // Broadcast to network
+        self.broadcast(NetworkMessage::FallbackVote {
+            vote: fallback_vote,
+        })
+        .await;
+
+        Ok(())
+    }
+
+    /// Check for stalled transactions and broadcast alerts (§7.6.1-7.6.2)
+    /// Should be called periodically (e.g., every 5-10 seconds)
+    pub async fn check_and_broadcast_stalls(&self, current_slot: u64) -> usize {
+        let stalled = self.get_stalled_transactions();
+        let count = stalled.len();
+
+        for txid in stalled {
+            if let Err(e) = self.broadcast_liveness_alert(txid, current_slot).await {
+                tracing::error!("Failed to broadcast LivenessAlert: {}", e);
+            }
+        }
+
+        if count > 0 {
+            tracing::warn!(
+                "Detected and broadcast alerts for {} stalled transactions",
+                count
+            );
+        }
+
+        count
     }
 
     #[allow(dead_code)]
