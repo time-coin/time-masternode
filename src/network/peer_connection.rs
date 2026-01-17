@@ -1667,7 +1667,12 @@ impl PeerConnection {
                 let our_height = blockchain.get_height();
                 if heartbeat.block_height > our_height {
                     // Throttle opportunistic sync: only request once per 60 seconds
-                    let should_sync = {
+                    // ✅ REFACTORED: Opportunistic sync removed - causes request storms
+                    // Sync coordinator in blockchain.rs periodic task handles all sync now
+                    // See: analysis/REFACTORING_ROADMAP.md - Phase 3, Step 3.2 (COMPLETED)
+                    //
+                    // Leaving throttle check in place for potential future use
+                    let _should_sync = {
                         let last_sync = self.last_opportunistic_sync.read().await;
                         match *last_sync {
                             None => true,
@@ -1675,28 +1680,21 @@ impl PeerConnection {
                         }
                     };
 
-                    if should_sync {
-                        // TODO(refactor): Remove opportunistic sync from here, use sync_coordinator
-                        // This causes sync request storms visible in logs (5-10 requests per ChainTipResponse)
-                        // See: analysis/REFACTORING_ROADMAP.md - Phase 3, Step 3.2
-
-                        info!(
-                            "🔄 [{:?}] Opportunistic sync: peer {} at height {} (we're at {})",
-                            self.direction,
-                            heartbeat.masternode_address,
-                            heartbeat.block_height,
-                            our_height
-                        );
-
-                        // Update last sync time
-                        *self.last_opportunistic_sync.write().await = Some(Instant::now());
-
-                        let start_height = our_height + 1;
-                        let msg = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
-                        if let Err(e) = self.send_message(&msg).await {
-                            debug!("Failed to request blocks: {}", e);
-                        }
-                    }
+                    // Opportunistic sync DISABLED - periodic sync handles this better
+                    // The periodic compare_chain_with_peers() task already:
+                    // - Queries all peers for consensus
+                    // - Uses sync_coordinator for throttling
+                    // - Handles fork resolution properly
+                    //
+                    // This prevents the sync storm issue where we'd fire 5-10 sync
+                    // requests for a single ChainTipResponse
+                    debug!(
+                        "📊 [{:?}] Peer {} at height {} (we're at {}) - periodic sync will handle if needed",
+                        self.direction,
+                        heartbeat.masternode_address,
+                        heartbeat.block_height,
+                        our_height
+                    );
                 }
             }
             NetworkMessage::HeartbeatAttestation(_) => {

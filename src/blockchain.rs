@@ -203,6 +203,8 @@ pub struct Blockchain {
     peer_scoring: Arc<crate::network::peer_scoring::PeerScoringSystem>,
     /// AI-powered fork resolution
     fork_resolver: Arc<crate::ai::fork_resolver::ForkResolver>,
+    /// Sync coordinator to prevent sync storms and duplicate requests
+    sync_coordinator: Arc<crate::network::sync_coordinator::SyncCoordinator>,
     /// Cumulative chain work for longest-chain-by-work rule
     cumulative_work: Arc<RwLock<u128>>,
     /// Recent reorganization events (for monitoring and debugging)
@@ -245,6 +247,9 @@ impl Blockchain {
             storage.clone(),
         )));
 
+        // Initialize sync coordinator to prevent sync storms
+        let sync_coordinator = Arc::new(crate::network::sync_coordinator::SyncCoordinator::new());
+
         // Initialize two-tier block cache
         // Hot cache: 50 deserialized blocks (~50MB)
         // Warm cache: 500 serialized blocks (~150MB compressed)
@@ -274,6 +279,7 @@ impl Blockchain {
             connection_manager: Arc::new(RwLock::new(None)),
             peer_scoring,
             fork_resolver,
+            sync_coordinator,
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
             fork_state: Arc::new(RwLock::new(ForkResolutionState::None)),
@@ -994,25 +1000,53 @@ impl Blockchain {
             return Ok(());
         }
 
-        let peer_registry = self.peer_registry.read().await;
-        let registry = peer_registry.as_ref().ok_or("No peer registry available")?;
-
         // Request blocks from the specific peer
         let batch_start = current + 1;
         let batch_end = time_expected;
 
-        tracing::info!(
-            "📤 Requesting blocks {}-{} from consensus peer {}",
-            batch_start,
-            batch_end,
-            peer_ip
-        );
+        // ✅ Check with sync coordinator before requesting
+        let sync_approved = self
+            .sync_coordinator
+            .request_sync(
+                peer_ip.to_string(),
+                batch_start,
+                batch_end,
+                crate::network::sync_coordinator::SyncSource::Periodic,
+            )
+            .await;
+
+        match sync_approved {
+            Ok(true) => {
+                // Sync approved - proceed
+                tracing::info!(
+                    "📤 Requesting blocks {}-{} from consensus peer {}",
+                    batch_start,
+                    batch_end,
+                    peer_ip
+                );
+            }
+            Ok(false) => {
+                tracing::debug!(
+                    "⏸️ Sync with {} queued (already active or at limit)",
+                    peer_ip
+                );
+                return Ok(()); // Queued, not an error
+            }
+            Err(e) => {
+                tracing::debug!("⏱️ Sync with {} throttled: {}", peer_ip, e);
+                return Ok(()); // Throttled, not an error
+            }
+        }
+
+        let peer_registry = self.peer_registry.read().await;
+        let registry = peer_registry.as_ref().ok_or("No peer registry available")?;
 
         let req = NetworkMessage::GetBlocks(batch_start, batch_end);
-        registry
-            .send_to_peer(peer_ip, req)
-            .await
-            .map_err(|e| format!("Failed to request blocks from {}: {}", peer_ip, e))?;
+        if let Err(e) = registry.send_to_peer(peer_ip, req).await {
+            // Cancel sync on failure
+            self.sync_coordinator.cancel_sync(peer_ip).await;
+            return Err(format!("Failed to request blocks from {}: {}", peer_ip, e));
+        }
 
         // Wait for blocks to arrive with longer timeout for fork resolution
         let wait_start = std::time::Instant::now();
@@ -1025,6 +1059,8 @@ impl Blockchain {
 
             if now_height >= time_expected {
                 tracing::info!("✓ Synced from consensus peer to height {}", now_height);
+                // Mark sync as complete
+                self.sync_coordinator.complete_sync(peer_ip).await;
                 return Ok(());
             }
 
@@ -1072,6 +1108,8 @@ impl Blockchain {
 
                         if now_height >= time_expected {
                             tracing::info!("✅ Fork resolved! Synced to height {}", now_height);
+                            // Mark sync as complete
+                            self.sync_coordinator.complete_sync(peer_ip).await;
                             return Ok(());
                         }
                     }
@@ -1087,6 +1125,8 @@ impl Blockchain {
                 )),
             }
         } else {
+            // Mark sync as complete even if partial - let it be retried later
+            self.sync_coordinator.complete_sync(peer_ip).await;
             Err(format!(
                 "Partial sync from {}: reached {} but expected {}",
                 peer_ip, final_height, time_expected
@@ -3825,23 +3865,38 @@ impl Blockchain {
                                     blockchain.peer_registry.read().await.as_ref()
                                 {
                                     let request_from = consensus_height.saturating_sub(20).max(1);
-                                    let req =
-                                        NetworkMessage::GetBlocks(request_from, consensus_height);
-                                    if let Err(e) =
-                                        peer_registry.send_to_peer(&consensus_peer, req).await
-                                    {
-                                        tracing::warn!(
-                                            "⚠️  Failed to request blocks from {}: {}",
-                                            consensus_peer,
-                                            e
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            "📤 Requested blocks {}-{} from {} to find common ancestor",
-                                            request_from,
-                                            consensus_height,
-                                            consensus_peer
-                                        );
+
+                                    // ✅ Check with sync coordinator before requesting
+                                    match blockchain.sync_coordinator.request_sync(
+                                        consensus_peer.clone(),
+                                        request_from,
+                                        consensus_height,
+                                        crate::network::sync_coordinator::SyncSource::ForkResolution,
+                                    ).await {
+                                        Ok(true) => {
+                                            let req = NetworkMessage::GetBlocks(request_from, consensus_height);
+                                            if let Err(e) = peer_registry.send_to_peer(&consensus_peer, req).await {
+                                                blockchain.sync_coordinator.cancel_sync(&consensus_peer).await;
+                                                tracing::warn!(
+                                                    "⚠️  Failed to request blocks from {}: {}",
+                                                    consensus_peer,
+                                                    e
+                                                );
+                                            } else {
+                                                tracing::info!(
+                                                    "📤 Requested blocks {}-{} from {} to find common ancestor",
+                                                    request_from,
+                                                    consensus_height,
+                                                    consensus_peer
+                                                );
+                                            }
+                                        }
+                                        Ok(false) => {
+                                            tracing::debug!("⏸️ Fork resolution sync queued with {}", consensus_peer);
+                                        }
+                                        Err(e) => {
+                                            tracing::debug!("⏱️ Fork resolution sync throttled with {}: {}", consensus_peer, e);
+                                        }
                                     }
                                 }
                             }
@@ -4932,6 +4987,7 @@ impl Clone for Blockchain {
             connection_manager: self.connection_manager.clone(),
             peer_scoring: self.peer_scoring.clone(),
             fork_resolver: self.fork_resolver.clone(),
+            sync_coordinator: self.sync_coordinator.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
             fork_state: self.fork_state.clone(),

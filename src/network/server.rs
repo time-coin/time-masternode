@@ -1089,54 +1089,20 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
                                 }
-                                NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
-                                    // TODO(refactor): Route through message_handler.rs instead of handling directly
-                                    // This creates inconsistent fork detection between inbound/outbound paths
-                                    // See: analysis/REFACTORING_ROADMAP.md - Phase 1, Step 1.2
+                                NetworkMessage::BlocksResponse(_) | NetworkMessage::BlockRangeResponse(_) => {
+                                    // ✅ REFACTORED: Route through unified message_handler.rs
+                                    // See: analysis/REFACTORING_ROADMAP.md - Phase 1, Step 1.2 (COMPLETED)
 
-                                    // SIMPLIFIED: Just try to add blocks sequentially
-                                    // Fork resolution is handled by periodic compare_chain_with_peers() task
-                                    let block_count = blocks.len();
-                                    if block_count == 0 {
-                                        tracing::debug!("📥 [Server] Received empty blocks response from {}", peer.addr);
-                                        continue;
-                                    }
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
 
-                                    let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
-                                    let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
-                                    tracing::info!("📥 [Server] Received {} blocks (height {}-{}) from {}",
-                                        block_count, start_height, end_height, peer.addr);
-
-                                    // Try to add blocks sequentially
-                                    let mut added = 0;
-                                    let mut skipped = 0;
-
-                                    for block in blocks {
-                                        match blockchain.add_block_with_fork_handling(block.clone()).await {
-                                            Ok(true) => added += 1,
-                                            Ok(false) => skipped += 1,
-                                            Err(e) if e.contains("Fork detected") => {
-                                                tracing::warn!(
-                                                    "🔀 [Server] Fork detected with {} at height {} - deferring to periodic resolution",
-                                                    peer.addr, block.header.height
-                                                );
-                                                skipped += 1;
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!("⏭️ [Server] Skipped block {} from {}: {}",
-                                                    block.header.height, peer.addr, e);
-                                                skipped += 1;
-                                            }
-                                        }
-                                    }
-
-                                    if added > 0 {
-                                        tracing::info!("✅ [Server] Added {} blocks from {} (skipped {})",
-                                            added, peer.addr, skipped);
-                                    } else if skipped > 0 {
-                                        tracing::warn!("⚠️  [Server] All {} blocks skipped from {} - periodic resolution will handle",
-                                            skipped, peer.addr);
-                                    }
+                                    // Handle the message through unified handler
+                                    let _ = handler.handle_message(&msg, &context).await;
                                 }
                                 NetworkMessage::HeartbeatBroadcast(_) => {
                                     // Use unified message handler with full context
