@@ -1025,214 +1025,22 @@ impl PeerConnection {
                 // Phase 3: Pass peer height to handler
                 self.handle_pong(*nonce, *timestamp, *height).await?;
             }
-            NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
-                // UNIFIED FORK RESOLUTION - All peers use same logic
-                let block_count = blocks.len();
-                if block_count == 0 {
-                    debug!(
-                        "📥 [{:?}] Received empty blocks response from {}",
-                        self.direction, self.peer_ip
-                    );
-                    return Ok(());
-                }
-
-                let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
-                let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
-
-                // Update our knowledge of peer's height
-                let current_known = self.peer_height.read().await;
-                if current_known.map(|h| h < end_height).unwrap_or(true) {
-                    *self.peer_height.write().await = Some(end_height);
-                }
-                drop(current_known);
-
-                info!(
-                    "📥 [{:?}] Received {} blocks (height {}-{}) from {} {}",
-                    self.direction,
-                    block_count,
-                    start_height,
-                    end_height,
-                    self.peer_ip,
-                    if is_whitelisted { "(whitelisted)" } else { "" }
+            NetworkMessage::BlocksResponse(_) | NetworkMessage::BlockRangeResponse(_) => {
+                // Use unified message handler
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
                 );
 
-                // SIMPLE STRATEGY: Try to add blocks sequentially
-                // If fork is detected, the periodic compare_chain_with_peers() will handle resolution
-                let mut added = 0;
-                let mut skipped = 0;
-                let mut fork_detected = false;
-
-                for block in blocks.iter() {
-                    // Validate block has non-zero previous_hash (except genesis at height 0)
-                    if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
+                if let Ok(Some(response)) = handler.handle_message(&message, &context).await {
+                    if let Err(e) = self.send_message(&response).await {
                         warn!(
-                            "⚠️ Peer {} sent corrupt block {} with zero previous_hash - skipping",
-                            self.peer_ip, block.header.height
+                            "⚠️ [{:?}] Failed to send response after BlocksResponse handling: {}",
+                            self.direction, e
                         );
-                        skipped += 1;
-                        // If whitelist peer sends corrupt data, don't disconnect but log warning
-                        if is_whitelisted {
-                            warn!(
-                                "⚠️ Whitelisted peer {} sent corrupt block - data quality issue!",
-                                self.peer_ip
-                            );
-                        }
-                        continue;
                     }
-
-                    match blockchain.add_block_with_fork_handling(block.clone()).await {
-                        Ok(true) => {
-                            added += 1;
-
-                            // Reset persistent fork error counter on successful block
-                            peer_registry.reset_fork_errors(&self.peer_ip);
-
-                            // If peer was previously marked incompatible but blocks now work,
-                            // clear the incompatible status - they may have updated
-                            if added == 1 {
-                                peer_registry.clear_incompatible(&self.peer_ip).await;
-                            }
-                        }
-                        Ok(false) => {
-                            // Block already exists or is not next in chain
-                            skipped += 1;
-                        }
-                        Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
-                            // Record fork error - this tracks persistent forks but does NOT mark incompatible
-                            // Only genesis hash mismatch marks peers as truly incompatible
-                            let needs_deep_resolution =
-                                peer_registry.record_fork_error(&self.peer_ip).await;
-
-                            // Fork detected - trigger fork resolution
-                            if !fork_detected {
-                                warn!(
-                                    "🔀 Fork detected with peer {} at height {}: {}",
-                                    self.peer_ip, block.header.height, e
-                                );
-
-                                if needs_deep_resolution {
-                                    info!("   Persistent fork - verifying genesis compatibility before resolution");
-                                } else {
-                                    info!("   Triggering immediate fork resolution check");
-                                }
-                                fork_detected = true;
-
-                                // Spawn fork resolution - verify genesis compatibility first
-                                let blockchain_clone = Arc::clone(blockchain);
-                                let peer_ip_clone = self.peer_ip.clone();
-                                let peer_registry_clone = Arc::clone(peer_registry);
-                                let needs_genesis_check = needs_deep_resolution;
-
-                                tokio::spawn(async move {
-                                    // Brief pause to allow peer to update chain tip
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(500))
-                                        .await;
-
-                                    // If persistent fork, verify genesis compatibility first
-                                    if needs_genesis_check {
-                                        if let Ok(genesis) = blockchain_clone.get_block(0) {
-                                            let our_genesis_hash = genesis.hash();
-                                            let is_compatible = (*peer_registry_clone)
-                                                .verify_genesis_compatibility(
-                                                    &peer_ip_clone,
-                                                    our_genesis_hash,
-                                                )
-                                                .await;
-
-                                            if !is_compatible {
-                                                tracing::error!(
-                                                    "🚫 Peer {} is running incompatible software - cannot resolve fork",
-                                                    peer_ip_clone
-                                                );
-                                                return;
-                                            }
-                                            tracing::info!(
-                                                "✅ Genesis compatible with {} - proceeding with fork resolution",
-                                                peer_ip_clone
-                                            );
-                                        }
-                                    }
-
-                                    // Try to resolve the fork by finding common ancestor
-                                    if let Some((consensus_height, consensus_peer)) =
-                                        blockchain_clone.compare_chain_with_peers().await
-                                    {
-                                        let our_height = blockchain_clone.get_height();
-
-                                        if consensus_height < our_height {
-                                            // We have the longer chain - peers should sync to us
-                                            tracing::info!(
-                                                "📈 We have longer chain ({} vs consensus {}), broadcasting blocks to help peers sync",
-                                                our_height, consensus_height
-                                            );
-                                        } else {
-                                            tracing::info!(
-                                                "🔀 Fork resolution: syncing from {} (our height: {}, consensus: {})",
-                                                consensus_peer, our_height, consensus_height
-                                            );
-
-                                            // sync_from_specific_peer handles rollback and sync
-                                            if let Err(e) = blockchain_clone
-                                                .sync_from_specific_peer(&consensus_peer)
-                                                .await
-                                            {
-                                                tracing::error!(
-                                                    "❌ Failed to sync during fork resolution: {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    } else {
-                                        // No consensus found - try to resolve fork with this specific peer
-                                        tracing::info!(
-                                            "🔀 No consensus found, attempting direct fork resolution with {}",
-                                            peer_ip_clone
-                                        );
-                                    }
-                                });
-                            }
-                            skipped += 1;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "⚠️ Failed to add block {} from {}: {}",
-                                block.header.height, self.peer_ip, e
-                            );
-                            skipped += 1;
-                        }
-                    }
-                }
-
-                // Report results
-                if added > 0 {
-                    info!(
-                        "✅ Added {} blocks from {} (skipped {}{})",
-                        added,
-                        self.peer_ip,
-                        skipped,
-                        if fork_detected { ", fork detected" } else { "" }
-                    );
-                    *self.invalid_block_count.write().await = 0;
-                } else if skipped > 0 {
-                    warn!(
-                        "⚠️ All {} blocks skipped from {}{}",
-                        skipped,
-                        self.peer_ip,
-                        if fork_detected {
-                            " (fork detected)"
-                        } else {
-                            ""
-                        }
-                    );
-                }
-
-                // If fork was detected, immediate resolution was triggered
-                // This applies to BOTH whitelisted and non-whitelisted peers
-                if fork_detected {
-                    info!(
-                        "🔄 Fork with {} - immediate resolution check initiated",
-                        self.peer_ip
-                    );
                 }
             }
             NetworkMessage::BlockInventory(block_height) => {

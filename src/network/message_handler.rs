@@ -308,11 +308,17 @@ impl MessageHandler {
                 .await
             }
 
-            // === Response Messages (handled by caller) ===
+            // === Chain Synchronization Response Messages ===
+            NetworkMessage::ChainTipResponse { height, hash } => {
+                self.handle_chain_tip_response(*height, *hash, context)
+                    .await
+            }
+            NetworkMessage::BlocksResponse(blocks) | NetworkMessage::BlockRangeResponse(blocks) => {
+                self.handle_blocks_response(blocks.clone(), context).await
+            }
+
+            // === Other Response Messages (handled by caller) ===
             NetworkMessage::BlockHeightResponse(_)
-            | NetworkMessage::ChainTipResponse { .. }
-            | NetworkMessage::BlocksResponse(_)
-            | NetworkMessage::BlockRangeResponse(_)
             | NetworkMessage::BlockHashResponse { .. }
             | NetworkMessage::UTXOStateResponse(_)
             | NetworkMessage::UTXOSetResponse(_)
@@ -1743,6 +1749,270 @@ impl MessageHandler {
                 request_from,
                 consensus_height + 5,
             )));
+        }
+
+        Ok(None)
+    }
+
+    /// Handle ChainTipResponse - centralized fork detection and sync triggering
+    ///
+    /// This replaces the duplicated logic that was in peer_connection.rs
+    async fn handle_chain_tip_response(
+        &self,
+        peer_height: u64,
+        peer_hash: [u8; 32],
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let our_height = context.blockchain.get_height();
+        let our_hash = context
+            .blockchain
+            .get_block_hash(our_height)
+            .unwrap_or([0u8; 32]);
+
+        // Update peer registry with their height and chain tip
+        context
+            .peer_registry
+            .set_peer_height(&self.peer_ip, peer_height)
+            .await;
+        context
+            .peer_registry
+            .update_peer_chain_tip(&self.peer_ip, peer_height, peer_hash)
+            .await;
+
+        info!(
+            "📥 [{}] Received ChainTipResponse from {}: height {} hash {} (our height: {})",
+            self.direction,
+            self.peer_ip,
+            peer_height,
+            hex::encode(&peer_hash[..8]),
+            our_height
+        );
+
+        if peer_height == our_height {
+            // Same height - check if same hash (on same chain)
+            if peer_hash != our_hash {
+                // FORK DETECTED - same height but different blocks!
+                warn!(
+                    "🔀 [{}] FORK with {} at height {}: our {} vs their {}",
+                    self.direction,
+                    self.peer_ip,
+                    peer_height,
+                    hex::encode(&our_hash[..8]),
+                    hex::encode(&peer_hash[..8])
+                );
+
+                // Check consensus - if we have majority, alert the peer
+                let all_peers = context.peer_registry.get_connected_peers().await;
+                let mut our_chain_count = 1; // Count ourselves
+                let mut peer_chain_count = 0;
+
+                for peer_addr in &all_peers {
+                    if let Some((peer_h, p_hash)) =
+                        context.peer_registry.get_peer_chain_tip(peer_addr).await
+                    {
+                        if peer_h == our_height {
+                            if p_hash == our_hash {
+                                our_chain_count += 1;
+                            } else if p_hash == peer_hash {
+                                peer_chain_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                // If we have consensus and peer is on minority fork, send alert
+                if our_chain_count > peer_chain_count && our_chain_count >= 3 {
+                    info!(
+                        "📢 [{}] We have consensus ({} vs {} peers) at height {} - sending fork alert to {}",
+                        self.direction, our_chain_count, peer_chain_count, peer_height, self.peer_ip
+                    );
+
+                    // Return ForkAlert message to be sent
+                    return Ok(Some(NetworkMessage::ForkAlert {
+                        your_height: peer_height,
+                        your_hash: peer_hash,
+                        consensus_height: our_height,
+                        consensus_hash: our_hash,
+                        consensus_peer_count: our_chain_count,
+                        message: format!(
+                            "You're on a minority fork at height {}. {} peers (including us) are on consensus chain with hash {}",
+                            peer_height,
+                            our_chain_count,
+                            hex::encode(&our_hash[..8])
+                        ),
+                    }));
+                }
+
+                // Request blocks for fork resolution
+                let request_from = peer_height.saturating_sub(10);
+                info!(
+                    "🔄 [{}] Requesting blocks {}-{} from {} for fork resolution",
+                    self.direction,
+                    request_from,
+                    peer_height + 5,
+                    self.peer_ip
+                );
+                return Ok(Some(NetworkMessage::GetBlocks(
+                    request_from,
+                    peer_height + 5,
+                )));
+            } else {
+                debug!(
+                    "✅ [{}] Peer {} on same chain at height {}",
+                    self.direction, self.peer_ip, peer_height
+                );
+            }
+        } else if peer_height > our_height {
+            // Peer is ahead - we need to sync
+            info!(
+                "📈 [{}] Peer {} ahead at height {} (we have {}), requesting blocks",
+                self.direction, self.peer_ip, peer_height, our_height
+            );
+            return Ok(Some(NetworkMessage::GetBlocks(
+                our_height + 1,
+                peer_height + 1,
+            )));
+        } else {
+            // We're ahead - peer might need to sync from us
+            debug!(
+                "📉 [{}] Peer {} behind at height {} (we have {})",
+                self.direction, self.peer_ip, peer_height, our_height
+            );
+        }
+
+        Ok(None)
+    }
+
+    /// Handle BlocksResponse/BlockRangeResponse - centralized block processing
+    ///
+    /// This replaces the duplicated logic that was in peer_connection.rs
+    async fn handle_blocks_response(
+        &self,
+        blocks: Vec<Block>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let block_count = blocks.len();
+        if block_count == 0 {
+            debug!(
+                "📥 [{}] Received empty blocks response from {}",
+                self.direction, self.peer_ip
+            );
+            return Ok(None);
+        }
+
+        let start_height = blocks.first().map(|b| b.header.height).unwrap_or(0);
+        let end_height = blocks.last().map(|b| b.header.height).unwrap_or(0);
+
+        // Check if peer is whitelisted
+        let is_whitelisted = context.peer_registry.is_whitelisted(&self.peer_ip).await;
+
+        info!(
+            "📥 [{}] Received {} blocks (height {}-{}) from {} {}",
+            self.direction,
+            block_count,
+            start_height,
+            end_height,
+            self.peer_ip,
+            if is_whitelisted { "(whitelisted)" } else { "" }
+        );
+
+        // Try to add blocks sequentially
+        let mut added = 0;
+        let mut skipped = 0;
+        let mut fork_detected = false;
+
+        for block in blocks.iter() {
+            // Validate block has non-zero previous_hash (except genesis at height 0)
+            if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
+                warn!(
+                    "⚠️ [{}] Peer {} sent corrupt block {} with zero previous_hash - skipping",
+                    self.direction, self.peer_ip, block.header.height
+                );
+                skipped += 1;
+                if is_whitelisted {
+                    warn!(
+                        "⚠️ [{}] Whitelisted peer {} sent corrupt block - data quality issue!",
+                        self.direction, self.peer_ip
+                    );
+                }
+                continue;
+            }
+
+            match context
+                .blockchain
+                .add_block_with_fork_handling(block.clone())
+                .await
+            {
+                Ok(true) => {
+                    added += 1;
+
+                    // Reset persistent fork error counter on successful block
+                    context.peer_registry.reset_fork_errors(&self.peer_ip);
+
+                    // Clear incompatible status if blocks now work
+                    if added == 1 {
+                        context
+                            .peer_registry
+                            .clear_incompatible(&self.peer_ip)
+                            .await;
+                    }
+                }
+                Ok(false) => {
+                    // Block already exists or is not next in chain
+                    skipped += 1;
+                }
+                Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
+                    fork_detected = true;
+                    skipped += 1;
+
+                    debug!(
+                        "🔀 [{}] Fork detected from {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+
+                    // Track fork errors
+                    let error_count = context.peer_registry.increment_fork_errors(&self.peer_ip);
+
+                    // Check if this is a persistent fork (many consecutive errors)
+                    if error_count >= 50 {
+                        warn!(
+                            "🔀 [{}] Persistent fork with peer {} ({} errors) - needs fork resolution (finding common ancestor)",
+                            self.direction, self.peer_ip, error_count
+                        );
+                        warn!(
+                            "🔀 [{}] Fork detected with peer {} at height {}: {}",
+                            self.direction, self.peer_ip, block.header.height, e
+                        );
+
+                        // Trigger immediate fork resolution check
+                        info!(
+                            "🔄 [{}] Fork with {} - immediate resolution check initiated",
+                            self.direction, self.peer_ip
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "❌ [{}] Failed to add block {} from {}: {}",
+                        self.direction, block.header.height, self.peer_ip, e
+                    );
+                    skipped += 1;
+                }
+            }
+        }
+
+        if added > 0 {
+            info!(
+                "✅ [{}] Added {} blocks from {} (skipped {})",
+                self.direction, added, self.peer_ip, skipped
+            );
+        }
+
+        if fork_detected {
+            warn!(
+                "⚠️ [{}] All {} blocks skipped from {} (fork detected)",
+                self.direction, block_count, self.peer_ip
+            );
         }
 
         Ok(None)

@@ -370,6 +370,24 @@ impl PeerConnectionRegistry {
         }
     }
 
+    /// Increment fork error count and return the new count
+    pub fn increment_fork_errors(&self, peer_ip: &str) -> u32 {
+        let ip_only = extract_ip(peer_ip).to_string();
+        let count = self
+            .fork_error_counts
+            .entry(ip_only)
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+        *count
+    }
+
+    /// Get list of whitelisted peer IPs
+    pub fn get_whitelisted_peers(&self) -> Vec<String> {
+        // For now, return empty vec since whitelisting is checked per-peer
+        // In the future, could maintain a cached list
+        vec![]
+    }
+
     /// Get list of compatible connected peers (excludes currently incompatible ones)
     pub async fn get_compatible_peers(&self) -> Vec<String> {
         // First, clean up expired incompatible entries
