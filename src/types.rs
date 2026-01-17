@@ -559,3 +559,255 @@ impl FallbackVote {
         Ok(())
     }
 }
+
+// ============================================================================
+// UNIT TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+
+    /// Helper to create a test signing key
+    fn test_signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[42u8; 32])
+    }
+
+    /// Helper to create a test transaction
+    fn test_transaction() -> Transaction {
+        Transaction {
+            version: 1,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                value: 1000,
+                script_pubkey: vec![0x76, 0xa9], // OP_DUP OP_HASH160
+            }],
+            lock_time: 0,
+            timestamp: 1234567890,
+        }
+    }
+
+    #[test]
+    fn test_transaction_status_terminal() {
+        let status = TransactionStatus::GloballyFinalized {
+            finalized_at: 1000,
+            vfp_weight: 100,
+        };
+        assert!(status.is_terminal());
+        assert!(!status.is_pending());
+
+        let status = TransactionStatus::Rejected {
+            rejected_at: 1000,
+            reason: "test".to_string(),
+        };
+        assert!(status.is_terminal());
+
+        let status = TransactionStatus::Archived {
+            block_height: 100,
+            archived_at: 1000,
+        };
+        assert!(status.is_terminal());
+    }
+
+    #[test]
+    fn test_transaction_status_pending() {
+        let status = TransactionStatus::Seen;
+        assert!(status.is_pending());
+        assert!(!status.is_terminal());
+
+        let status = TransactionStatus::Sampling {
+            confidence: 5,
+            counter: 10,
+            started_at: 1000,
+        };
+        assert!(status.is_pending());
+
+        let status = TransactionStatus::LocallyAccepted { accepted_at: 1000 };
+        assert!(status.is_pending());
+
+        let status = TransactionStatus::FallbackResolution {
+            started_at: 1000,
+            round: 1,
+            alerts_count: 3,
+        };
+        assert!(status.is_pending());
+    }
+
+    #[test]
+    fn test_liveness_alert_signature() {
+        let signing_key = test_signing_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let tx_hash: Hash256 = Sha256::digest(bincode::serialize(&tx).unwrap()).into();
+
+        let mut alert = LivenessAlert {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: tx_hash,
+            slot_index: 100,
+            poll_history: vec![PollResult {
+                round: 1,
+                votes_valid: 10,
+                votes_invalid: 5,
+                votes_unknown: 3,
+                timestamp_ms: 1234567890,
+            }],
+            current_confidence: 5,
+            stall_duration_ms: 30000,
+            reporter_mn_id: "test_mn".to_string(),
+            reporter_signature: Vec::new(),
+        };
+
+        // Sign the alert
+        let msg = alert.signing_message();
+        let signature = signing_key.sign(&msg);
+        alert.reporter_signature = signature.to_bytes().to_vec();
+
+        // Verify signature
+        let verifying_key = signing_key.verifying_key();
+        assert!(alert.verify(&verifying_key).is_ok());
+
+        // Test with wrong key
+        let wrong_key = SigningKey::from_bytes(&[99u8; 32]);
+        assert!(alert.verify(&wrong_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn test_finality_proposal_hash() {
+        let _signing_key = test_signing_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let tx_hash: Hash256 = Sha256::digest(bincode::serialize(&tx).unwrap()).into();
+
+        let proposal = FinalityProposal {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: tx_hash,
+            slot_index: 100,
+            decision: FallbackDecision::Accept,
+            justification: "Test".to_string(),
+            leader_mn_id: "leader1".to_string(),
+            leader_signature: Vec::new(),
+        };
+
+        // Proposal hash should be deterministic
+        let hash1 = proposal.proposal_hash();
+        let hash2 = proposal.proposal_hash();
+        assert_eq!(hash1, hash2);
+
+        // Different decision should give different hash
+        let proposal2 = FinalityProposal {
+            decision: FallbackDecision::Reject,
+            ..proposal.clone()
+        };
+        assert_ne!(proposal.proposal_hash(), proposal2.proposal_hash());
+    }
+
+    #[test]
+    fn test_finality_proposal_signature() {
+        let signing_key = test_signing_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let tx_hash: Hash256 = Sha256::digest(bincode::serialize(&tx).unwrap()).into();
+
+        let mut proposal = FinalityProposal {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: tx_hash,
+            slot_index: 100,
+            decision: FallbackDecision::Accept,
+            justification: "Test".to_string(),
+            leader_mn_id: "leader1".to_string(),
+            leader_signature: Vec::new(),
+        };
+
+        // Sign the proposal
+        let msg = proposal.signing_message();
+        let signature = signing_key.sign(&msg);
+        proposal.leader_signature = signature.to_bytes().to_vec();
+
+        // Verify signature
+        let verifying_key = signing_key.verifying_key();
+        assert!(proposal.verify(&verifying_key).is_ok());
+
+        // Test with wrong key
+        let wrong_key = SigningKey::from_bytes(&[99u8; 32]);
+        assert!(proposal.verify(&wrong_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn test_fallback_vote_signature() {
+        let signing_key = test_signing_key();
+        let proposal_hash = [42u8; 32];
+
+        let mut vote = FallbackVote {
+            chain_id: 1,
+            proposal_hash,
+            vote: FallbackVoteDecision::Approve,
+            voter_mn_id: "voter1".to_string(),
+            voter_weight: 1000,
+            voter_signature: Vec::new(),
+        };
+
+        // Sign the vote
+        let msg = vote.signing_message();
+        let signature = signing_key.sign(&msg);
+        vote.voter_signature = signature.to_bytes().to_vec();
+
+        // Verify signature
+        let verifying_key = signing_key.verifying_key();
+        assert!(vote.verify(&verifying_key).is_ok());
+
+        // Test with wrong key
+        let wrong_key = SigningKey::from_bytes(&[99u8; 32]);
+        assert!(vote.verify(&wrong_key.verifying_key()).is_err());
+    }
+
+    #[test]
+    fn test_poll_result_serialization() {
+        let poll = PollResult {
+            round: 1,
+            votes_valid: 10,
+            votes_invalid: 5,
+            votes_unknown: 3,
+            timestamp_ms: 1234567890,
+        };
+
+        // Test serialization
+        let serialized = bincode::serialize(&poll).unwrap();
+        let deserialized: PollResult = bincode::deserialize(&serialized).unwrap();
+
+        assert_eq!(poll.round, deserialized.round);
+        assert_eq!(poll.votes_valid, deserialized.votes_valid);
+        assert_eq!(poll.votes_invalid, deserialized.votes_invalid);
+        assert_eq!(poll.votes_unknown, deserialized.votes_unknown);
+        assert_eq!(poll.timestamp_ms, deserialized.timestamp_ms);
+    }
+
+    #[test]
+    fn test_fallback_decision_enum() {
+        // Test equality
+        assert_eq!(FallbackDecision::Accept, FallbackDecision::Accept);
+        assert_eq!(FallbackDecision::Reject, FallbackDecision::Reject);
+        assert_ne!(FallbackDecision::Accept, FallbackDecision::Reject);
+
+        // Test clone
+        let decision = FallbackDecision::Accept;
+        let cloned = decision.clone();
+        assert_eq!(decision, cloned);
+    }
+
+    #[test]
+    fn test_fallback_vote_decision_enum() {
+        // Test equality
+        assert_eq!(FallbackVoteDecision::Approve, FallbackVoteDecision::Approve);
+        assert_eq!(FallbackVoteDecision::Reject, FallbackVoteDecision::Reject);
+        assert_ne!(FallbackVoteDecision::Approve, FallbackVoteDecision::Reject);
+
+        // Test clone
+        let decision = FallbackVoteDecision::Approve;
+        let cloned = decision.clone();
+        assert_eq!(decision, cloned);
+    }
+}

@@ -41,6 +41,10 @@ const MAX_TX_SIZE: usize = 1_000_000; // 1MB
 const MIN_TX_FEE: u64 = 1_000; // 0.00001 TIME minimum fee
 const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
 
+// §7.6 Liveness Fallback Protocol Parameters
+const STALL_TIMEOUT: Duration = Duration::from_secs(30); // Protocol §7.6.1
+const FALLBACK_MIN_DURATION: Duration = Duration::from_secs(20); // Protocol §7.6.3
+
 type BroadcastCallback = Arc<TokioRwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>>>;
 
 struct NodeIdentity {
@@ -484,6 +488,14 @@ pub struct AvalancheConsensus {
     /// Phase 3E: Precommit vote accumulator for Avalanche blocks
     precommit_votes: Arc<PrecommitVoteAccumulator>,
 
+    /// §7.6 Liveness Fallback: Transaction status tracking
+    /// Per protocol §7.3 and §7.6 - explicit state machine
+    tx_status: Arc<DashMap<Hash256, TransactionStatus>>,
+
+    /// §7.6 Liveness Fallback: Stall detection timers
+    /// Tracks when transactions entered Sampling state for timeout detection
+    stall_timers: Arc<DashMap<Hash256, Instant>>,
+
     /// Metrics
     rounds_executed: AtomicUsize,
     txs_finalized: AtomicUsize,
@@ -513,6 +525,8 @@ impl AvalancheConsensus {
             vfp_votes: DashMap::new(),
             prepare_votes: Arc::new(PrepareVoteAccumulator::new()),
             precommit_votes: Arc::new(PrecommitVoteAccumulator::new()),
+            tx_status: Arc::new(DashMap::new()),
+            stall_timers: Arc::new(DashMap::new()),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
         })
@@ -1784,6 +1798,140 @@ impl ConsensusEngine {
         self.avalanche.cleanup_old_finalized(retention_secs)
     }
 
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - State Management
+    // ========================================================================
+
+    /// Start monitoring a transaction for stall detection (§7.6.1)
+    /// Call this when a transaction enters Sampling state
+    pub fn start_stall_timer(&self, txid: Hash256) {
+        self.avalanche.stall_timers.insert(txid, Instant::now());
+        tracing::debug!("Started stall timer for transaction {}", hex::encode(txid));
+    }
+
+    /// Check if a transaction has exceeded the stall timeout (§7.6.1)
+    /// Returns true if transaction has been in Sampling for > STALL_TIMEOUT
+    pub fn check_stall_timeout(&self, txid: &Hash256) -> bool {
+        if let Some(entry) = self.avalanche.stall_timers.get(txid) {
+            let elapsed = entry.value().elapsed();
+            elapsed > STALL_TIMEOUT
+        } else {
+            false
+        }
+    }
+
+    /// Stop monitoring a transaction (remove stall timer)
+    /// Call when transaction reaches terminal state
+    pub fn stop_stall_timer(&self, txid: &Hash256) {
+        self.avalanche.stall_timers.remove(txid);
+    }
+
+    /// Set transaction status (§7.3 state machine)
+    pub fn set_tx_status(&self, txid: Hash256, status: TransactionStatus) {
+        self.avalanche.tx_status.insert(txid, status);
+    }
+
+    /// Get transaction status
+    pub fn get_tx_status(&self, txid: &Hash256) -> Option<TransactionStatus> {
+        self.avalanche.tx_status.get(txid).map(|r| r.clone())
+    }
+
+    /// Transition transaction to Sampling state (§7.3)
+    pub fn transition_to_sampling(&self, txid: Hash256) {
+        let status = TransactionStatus::Sampling {
+            confidence: 0,
+            counter: 0,
+            started_at: chrono::Utc::now().timestamp_millis(),
+        };
+        self.set_tx_status(txid, status);
+        self.start_stall_timer(txid);
+        tracing::debug!("Transaction {} → Sampling", hex::encode(txid));
+    }
+
+    /// Transition transaction to LocallyAccepted state (§7.5)
+    pub fn transition_to_locally_accepted(&self, txid: Hash256) {
+        let status = TransactionStatus::LocallyAccepted {
+            accepted_at: chrono::Utc::now().timestamp_millis(),
+        };
+        self.set_tx_status(txid, status);
+        self.stop_stall_timer(&txid);
+        tracing::info!("Transaction {} → LocallyAccepted", hex::encode(txid));
+    }
+
+    /// Transition transaction to FallbackResolution state (§7.6.4)
+    pub fn transition_to_fallback_resolution(&self, txid: Hash256, alerts_count: u32) {
+        let status = TransactionStatus::FallbackResolution {
+            started_at: chrono::Utc::now().timestamp_millis(),
+            round: 0,
+            alerts_count,
+        };
+        self.set_tx_status(txid, status);
+        self.stop_stall_timer(&txid);
+        tracing::warn!(
+            "Transaction {} → FallbackResolution (alerts: {})",
+            hex::encode(txid),
+            alerts_count
+        );
+    }
+
+    /// Transition transaction to GloballyFinalized state (§8)
+    pub fn transition_to_globally_finalized(&self, txid: Hash256, vfp_weight: u64) {
+        let status = TransactionStatus::GloballyFinalized {
+            finalized_at: chrono::Utc::now().timestamp_millis(),
+            vfp_weight,
+        };
+        self.set_tx_status(txid, status);
+        self.stop_stall_timer(&txid);
+        tracing::info!(
+            "Transaction {} → GloballyFinalized (weight: {})",
+            hex::encode(txid),
+            vfp_weight
+        );
+    }
+
+    /// Transition transaction to Rejected state
+    pub fn transition_to_rejected(&self, txid: Hash256, reason: String) {
+        let status = TransactionStatus::Rejected {
+            rejected_at: chrono::Utc::now().timestamp_millis(),
+            reason: reason.clone(),
+        };
+        self.set_tx_status(txid, status);
+        self.stop_stall_timer(&txid);
+        tracing::info!("Transaction {} → Rejected: {}", hex::encode(txid), reason);
+    }
+
+    /// Get all transactions in a specific status
+    pub fn get_transactions_by_status(&self, target_status: &TransactionStatus) -> Vec<Hash256> {
+        self.avalanche
+            .tx_status
+            .iter()
+            .filter_map(|entry| {
+                let (txid, status) = entry.pair();
+                if std::mem::discriminant(status) == std::mem::discriminant(target_status) {
+                    Some(*txid)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get all stalled transactions (in Sampling for > STALL_TIMEOUT)
+    pub fn get_stalled_transactions(&self) -> Vec<Hash256> {
+        self.avalanche
+            .stall_timers
+            .iter()
+            .filter_map(|entry| {
+                let (txid, start_time) = entry.pair();
+                if start_time.elapsed() > STALL_TIMEOUT {
+                    Some(*txid)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Get memory usage statistics from consensus engine
     pub fn memory_stats(&self) -> ConsensusMemoryStats {
         self.avalanche.memory_stats()
@@ -1978,5 +2126,102 @@ mod tests {
             ..Default::default()
         };
         assert!(AvalancheConsensus::new(config).is_err());
+    }
+}
+
+// ============================================================================
+// §7.6 LIVENESS FALLBACK PROTOCOL - Leader Election
+// ============================================================================
+
+/// Compute deterministic fallback leader for a stalled transaction (§7.6.4 Step 2)
+///
+/// Uses `H(txid || slot_index || mn_pubkey)` to select leader independently on all nodes.
+/// All nodes compute the same leader without message exchange.
+///
+/// # Arguments
+/// * `txid` - The stalled transaction ID
+/// * `slot_index` - Current slot index (for timeout advancement)
+/// * `avs` - Active Validator Set snapshot
+///
+/// # Returns
+/// * `Some(mn_id)` - The masternode ID of the elected leader
+/// * `None` - If AVS is empty
+pub fn compute_fallback_leader(
+    txid: &Hash256,
+    slot_index: u64,
+    avs: &[Masternode],
+) -> Option<String> {
+    if avs.is_empty() {
+        return None;
+    }
+
+    // Compute hash score for each masternode
+    let mut scores: Vec<(Hash256, String)> = avs
+        .iter()
+        .map(|mn| {
+            let mut hasher = Sha256::new();
+            hasher.update(txid);
+            hasher.update(slot_index.to_le_bytes());
+            hasher.update(mn.public_key.as_bytes());
+            let score: Hash256 = hasher.finalize().into();
+            (score, mn.address.clone())
+        })
+        .collect();
+
+    // Leader is the masternode with minimum hash score
+    scores.sort_by(|a, b| a.0.cmp(&b.0));
+
+    scores.first().map(|(_, mn_id)| mn_id.clone())
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    #[test]
+    fn test_compute_fallback_leader_deterministic() {
+        // Create test masternodes
+        let mut avs = Vec::new();
+        for i in 0..5 {
+            let signing_key = SigningKey::from_bytes(&[i; 32]);
+            avs.push(Masternode {
+                address: format!("mn{}", i),
+                wallet_address: format!("wallet{}", i),
+                collateral: 1000,
+                public_key: signing_key.verifying_key(),
+                tier: MasternodeTier::Bronze,
+                registered_at: 0,
+            });
+        }
+
+        let txid = [1u8; 32];
+        let slot_index = 100;
+
+        // Compute leader twice - should be same
+        let leader1 = compute_fallback_leader(&txid, slot_index, &avs);
+        let leader2 = compute_fallback_leader(&txid, slot_index, &avs);
+        assert_eq!(leader1, leader2);
+        assert!(leader1.is_some());
+
+        // Different slot should give potentially different leader
+        let leader3 = compute_fallback_leader(&txid, slot_index + 1, &avs);
+        assert!(leader3.is_some());
+        // May or may not be different, but function should work
+
+        // Different txid should give potentially different leader
+        let txid2 = [2u8; 32];
+        let leader4 = compute_fallback_leader(&txid2, slot_index, &avs);
+        assert!(leader4.is_some());
+    }
+
+    #[test]
+    fn test_compute_fallback_leader_empty_avs() {
+        let txid = [1u8; 32];
+        let slot_index = 100;
+        let avs: Vec<Masternode> = Vec::new();
+
+        let leader = compute_fallback_leader(&txid, slot_index, &avs);
+        assert!(leader.is_none());
     }
 }
