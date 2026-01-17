@@ -675,7 +675,11 @@ impl Blockchain {
     /// 4. Validate each block independently
     ///
     /// NOTE: If peers don't have blocks, they'll be produced on TSDC schedule
-    pub async fn sync_from_peers(&self) -> Result<(), String> {
+    ///
+    /// # Arguments
+    /// * `target_height` - Optional target height to sync to. If None, uses time-based calculation.
+    ///   Used during fork resolution to sync to peer consensus height.
+    pub async fn sync_from_peers(&self, target_height: Option<u64>) -> Result<(), String> {
         // Check if already syncing - prevent concurrent syncs
         if self.is_syncing.load(Ordering::Acquire) {
             tracing::debug!("⏭️  Sync already in progress, skipping duplicate request");
@@ -690,31 +694,42 @@ impl Blockchain {
         });
 
         let mut current = self.current_height.load(Ordering::Acquire);
+
+        // Use provided target height (from consensus) or calculate from time
         let time_expected = self.calculate_expected_height();
+        let target = target_height.unwrap_or(time_expected);
 
         // Debug logging for genesis timestamp issue
         let now = chrono::Utc::now().timestamp();
         let genesis_ts = self.genesis_timestamp();
+        let source = if target_height.is_some() {
+            "peer consensus"
+        } else {
+            "time-based calculation"
+        };
         tracing::debug!(
-            "🔍 Sync calculation: current={}, time_expected={}, now={}, genesis={}, elapsed={}",
+            "🔍 Sync calculation: current={}, target={} ({}), time_expected={}, now={}, genesis={}, elapsed={}",
             current,
+            target,
+            source,
             time_expected,
             now,
             genesis_ts,
             now - genesis_ts
         );
 
-        if current >= time_expected {
+        if current >= target {
             tracing::info!("✓ Blockchain synced (height: {})", current);
             return Ok(());
         }
 
-        let behind = time_expected - current;
+        let behind = target - current;
         tracing::info!(
-            "⏳ Syncing from peers: {} → {} ({} blocks behind based on time)",
+            "⏳ Syncing from peers: {} → {} ({} blocks behind via {})",
             current,
-            time_expected,
-            behind
+            target,
+            behind,
+            source
         );
 
         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
@@ -748,13 +763,13 @@ impl Blockchain {
             let starting_height = current;
 
             tracing::info!(
-                "📍 Starting sync loop: current={}, expected={}, timeout={}s",
+                "📍 Starting sync loop: current={}, target={}, timeout={}s",
                 current,
-                time_expected,
+                target,
                 max_sync_time.as_secs()
             );
 
-            while current < time_expected && sync_start.elapsed() < max_sync_time {
+            while current < target && sync_start.elapsed() < max_sync_time {
                 // Request next batch of blocks
                 // Always start from 0 when current is 0 (need genesis)
                 // Otherwise start from current + 1 (need next block after our tip)
@@ -763,7 +778,7 @@ impl Blockchain {
                 } else {
                     current + 1 // Request next block after our tip
                 };
-                let batch_end = (batch_start + 100).min(time_expected);
+                let batch_end = (batch_start + 100).min(target);
 
                 let req = NetworkMessage::GetBlocks(batch_start, batch_end);
                 tracing::info!(
@@ -1068,17 +1083,21 @@ impl Blockchain {
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
                 // This uses fresh chain tip data we just requested
-                if let Some((_consensus_height, sync_peer)) = self.compare_chain_with_peers().await
-                {
+                if let Some((consensus_height, sync_peer)) = self.compare_chain_with_peers().await {
                     // Fork detected by consensus mechanism
                     info!(
-                        "🔀 Sync coordinator: Fork detected via consensus, syncing from {}",
+                        "🔀 Sync coordinator: Fork detected via consensus at height {}, syncing from {}",
+                        consensus_height,
                         sync_peer
                     );
                     if !already_syncing {
                         let blockchain_clone = Arc::clone(&self);
                         tokio::spawn(async move {
-                            if let Err(e) = blockchain_clone.sync_from_peers().await {
+                            // CRITICAL FIX: Pass consensus height to sync, not time-based height
+                            if let Err(e) = blockchain_clone
+                                .sync_from_peers(Some(consensus_height))
+                                .await
+                            {
                                 warn!("⚠️  Consensus fork sync failed: {}", e);
                             }
                         });
@@ -1130,7 +1149,7 @@ impl Blockchain {
                     // Initiate sync
                     let blockchain_clone = Arc::clone(&self);
                     tokio::spawn(async move {
-                        if let Err(e) = blockchain_clone.sync_from_peers().await {
+                        if let Err(e) = blockchain_clone.sync_from_peers(None).await {
                             warn!("⚠️  Sync coordinator sync failed: {}", e);
                         }
                     });
@@ -1143,7 +1162,7 @@ impl Blockchain {
                         );
                         let blockchain_clone = Arc::clone(&self);
                         tokio::spawn(async move {
-                            if let Err(e) = blockchain_clone.sync_from_peers().await {
+                            if let Err(e) = blockchain_clone.sync_from_peers(None).await {
                                 warn!("⚠️  Sync coordinator time-based sync failed: {}", e);
                             }
                         });
@@ -3603,54 +3622,25 @@ impl Blockchain {
         }
 
         // Case 3: We're ahead of consensus
+        // LONGEST CHAIN RULE: If we have a valid longer chain, WE are canonical
+        // Other nodes should sync TO us, not the other way around
         if our_height > consensus_height {
-            // Check if we share the same chain history as consensus
-            // Our block at consensus_height should match consensus_hash if we're on the same chain
-            let our_block_at_consensus_height = match self.get_block_hash(consensus_height) {
-                Ok(hash) => hash,
-                Err(_) => {
-                    // Can't verify - don't roll back
-                    return None;
-                }
-            };
-
             let our_chain_peer_count = chain_counts
                 .get(&(our_height, our_hash))
                 .map(|peers| peers.len())
                 .unwrap_or(0);
 
-            if our_block_at_consensus_height == consensus_hash {
-                // We're on the same chain as consensus, just ahead - this is fine
-                // LONGEST CHAIN RULE: We have a longer chain on the SAME fork
-                tracing::info!(
-                    "📈 We're ahead of network: our height {} > consensus {} ({} peers behind, {} peers with us) - same chain ✓",
-                    our_height,
-                    consensus_height,
-                    consensus_peers.len(),
-                    our_chain_peer_count
-                );
-                // Don't roll back - peers will sync to us
-                return None;
-            } else {
-                // CRITICAL: We're on a DIFFERENT FORK than consensus!
-                // Even though we have more blocks, our chain diverged from the majority
-                // This means we're on a minority fork and need to roll back to rejoin the network
-                tracing::error!(
-                    "🚨 FORK DIVERGENCE: We're at height {} but our block at consensus height {} is {} (consensus: {})",
-                    our_height,
-                    consensus_height,
-                    hex::encode(&our_block_at_consensus_height[..8]),
-                    hex::encode(&consensus_hash[..8])
-                );
-                tracing::error!(
-                    "🔄 Rolling back to rejoin consensus chain ({} peers on consensus, {} on our fork)",
-                    consensus_peers.len(),
-                    our_chain_peer_count
-                );
+            tracing::info!(
+                "📈 We have the longest chain: height {} > consensus {} ({} peers behind, {} peers with us)",
+                our_height,
+                consensus_height,
+                consensus_peers.len(),
+                our_chain_peer_count
+            );
 
-                // Return consensus info to trigger rollback and resync
-                return Some((consensus_height, consensus_peers[0].clone()));
-            }
+            // Don't roll back - we ARE the canonical chain
+            // Peers will sync to us when they receive our blocks
+            return None;
         }
 
         // Case 4: Same height, same hash - no fork
@@ -3740,56 +3730,9 @@ impl Blockchain {
                                 consensus_peer
                             );
                         }
-                    } else if consensus_height < our_height {
-                        // compare_chain_with_peers already checked if we're on the same chain
-                        // If we got here (Some returned), it means we're on a DIFFERENT fork
-                        // and need to roll back to rejoin the consensus chain
-                        tracing::error!(
-                            "🔄 Fork divergence detected: rolling back from {} to {} to rejoin consensus",
-                            our_height,
-                            consensus_height
-                        );
-
-                        // Rollback to consensus height
-                        match blockchain.rollback_to_height(consensus_height).await {
-                            Ok(_) => {
-                                tracing::info!(
-                                    "✅ Rolled back to consensus height {}",
-                                    consensus_height
-                                );
-
-                                // Request blocks from consensus peer to get their chain
-                                if let Some(peer_registry) =
-                                    blockchain.peer_registry.read().await.as_ref()
-                                {
-                                    let request_from = consensus_height.saturating_sub(5).max(1);
-                                    let req = NetworkMessage::GetBlocks(
-                                        request_from,
-                                        consensus_height + 50,
-                                    );
-                                    if let Err(e) =
-                                        peer_registry.send_to_peer(&consensus_peer, req).await
-                                    {
-                                        tracing::warn!(
-                                            "⚠️  Failed to request blocks from {}: {}",
-                                            consensus_peer,
-                                            e
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            "📤 Requested blocks {}-{} from consensus peer {}",
-                                            request_from,
-                                            consensus_height + 50,
-                                            consensus_peer
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ Failed to rollback for fork divergence: {}", e);
-                            }
-                        }
                     }
+                    // Note: consensus_height < our_height case is handled by compare_chain_with_peers
+                    // returning None (we don't roll back a longer valid chain)
                 }
             }
         });

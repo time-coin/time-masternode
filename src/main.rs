@@ -663,7 +663,7 @@ async fn main() {
 
         // STEP 4: Sync remaining blocks from peers
         tracing::info!("📦 Syncing blockchain from peers...");
-        if let Err(e) = blockchain_init.sync_from_peers().await {
+        if let Err(e) = blockchain_init.sync_from_peers(None).await {
             tracing::warn!("⚠️  Initial sync from peers: {}", e);
         }
 
@@ -673,7 +673,7 @@ async fn main() {
         }
 
         // Continue syncing if still behind
-        if let Err(e) = blockchain_init.sync_from_peers().await {
+        if let Err(e) = blockchain_init.sync_from_peers(None).await {
             tracing::warn!("⚠️  Block sync from peers: {}", e);
         }
 
@@ -1129,7 +1129,7 @@ async fn main() {
                             "🔀 Fork detected at height {}: syncing to majority chain before producing",
                             current_height
                         );
-                        if let Err(e) = block_blockchain.sync_from_peers().await {
+                        if let Err(e) = block_blockchain.sync_from_peers(None).await {
                             tracing::warn!("⚠️  Sync to majority failed: {}", e);
                         }
                         continue;
@@ -1506,7 +1506,7 @@ async fn main() {
                             );
 
                             // Try to sync from peers first
-                            match status_blockchain.sync_from_peers().await {
+                            match status_blockchain.sync_from_peers(None).await {
                                 Ok(()) => {
                                     tracing::info!("✅ Responsive sync successful via 5-min check");
                                 }

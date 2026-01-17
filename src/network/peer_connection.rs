@@ -1084,49 +1084,97 @@ impl PeerConnection {
                             skipped += 1;
                         }
                         Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
-                            // Record persistent fork error (tracks across multiple requests)
-                            // If threshold is reached, peer is auto-marked incompatible
-                            if peer_registry.record_fork_error(&self.peer_ip).await {
-                                // Peer marked incompatible, stop processing
-                                break;
-                            }
+                            // Record fork error - this tracks persistent forks but does NOT mark incompatible
+                            // Only genesis hash mismatch marks peers as truly incompatible
+                            let needs_deep_resolution =
+                                peer_registry.record_fork_error(&self.peer_ip).await;
 
-                            // Fork detected - trigger immediate resolution check
+                            // Fork detected - trigger fork resolution
                             if !fork_detected {
                                 warn!(
                                     "🔀 Fork detected with peer {} at height {}: {}",
                                     self.peer_ip, block.header.height, e
                                 );
-                                info!("   Triggering immediate fork resolution check");
+
+                                if needs_deep_resolution {
+                                    info!("   Persistent fork - verifying genesis compatibility before resolution");
+                                } else {
+                                    info!("   Triggering immediate fork resolution check");
+                                }
                                 fork_detected = true;
 
-                                // Spawn immediate fork resolution check and handle result
+                                // Spawn fork resolution - verify genesis compatibility first
                                 let blockchain_clone = Arc::clone(blockchain);
+                                let peer_ip_clone = self.peer_ip.clone();
+                                let peer_registry_clone = Arc::clone(peer_registry);
+                                let needs_genesis_check = needs_deep_resolution;
+
                                 tokio::spawn(async move {
                                     // Give it a moment for peer to update chain tip, then check consensus
                                     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-                                    // If compare_chain_with_peers returns Some, it means we need to sync to consensus
-                                    // This handles all cases: minority fork, majority fork, or falling behind
+                                    // If persistent fork, verify genesis compatibility first
+                                    if needs_genesis_check {
+                                        if let Ok(genesis) =
+                                            blockchain_clone.get_block(0)
+                                        {
+                                            let our_genesis_hash = genesis.hash();
+                                            let is_compatible = peer_registry_clone
+                                                .verify_genesis_compatibility(
+                                                    &peer_ip_clone,
+                                                    our_genesis_hash,
+                                                )
+                                                .await;
+
+                                            if !is_compatible {
+                                                tracing::error!(
+                                                    "🚫 Peer {} is running incompatible software - cannot resolve fork",
+                                                    peer_ip_clone
+                                                );
+                                                return;
+                                            }
+                                            tracing::info!(
+                                                "✅ Genesis compatible with {} - proceeding with fork resolution",
+                                                peer_ip_clone
+                                            );
+                                        }
+                                    }
+
+                                    // Try to resolve the fork by finding common ancestor
                                     if let Some((consensus_height, consensus_peer)) =
                                         blockchain_clone.compare_chain_with_peers().await
                                     {
                                         let our_height = blockchain_clone.get_height();
-                                        tracing::info!(
-                                            "🔀 Immediate fork resolution: syncing from {} (our height: {}, consensus: {})",
-                                            consensus_peer, our_height, consensus_height
-                                        );
 
-                                        // sync_from_specific_peer handles both rollback and sync
-                                        if let Err(e) = blockchain_clone
-                                            .sync_from_specific_peer(&consensus_peer)
-                                            .await
-                                        {
-                                            tracing::error!(
-                                                "❌ Failed to sync during fork resolution: {}",
-                                                e
+                                        if consensus_height < our_height {
+                                            // We have the longer chain - peers should sync to us
+                                            tracing::info!(
+                                                "📈 We have longer chain ({} vs consensus {}), broadcasting blocks to help peers sync",
+                                                our_height, consensus_height
                                             );
+                                        } else {
+                                            tracing::info!(
+                                                "🔀 Fork resolution: syncing from {} (our height: {}, consensus: {})",
+                                                consensus_peer, our_height, consensus_height
+                                            );
+
+                                            // sync_from_specific_peer handles rollback and sync
+                                            if let Err(e) = blockchain_clone
+                                                .sync_from_specific_peer(&consensus_peer)
+                                                .await
+                                            {
+                                                tracing::error!(
+                                                    "❌ Failed to sync during fork resolution: {}",
+                                                    e
+                                                );
+                                            }
                                         }
+                                    } else {
+                                        // No consensus found - try to resolve fork with this specific peer
+                                        tracing::info!(
+                                            "🔀 No consensus found, attempting direct fork resolution with {}",
+                                            peer_ip_clone
+                                        );
                                     }
                                 });
                             }
