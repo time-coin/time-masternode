@@ -1119,7 +1119,7 @@ impl PeerConnection {
                                             blockchain_clone.get_block(0)
                                         {
                                             let our_genesis_hash = genesis.hash();
-                                            let is_compatible = peer_registry_clone
+                                            let is_compatible = (*peer_registry_clone)
                                                 .verify_genesis_compatibility(
                                                     &peer_ip_clone,
                                                     our_genesis_hash,
