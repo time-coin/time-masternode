@@ -93,6 +93,73 @@ pub enum UTXOState {
     },
 }
 
+// ============================================================================
+// TRANSACTION STATUS - Per Protocol §7.3 and §7.6
+// ============================================================================
+
+/// Transaction status in the consensus state machine
+/// Per protocol §7.3: status[X] ∈ {Seen, Sampling, LocallyAccepted, GloballyFinalized, Rejected, Archived}
+/// Extended in §7.6 with FallbackResolution state
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TransactionStatus {
+    /// Transaction received, basic validation passed
+    Seen,
+    /// Actively sampling via Avalanche consensus
+    Sampling {
+        confidence: u32,
+        counter: u32,
+        started_at: i64, // Unix timestamp in milliseconds
+    },
+    /// Reached β_local consecutive successful polls (Protocol §7.5)
+    LocallyAccepted {
+        accepted_at: i64,
+    },
+    /// Deterministic fallback resolution in progress (Protocol §7.6)
+    FallbackResolution {
+        started_at: i64,
+        round: u32,
+        alerts_count: u32,
+    },
+    /// Has valid VFP with ≥ Q_finality weight (Protocol §8)
+    GloballyFinalized {
+        finalized_at: i64,
+        vfp_weight: u64,
+    },
+    /// Rejected due to conflict or invalidity
+    Rejected {
+        rejected_at: i64,
+        reason: String,
+    },
+    /// Included in TSDC block, can be pruned
+    Archived {
+        block_height: u64,
+        archived_at: i64,
+    },
+}
+
+impl TransactionStatus {
+    /// Check if transaction is in a terminal state
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            TransactionStatus::GloballyFinalized { .. }
+                | TransactionStatus::Rejected { .. }
+                | TransactionStatus::Archived { .. }
+        )
+    }
+
+    /// Check if transaction can still be finalized
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self,
+            TransactionStatus::Seen
+                | TransactionStatus::Sampling { .. }
+                | TransactionStatus::LocallyAccepted { .. }
+                | TransactionStatus::FallbackResolution { .. }
+        )
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Masternode {
     pub address: String,
@@ -342,3 +409,165 @@ impl AVSSnapshot {
         (self.total_weight * 67) / 100
     }
 }
+
+// ============================================================================
+// LIVENESS FALLBACK PROTOCOL - Per Protocol §7.6
+// ============================================================================
+
+/// Poll result data for liveness evidence
+/// Per protocol §7.6.2: Records individual polling rounds for stall detection
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PollResult {
+    pub round: u64,
+    pub votes_valid: u32,
+    pub votes_invalid: u32,
+    pub votes_unknown: u32,
+    pub timestamp_ms: u64,
+}
+
+/// Liveness alert broadcast when transaction stalls
+/// Per protocol §7.6.2: LivenessAlert message structure
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LivenessAlert {
+    pub chain_id: u32,
+    pub txid: Hash256,
+    pub tx_hash_commitment: Hash256,
+    pub slot_index: u64,
+    pub poll_history: Vec<PollResult>,
+    pub current_confidence: u32,
+    pub stall_duration_ms: u64,
+    pub reporter_mn_id: String,
+    pub reporter_signature: Vec<u8>, // Ed25519 signature
+}
+
+impl LivenessAlert {
+    /// Get the message that should be signed
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&self.chain_id.to_le_bytes());
+        msg.extend_from_slice(&self.txid);
+        msg.extend_from_slice(&self.tx_hash_commitment);
+        msg.extend_from_slice(&self.slot_index.to_le_bytes());
+        msg.extend_from_slice(&self.current_confidence.to_le_bytes());
+        msg.extend_from_slice(&self.stall_duration_ms.to_le_bytes());
+        msg.extend_from_slice(self.reporter_mn_id.as_bytes());
+        msg
+    }
+
+    /// Verify the alert signature
+    pub fn verify(&self, pubkey: &VerifyingKey) -> Result<(), Box<dyn std::error::Error>> {
+        let msg = self.signing_message();
+        pubkey.verify(
+            &msg,
+            &ed25519_dalek::Signature::from_slice(&self.reporter_signature)?,
+        )?;
+        Ok(())
+    }
+}
+
+/// Finality proposal from deterministic fallback leader
+/// Per protocol §7.6.4 Step 3: Leader's decision on transaction
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FallbackDecision {
+    Accept,
+    Reject,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FinalityProposal {
+    pub chain_id: u32,
+    pub txid: Hash256,
+    pub tx_hash_commitment: Hash256,
+    pub slot_index: u64,
+    pub decision: FallbackDecision,
+    pub justification: String, // OPTIONAL: debugging info
+    pub leader_mn_id: String,
+    pub leader_signature: Vec<u8>, // Ed25519 signature
+}
+
+impl FinalityProposal {
+    /// Hash of this proposal for voting
+    pub fn proposal_hash(&self) -> Hash256 {
+        let mut hasher = Sha256::new();
+        hasher.update(&self.chain_id.to_le_bytes());
+        hasher.update(&self.txid);
+        hasher.update(&self.tx_hash_commitment);
+        hasher.update(&self.slot_index.to_le_bytes());
+        match self.decision {
+            FallbackDecision::Accept => hasher.update(&[1u8]),
+            FallbackDecision::Reject => hasher.update(&[0u8]),
+        }
+        hasher.update(self.leader_mn_id.as_bytes());
+        hasher.finalize().into()
+    }
+
+    /// Get the message that should be signed
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&self.chain_id.to_le_bytes());
+        msg.extend_from_slice(&self.txid);
+        msg.extend_from_slice(&self.tx_hash_commitment);
+        msg.extend_from_slice(&self.slot_index.to_le_bytes());
+        match self.decision {
+            FallbackDecision::Accept => msg.push(1u8),
+            FallbackDecision::Reject => msg.push(0u8),
+        }
+        msg.extend_from_slice(self.leader_mn_id.as_bytes());
+        msg
+    }
+
+    /// Verify the proposal signature
+    pub fn verify(&self, pubkey: &VerifyingKey) -> Result<(), Box<dyn std::error::Error>> {
+        let msg = self.signing_message();
+        pubkey.verify(
+            &msg,
+            &ed25519_dalek::Signature::from_slice(&self.leader_signature)?,
+        )?;
+        Ok(())
+    }
+}
+
+/// Vote on a fallback finality proposal
+/// Per protocol §7.6.4 Step 4: AVS members vote on leader's proposal
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum FallbackVoteDecision {
+    Approve,
+    Reject,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FallbackVote {
+    pub chain_id: u32,
+    pub proposal_hash: Hash256,
+    pub vote: FallbackVoteDecision,
+    pub voter_mn_id: String,
+    pub voter_weight: u64,
+    pub voter_signature: Vec<u8>, // Ed25519 signature
+}
+
+impl FallbackVote {
+    /// Get the message that should be signed
+    pub fn signing_message(&self) -> Vec<u8> {
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&self.chain_id.to_le_bytes());
+        msg.extend_from_slice(&self.proposal_hash);
+        match self.vote {
+            FallbackVoteDecision::Approve => msg.push(1u8),
+            FallbackVoteDecision::Reject => msg.push(0u8),
+        }
+        msg.extend_from_slice(self.voter_mn_id.as_bytes());
+        msg.extend_from_slice(&self.voter_weight.to_le_bytes());
+        msg
+    }
+
+    /// Verify the vote signature
+    pub fn verify(&self, pubkey: &VerifyingKey) -> Result<(), Box<dyn std::error::Error>> {
+        let msg = self.signing_message();
+        pubkey.verify(
+            &msg,
+            &ed25519_dalek::Signature::from_slice(&self.voter_signature)?,
+        )?;
+        Ok(())
+    }
+}
+

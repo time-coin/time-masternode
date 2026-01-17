@@ -173,6 +173,19 @@ pub enum NetworkMessage {
         block_hash: [u8; 32],
         cumulative_work: u128,
     },
+    // §7.6 Liveness Fallback Protocol Messages
+    /// Broadcast when a transaction stalls in Sampling state
+    LivenessAlert {
+        alert: crate::types::LivenessAlert,
+    },
+    /// Deterministic leader's proposal for stalled transaction
+    FinalityProposal {
+        proposal: crate::types::FinalityProposal,
+    },
+    /// Vote on a fallback finality proposal
+    FallbackVote {
+        vote: crate::types::FallbackVote,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -262,6 +275,9 @@ impl NetworkMessage {
             NetworkMessage::GetChainWorkAt(_) => "GetChainWorkAt",
             NetworkMessage::ChainWorkAtResponse { .. } => "ChainWorkAtResponse",
             NetworkMessage::ForkAlert { .. } => "ForkAlert",
+            NetworkMessage::LivenessAlert { .. } => "LivenessAlert",
+            NetworkMessage::FinalityProposal { .. } => "FinalityProposal",
+            NetworkMessage::FallbackVote { .. } => "FallbackVote",
         }
     }
 

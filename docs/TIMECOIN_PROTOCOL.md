@@ -1,7 +1,7 @@
 # TIME Coin Protocol Specification (Improved)
 **Document:** `TIMECOIN_PROTOCOL.md`  
-**Version:** 6.0 (Avalanche Snowball + TSDC Checkpoints + Verifiable Finality Proofs)  
-**Last Updated:** January 2, 2026  
+**Version:** 6.1 (Avalanche Snowball + TSDC Checkpoints + VFP + Liveness Fallback)  
+**Last Updated:** January 17, 2026  
 **Status:** Implementation Spec (Normative)
 
 ---
@@ -216,8 +216,214 @@ When a node locally accepts `X`, it MUST mark all conflicting txs for any input 
 
 > **Wallet UX:** “Confirmed” MAY correspond to `LocallyAccepted` for sub‑second UX.  
 > **Protocol/objective finality:** requires VFP (`GloballyFinalized`).
+### 7.6 Liveness Fallback Protocol
 
----
+Avalanche's probabilistic consensus can stall under adversarial conditions or network partitions. This section defines a **deterministic fallback mechanism** that guarantees bounded recovery time while preserving the leaderless nature of normal operation.
+
+#### 7.6.1 Stall Detection
+
+A node detects a **liveness stall** for transaction `X` if ALL of the following hold:
+
+1. `status[X] == Sampling` for duration `> STALL_TIMEOUT` (default: 30 seconds)
+2. `confidence[X] < β_local` (transaction has not reached local acceptance)
+3. No conflicting transaction for any input of `X` has reached `GloballyFinalized`
+4. Transaction `X` is valid per §6 validation rules
+
+**Rationale:** Distinguishes genuine stalls from consensus-resolved conflicts or invalid transactions.
+
+#### 7.6.2 Stall Evidence and Alert Broadcast
+
+When a node detects a stall for transaction `X`:
+
+1. **Assemble Evidence:**
+   ```
+   LivenessAlert {
+     chain_id: u32,
+     txid: Hash256,
+     tx_hash_commitment: Hash256,
+     slot_index: u64,              // Current slot when stall detected
+     poll_history: Vec<PollResult>, // Last N poll results
+     current_confidence: u32,
+     stall_duration_ms: u64,
+     reporter_mn_id: String,
+     reporter_signature: Signature
+   }
+   
+   PollResult {
+     round: u64,
+     votes_valid: u32,
+     votes_invalid: u32,
+     votes_unknown: u32,
+     timestamp_ms: u64
+   }
+   ```
+
+2. **Broadcast to Network:**
+   - Send `LivenessAlert` to all connected peers
+   - Peers MUST validate signature and that reporter is in AVS
+   - Peers SHOULD relay alert if they also observe the stall
+
+#### 7.6.3 Fallback Trigger Threshold
+
+A node enters **Fallback Mode** for transaction `X` when:
+
+- It receives `LivenessAlert` messages from `≥ f+1` distinct masternodes (where `f = ⌊(n-1)/3⌋`)
+- All alerts reference the same `txid` and conflict set
+- At least `FALLBACK_MIN_DURATION` (default: 20s) has elapsed since first alert
+
+**Safety:** `f+1` alerts guarantees at least one honest node observed the stall (in a BFT-style `n ≥ 3f+1` model).
+
+#### 7.6.4 Deterministic Resolution Round
+
+Upon entering Fallback Mode for transaction `X`:
+
+**Step 1: Freeze Avalanche Sampling**
+- Set `status[X] = FallbackResolution`
+- Stop sending new `SampleQuery` messages for `X` or any conflicting transaction
+- Continue responding to queries from peers (based on current preference)
+
+**Step 2: Deterministic Leader Election**
+```
+fallback_leader = MN with minimum H(txid || slot_index || mn_pubkey)
+```
+- All nodes compute the same leader independently (no message exchange)
+- Leader MUST be member of AVS snapshot at `slot_index`
+- If elected leader is offline, timeout advances to next slot
+
+**Step 3: Leader Proposal**
+Within `FALLBACK_PROPOSAL_TIMEOUT` (default: 5 seconds), the leader broadcasts:
+```
+FinalityProposal {
+  chain_id: u32,
+  txid: Hash256,
+  tx_hash_commitment: Hash256,
+  slot_index: u64,
+  decision: Accept | Reject,
+  justification: String,  // OPTIONAL: debugging info
+  leader_mn_id: String,
+  leader_signature: Signature
+}
+```
+
+**Decision Logic for Leader:**
+- `Accept` if `counter[X] > counter[conflicting_tx]` for all conflicts
+- `Reject` if any conflict has higher `counter` value
+- `Accept` if tied (use deterministic tie-breaker: lowest `txid`)
+
+**Step 4: Voting Round**
+All AVS members vote on the proposal within `FALLBACK_VOTE_TIMEOUT` (default: 5 seconds):
+```
+FallbackVote {
+  chain_id: u32,
+  proposal_hash: Hash256,  // H(FinalityProposal)
+  vote: Approve | Reject,
+  voter_mn_id: String,
+  voter_weight: u64,
+  voter_signature: Signature
+}
+```
+
+**Voting Rule:**
+- `Approve` if voter's local state agrees with leader's decision AND proposal is valid
+- `Reject` otherwise
+
+**Step 5: Finalization**
+If proposal receives `≥ Q_finality` total weight in `Approve` votes (same threshold as VFP §8.3):
+
+1. Set `status[X] = GloballyFinalized` (if decision = Accept) or `Rejected` (if decision = Reject)
+2. Assemble `VerifiableFinality` proof (§8) using the collected `FallbackVote` signatures
+3. Mark conflicting transactions as `Rejected`
+4. Resume normal Avalanche operation for other transactions
+
+**Step 6: Timeout and Retry**
+If no decision after `FALLBACK_ROUND_TIMEOUT` (default: 10 seconds):
+
+1. Increment `slot_index += 1` (advances to next leader)
+2. Repeat from Step 2 with new leader
+3. After `MAX_FALLBACK_ROUNDS` (default: 5), escalate to TSDC checkpoint synchronization
+
+#### 7.6.5 TSDC Checkpoint Synchronization (Ultimate Fallback)
+
+If fallback rounds fail after `MAX_FALLBACK_ROUNDS` attempts:
+
+1. Transaction `X` remains in `Sampling` state
+2. Wait for next TSDC block boundary (≤ 10 minutes per §9)
+3. TSDC block producer (VRF-selected) MUST include a `LivenessRecoveryFlag` in block header
+4. Block producer deterministically resolves all pending liveness stalls:
+   - Includes transactions with `counter[X] > 0` (at least one positive vote observed)
+   - Excludes transactions with only negative votes
+5. All nodes synchronize to TSDC block state
+6. Reset Avalanche sampling for any remaining unresolved transactions
+
+> **Note:** This is a rare fallback (expected frequency: < 0.01% of transactions under normal operation).
+
+#### 7.6.6 State Transition Diagram
+
+```
+Seen → Sampling ──────────────────────→ LocallyAccepted → (VFP Assembly) → GloballyFinalized
+         │                                     ↓
+         │ (confidence ≥ β_local)          (Conflicting tx finalized)
+         │                                     ↓
+         │                                  Rejected
+         ↓
+    (Stall detected)
+         ↓
+  FallbackResolution ─────→ GloballyFinalized (if proposal approved)
+         │                        or
+         │                    Rejected (if proposal rejected)
+         ↓
+   (Fallback timeout)
+         ↓
+  (Retry with new leader or TSDC checkpoint)
+```
+
+#### 7.6.7 Protocol Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `STALL_TIMEOUT` | 30s | Duration before declaring liveness stall |
+| `FALLBACK_MIN_DURATION` | 20s | Minimum time before accepting alerts |
+| `FALLBACK_PROPOSAL_TIMEOUT` | 5s | Leader must propose within this time |
+| `FALLBACK_VOTE_TIMEOUT` | 5s | Voting period duration |
+| `FALLBACK_ROUND_TIMEOUT` | 10s | Total time for one fallback round |
+| `MAX_FALLBACK_ROUNDS` | 5 | Attempts before TSDC escalation |
+| `ALERT_THRESHOLD` | f+1 | LivenessAlerts needed to trigger (`f = ⌊(n-1)/3⌋`) |
+
+#### 7.6.8 Security Considerations
+
+**Byzantine Resistance:**
+- Fallback requires `f+1` alerts → at least one honest node confirms stall
+- Leader is deterministic → no leader election attacks
+- Voting requires `≥ Q_finality` weight → Byzantine minority cannot force decision
+- TSDC provides ultimate synchronization point
+
+**Liveness Guarantees:**
+- Worst-case resolution time: `30s (stall) + 5×10s (fallback rounds) + 10min (TSDC) ≈ 11.3 minutes`
+- Typical case: `30s (stall) + 10s (single fallback round) = 40 seconds`
+- No indefinite deadlock possible (bounded by TSDC interval)
+
+**Comparison to Pure BFT:**
+- Avoids view change storms (deterministic leader selection)
+- No multi-phase commit complexity (single propose → vote → finalize)
+- Fallback is rare (only after Avalanche stalls)
+- Normal operation remains leaderless and fast (<1s)
+
+#### 7.6.9 Implementation Requirements
+
+Nodes MUST implement:
+1. Stall detection timer per transaction in `Sampling` state
+2. `LivenessAlert` message handling and relay logic
+3. Deterministic leader computation function
+4. `FinalityProposal` and `FallbackVote` message types
+5. Fallback voting logic and threshold checking
+6. State transition from `FallbackResolution` to final state
+
+Nodes SHOULD implement:
+1. Metrics for fallback activation frequency
+2. Logging of fallback events for network health monitoring
+3. Dashboard indicators when node is in fallback mode
+
+----
 
 ## 8. Verifiable Finality Proofs (VFP)
 
