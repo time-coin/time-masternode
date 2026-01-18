@@ -8,7 +8,7 @@ This document outlines the planned development roadmap for TimeCoin.
 
 - **Core Blockchain**
   - Proof-of-Time consensus mechanism
-  - TSDC (Time-Synchronized Distributed Consensus)
+  - TimeLock (Time-Synchronized Distributed Consensus)
   - Block creation and validation
   - Transaction processing
   - Chain reorganization

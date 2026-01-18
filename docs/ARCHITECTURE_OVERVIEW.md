@@ -24,9 +24,9 @@
 ┌──────────────────────┐ ┌─────────────────┐ ┌──────────────────┐
 │  Consensus           │ │  Network        │ │  Storage         │
 │  Engines             │ │  Layer          │ │  Layer           │
-│  - Avalanche         │ │  - P2P TCP      │ │  - Sled DB       │
+│  - TimeVote          │ │  - P2P TCP      │ │  - Sled DB       │
 │    (TX Finality)     │ │  - Message Relay│ │  - UTXO Manager  │
-│  - TSDC              │ │  - Peer Mgmt    │ │  - TX Pool       │
+│  - TimeLock          │ │  - Peer Mgmt    │ │  - TX Pool       │
 │    (Block Producer)  │ │  - Heartbeats   │ │  - Block Chain   │
 │  - AI Fork Resolver  │ │  - Fork Sync    │ │  - AI History    │
 └──────────────────────┘ └─────────────────┘ └──────────────────┘
@@ -45,14 +45,15 @@
 
 ## Core Components
 
-### 1. Consensus Engine - Avalanche (`consensus.rs`)
+### 1. Consensus Engine - TimeVote Protocol (`consensus.rs`)
 
 **Responsibility:** Transaction validation, ordering, and finality
 
 **Key Features:**
-- **Avalanche Protocol:** Continuous voting consensus with random validator sampling
+- **TimeVote Protocol:** Continuous voting consensus with stake-weighted validator voting
 - **Snowflake/Snowball:** Low-latency finality primitives
-- **Stake-Weighted Sampling:** Validators selected proportional to collateral
+- **Progressive TimeProof Assembly:** Signed votes accumulate to form verifiable proof
+- **Unified Finality:** Single finality state (67% weight threshold)
 - **Instant Finality:** Transactions finalized in ~750ms average
 - **UTXO Locking:** Prevents double-spending during consensus
 - **Deterministic Finality:** No forks after finality achieved
@@ -67,13 +68,13 @@
 **Data Structures:**
 ```rust
 pub struct ConsensusEngine {
-    avalanche: Arc<AvalancheConsensus>,          // Consensus state
+    timevote: Arc<TimeVoteConsensus>,           // Consensus state
     masternodes: ArcSwap<Vec<Masternode>>,      // Lock-free
     utxo_manager: Arc<UTXOStateManager>,        // UTXO state
     tx_pool: Arc<TransactionPool>,              // Mempool
 }
 
-pub struct AvalancheConsensus {
+pub struct TimeVoteConsensus {
     tx_state: DashMap<Hash256, Arc<RwLock<Snowball>>>,      // Per-TX state
     active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>, // Vote tracking
     finalized_txs: DashMap<Hash256, Preference>,             // Finalized set
@@ -82,21 +83,21 @@ pub struct AvalancheConsensus {
 
 ---
 
-### 2. Block Production - TSDC (`tsdc.rs`)
+### 2. Block Production - TimeLock (`tsdc.rs`)
 
 **Responsibility:** Deterministic block production and checkpointing
 
 **Key Features:**
-- **Time-Slot Deterministic Consensus (TSDC):** Block leader elected per 10-min slot
+- **TimeLock:** Block leader elected per 10-min slot
 - **VRF-Based Leader Selection:** Cryptographically verifiable randomness
 - **Fixed Block Time:** Blocks produced every 10 minutes (600 seconds)
-- **Checkpoint Creation:** Finalizes all pending Avalanche transactions
+- **Checkpoint Creation:** Finalizes all pending TimeVote transactions
 - **Masternode Rotation:** Fair leader selection based on stake
 
 **Key Insight:**
-- TSDC is **NOT** a consensus algorithm - it's a block production schedule
-- Actual consensus for transaction finality happens in Avalanche (seconds)
-- TSDC just bundles already-finalized transactions into periodic blocks
+- TimeLock is **NOT** a consensus algorithm - it's a block production schedule
+- Actual consensus for transaction finality happens in TimeVote (seconds)
+- TimeLock just bundles already-finalized transactions into periodic blocks
 
 **Optimizations:**
 - ✅ VRF prevents leader bias
@@ -105,10 +106,10 @@ pub struct AvalancheConsensus {
 
 **Data Structures:**
 ```rust
-pub struct TSCDConsensus {
-    validators: Arc<RwLock<Vec<TSCDValidator>>>,  // Active validators
-    current_slot: AtomicU64,                       // Current time slot
-    finalized_height: AtomicU64,                   // Last finalized block
+pub struct TimeLockConsensus {
+    validators: Arc<RwLock<Vec<TimeLockValidator>>>,  // Active validators
+    current_slot: AtomicU64,                           // Current time slot
+    finalized_height: AtomicU64,                       // Last finalized block
 }
 ```
 
@@ -194,7 +195,7 @@ impl UtxoStorage for SledUtxoStorage {
 **Key Features:**
 - Tracks unspent transaction outputs with state machine:
   - **Unspent:** Available for spending
-  - **SpentPending:** Input locked during Avalanche consensus
+  - **SpentPending:** Input locked during TimeVote consensus
   - **Spent:** Transaction finalized
 - Prevents double-spending via state locking
 - Calculates UTXO set hash for validation
@@ -235,10 +236,10 @@ pub enum UTXOState {
 - **Persistent Masternode Mesh:** Two-way connections established once, never disconnected
 - **Message Types:**
   - TransactionBroadcast: New transactions
-  - TransactionVoteRequest: Avalanche vote requests
-  - TransactionVote: Validator votes for Avalanche
+  - TransactionVoteRequest: TimeVote vote requests
+  - TransactionVote: Validator votes for TimeVote
   - UTXOStateUpdate: State changes during consensus
-  - BlockProposal: TSDC block production
+  - BlockProposal: TimeLock block production
   - Heartbeat: Liveness detection
 - **Peer Discovery:** Masternode registry queries
 - **Handshakes:** Network validation and peer identification
@@ -297,7 +298,7 @@ ShutdownManager::cancel()
 
 ## Data Flow
 
-### Transaction Finality Flow (Avalanche Consensus)
+### Transaction Finality Flow (TimeVote Consensus)
 
 ```
 User submits transaction (RPC sendrawtransaction)
@@ -310,30 +311,31 @@ ConsensusEngine::submit_transaction()
     ├─→ Add to TransactionPool (pending)
     │
     ▼
-Initiate Avalanche Consensus
-    ├─→ Create Snowball state machine
+Initiate TimeVote Consensus (Unified Finality)
+    ├─→ Transaction enters "Voting" state
     ├─→ Create QueryRound for vote tracking
     │
     ▼
-Execute Avalanche Rounds (10 rounds max)
-    ├─→ Sample k validators (random)
+Execute TimeVote Rounds (progressive TimeProof assembly)
+    ├─→ Sample k validators (stake-weighted)
     ├─→ Send TransactionVoteRequest
-    ├─→ Collect votes for 2 seconds
-    ├─→ Tally votes
+    ├─→ Collect signed votes for 2 seconds
+    ├─→ Accumulate unique signed votes toward TimeProof
     │
     ├─→ If α votes for Accept:
-    │   ├─→ Update Snowball preference
-    │   ├─→ Increment confidence counter
+    │   ├─→ Add signed votes to TimeProof
+    │   ├─→ Update accumulated weight
     │
-    └─→ If confidence ≥ β (20):
-        ├─→ Transaction FINALIZED
+    └─→ If accumulated_weight ≥ Q_finality (67% of AVS weight):
+        ├─→ Transaction FINALIZED (single unified state)
+        ├─→ TimeProof complete (verifiable by anyone)
         ├─→ Move to finalized pool
         ├─→ Notify clients (instant finality ~750ms)
         │
         ▼
-TSDC Block Production (every 10 minutes)
+TimeLock Block Production (every 10 minutes)
     ├─→ Collect finalized transactions
-    ├─→ Select TSDC leader via VRF
+    ├─→ Select TimeLock leader via VRF
     ├─→ Bundle into block
     ├─→ Commit to blockchain
     │
@@ -341,22 +343,22 @@ TSDC Block Production (every 10 minutes)
 Transaction in blockchain (permanent checkpoint)
 ```
 
-**Avalanche Parameters:**
+**TimeVote Parameters:**
 - **Sample size (k):** 20 validators per round
 - **Quorum (α):** 14 responses needed for decision
-- **Finality threshold (β):** 20 consecutive confirms
+- **Finality threshold (Q_finality):** 67% of AVS weight
 - **Query timeout:** 2 seconds per round
 - **Typical finality:** 750ms (varies with network)
 
 ---
 
-### Block Production Flow (TSDC)
+### Block Production Flow (TimeLock)
 
 ```
 Slot Timer (every 10 minutes)
     │
     ▼
-TSDC::select_leader()
+TimeLock::select_leader()
     ├─→ Calculate VRF output for current slot
     ├─→ Determine leader (deterministic)
     │
@@ -376,14 +378,14 @@ All nodes receive block
     │
     ▼
 Block committed (immutable checkpoint)
-    ├─→ Avalanche-finalized transactions now blockchain-confirmed
+    ├─→ TimeVote-finalized transactions now blockchain-confirmed
     ├─→ Clients can rely on finality
 ```
 
-**TSDC Parameters:**
+**TimeLock Parameters:**
 - **Block time:** 10 minutes (600 seconds)
 - **Leader selection:** VRF-based (deterministic, cannot be gamed)
-- **Transactions included:** Only those finalized by Avalanche
+- **Transactions included:** Only those finalized by TimeVote
 - **Block finality:** Permanent (cannot be reverted)
 
 ---
@@ -396,8 +398,8 @@ Block committed (immutable checkpoint)
 Application (no lock)
     │
     ├─→ DashMap operations (per-entry lock)
-    │   ├─ ConsensusEngine.avalanche.tx_state (per-txid lock)
-    │   ├─ ConsensusEngine.avalanche.active_rounds (per-txid lock)
+    │   ├─ ConsensusEngine.timevote.tx_state (per-txid lock)
+    │   ├─ ConsensusEngine.timevote.active_rounds (per-txid lock)
     │   ├─ TransactionPool.pending (per-txid lock)
     │   ├─ TransactionPool.finalized (per-txid lock)
     │   ├─ UTXOStateManager.utxo_states (per-outpoint lock)
@@ -429,8 +431,8 @@ Application (no lock)
 - ✅ Task coordination
 - ✅ Timeout handling (vote collection windows)
 - ✅ State updates (via lock-free structures)
-- ✅ Avalanche round scheduling
-- ✅ TSDC slot timing
+- ✅ TimeVote round scheduling
+- ✅ TimeLock slot timing
 
 ---
 

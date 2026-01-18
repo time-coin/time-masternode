@@ -26,7 +26,7 @@ Comprehensive documentation for the TIME Coin Protocol.
 ## Key Features
 
 ### Instant Finality
-- **Transaction finalization in <1 second (Avalanche)**
+- **Transaction finalization in <1 second (TimeVote)**
 - Continuous quorum voting consensus
 - 2/3 masternode quorum required
 - No need for multiple confirmations
@@ -76,7 +76,7 @@ For implementation details, architectural decisions, and status reports, see `/a
 - [Protocol Overview](TIMECOIN_PROTOCOL.md#overview)
 - [UTXO State Machine](TIMECOIN_PROTOCOL.md#utxo-state-machine)
 - [Instant Finality](TIMECOIN_PROTOCOL.md#instant-finality)
-- [Avalanche Consensus](TIMECOIN_PROTOCOL.md#avalanche-consensus)
+- [TimeVote Consensus](TIMECOIN_PROTOCOL.md#timevote-consensus)
 - [Masternode System](TIMECOIN_PROTOCOL.md#masternode-system)
 - [Heartbeat Attestation](TIMECOIN_PROTOCOL.md#heartbeat-attestation)
 - [Reward Distribution](TIMECOIN_PROTOCOL.md#reward-distribution)

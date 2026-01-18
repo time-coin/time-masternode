@@ -67,16 +67,13 @@ Bootstrap:     Configured in config.toml
 ## Consensus Parameters
 
 ```yaml
-Avalanche:
+TimeVote:
   k:               20          # sample size
   α:               14          # success threshold
-  β_local:         20          # local acceptance threshold
+  Q_finality:      67%         # finality threshold (% of AVS weight)
   POLL_TIMEOUT:    200 ms
-
-VFP:
-  Q_finality:      67% of AVS weight
   
-TSDC:
+TimeLock:
   BLOCK_INTERVAL:  600 s       # 10 minutes
   SLOT_GRACE:      30 s        # accept blocks in [slot-30, slot+30]
   FUTURE_TOLERANCE: 5 s        # reject blocks > 5s in future
@@ -211,7 +208,7 @@ Header:
 
 Body:
   entries: [
-    { txid: Hash256, vfp_hash: Hash256 },
+    { txid: Hash256, timeproof_hash: Hash256 },
     ...
   ]
   (sorted lexicographically by txid)
@@ -219,7 +216,7 @@ Body:
 
 ---
 
-## VFP (Verifiable Finality Proof)
+## TimeProof
 
 ```
 FinalityVote:
@@ -231,7 +228,7 @@ FinalityVote:
   voter_weight: u16
   signature: [u8; 64] (Ed25519)
 
-VFP validation:
+TimeProof validation:
   1. All signatures verify
   2. All votes agree on (chain_id, txid, tx_hash_commitment, slot_index)
   3. Voters distinct

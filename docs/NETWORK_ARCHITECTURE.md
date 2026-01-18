@@ -318,7 +318,7 @@ pub fn rotate_if_expired()
 ### Message Flow
 
 ```
-Consensus Layer (Avalanche + TSDC)
+Consensus Layer (TimeVote + TimeLock)
         │
         ▼
 ┌──────────────────────────┐

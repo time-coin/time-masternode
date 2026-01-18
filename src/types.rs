@@ -98,28 +98,26 @@ pub enum UTXOState {
 // ============================================================================
 
 /// Transaction status in the consensus state machine
-/// Per protocol §7.3: status[X] ∈ {Seen, Sampling, LocallyAccepted, GloballyFinalized, Rejected, Archived}
+/// Per protocol §7.3: status[X] ∈ {Seen, Voting, Finalized, Rejected, Archived}
 /// Extended in §7.6 with FallbackResolution state
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionStatus {
     /// Transaction received, basic validation passed
     Seen,
-    /// Actively sampling via Avalanche consensus
-    Sampling {
+    /// Actively voting via TimeVote consensus, accumulating signed votes
+    Voting {
         confidence: u32,
         counter: u32,
         started_at: i64, // Unix timestamp in milliseconds
     },
-    /// Reached β_local consecutive successful polls (Protocol §7.5)
-    LocallyAccepted { accepted_at: i64 },
     /// Deterministic fallback resolution in progress (Protocol §7.6)
     FallbackResolution {
         started_at: i64,
         round: u32,
         alerts_count: u32,
     },
-    /// Has valid VFP with ≥ Q_finality weight (Protocol §8)
-    GloballyFinalized { finalized_at: i64, vfp_weight: u64 },
+    /// Has valid TimeProof with ≥ Q_finality weight (Protocol §8)
+    Finalized { finalized_at: i64, vfp_weight: u64 },
     /// Rejected due to conflict or invalidity
     Rejected { rejected_at: i64, reason: String },
     /// Included in TSDC block, can be pruned
@@ -131,7 +129,7 @@ impl TransactionStatus {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            TransactionStatus::GloballyFinalized { .. }
+            TransactionStatus::Finalized { .. }
                 | TransactionStatus::Rejected { .. }
                 | TransactionStatus::Archived { .. }
         )
@@ -142,8 +140,7 @@ impl TransactionStatus {
         matches!(
             self,
             TransactionStatus::Seen
-                | TransactionStatus::Sampling { .. }
-                | TransactionStatus::LocallyAccepted { .. }
+                | TransactionStatus::Voting { .. }
                 | TransactionStatus::FallbackResolution { .. }
         )
     }
@@ -590,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_transaction_status_terminal() {
-        let status = TransactionStatus::GloballyFinalized {
+        let status = TransactionStatus::Finalized {
             finalized_at: 1000,
             vfp_weight: 100,
         };
@@ -616,14 +613,11 @@ mod tests {
         assert!(status.is_pending());
         assert!(!status.is_terminal());
 
-        let status = TransactionStatus::Sampling {
+        let status = TransactionStatus::Voting {
             confidence: 5,
             counter: 10,
             started_at: 1000,
         };
-        assert!(status.is_pending());
-
-        let status = TransactionStatus::LocallyAccepted { accepted_at: 1000 };
         assert!(status.is_pending());
 
         let status = TransactionStatus::FallbackResolution {

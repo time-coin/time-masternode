@@ -2072,8 +2072,8 @@ impl MessageHandler {
         if let Some(consensus) = &context.consensus {
             // Check if we also observe this stall
             if let Some(tx_status) = consensus.get_tx_status(&alert.txid) {
-                if matches!(tx_status, crate::types::TransactionStatus::Sampling { .. }) {
-                    // We also see this transaction in Sampling state
+                if matches!(tx_status, crate::types::TransactionStatus::Voting { .. }) {
+                    // We also see this transaction in Voting state
                     let stalled = consensus.check_stall_timeout(&alert.txid);
 
                     if stalled {

@@ -68,7 +68,7 @@ Different tools for different jobs:
 
 ### 3. **ECVRF** (Verifiable Random Function)
 ```
-Use case: Deterministic but unpredictable sortition for TSDC block production
+Use case: Deterministic but unpredictable sortition for TimeLock block production
 Problem solved: Fair, verifiable block leader selection
 ```
 
@@ -99,7 +99,7 @@ Canonical leader = min(score_A, score_B) = Masternode B
 | Verifiable by anyone? | ✓ | ✗ | ✓ |
 | Creates sortition ranking? | ✗ | Can't | ✓ |
 
-**Why BLAKE3 alone doesn't work for TSDC:**
+**Why BLAKE3 alone doesn't work for TimeLock:**
 ```
 If block leader = lowest_hash(privkey || input):
   • Everyone can compute hash(input) → predictable!
@@ -129,7 +129,7 @@ VRF is purpose-built for:
 
 ## Real-World Example: What Breaks If You Use Just Ed25519?
 
-### Scenario: TSDC Block Production with Only Ed25519
+### Scenario: TimeLock Block Production with Only Ed25519
 
 ```rust
 // WRONG: Using Ed25519 to elect block producers
@@ -229,7 +229,7 @@ Random:    Beacon chain VRF (RANDAO + BLS)
 Transaction Flow:
   1. Create TX → BLAKE3_hash(tx_bytes) → txid
   2. Sign TX → Ed25519_sign(tx, privkey) → signature
-  3. Include in VFP → Ed25519_verify(voter_pubkey, signature)
+  3. Include in TimeProof → Ed25519_verify(voter_pubkey, signature)
 
 Block Production Flow:
   1. Compute slot → VRF(privkey, input) → (score, proof)

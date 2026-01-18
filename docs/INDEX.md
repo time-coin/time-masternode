@@ -55,7 +55,7 @@ src/
 ├── main.rs                    # Application entry point
 ├── config.rs                  # Configuration loading
 ├── types.rs                   # Core data types
-├── consensus.rs               # Avalanche + TSDC implementation
+├── consensus.rs               # TimeVote + TimeLock implementation
 ├── utxo_manager.rs            # UTXO state management
 ├── blockchain.rs              # Blockchain storage
 ├── masternode_registry.rs     # Masternode tracking
@@ -143,10 +143,10 @@ analysis/
 ## 📊 Quick Facts
 
 ### Protocol
-- **Version:** v5 (Avalanche + TSDC)
+- **Version:** v5 (TimeVote + TimeLock)
 - **Consensus:** Hybrid (real-time + deterministic)
-- **Finality:** <1 second (Avalanche)
-- **Block Time:** 10 minutes (TSDC)
+- **Finality:** <1 second (TimeVote)
+- **Block Time:** 10 minutes (TimeLock)
 - **Block Reward:** 100 × (1 + ln(n)) TIME
 
 ### Network

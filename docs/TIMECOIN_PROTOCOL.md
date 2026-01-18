@@ -1,6 +1,6 @@
 # TIME Coin Protocol Specification (Improved)
 **Document:** `TIMECOIN_PROTOCOL.md`  
-**Version:** 6.1 (Avalanche Snowball + TSDC Checkpoints + VFP + Liveness Fallback)  
+**Version:** 6.1 (TimeVote Protocol + TimeLock Checkpoints + TimeProof + TimeGuard Protocol)  
 **Last Updated:** January 17, 2026  
 **Status:** Implementation Spec (Normative)
 
@@ -14,9 +14,9 @@
 4. [Cryptography and Identifiers](#4-cryptography-and-identifiers)
 5. [Masternodes, Weight, and Active Validator Set (AVS)](#5-masternodes-weight-and-active-validator-set-avs)
 6. [UTXO Model and Transaction Validity](#6-utxo-model-and-transaction-validity)
-7. [Avalanche Snowball Finality](#7-avalanche-snowball-finality)
-8. [Verifiable Finality Proofs (VFP)](#8-verifiable-finality-proofs-vfp)
-9. [Time-Scheduled Deterministic Consensus (TSDC) Checkpoint Blocks (Archival Chain)](#9-tsdc-checkpoint-blocks-archival-chain)
+7. [TimeVote Protocol Finality](#7-timevote-protocol-finality)
+8. [TimeProof (Verifiable Finality)](#8-timeproof-verifiable-finality)
+9. [TimeLock Checkpoint Blocks (Archival Chain)](#9-timelock-checkpoint-blocks-archival-chain)
 10. [Rewards and Fees](#10-rewards-and-fees)
 11. [Network Protocol](#11-network-protocol)
 12. [Mempool and Pooling Rules](#12-mempool-and-pooling-rules)
@@ -42,9 +42,9 @@
 
 TIME Coin separates **state finality** from **historical checkpointing**:
 
-- **Avalanche Snowball (Transaction Layer):** fast, leaderless, stake-weighted sampling that converges on a single winner among conflicting transactions. Nodes can provide **sub‑second local acceptance**.
-- **Verifiable Finality Proofs (VFP):** converts local probabilistic acceptance into an **objectively verifiable artifact** that any node can validate offline.
-- **TSDC (Block Layer):** deterministic, VRF-sortition checkpoint blocks every 10 minutes. Blocks are **archival** (history + reward events), not the source of transaction finality.
+- **TimeVote Protocol (Transaction Layer):** fast, leaderless, stake-weighted voting that converges on a single winner among conflicting transactions. Progressive TimeProof assembly provides **unified finality** when 67% weight threshold is reached.
+- **TimeProof:** Accumulates signed votes during consensus to create an **objectively verifiable artifact** that any node can validate offline. No separate assembly step needed.
+- **TimeLock (Block Layer):** deterministic, VRF-sortition checkpoint blocks every 10 minutes. Blocks are **archival** (history + reward events), not the source of transaction finality.
 
 > **Terminology note:** **AVS** means **Active Validator Set** (eligible active masternodes). It is purely a protocol term.
 
@@ -55,8 +55,8 @@ TIME Coin separates **state finality** from **historical checkpointing**:
 ### 2.1 Goals
 1. **Fast settlement:** typical confirmation < 1s under healthy network conditions.
 2. **Leaderless transaction finality:** no global committee rounds for transaction acceptance.
-3. **Sybil resistance:** sampling influence proportional to stake weight.
-4. **Objective verification:** third parties can verify that a transaction reached finality using a compact proof (VFP).
+3. **Sybil resistance:** voting influence proportional to stake weight.
+4. **Objective verification:** third parties can verify that a transaction reached finality using a compact proof (TimeProof).
 5. **Deterministic checkpoint schedule:** blocks every 600s aligned to wall clock.
 
 ### 2.2 Non‑Goals
@@ -72,10 +72,10 @@ Two time scales:
 
 ```
 Real-time (Transactions)
-Tx broadcast -> Avalanche sampling -> Local Accepted -> VFP assembled -> Globally Finalized
+Tx broadcast -> TimeVote (progressive voting) -> TimeProof assembled -> Finalized
 
 Epoch-time (Blocks)
-Every 10 minutes -> TSDC checkpoint block archives globally-finalized txs + rewards
+Every 10 minutes -> TimeLock checkpoint block archives finalized txs + rewards
 ```
 
 ---
@@ -123,9 +123,9 @@ This spec assumes **on-chain staking UTXO** unless explicitly configured otherwi
 
 ### 5.4 Active Validator Set (AVS)
 Only masternodes in the **AVS** may be:
-- sampled for Avalanche queries
-- counted for VFP weight thresholds
-- eligible to produce/compete for TSDC checkpoint blocks
+- sampled for TimeVote queries
+- counted for TimeProof weight thresholds
+- eligible to produce/compete for TimeLock checkpoint blocks
 
 A masternode is **AVS-active** if:
 - It has a valid `SignedHeartbeat` within `HEARTBEAT_TTL` (default 180s), AND
@@ -133,11 +133,11 @@ A masternode is **AVS-active** if:
 
 Nodes MUST maintain and gossip AVS state.
 
-### 5.5 Stake-weighted sampling distribution
-Sampling MUST be stake-weighted over AVS:
+### 5.5 Stake-weighted voting distribution
+Validator selection for queries MUST be stake-weighted over AVS:
 `P(i) = w_i / Σ_{j∈AVS} w_j`
 
-Sampling SHOULD be without replacement per poll.
+Validator selection SHOULD be without replacement per poll.
 
 ---
 
@@ -146,7 +146,7 @@ Sampling SHOULD be without replacement per poll.
 ### 6.1 UTXO States (per outpoint)
 - `Unspent`
 - `Locked(txid)` (local reservation)
-- `Spent(txid)` (by Globally Finalized tx)
+- `Spent(txid)` (by Finalized tx)
 - `Archived(txid, height)` (spent + checkpointed)
 
 ### 6.2 Transaction Validity Preconditions
@@ -160,63 +160,89 @@ A node MUST treat a Tx as **invalid** (and vote `Invalid`) if:
 ### 6.3 Conflict Sets
 For each input outpoint `o`, define a conflict set `C(o)` containing all txids spending `o`.
 
-Only one txid per outpoint may be Globally Finalized.
+Only one txid per outpoint may be Finalized.
 
 ---
 
-## 7. Avalanche Snowball Finality
+## 7. TimeVote Protocol Finality
 
-TIME Coin uses stake-weighted Snowball-style repeated sampling. The protocol is defined on **conflict sets** (double spends), while non-conflicting transactions converge trivially.
+TIME Coin uses stake-weighted Snowball-style repeated voting. The protocol is defined on **conflict sets** (double spends), while non-conflicting transactions converge trivially.
 
 ### 7.1 Parameters
 - `k`: sample size (default 20)
 - `α`: successful poll threshold (default 14)
-- `β_local`: local acceptance threshold (default 20 consecutive successful polls)
+- `Q_finality`: finality threshold (67% of AVS weight)
 - `POLL_TIMEOUT`: default 200ms
 - `MAX_TXS_PER_QUERY`: default 64
 
-### 7.2 Responder Rule (Voting)
-On receiving a query for txid `X`, the responder returns `VoteResponse`:
+### 7.2 Voting Response
+When queried about transaction `X`, a validator MUST:
 
-- `Valid` if `X` is locally valid AND responder currently prefers `X` for all its input conflict sets.
-- `Invalid` if `X` is locally invalid OR responder prefers a conflicting tx for any input.
-- `Unknown` if responder cannot evaluate (missing Tx data) or Tx not known.
+1. Validate transaction per §6
+2. Check UTXO availability
+3. Check for conflicts with preferred transactions
+4. If valid and preferred: **Sign and return `FinalityVote`** with decision=Accept (§8.1)
+5. If invalid or conflicting: Return `VoteResponse` with decision=Reject (no signature needed)
 
-Responder MUST NOT return `Valid` for two conflicting txs for the same outpoint.
+**Critical:** Every positive vote MUST include a signed `FinalityVote` immediately. This vote contributes directly to the TimeProof.
 
-### 7.3 Local Snowball State (per txid)
+Responder MUST NOT return `Accept` for two conflicting txs for the same outpoint.
+
+### 7.3 TimeVote State (per txid)
 Each node maintains:
-- `status[X] ∈ {Seen, Sampling, LocallyAccepted, GloballyFinalized, Rejected, Archived}`
-- `confidence[X]` (consecutive successful polls)
-- `counter[X]` (cumulative successful polls; RECOMMENDED)
+- `status[X] ∈ {Seen, Voting, Finalized, Rejected, Archived}`
+- `accumulated_votes[X]`: Set of unique `FinalityVote` signatures
+- `accumulated_weight[X]`: u64 (sum of validator weights for votes in accumulated_votes)
+- `confidence[X]`: consecutive successful polls (for optimization only)
 - Per outpoint preference `preferred_txid[o]`
+
+**State Descriptions:**
+- **Seen**: Transaction received, pending validation
+- **Voting**: Actively collecting signed votes and building TimeProof
+- **Finalized**: Accumulated weight ≥ Q_finality, TimeProof complete
+- **Rejected**: Invalid or lost conflict resolution
+- **Archived**: Included in TimeLock checkpoint
 
 Tie-breakers MUST be deterministic (RECOMMENDED: lowest `txid` wins ties).
 
 ### 7.4 Polling Loop (per txid)
-For txid `X` in `Sampling`:
+For txid `X` in `Voting`:
 
 1. Select `k` masternodes from the AVS (stake-weighted).
-2. Send `SampleQuery` including `X` (batched allowed).
-3. Collect responses until timeout.
-4. Let `v = count(Valid votes for X)`.
-5. If `v ≥ α`:
-   - `counter[X] += 1`
+2. Send `VoteQuery` including `X` (batched allowed).
+3. Collect **signed votes** until timeout.
+4. For each new valid `FinalityVote` received:
+   - Verify signature and voter eligibility
+   - If vote is from a new voter (not already in `accumulated_votes[X]`):
+     - Add vote to `accumulated_votes[X]`
+     - Add voter's weight to `accumulated_weight[X]`
+5. Let `v = count(Accept votes in this round)`.
+6. If `v ≥ α`:
    - `confidence[X] += 1`
-   - Update `preferred_txid[o]` for each input outpoint `o` using `argmax(counter[t])` among known conflicts.
-6. Else:
+   - Update `preferred_txid[o]` for each input outpoint `o` (highest accumulated_weight wins).
+7. Else:
    - `confidence[X] = 0`
+8. **Check Finality:**
+   - If `accumulated_weight[X] ≥ Q_finality`:
+     - Set `status[X] = Finalized`
+     - Assemble TimeProof from `accumulated_votes[X]`
+     - Broadcast TimeProof to network
+     - Stop polling for `X`
 
-### 7.5 Local Acceptance
-A node MUST set `status[X] = LocallyAccepted` if:
-- `confidence[X] ≥ β_local`, AND
-- `preferred_txid[o] == X` for all inputs.
+### 7.5 Finality Rule
+A node MUST set `status[X] = Finalized` when:
+- `accumulated_weight[X] ≥ Q_finality`, AND
+- `accumulated_votes[X]` form a valid TimeProof per §8
 
-When a node locally accepts `X`, it MUST mark all conflicting txs for any input outpoint as `Rejected` locally.
+When `X` reaches `Finalized`, the node MUST:
+1. Mark all conflicting transactions for any input outpoint as `Rejected`
+2. Broadcast the assembled TimeProof to peers
+3. Stop polling for `X`
 
-> **Wallet UX:** “Confirmed” MAY correspond to `LocallyAccepted` for sub‑second UX.  
-> **Protocol/objective finality:** requires VFP (`GloballyFinalized`).
-### 7.6 Liveness Fallback Protocol
+**There is only ONE finality state.** When a transaction is `Finalized`, it has an objective, verifiable TimeProof that any node can validate.
+
+> **Wallet UX:** Wallets MAY show "Confirming (X% votes)" during `Voting` state for optimistic UX, but MUST clearly indicate that only `Finalized` represents cryptographic finality with TimeProof.
+### 7.6 TimeGuard Protocol
 
 Avalanche's probabilistic consensus can stall under adversarial conditions or network partitions. This section defines a **deterministic fallback mechanism** that guarantees bounded recovery time while preserving the leaderless nature of normal operation.
 
@@ -224,9 +250,9 @@ Avalanche's probabilistic consensus can stall under adversarial conditions or ne
 
 A node detects a **liveness stall** for transaction `X` if ALL of the following hold:
 
-1. `status[X] == Sampling` for duration `> STALL_TIMEOUT` (default: 30 seconds)
-2. `confidence[X] < β_local` (transaction has not reached local acceptance)
-3. No conflicting transaction for any input of `X` has reached `GloballyFinalized`
+1. `status[X] == Voting` for duration `> STALL_TIMEOUT` (default: 30 seconds)
+2. `accumulated_weight[X] < Q_finality` (transaction has not reached finality)
+3. No conflicting transaction for any input of `X` has reached `Finalized`
 4. Transaction `X` is valid per §6 validation rules
 
 **Rationale:** Distinguishes genuine stalls from consensus-resolved conflicts or invalid transactions.
@@ -237,7 +263,7 @@ When a node detects a stall for transaction `X`:
 
 1. **Assemble Evidence:**
    ```
-   LivenessAlert {
+   TimeGuardAlert {
      chain_id: u32,
      txid: Hash256,
      tx_hash_commitment: Hash256,
@@ -259,7 +285,7 @@ When a node detects a stall for transaction `X`:
    ```
 
 2. **Broadcast to Network:**
-   - Send `LivenessAlert` to all connected peers
+   - Send `TimeGuardAlert` to all connected peers
    - Peers MUST validate signature and that reporter is in AVS
    - Peers SHOULD relay alert if they also observe the stall
 
@@ -267,7 +293,7 @@ When a node detects a stall for transaction `X`:
 
 A node enters **Fallback Mode** for transaction `X` when:
 
-- It receives `LivenessAlert` messages from `≥ f+1` distinct masternodes (where `f = ⌊(n-1)/3⌋`)
+- It receives `TimeGuardAlert` messages from `≥ f+1` distinct masternodes (where `f = ⌊(n-1)/3⌋`)
 - All alerts reference the same `txid` and conflict set
 - At least `FALLBACK_MIN_DURATION` (default: 20s) has elapsed since first alert
 
@@ -277,9 +303,9 @@ A node enters **Fallback Mode** for transaction `X` when:
 
 Upon entering Fallback Mode for transaction `X`:
 
-**Step 1: Freeze Avalanche Sampling**
+**Step 1: Freeze TimeVote Polling**
 - Set `status[X] = FallbackResolution`
-- Stop sending new `SampleQuery` messages for `X` or any conflicting transaction
+- Stop sending new `VoteQuery` messages for `X` or any conflicting transaction
 - Continue responding to queries from peers (based on current preference)
 
 **Step 2: Deterministic Leader Election**
@@ -306,8 +332,8 @@ FinalityProposal {
 ```
 
 **Decision Logic for Leader:**
-- `Accept` if `counter[X] > counter[conflicting_tx]` for all conflicts
-- `Reject` if any conflict has higher `counter` value
+- `Accept` if `accumulated_weight[X] > accumulated_weight[conflicting_tx]` for all conflicts
+- `Reject` if any conflict has higher `accumulated_weight` value
 - `Accept` if tied (use deterministic tie-breaker: lowest `txid`)
 
 **Step 4: Voting Round**
@@ -328,10 +354,10 @@ FallbackVote {
 - `Reject` otherwise
 
 **Step 5: Finalization**
-If proposal receives `≥ Q_finality` total weight in `Approve` votes (same threshold as VFP §8.3):
+If proposal receives `≥ Q_finality` total weight in `Approve` votes (same threshold as TimeProof §8.3):
 
-1. Set `status[X] = GloballyFinalized` (if decision = Accept) or `Rejected` (if decision = Reject)
-2. Assemble `VerifiableFinality` proof (§8) using the collected `FallbackVote` signatures
+1. Set `status[X] = Finalized` (if decision = Accept) or `Rejected` (if decision = Reject)
+2. Assemble TimeProof (§8) using the collected `FallbackVote` signatures
 3. Mark conflicting transactions as `Rejected`
 4. Resume normal Avalanche operation for other transactions
 
@@ -340,41 +366,43 @@ If no decision after `FALLBACK_ROUND_TIMEOUT` (default: 10 seconds):
 
 1. Increment `slot_index += 1` (advances to next leader)
 2. Repeat from Step 2 with new leader
-3. After `MAX_FALLBACK_ROUNDS` (default: 5), escalate to TSDC checkpoint synchronization
+3. After `MAX_FALLBACK_ROUNDS` (default: 5), escalate to TimeLock checkpoint synchronization
 
-#### 7.6.5 TSDC Checkpoint Synchronization (Ultimate Fallback)
+#### 7.6.5 TimeLock Checkpoint Synchronization (Ultimate Fallback)
 
 If fallback rounds fail after `MAX_FALLBACK_ROUNDS` attempts:
 
-1. Transaction `X` remains in `Sampling` state
-2. Wait for next TSDC block boundary (≤ 10 minutes per §9)
-3. TSDC block producer (VRF-selected) MUST include a `LivenessRecoveryFlag` in block header
+1. Transaction `X` remains in `Voting` state
+2. Wait for next TimeLock block boundary (≤ 10 minutes per §9)
+3. TimeLock block producer (VRF-selected) MUST include a `TimeGuardRecoveryFlag` in block header
 4. Block producer deterministically resolves all pending liveness stalls:
-   - Includes transactions with `counter[X] > 0` (at least one positive vote observed)
+   - Includes transactions with `accumulated_weight[X] > 0` (at least one positive vote observed)
    - Excludes transactions with only negative votes
-5. All nodes synchronize to TSDC block state
-6. Reset Avalanche sampling for any remaining unresolved transactions
+5. All nodes synchronize to TimeLock block state
+6. Reset TimeVote polling for any remaining unresolved transactions
 
 > **Note:** This is a rare fallback (expected frequency: < 0.01% of transactions under normal operation).
 
 #### 7.6.6 State Transition Diagram
 
 ```
-Seen → Sampling ──────────────────────→ LocallyAccepted → (VFP Assembly) → GloballyFinalized
-         │                                     ↓
-         │ (confidence ≥ β_local)          (Conflicting tx finalized)
-         │                                     ↓
-         │                                  Rejected
+Seen → Voting ──────────────────────────────────→ Finalized
+         │                                            (accumulated_weight ≥ Q_finality)
+         │                                            (TimeProof complete)
+         │
+         │ (Conflicting tx finalized)
          ↓
-    (Stall detected)
-         ↓
-  FallbackResolution ─────→ GloballyFinalized (if proposal approved)
-         │                        or
-         │                    Rejected (if proposal rejected)
-         ↓
-   (Fallback timeout)
-         ↓
-  (Retry with new leader or TSDC checkpoint)
+      Rejected
+         
+         
+         
+Voting → (Stall detected) → FallbackResolution ─────→ Finalized (if proposal approved)
+                                    │                        or
+                                    │                    Rejected (if proposal rejected)
+                                    ↓
+                              (Fallback timeout)
+                                    ↓
+                          (Retry with new leader or TimeLock checkpoint)
 ```
 
 #### 7.6.7 Protocol Parameters
@@ -386,8 +414,8 @@ Seen → Sampling ────────────────────�
 | `FALLBACK_PROPOSAL_TIMEOUT` | 5s | Leader must propose within this time |
 | `FALLBACK_VOTE_TIMEOUT` | 5s | Voting period duration |
 | `FALLBACK_ROUND_TIMEOUT` | 10s | Total time for one fallback round |
-| `MAX_FALLBACK_ROUNDS` | 5 | Attempts before TSDC escalation |
-| `ALERT_THRESHOLD` | f+1 | LivenessAlerts needed to trigger (`f = ⌊(n-1)/3⌋`) |
+| `MAX_FALLBACK_ROUNDS` | 5 | Attempts before TimeLock escalation |
+| `ALERT_THRESHOLD` | f+1 | TimeGuardAlerts needed to trigger (`f = ⌊(n-1)/3⌋`) |
 
 #### 7.6.8 Security Considerations
 
@@ -395,12 +423,12 @@ Seen → Sampling ────────────────────�
 - Fallback requires `f+1` alerts → at least one honest node confirms stall
 - Leader is deterministic → no leader election attacks
 - Voting requires `≥ Q_finality` weight → Byzantine minority cannot force decision
-- TSDC provides ultimate synchronization point
+- TimeLock provides ultimate synchronization point
 
 **Liveness Guarantees:**
-- Worst-case resolution time: `30s (stall) + 5×10s (fallback rounds) + 10min (TSDC) ≈ 11.3 minutes`
+- Worst-case resolution time: `30s (stall) + 5×10s (fallback rounds) + 10min (TimeLock) ≈ 11.3 minutes`
 - Typical case: `30s (stall) + 10s (single fallback round) = 40 seconds`
-- No indefinite deadlock possible (bounded by TSDC interval)
+- No indefinite deadlock possible (bounded by TimeLock interval)
 
 **Comparison to Pure BFT:**
 - Avoids view change storms (deterministic leader selection)
@@ -411,23 +439,27 @@ Seen → Sampling ────────────────────�
 #### 7.6.9 Implementation Requirements
 
 Nodes MUST implement:
-1. Stall detection timer per transaction in `Sampling` state
-2. `LivenessAlert` message handling and relay logic
+1. Stall detection timer per transaction in `Voting` state
+2. `TimeGuardAlert` message handling and relay logic
 3. Deterministic leader computation function
 4. `FinalityProposal` and `FallbackVote` message types
 5. Fallback voting logic and threshold checking
 6. State transition from `FallbackResolution` to final state
+7. Progressive accumulation of signed votes into `accumulated_votes[X]`
+8. Weight tracking in `accumulated_weight[X]`
+9. Finality threshold check after each polling round
 
 Nodes SHOULD implement:
 1. Metrics for fallback activation frequency
 2. Logging of fallback events for network health monitoring
 3. Dashboard indicators when node is in fallback mode
+4. Optimistic UX indicators showing vote accumulation progress during `Voting` state
 
 ----
 
-## 8. Verifiable Finality Proofs (VFP)
+## 8. TimeProof (Verifiable Finality)
 
-VFP turns local acceptance into an objectively verifiable proof that can be:
+TimeProof is the mechanism for achieving finality in TimeCoin. A TimeProof is assembled progressively as nodes collect finality votes during normal transaction validation. Once enough votes are collected (≥67% of AVS weight), the transaction achieves finality and the TimeProof can be:
 - gossiped
 - stored
 - included (directly or by hash) in checkpoint blocks
@@ -446,10 +478,10 @@ Signature covers all fields.
 
 **Eligibility:** A vote counts only if the voter is AVS-active in the referenced `slot_index` (see §8.4).
 
-### 8.2 VFP Definition
-A **VFP** for transaction `X` is:
+### 8.2 TimeProof Definition
+A **TimeProof** for transaction `X` is:
 
-`VFP(X) = { tx, slot_index, votes[] }`
+`TimeProof(X) = { tx, slot_index, votes[] }`
 
 Validity conditions:
 1. All `votes[]` signatures verify.
@@ -475,22 +507,27 @@ An AVS snapshot MUST include:
 - `weight`
 - (optional) `vrf_pubkey`
 
-### 8.5 Assembling a VFP (How nodes obtain votes)
-Any node MAY request signed votes from peers. Recommended flow:
-- During normal `SampleQuery`, responders SHOULD include a `FinalityVote` when responding `Valid` (if requested).
-- The initiator accumulates unique votes over time until the threshold is met.
+### 8.5 Assembling a TimeProof
+TimeProof is assembled progressively during normal transaction validation:
+- When performing `SampleQuery` during validation, responders SHOULD include a `FinalityVote` when responding `Valid` (if requested).
+- The initiator accumulates unique votes as part of the normal polling process.
+- Once the accumulated vote weight reaches the finality threshold (≥67% of AVS weight), the TimeProof is complete and the transaction achieves finality.
 
-### 8.6 Global Finalization Rule
-A node MUST set `status[X] = GloballyFinalized` when it has a valid `VFP(X)`.
+There is no separate "finalization phase" - votes are collected during the same process as validation polling.
 
-A node MUST reject any conflicting tx `Y` spending any same outpoint once `X` is `GloballyFinalized`.
+### 8.6 Finalization Rule
+A node MUST set `status[X] = Finalized` when it has a valid `TimeProof(X)`.
+
+Once a transaction is `Finalized`, a node MUST reject any conflicting transaction `Y` spending any same outpoint.
+
+The TimeProof IS the finality - there is only one finality state, achieved when the vote threshold is met.
 
 ### 8.7 Catastrophic conflict
-If two conflicting transactions both obtain valid VFPs, the network’s safety assumptions have been violated. Clients SHOULD halt automatic finalization and surface an emergency condition. (Slashing/recovery is out of scope unless separately specified.)
+If two conflicting transactions both obtain valid TimeProofs, the network’s safety assumptions have been violated. Clients SHOULD halt automatic finalization and surface an emergency condition. (Slashing/recovery is out of scope unless separately specified.)
 
 ---
 
-## 9. Time-Scheduled Deterministic Consensus (TSDC) Checkpoint Blocks (Archival Chain)
+## 9. TimeLock Checkpoint Blocks (Archival Chain)
 
 Checkpoint blocks exist to:
 - checkpoint history
@@ -530,18 +567,18 @@ A block MUST contain:
   - `entries[]` sorted lexicographically by `txid`
 
 Each entry:
-`FinalizedEntry = { txid, vfp_hash }`
+`FinalizedEntry = { txid, timeproof_hash }`
 
-Blocks MAY optionally include full `VFP` payloads; otherwise nodes fetch VFPs by hash.
+Blocks MAY optionally include full `TimeProof` payloads; otherwise nodes fetch TimeProofs by hash.
 
 ### 9.5 Block validity
 A node MUST accept a block only if:
 1. `prev_block_hash` matches the current canonical chain tip.
 2. VRF proof verifies and binds to `(prev_block_hash, slot_time, chain_id)`.
 3. `entries[]` are sorted and unique by txid.
-4. For every entry, the referenced VFP is available and valid OR retrievable (implementation may mark as “pending” until fetched).
+4. For every entry, the referenced TimeProof is available and valid OR retrievable (implementation may mark as “pending” until fetched).
 5. No two included transactions conflict (no outpoint is spent twice).
-6. All included transactions are `GloballyFinalized` by VFP and pass base validity checks.
+6. All included transactions are `Finalized` by TimeProof and pass base validity checks.
 
 ### 9.6 Archival transition
 Upon block acceptance:
@@ -598,7 +635,7 @@ pub enum NetworkMessage {
     },
 
     // Finality proof gossip
-    VfpGossip { txid: Hash256, vfp: Vfp },
+    VfpGossip { txid: Hash256, TimeProof: TimeProof },
 
     // Blocks
     BlockBroadcast { block: Block },
@@ -622,7 +659,7 @@ All signed messages MUST include `chain_id` and a time/slot domain separator.
 
 Nodes SHOULD rate-limit:
 - polling requests per peer
-- VFP payload sizes
+- TimeProof payload sizes
 - transaction relay
 
 ---
@@ -631,10 +668,9 @@ Nodes SHOULD rate-limit:
 
 ### 12.1 Pools
 Nodes maintain:
-- `SeenPool`: known but not sampling
-- `SamplingPool`: active in Snowball
-- `LocallyAcceptedPool`: fast-confirmed
-- `FinalizedPool`: has VFP (`GloballyFinalized`)
+- `SeenPool`: known but not yet voting
+- `VotingPool`: active in TimeVote consensus
+- `FinalizedPool`: has TimeProof (`Finalized`)
 - `ArchivedPool`: checkpointed
 
 ### 12.2 Checkpoint inclusion eligibility
@@ -642,7 +678,7 @@ Checkpoint blocks SHOULD include:
 - all `FinalizedPool` txs not yet archived,
 - subject to size limits.
 
-Blocks MUST NOT include `LocallyAccepted` txs lacking VFP.
+Blocks MUST only include transactions with TimeProof.
 
 ---
 
@@ -650,15 +686,15 @@ Blocks MUST NOT include `LocallyAccepted` txs lacking VFP.
 
 ### 13.1 Assumptions
 - A majority (by weight) of the AVS is honest (parameter-dependent).
-- Network connectivity allows representative sampling.
+- Network connectivity allows representative voting.
 - AVS membership/weights are correctly enforced (staking/registry + heartbeats + witnesses).
 
 ### 13.2 Safety
-- `LocallyAccepted` is probabilistic (tuned by `k, α, β_local`).
-- `GloballyFinalized` is objective once a VFP with threshold weight is obtained.
+- Transaction finality is objective once a TimeProof with threshold weight (≥67% of AVS) is obtained.
+- The TimeProof mechanism ensures that conflicting transactions cannot both achieve finality under honest majority assumptions.
 
 ### 13.3 Liveness
-If honest weight dominates and the network is connected, honest transactions can gather VFP signatures and be checkpointed.
+If honest weight dominates and the network is connected, honest transactions can gather TimeProof signatures and be checkpointed.
 
 ---
 
@@ -681,10 +717,10 @@ If honest weight dominates and the network is connected, honest transactions can
 
 ## 15. Implementation Notes
 
-1. **AVS Snapshotting:** store AVS membership/weights by slot for verifying VFP voter eligibility.
-2. **Bandwidth:** VFPs can be large; prefer `vfp_hash` in blocks + fetch-on-demand.
-3. **Conflict handling:** treat conflicts per outpoint; when a VFP is accepted, prune all competing spends.
-4. **Archival chain reorg tolerance:** checkpoint blocks are archival; transaction finality comes from VFP. Reorgs should not affect finalized state unless you explicitly couple rewards/state to block order.
+1. **AVS Snapshotting:** store AVS membership/weights by slot for verifying TimeProof voter eligibility.
+2. **Bandwidth:** TimeProofs can be large; prefer `timeproof_hash` in blocks + fetch-on-demand.
+3. **Conflict handling:** treat conflicts per outpoint; when a TimeProof is accepted, prune all competing spends.
+4. **Archival chain reorg tolerance:** checkpoint blocks are archival; transaction finality comes from TimeProof. Reorgs should not affect finalized state unless you explicitly couple rewards/state to block order.
 5. **Canonical TX serialization:** MUST be specified precisely, since `tx_hash_commitment` is signed. (Do not reuse non-canonical encodings.)
 
 ---
@@ -709,7 +745,7 @@ BLAKE3 is a *hash function*, Ed25519 is a *signature scheme*. They serve differe
 See **CRYPTOGRAPHY_RATIONALE.md** for detailed explanation.
 
 ### 16.2 VRF Scheme
-**REQUIREMENT:** VRF is used in §9 for TSDC sortition. The specification MUST pin a concrete VRF construction:
+**REQUIREMENT:** VRF is used in §9 for TimeLock sortition. The specification MUST pin a concrete VRF construction:
 
 ```
 VRF_SCHEME = ECVRF-EDWARDS25519-SHA512-TAI (RFC 9381)
@@ -972,7 +1008,7 @@ All signed objects (§8.1, §5.4) MUST include the correct `chain_id` to prevent
 ## 20. Clock Synchronization Requirements (NORMATIVE)
 
 ### 20.1 Wall-Clock Dependency
-TSDC (§9) relies on wall-clock time for slot alignment. Clocks MUST be synchronized to within a tight tolerance.
+TimeLock (§9) relies on wall-clock time for slot alignment. Clocks MUST be synchronized to within a tight tolerance.
 
 ```
 CLOCK_SYNC_REQUIREMENT = NTP v4 (RFC 5905) or GPS/PTP
@@ -1011,9 +1047,9 @@ server 3.pool.ntp.org iburst
 
 ### 21.1 Light Client Model
 Clients that cannot run full validation (e.g., mobile wallets) MAY:
-- Verify transactions against **VFP** (§8) rather than replaying Snowball
+- Verify transactions against **TimeProof** (§8) rather than replaying Snowball
 - Query trusted peers for AVS snapshots (§8.4)
-- Verify VFP signatures against AVS snapshot at transaction's `slot_index`
+- Verify TimeProof signatures against AVS snapshot at transaction's `slot_index`
 
 ### 21.2 Block Header Format for Light Clients
 ```rust
@@ -1031,39 +1067,39 @@ pub struct BlockHeader {
 ```
 
 ### 21.3 Merkle Proof for Entry Verification
-Light clients can verify that a specific `(txid, vfp_hash)` is included in a block:
+Light clients can verify that a specific `(txid, timeproof_hash)` is included in a block:
 
 ```rust
 pub struct EntryProof {
     pub txid: Hash256,
-    pub vfp_hash: Hash256,
+    pub timeproof_hash: Hash256,
     pub inclusion_path: Vec<Hash256>,  // Merkle path to finalized_root
     pub leaf_index: u32,
 }
 
-// Verify: compute_merkle_root(txid || vfp_hash, inclusion_path, leaf_index) == block.finalized_root
+// Verify: compute_merkle_root(txid || timeproof_hash, inclusion_path, leaf_index) == block.finalized_root
 ```
 
 ### 21.4 Trust Model
 Light clients MUST:
 1. Trust the canonical **header chain** (validated via VRF sortition).
 2. Trust AVS snapshots returned by queried peers (or require multiple confirmations).
-3. Assume VFP signature verification is correct (standard Ed25519).
+3. Assume TimeProof signature verification is correct (standard Ed25519).
 
 ---
 
 ## 22. Error Recovery and Edge Cases (NORMATIVE)
 
-### 22.1 Conflicting VFPs
-**Issue (§8.7):** Two conflicting transactions both obtain valid VFPs.
+### 22.1 Conflicting TimeProofs
+**Issue (§8.7):** Two conflicting transactions both obtain valid TimeProofs.
 
 **Safety violation:** One or more AVS members produced signatures for conflicting transactions, or signatures were forged.
 
 **Recovery:**
 ```
-ON_CONFLICTING_VFP:
-  1. Detect: compare (txid_A, vfp_A) vs (txid_B, vfp_B) for same input outpoint
-  2. Log: record both VFPs and all signatories as emergency event
+ON_CONFLICTING_TIMEPROOF:
+  1. Detect: compare (txid_A, timeproof_A) vs (txid_B, timeproof_B) for same input outpoint
+  2. Log: record both TimeProofs and all signatories as emergency event
   3. Halt: stop automatic finalization for that outpoint
   4. Surface: alert operators and light clients
   5. (Future) Governance: require manual intervention or protocol upgrade
@@ -1082,7 +1118,7 @@ ON_CONFLICTING_VFP:
 ON_RECONNECTION:
   1. Exchange block headers across partitions
   2. Canonical chain = partition with highest cumulative AVS weight (sum of all blocks' producers' weight)
-  3. Minority partition rolls back uncommitted VFPs (§8.6)
+  3. Minority partition rolls back uncommitted TimeProofs (§8.6)
   4. Replay finalized transactions from majority onto minority's UTXO set
 ```
 
@@ -1227,7 +1263,7 @@ Before shipping to mainnet, implementations MUST address:
 - [ ] Genesis block format and initialization tested (§19)
 - [ ] Clock synchronization verified (NTP running, offset < 10s) (§20)
 - [ ] Mempool eviction and fee estimation functioning (§24)
-- [ ] Conflicting VFP detection and logging in place (§22.1)
+- [ ] Conflicting TimeProof detection and logging in place (§22.1)
 - [ ] Network partition recovery tested (§22.2)
 - [ ] Address format and RPC API standardized (§23)
 - [ ] Reward calculation verified with test vectors (§25)
@@ -1267,12 +1303,12 @@ test_vectors:
       vote_weight: 68
       valid: true
 
-  snowball_state_transitions:
-    - status: "Sampling"
-      confidence: 19
+  timevote_state_transitions:
+    - status: "Voting"
+      accumulated_weight: 67
+      required_weight: 67
       poll_result: "Valid"
-      expected_new_confidence: 20
-      expected_new_status: "LocallyAccepted"
+      expected_new_status: "Finalized"
 
   block_validity:
     - block_hash: "..."
