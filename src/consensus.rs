@@ -13,6 +13,7 @@
 
 use crate::block::types::Block;
 use crate::finality_proof::FinalityProofManager;
+use crate::masternode_registry::MasternodeRegistry;
 use crate::network::message::NetworkMessage;
 use crate::state_notifier::StateNotifier;
 use crate::transaction_pool::TransactionPool;
@@ -2034,6 +2035,11 @@ impl ConsensusEngine {
         };
         self.set_tx_status(txid, status);
         self.stop_stall_timer(&txid);
+
+        // §7.6 Week 5-6 Part 4: Clean up fallback tracking
+        self.avalanche.fallback_rounds.remove(&txid);
+        self.avalanche.liveness_alerts.remove(&txid);
+
         tracing::info!(
             "Transaction {} → Finalized (weight: {})",
             hex::encode(txid),
@@ -2050,10 +2056,19 @@ impl ConsensusEngine {
         };
         self.set_tx_status(txid, status);
         self.stop_stall_timer(&txid);
+
+        // §7.6 Week 5-6 Part 4: Initialize fallback round tracking
+        // Start with slot_index 0, round_count 0
+        let current_slot = (chrono::Utc::now().timestamp() as u64) / 600; // 10-minute slots
+        self.avalanche
+            .fallback_rounds
+            .insert(txid, (current_slot, 0, Instant::now()));
+
         tracing::warn!(
-            "Transaction {} → FallbackResolution (alerts: {})",
+            "Transaction {} → FallbackResolution (alerts: {}, slot: {})",
             hex::encode(txid),
-            alerts_count
+            alerts_count,
+            current_slot
         );
     }
 
@@ -2065,6 +2080,11 @@ impl ConsensusEngine {
         };
         self.set_tx_status(txid, status);
         self.stop_stall_timer(&txid);
+
+        // §7.6 Week 5-6 Part 4: Clean up fallback tracking
+        self.avalanche.fallback_rounds.remove(&txid);
+        self.avalanche.liveness_alerts.remove(&txid);
+
         tracing::info!("Transaction {} → Rejected: {}", hex::encode(txid), reason);
     }
 
@@ -2293,6 +2313,218 @@ impl ConsensusEngine {
                 FallbackVoteDecision::Reject
             }
         }
+    }
+
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - TIMEOUT & RETRY
+    // ========================================================================
+
+    /// Check for timed-out fallback rounds and retry with new leader (§7.6.3)
+    ///
+    /// This method is called periodically to detect fallback rounds that have
+    /// exceeded FALLBACK_ROUND_TIMEOUT without reaching Q_finality. When a timeout
+    /// is detected, the slot_index is incremented to deterministically select a
+    /// new leader, and the fallback process retries.
+    ///
+    /// # Protocol Flow
+    /// 1. Scan all transactions in FallbackResolution state
+    /// 2. Check if round_started_at + FALLBACK_ROUND_TIMEOUT < now
+    /// 3. If timed out:
+    ///    a. Increment slot_index (deterministic leader rotation)
+    ///    b. Check if round_count < MAX_FALLBACK_ROUNDS
+    ///    c. If under limit: retry with new leader
+    ///    d. If exceeded: escalate to TSDC checkpoint sync
+    ///
+    /// # Arguments
+    /// * `masternode_registry` - For computing next leader
+    ///
+    /// # Returns
+    /// Number of timed-out rounds that were retried or escalated
+    ///
+    /// # Example
+    /// ```rust
+    /// // Called every 5 seconds by background task
+    /// let retry_count = consensus.check_fallback_timeouts(&registry).await;
+    /// if retry_count > 0 {
+    ///     info!("Retried {} timed-out fallback rounds", retry_count);
+    /// }
+    /// ```
+    pub async fn check_fallback_timeouts(
+        &self,
+        masternode_registry: &MasternodeRegistry,
+    ) -> usize {
+        let now = Instant::now();
+        let mut retried_count = 0;
+
+        // Collect timed-out transactions
+        let timed_out: Vec<(Hash256, u64, u32, Instant)> = self
+            .avalanche
+            .fallback_rounds
+            .iter()
+            .filter_map(|entry| {
+                let (txid, (slot_index, round_count, started_at)) = entry.pair();
+                let elapsed = now.duration_since(*started_at);
+
+                if elapsed >= FALLBACK_ROUND_TIMEOUT {
+                    Some((*txid, *slot_index, *round_count, *started_at))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Handle each timeout
+        for (txid, slot_index, round_count, _started_at) in timed_out {
+            if round_count >= MAX_FALLBACK_ROUNDS {
+                // Exceeded max rounds - escalate to TSDC
+                tracing::error!(
+                    "❌ Transaction {} exceeded MAX_FALLBACK_ROUNDS ({}), escalating to TSDC",
+                    hex::encode(txid),
+                    MAX_FALLBACK_ROUNDS
+                );
+
+                // Mark for TSDC escalation
+                self.transition_to_rejected(
+                    txid,
+                    format!(
+                        "Fallback failed after {} rounds, awaiting TSDC sync",
+                        MAX_FALLBACK_ROUNDS
+                    ),
+                );
+
+                // Remove from fallback tracking
+                self.avalanche.fallback_rounds.remove(&txid);
+                retried_count += 1;
+            } else {
+                // Retry with new leader (increment slot_index)
+                let new_slot_index = slot_index + 1;
+                let new_round_count = round_count + 1;
+
+                tracing::warn!(
+                    "⏱️ Fallback round timeout for tx {} (slot {}, round {}/{}), retrying with slot {}",
+                    hex::encode(txid),
+                    slot_index,
+                    round_count,
+                    MAX_FALLBACK_ROUNDS,
+                    new_slot_index
+                );
+
+                // Update fallback round tracker
+                self.avalanche.fallback_rounds.insert(
+                    txid,
+                    (new_slot_index, new_round_count, Instant::now()),
+                );
+
+                // Compute new leader
+                let masternodes = masternode_registry.list_all().await;
+                let avs: Vec<Masternode> = masternodes
+                    .iter()
+                    .filter(|mn| mn.is_active)
+                    .map(|mn| mn.masternode.clone())
+                    .collect();
+
+                if let Some(new_leader_id) = compute_fallback_leader(&txid, new_slot_index, &avs) {
+                    tracing::info!(
+                        "🔄 New leader for tx {}: {} (slot {})",
+                        hex::encode(txid),
+                        new_leader_id,
+                        new_slot_index
+                    );
+
+                    // If we are the new leader, broadcast proposal
+                    if let Some(identity) = self.identity.get() {
+                        if identity.address == new_leader_id {
+                            tracing::info!(
+                                "✅ We are the new leader for tx {} (slot {}), broadcasting proposal",
+                                hex::encode(txid),
+                                new_slot_index
+                            );
+
+                            // Decide proposal vote
+                            let decision = match self.get_tx_status(&txid) {
+                                Some(TransactionStatus::FallbackResolution { .. }) => {
+                                    FallbackDecision::Accept
+                                }
+                                _ => FallbackDecision::Reject,
+                            };
+
+                            // Broadcast the proposal
+                            if let Err(e) = self
+                                .broadcast_finality_proposal(
+                                    txid,
+                                    new_slot_index,
+                                    decision,
+                                )
+                                .await
+                            {
+                                tracing::error!(
+                                    "Failed to broadcast retry proposal for tx {}: {}",
+                                    hex::encode(txid),
+                                    e
+                                );
+                            }
+                        }
+                    }
+
+                    retried_count += 1;
+                } else {
+                    tracing::error!(
+                        "Could not compute new leader for tx {} (empty AVS?)",
+                        hex::encode(txid)
+                    );
+                }
+            }
+        }
+
+        retried_count
+    }
+
+    /// Start a background task that periodically checks for fallback round timeouts (§7.6.3)
+    ///
+    /// This spawns a tokio task that runs every `check_interval_secs` seconds
+    /// to detect and handle timed-out fallback rounds.
+    ///
+    /// # Arguments
+    /// * `consensus` - Arc reference to ConsensusEngine
+    /// * `masternode_registry` - For computing new leaders
+    /// * `check_interval_secs` - How often to check (recommended: 5 seconds)
+    ///
+    /// # Returns
+    /// JoinHandle for the background task
+    ///
+    /// # Example
+    /// ```rust
+    /// let timeout_checker = ConsensusEngine::start_fallback_timeout_checker(
+    ///     consensus.clone(),
+    ///     registry.clone(),
+    ///     5, // Check every 5 seconds
+    /// );
+    /// ```
+    pub fn start_fallback_timeout_checker(
+        consensus: Arc<Self>,
+        masternode_registry: Arc<MasternodeRegistry>,
+        check_interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(check_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                // Check for timed-out fallback rounds
+                let retry_count = consensus
+                    .check_fallback_timeouts(&masternode_registry)
+                    .await;
+
+                if retry_count > 0 {
+                    tracing::info!(
+                        "§7.6 Timeout checker handled {} fallback round timeouts",
+                        retry_count
+                    );
+                }
+            }
+        })
     }
 
     // ========================================================================
