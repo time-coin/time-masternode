@@ -1524,11 +1524,16 @@ impl Blockchain {
 
         // Get finalized transactions from consensus layer
         let finalized_txs = self.consensus.get_finalized_transactions_for_block();
-        let total_fees = self.consensus.tx_pool.get_total_fees();
+        
+        // Calculate fees from current transactions (will be added to NEXT block)
+        let current_block_fees = self.consensus.tx_pool.get_total_fees();
+        
+        // Get fees from PREVIOUS block (stored during last block production)
+        let previous_block_fees = self.get_pending_fees();
 
-        // Calculate rewards
+        // Calculate rewards: base_reward + fees_from_previous_block
         let base_reward = BLOCK_REWARD_SATOSHIS;
-        let total_reward = base_reward + total_fees;
+        let total_reward = base_reward + previous_block_fees;
         let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
 
         if rewards.is_empty() {
@@ -1538,13 +1543,26 @@ impl Blockchain {
             ));
         }
 
-        tracing::debug!(
-            "💰 Block {}: distributing {} satoshis to {} masternodes ({} each)",
+        tracing::info!(
+            "💰 Block {}: base {} + fees {} = {} satoshis total to {} masternodes",
             next_height,
+            base_reward,
+            previous_block_fees,
             total_reward,
-            rewards.len(),
-            total_reward / masternodes.len() as u64
+            rewards.len()
         );
+        
+        // Store current block fees for NEXT block
+        self.store_pending_fees(current_block_fees)?;
+        
+        if current_block_fees > 0 {
+            tracing::info!(
+                "💸 Block {}: collected {} satoshis in fees (will be added to block {})",
+                next_height,
+                current_block_fees,
+                next_height + 1
+            );
+        }
 
         // Coinbase transaction creates the total block reward
         // CRITICAL: Include block height in output to ensure unique txid per block
@@ -2155,6 +2173,27 @@ impl Blockchain {
         }
 
         Ok(())
+    }
+
+    /// Store pending fees to be added to next block reward
+    fn store_pending_fees(&self, fees: u64) -> Result<(), String> {
+        let key = "pending_fees".as_bytes();
+        let fee_bytes = bincode::serialize(&fees).map_err(|e| e.to_string())?;
+        self.storage
+            .insert(key, fee_bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Get pending fees from previous block (to add to current block reward)
+    fn get_pending_fees(&self) -> u64 {
+        let key = "pending_fees".as_bytes();
+        match self.storage.get(key) {
+            Ok(Some(bytes)) => {
+                bincode::deserialize(&bytes).unwrap_or(0)
+            }
+            _ => 0, // No pending fees (genesis or first block after restart)
+        }
     }
 
     /// Process block UTXOs and create undo log for rollback support
