@@ -2170,11 +2170,71 @@ impl MessageHandler {
                 hex::encode(proposal_hash),
                 txid_hex
             );
-        }
 
-        // TODO: Week 5-6 Part 3 - Verify this node is deterministic leader
-        // TODO: Week 5-6 Part 3 - Vote on the proposal
-        // TODO: Week 5-6 Part 3 - Broadcast our FallbackVote
+            // §7.6 Week 5-6 Part 3: Verify leader and cast vote
+            // Step 1: Compute who the expected leader should be
+            let avs = masternodes
+                .iter()
+                .filter(|mn| mn.is_active)
+                .map(|mn| mn.masternode.clone())
+                .collect::<Vec<_>>();
+
+            let expected_leader = crate::consensus::compute_fallback_leader(
+                &proposal.txid,
+                proposal.slot_index,
+                &avs,
+            );
+
+            // Step 2: Verify the proposal came from the expected leader
+            match expected_leader {
+                Some(expected_mn_id) if expected_mn_id == proposal.leader_mn_id => {
+                    info!(
+                        "[{}] ✅ Leader verified: {} is correct leader for slot {}",
+                        self.direction, proposal.leader_mn_id, proposal.slot_index
+                    );
+
+                    // Step 3: Decide how to vote based on transaction state
+                    let vote_decision = consensus.decide_fallback_vote(&proposal.txid);
+
+                    info!(
+                        "[{}] Voting {:?} on proposal {} (tx {})",
+                        self.direction,
+                        vote_decision,
+                        hex::encode(proposal_hash),
+                        txid_hex
+                    );
+
+                    // Step 4: Get our voting weight and broadcast vote
+                    // TODO: Get actual voter weight from masternode collateral
+                    let voter_weight = 1_000_000_000; // Placeholder: 1 tier weight
+
+                    if let Err(e) = consensus
+                        .broadcast_fallback_vote(proposal_hash, vote_decision, voter_weight)
+                        .await
+                    {
+                        warn!(
+                            "[{}] Failed to broadcast vote: {}",
+                            self.direction, e
+                        );
+                    }
+                }
+                Some(expected_mn_id) => {
+                    warn!(
+                        "[{}] ❌ Invalid leader: expected {}, got {} (ignoring proposal)",
+                        self.direction, expected_mn_id, proposal.leader_mn_id
+                    );
+                    // Don't vote on invalid leader proposals
+                    return Ok(None);
+                }
+                None => {
+                    warn!(
+                        "[{}] ⚠️ Could not compute expected leader (empty AVS?)",
+                        self.direction
+                    );
+                    return Ok(None);
+                }
+            }
+        }
 
         // Relay the proposal to other peers
         if let Some(broadcast_tx) = &context.broadcast_tx {

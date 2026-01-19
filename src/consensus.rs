@@ -2254,6 +2254,47 @@ impl ConsensusEngine {
         }
     }
 
+    /// Decide how to vote on a fallback finality proposal (§7.6.4)
+    ///
+    /// Evaluates transaction state and determines whether to vote Approve or Reject.
+    /// This implements the voting decision logic for the liveness fallback protocol.
+    ///
+    /// # Decision Logic
+    /// - **Approve**: Transaction is in Voting or FallbackResolution state (pending)
+    /// - **Reject**: Transaction is already Finalized, Rejected, or not found
+    ///
+    /// The reasoning is that if a transaction is pending fallback resolution,
+    /// we should vote to approve its finalization. If it's already resolved or
+    /// doesn't exist, we vote to reject the proposal.
+    ///
+    /// # Arguments
+    /// * `txid` - Transaction identifier to evaluate
+    ///
+    /// # Returns
+    /// Vote decision: either Approve or Reject
+    ///
+    /// # Example
+    /// ```rust
+    /// let decision = consensus.decide_fallback_vote(&tx_hash);
+    /// match decision {
+    ///     FallbackVoteDecision::Approve => { /* cast approve vote */ }
+    ///     FallbackVoteDecision::Reject => { /* cast reject vote */ }
+    /// }
+    /// ```
+    pub fn decide_fallback_vote(&self, txid: &Hash256) -> FallbackVoteDecision {
+        match self.get_tx_status(txid) {
+            Some(TransactionStatus::Voting { .. })
+            | Some(TransactionStatus::FallbackResolution { .. }) => {
+                // Transaction is pending, vote to approve finalization
+                FallbackVoteDecision::Approve
+            }
+            _ => {
+                // Transaction is already resolved, not found, or in invalid state
+                FallbackVoteDecision::Reject
+            }
+        }
+    }
+
     // ========================================================================
     // §7.6 LIVENESS FALLBACK PROTOCOL - BROADCASTING
     // ========================================================================
