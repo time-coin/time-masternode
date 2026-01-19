@@ -2089,8 +2089,32 @@ impl MessageHandler {
 
                     if stalled {
                         info!("[{}] Confirming stall for tx {}", self.direction, txid_hex);
-                        // TODO: Accumulate alerts and trigger fallback when f+1 threshold reached
-                        // This will be implemented in Week 5-6
+
+                        // §7.6 Week 5-6: Accumulate alerts and check f+1 threshold
+                        let should_trigger_fallback =
+                            consensus.accumulate_liveness_alert(alert.clone(), masternodes.len());
+
+                        let alert_count = consensus.get_alert_count(&alert.txid);
+                        let n = masternodes.len();
+                        let f = (n.saturating_sub(1)) / 3;
+                        let threshold = f + 1;
+
+                        info!(
+                            "[{}] Alert accumulation for tx {}: {}/{} (threshold: {})",
+                            self.direction, txid_hex, alert_count, n, threshold
+                        );
+
+                        // Trigger fallback if f+1 threshold reached
+                        if should_trigger_fallback {
+                            warn!(
+                                "[{}] 🚨 Fallback triggered for tx {} ({} >= {} alerts)",
+                                self.direction, txid_hex, alert_count, threshold
+                            );
+
+                            // Transition to FallbackResolution state
+                            consensus
+                                .transition_to_fallback_resolution(alert.txid, alert_count as u32);
+                        }
                     }
                 }
             }
@@ -2345,12 +2369,12 @@ impl MessageHandler {
 
         // Calculate expected fee (0.1% of block reward)
         let expected_fee = expected_total / 1000; // 0.1% = 1/1000
-        
+
         // Distributed should be approximately block_reward - 0.1%
         // Allow some tolerance for rounding (±1% of expected fee)
         let expected_distributed = expected_total.saturating_sub(expected_fee);
         let tolerance = expected_fee / 100; // 1% of the 0.1% fee = 0.001% of block reward
-        
+
         let lower_bound = expected_distributed.saturating_sub(tolerance);
         let upper_bound = expected_total; // Can't exceed block reward
 

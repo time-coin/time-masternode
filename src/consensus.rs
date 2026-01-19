@@ -44,6 +44,8 @@ const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
 // §7.6 Liveness Fallback Protocol Parameters
 const STALL_TIMEOUT: Duration = Duration::from_secs(30); // Protocol §7.6.1
 const FALLBACK_MIN_DURATION: Duration = Duration::from_secs(20); // Protocol §7.6.3
+const FALLBACK_ROUND_TIMEOUT: Duration = Duration::from_secs(10); // Protocol §7.6.5
+const MAX_FALLBACK_ROUNDS: u32 = 5; // Protocol §7.6.5
 
 type BroadcastCallback = Arc<TokioRwLock<Option<Arc<dyn Fn(NetworkMessage) + Send + Sync>>>>;
 
@@ -614,6 +616,18 @@ pub struct AvalancheConsensus {
     /// Tracks when transactions entered Voting state for timeout detection
     stall_timers: Arc<DashMap<Hash256, Instant>>,
 
+    /// §7.6 Liveness Fallback: Alert accumulation tracker
+    /// txid -> Vec<LivenessAlert> (accumulate alerts from different reporters)
+    liveness_alerts: DashMap<Hash256, Vec<LivenessAlert>>,
+
+    /// §7.6 Liveness Fallback: Vote accumulation tracker
+    /// proposal_hash -> Vec<FallbackVote> (accumulate votes from AVS members)
+    fallback_votes: DashMap<Hash256, Vec<FallbackVote>>,
+
+    /// §7.6 Liveness Fallback: Fallback round tracking
+    /// txid -> (slot_index, round_count, started_at)
+    fallback_rounds: DashMap<Hash256, (u64, u32, Instant)>,
+
     /// Metrics
     rounds_executed: AtomicUsize,
     txs_finalized: AtomicUsize,
@@ -645,6 +659,9 @@ impl AvalancheConsensus {
             precommit_votes: Arc::new(PrecommitVoteAccumulator::new()),
             tx_status: Arc::new(DashMap::new()),
             stall_timers: Arc::new(DashMap::new()),
+            liveness_alerts: DashMap::new(),
+            fallback_votes: DashMap::new(),
+            fallback_rounds: DashMap::new(),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
         })
@@ -2081,6 +2098,99 @@ impl ConsensusEngine {
     /// Get memory usage statistics from consensus engine
     pub fn memory_stats(&self) -> ConsensusMemoryStats {
         self.avalanche.memory_stats()
+    }
+
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - ALERT & VOTE ACCUMULATION
+    // ========================================================================
+
+    /// Accumulate a LivenessAlert and check if f+1 threshold reached (§7.6.2-7.6.3)
+    ///
+    /// Returns true if fallback should be triggered (f+1 unique reporters)
+    pub fn accumulate_liveness_alert(
+        &self,
+        alert: LivenessAlert,
+        total_masternodes: usize,
+    ) -> bool {
+        let txid = alert.txid;
+
+        // Add alert to tracker
+        self.avalanche
+            .liveness_alerts
+            .entry(txid)
+            .or_insert_with(Vec::new)
+            .push(alert);
+
+        // Count unique reporters (collect into Vec to avoid lifetime issues)
+        let alerts_vec: Vec<String> = self
+            .avalanche
+            .liveness_alerts
+            .get(&txid)
+            .map(|alerts| alerts.iter().map(|a| a.reporter_mn_id.clone()).collect())
+            .unwrap_or_default();
+
+        let unique_reporters: std::collections::HashSet<_> = alerts_vec.iter().collect();
+
+        // Calculate f+1 threshold
+        let f = (total_masternodes.saturating_sub(1)) / 3;
+        let threshold = f + 1;
+
+        unique_reporters.len() >= threshold
+    }
+
+    /// Get count of unique alert reporters for a transaction
+    pub fn get_alert_count(&self, txid: &Hash256) -> usize {
+        self.avalanche
+            .liveness_alerts
+            .get(txid)
+            .map(|alerts| {
+                let unique: std::collections::HashSet<_> =
+                    alerts.iter().map(|a| &a.reporter_mn_id).collect();
+                unique.len()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Accumulate a FallbackVote and check if Q_finality threshold reached (§7.6.4)
+    ///
+    /// Returns Some(decision) if quorum reached, None otherwise
+    pub fn accumulate_fallback_vote(
+        &self,
+        vote: FallbackVote,
+        total_avs_weight: u64,
+    ) -> Option<FallbackVoteDecision> {
+        let proposal_hash = vote.proposal_hash;
+
+        // Add vote to tracker
+        self.avalanche
+            .fallback_votes
+            .entry(proposal_hash)
+            .or_insert_with(Vec::new)
+            .push(vote);
+
+        // Calculate weighted totals
+        let votes = self.avalanche.fallback_votes.get(&proposal_hash).unwrap();
+        let mut approve_weight = 0u64;
+        let mut reject_weight = 0u64;
+
+        for v in votes.iter() {
+            match v.vote {
+                FallbackVoteDecision::Approve => approve_weight += v.voter_weight,
+                FallbackVoteDecision::Reject => reject_weight += v.voter_weight,
+            }
+        }
+
+        // Calculate Q_finality (2/3 of total AVS weight)
+        let q_finality = (total_avs_weight * 2) / 3;
+
+        // Check if threshold reached
+        if approve_weight >= q_finality {
+            Some(FallbackVoteDecision::Approve)
+        } else if reject_weight >= q_finality {
+            Some(FallbackVoteDecision::Reject)
+        } else {
+            None
+        }
     }
 
     // ========================================================================
