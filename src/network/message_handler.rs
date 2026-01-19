@@ -4,6 +4,7 @@
 //! that works regardless of connection direction. Previously, message handling
 //! was duplicated between server.rs (inbound) and peer_connection.rs (outbound).
 
+use crate::block::types::calculate_merkle_root;
 use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::consensus::ConsensusEngine;
@@ -576,6 +577,16 @@ impl MessageHandler {
             debug!(
                 "⏭️ [{}] Rejecting block proposal at height {} (expected {})",
                 self.direction, block_height, expected_height
+            );
+            return Ok(None);
+        }
+
+        // CRITICAL SECURITY: Validate block BEFORE voting
+        // This prevents voting on blocks with invalid transactions, UTXOs, or signatures
+        if let Err(e) = self.validate_block_before_vote(&block, context).await {
+            warn!(
+                "❌ [{}] Rejecting invalid block at height {} from {}: {}",
+                self.direction, block_height, self.peer_ip, e
             );
             return Ok(None);
         }
@@ -2169,6 +2180,182 @@ impl MessageHandler {
         }
 
         Ok(None)
+    }
+
+    /// CRITICAL SECURITY: Validate block before voting to prevent consensus on invalid blocks
+    ///
+    /// This validation must happen BEFORE voting to ensure:
+    /// - Invalid blocks don't accumulate votes
+    /// - Network doesn't waste resources on invalid proposals
+    /// - Consensus can't finalize blocks that will be rejected during add_block()
+    async fn validate_block_before_vote(
+        &self,
+        block: &Block,
+        context: &MessageContext,
+    ) -> Result<(), String> {
+        // 1. Validate block structure and size
+        let serialized =
+            bincode::serialize(block).map_err(|e| format!("Failed to serialize block: {}", e))?;
+
+        const MAX_BLOCK_SIZE: usize = 4 * 1024 * 1024; // 4MB
+        if serialized.len() > MAX_BLOCK_SIZE {
+            return Err(format!(
+                "Block too large: {} bytes (max {})",
+                serialized.len(),
+                MAX_BLOCK_SIZE
+            ));
+        }
+
+        // 2. Validate merkle root
+        let computed_merkle = calculate_merkle_root(&block.transactions);
+        if block.header.merkle_root != computed_merkle {
+            return Err(format!(
+                "Invalid merkle root: expected {}, got {}",
+                hex::encode(computed_merkle),
+                hex::encode(block.header.merkle_root)
+            ));
+        }
+
+        // 3. Validate block must have at least 2 transactions (coinbase + reward_distribution)
+        if block.transactions.len() < 2 {
+            return Err(format!(
+                "Block has {} transactions, expected at least 2",
+                block.transactions.len()
+            ));
+        }
+
+        // 4. Validate block rewards (prevents double-counting and inflation)
+        // Skip for genesis block
+        if block.header.height > 0 {
+            self.validate_block_rewards_structure(block)?;
+        }
+
+        // 5. Get consensus engine for transaction validation
+        let consensus = context
+            .consensus
+            .as_ref()
+            .ok_or_else(|| "Consensus engine not available".to_string())?;
+
+        // 6. Validate all transactions (except coinbase and reward distribution)
+        // Transactions 0-1 are system transactions (coinbase + reward_distribution)
+        // Transactions 2+ are user transactions that need full validation
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            if idx < 2 {
+                continue; // Skip coinbase and reward distribution (validated separately)
+            }
+
+            // Validate transaction structure and signatures
+            if let Err(e) = consensus.validate_transaction(tx).await {
+                return Err(format!("Invalid transaction at index {}: {}", idx, e));
+            }
+        }
+
+        // 7. Check for double-spends within the block
+        let mut spent_in_block = std::collections::HashSet::new();
+        for (idx, tx) in block.transactions.iter().enumerate() {
+            for input in &tx.inputs {
+                let outpoint_key = format!(
+                    "{}:{}",
+                    hex::encode(input.previous_output.txid),
+                    input.previous_output.vout
+                );
+                if spent_in_block.contains(&outpoint_key) {
+                    return Err(format!(
+                        "Double-spend detected in block: UTXO {} spent multiple times",
+                        outpoint_key
+                    ));
+                }
+                spent_in_block.insert(outpoint_key);
+            }
+
+            // Also check if attempting to spend outputs created in same block
+            // This is allowed (chained transactions) but needs careful tracking
+            debug!(
+                "Transaction {} spends {} inputs, creates {} outputs",
+                idx,
+                tx.inputs.len(),
+                tx.outputs.len()
+            );
+        }
+
+        info!(
+            "✅ [{}] Block {} validation passed: {} transactions, {} bytes",
+            self.direction,
+            block.header.height,
+            block.transactions.len(),
+            serialized.len()
+        );
+
+        Ok(())
+    }
+
+    /// Validate block reward structure (similar to blockchain.rs validation)
+    fn validate_block_rewards_structure(&self, block: &Block) -> Result<(), String> {
+        // Transaction 0 should be coinbase
+        let coinbase = &block.transactions[0];
+        if !coinbase.inputs.is_empty() {
+            return Err(format!(
+                "Coinbase has {} inputs, expected 0",
+                coinbase.inputs.len()
+            ));
+        }
+
+        if coinbase.outputs.len() != 1 {
+            return Err(format!(
+                "Coinbase has {} outputs, expected 1",
+                coinbase.outputs.len()
+            ));
+        }
+
+        let coinbase_amount = coinbase.outputs[0].value;
+        if coinbase_amount != block.header.block_reward {
+            return Err(format!(
+                "Coinbase creates {} satoshis, but block_reward is {}",
+                coinbase_amount, block.header.block_reward
+            ));
+        }
+
+        // Transaction 1 should be reward distribution
+        let reward_dist = &block.transactions[1];
+
+        if reward_dist.inputs.len() != 1 {
+            return Err(format!(
+                "Reward distribution has {} inputs, expected 1",
+                reward_dist.inputs.len()
+            ));
+        }
+
+        let coinbase_txid = coinbase.txid();
+        if reward_dist.inputs[0].previous_output.txid != coinbase_txid {
+            return Err("Reward distribution doesn't spend coinbase".to_string());
+        }
+
+        if reward_dist.outputs.len() != block.masternode_rewards.len() {
+            return Err(format!(
+                "Reward distribution has {} outputs but masternode_rewards has {} entries",
+                reward_dist.outputs.len(),
+                block.masternode_rewards.len()
+            ));
+        }
+
+        // Verify total outputs match block reward (within rounding)
+        let total_distributed: u64 = reward_dist.outputs.iter().map(|o| o.value).sum();
+        let expected_total = block.header.block_reward;
+
+        let diff = if total_distributed > expected_total {
+            total_distributed - expected_total
+        } else {
+            expected_total - total_distributed
+        };
+
+        if diff > 1000 {
+            return Err(format!(
+                "Total distributed {} doesn't match block_reward {} (diff: {})",
+                total_distributed, expected_total, diff
+            ));
+        }
+
+        Ok(())
     }
 }
 

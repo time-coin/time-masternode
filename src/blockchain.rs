@@ -2168,7 +2168,7 @@ impl Blockchain {
         // are created by the reward distribution transaction (transaction index 1).
         // We do NOT create separate UTXOs from the masternode_rewards array to avoid
         // double-counting rewards.
-        
+
         tracing::debug!(
             "📊 Block {} has {} masternode reward recipients (metadata)",
             block.header.height,
@@ -2343,15 +2343,13 @@ impl Blockchain {
         if coinbase_amount != block.header.block_reward {
             return Err(format!(
                 "Block {} coinbase creates {} satoshis, but block_reward is {}",
-                block.header.height,
-                coinbase_amount,
-                block.header.block_reward
+                block.header.height, coinbase_amount, block.header.block_reward
             ));
         }
 
         // Transaction 1 should be reward distribution
         let reward_dist = &block.transactions[1];
-        
+
         // Should spend the coinbase
         if reward_dist.inputs.len() != 1 {
             return Err(format!(
@@ -2387,20 +2385,14 @@ impl Blockchain {
             if &output_addr != expected_addr {
                 return Err(format!(
                     "Block {} reward output {} address mismatch: expected {}, got {}",
-                    block.header.height,
-                    i,
-                    expected_addr,
-                    output_addr
+                    block.header.height, i, expected_addr, output_addr
                 ));
             }
 
             if output.value != *expected_amount {
                 return Err(format!(
                     "Block {} reward output {} amount mismatch: expected {}, got {}",
-                    block.header.height,
-                    i,
-                    expected_amount,
-                    output.value
+                    block.header.height, i, expected_amount, output.value
                 ));
             }
         }
@@ -2408,7 +2400,7 @@ impl Blockchain {
         // Verify total outputs match block reward (within rounding)
         let total_distributed: u64 = reward_dist.outputs.iter().map(|o| o.value).sum();
         let expected_total = block.header.block_reward;
-        
+
         // Allow small rounding difference due to fee deduction
         let diff = if total_distributed > expected_total {
             total_distributed - expected_total
@@ -2416,13 +2408,11 @@ impl Blockchain {
             expected_total - total_distributed
         };
 
-        if diff > 1000 { // Allow up to 0.00001 TIME rounding error
+        if diff > 1000 {
+            // Allow up to 0.00001 TIME rounding error
             return Err(format!(
                 "Block {} total distributed {} doesn't match block_reward {} (diff: {})",
-                block.header.height,
-                total_distributed,
-                expected_total,
-                diff
+                block.header.height, total_distributed, expected_total, diff
             ));
         }
 

@@ -1326,7 +1326,7 @@ async fn main() {
                     // Step 4: Wait for consensus to finalize the block
                     // The message_handler will add the block when precommit consensus is reached
                     // During catchup, check if peers have synced instead of waiting for timeout
-                    
+
                     let consensus_timeout = if blocks_behind > 0 {
                         std::time::Duration::from_secs(10) // Catchup: 10 second max wait
                     } else {
@@ -1341,10 +1341,7 @@ async fn main() {
                         // Check if block was added (consensus reached via message handler)
                         let new_height = block_blockchain.get_height();
                         if new_height >= block_height {
-                            tracing::info!(
-                                "✅ Block {} finalized via consensus!",
-                                block_height
-                            );
+                            tracing::info!("✅ Block {} finalized via consensus!", block_height);
                             break;
                         }
 
@@ -1355,22 +1352,26 @@ async fn main() {
                             if !connected_peers.is_empty() {
                                 let mut synced_count = 0;
                                 let mut checked_count = 0;
-                                
+
                                 for peer_ip in &connected_peers {
-                                    if let Some(peer_height) = block_peer_registry.get_peer_height(peer_ip).await {
+                                    if let Some(peer_height) =
+                                        block_peer_registry.get_peer_height(peer_ip).await
+                                    {
                                         checked_count += 1;
                                         if peer_height >= block_height {
                                             synced_count += 1;
                                         }
                                     }
                                 }
-                                
+
                                 // If majority of reachable peers have synced, move on
                                 // This allows fast catchup without waiting for full consensus
                                 if checked_count > 0 {
-                                    let sync_percentage = (synced_count as f64 / checked_count as f64) * 100.0;
-                                    
-                                    if synced_count >= (checked_count * 2 / 3) && synced_count >= 2 {
+                                    let sync_percentage =
+                                        (synced_count as f64 / checked_count as f64) * 100.0;
+
+                                    if synced_count >= (checked_count * 2 / 3) && synced_count >= 2
+                                    {
                                         tracing::info!(
                                             "⚡ Block {} catchup: {}/{} peers synced ({:.0}%) - continuing",
                                             block_height,
@@ -1380,7 +1381,7 @@ async fn main() {
                                         );
                                         break;
                                     }
-                                    
+
                                     // Log sync progress every 2 seconds
                                     if consensus_start.elapsed().as_secs() % 2 == 0
                                         && consensus_start.elapsed().as_millis() < 300
