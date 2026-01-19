@@ -1732,6 +1732,12 @@ impl Blockchain {
         let block_hash = block.hash();
         self.validate_checkpoint(block.header.height, &block_hash)?;
 
+        // CRITICAL: Validate block rewards (prevent double-counting bug)
+        // Skip for genesis block
+        if !is_genesis {
+            self.validate_block_rewards(&block)?;
+        }
+
         // Additional timestamp validation: check if too far in past
         // Skip this check during sync (when we're behind) or for genesis blocks
         // During sync, we're catching up with blocks that are legitimately old
@@ -2300,6 +2306,127 @@ impl Blockchain {
         }
 
         rewards
+    }
+
+    /// Validate block rewards are correct and not double-counted
+    /// This prevents the old bug where rewards were added both as metadata AND as transaction outputs
+    fn validate_block_rewards(&self, block: &Block) -> Result<(), String> {
+        // Skip validation for blocks with no transactions (shouldn't happen, but be safe)
+        if block.transactions.len() < 2 {
+            return Err(format!(
+                "Block {} has {} transactions, expected at least 2 (coinbase + reward distribution)",
+                block.header.height,
+                block.transactions.len()
+            ));
+        }
+
+        // Transaction 0 should be coinbase
+        let coinbase = &block.transactions[0];
+        if !coinbase.inputs.is_empty() {
+            return Err(format!(
+                "Block {} transaction 0 is not a coinbase (has {} inputs)",
+                block.header.height,
+                coinbase.inputs.len()
+            ));
+        }
+
+        // Coinbase should create exactly one output with the total block reward
+        if coinbase.outputs.len() != 1 {
+            return Err(format!(
+                "Block {} coinbase has {} outputs, expected 1",
+                block.header.height,
+                coinbase.outputs.len()
+            ));
+        }
+
+        let coinbase_amount = coinbase.outputs[0].value;
+        if coinbase_amount != block.header.block_reward {
+            return Err(format!(
+                "Block {} coinbase creates {} satoshis, but block_reward is {}",
+                block.header.height,
+                coinbase_amount,
+                block.header.block_reward
+            ));
+        }
+
+        // Transaction 1 should be reward distribution
+        let reward_dist = &block.transactions[1];
+        
+        // Should spend the coinbase
+        if reward_dist.inputs.len() != 1 {
+            return Err(format!(
+                "Block {} reward distribution has {} inputs, expected 1",
+                block.header.height,
+                reward_dist.inputs.len()
+            ));
+        }
+
+        let coinbase_txid = coinbase.txid();
+        if reward_dist.inputs[0].previous_output.txid != coinbase_txid {
+            return Err(format!(
+                "Block {} reward distribution doesn't spend coinbase",
+                block.header.height
+            ));
+        }
+
+        // Verify outputs match masternode_rewards metadata
+        if reward_dist.outputs.len() != block.masternode_rewards.len() {
+            return Err(format!(
+                "Block {} reward distribution has {} outputs but masternode_rewards has {} entries",
+                block.header.height,
+                reward_dist.outputs.len(),
+                block.masternode_rewards.len()
+            ));
+        }
+
+        // Verify each output matches metadata
+        for (i, (expected_addr, expected_amount)) in block.masternode_rewards.iter().enumerate() {
+            let output = &reward_dist.outputs[i];
+            let output_addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+
+            if &output_addr != expected_addr {
+                return Err(format!(
+                    "Block {} reward output {} address mismatch: expected {}, got {}",
+                    block.header.height,
+                    i,
+                    expected_addr,
+                    output_addr
+                ));
+            }
+
+            if output.value != *expected_amount {
+                return Err(format!(
+                    "Block {} reward output {} amount mismatch: expected {}, got {}",
+                    block.header.height,
+                    i,
+                    expected_amount,
+                    output.value
+                ));
+            }
+        }
+
+        // Verify total outputs match block reward (within rounding)
+        let total_distributed: u64 = reward_dist.outputs.iter().map(|o| o.value).sum();
+        let expected_total = block.header.block_reward;
+        
+        // Allow small rounding difference due to fee deduction
+        let diff = if total_distributed > expected_total {
+            total_distributed - expected_total
+        } else {
+            expected_total - total_distributed
+        };
+
+        if diff > 1000 { // Allow up to 0.00001 TIME rounding error
+            return Err(format!(
+                "Block {} total distributed {} doesn't match block_reward {} (diff: {})",
+                block.header.height,
+                total_distributed,
+                expected_total,
+                diff
+            ));
+        }
+
+        Ok(())
     }
 
     // ===== Fork Detection and Reorganization =====
