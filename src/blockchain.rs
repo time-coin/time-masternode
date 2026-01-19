@@ -2158,45 +2158,18 @@ impl Blockchain {
         let mut utxos_created = 0;
         let mut utxos_spent = 0;
 
-        // FIRST: Process masternode rewards (block rewards)
-        // Create a synthetic coinbase transaction ID for masternode rewards
-        let coinbase_txid = if !block.transactions.is_empty() {
-            block.transactions[0].txid()
-        } else {
-            // Fallback: Generate txid from block hash
-            block_hash
-        };
+        // NOTE: block.masternode_rewards is metadata only - the actual reward UTXOs
+        // are created by the reward distribution transaction (transaction index 1).
+        // We do NOT create separate UTXOs from the masternode_rewards array to avoid
+        // double-counting rewards.
+        
+        tracing::debug!(
+            "📊 Block {} has {} masternode reward recipients (metadata)",
+            block.header.height,
+            block.masternode_rewards.len()
+        );
 
-        for (vout, (address, amount)) in block.masternode_rewards.iter().enumerate() {
-            let utxo = UTXO {
-                outpoint: OutPoint {
-                    txid: coinbase_txid,
-                    vout: vout as u32,
-                },
-                value: *amount,
-                script_pubkey: address.as_bytes().to_vec(),
-                address: address.clone(),
-            };
-
-            if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
-                tracing::warn!(
-                    "⚠️  Could not add masternode reward UTXO for {} at block {}: {:?}",
-                    address,
-                    block.header.height,
-                    e
-                );
-            } else {
-                utxos_created += 1;
-                tracing::debug!(
-                    "💰 Created reward UTXO for {} amount {} at block {}",
-                    address,
-                    amount,
-                    block.header.height
-                );
-            }
-        }
-
-        // SECOND: Process each transaction
+        // Process each transaction (including coinbase and reward distribution)
         for tx in &block.transactions {
             let txid = tx.txid();
 
@@ -2262,11 +2235,10 @@ impl Blockchain {
 
         if utxos_created > 0 || utxos_spent > 0 {
             tracing::info!(
-                "💰 Block {} indexed {} UTXOs ({} created [including {} rewards], {} spent, {} in undo log)",
+                "💰 Block {} indexed {} UTXOs ({} created, {} spent, {} in undo log)",
                 block.header.height,
                 utxos_created,
                 utxos_created,
-                block.masternode_rewards.len(),
                 utxos_spent,
                 undo_log.spent_utxos.len()
             );
@@ -2655,24 +2627,7 @@ impl Blockchain {
 
                     // Fallback: Try to at least remove created UTXOs
                     if let Ok(block) = self.get_block_by_height(height).await {
-                        // Remove masternode rewards
-                        let coinbase_txid = if !block.transactions.is_empty() {
-                            block.transactions[0].txid()
-                        } else {
-                            block.hash()
-                        };
-
-                        for (vout, _) in block.masternode_rewards.iter().enumerate() {
-                            let outpoint = OutPoint {
-                                txid: coinbase_txid,
-                                vout: vout as u32,
-                            };
-                            if let Ok(()) = self.utxo_manager.remove_utxo(&outpoint).await {
-                                utxo_rollback_count += 1;
-                            }
-                        }
-
-                        // Remove transaction outputs
+                        // Remove transaction outputs (including coinbase and reward distribution)
                         for tx in block.transactions.iter() {
                             let txid = tx.txid();
                             for (vout, _output) in tx.outputs.iter().enumerate() {
