@@ -2338,20 +2338,30 @@ impl MessageHandler {
             ));
         }
 
-        // Verify total outputs match block reward (within rounding)
+        // Verify total outputs are reasonable compared to block reward
+        // Note: distributed amount will be ~99.9% of block_reward due to 0.1% fee deduction
         let total_distributed: u64 = reward_dist.outputs.iter().map(|o| o.value).sum();
         let expected_total = block.header.block_reward;
 
-        let diff = if total_distributed > expected_total {
-            total_distributed - expected_total
-        } else {
-            expected_total - total_distributed
-        };
+        // Calculate expected fee (0.1% of block reward)
+        let expected_fee = expected_total / 1000; // 0.1% = 1/1000
+        
+        // Distributed should be approximately block_reward - 0.1%
+        // Allow some tolerance for rounding (±1% of expected fee)
+        let expected_distributed = expected_total.saturating_sub(expected_fee);
+        let tolerance = expected_fee / 100; // 1% of the 0.1% fee = 0.001% of block reward
+        
+        let lower_bound = expected_distributed.saturating_sub(tolerance);
+        let upper_bound = expected_total; // Can't exceed block reward
 
-        if diff > 1000 {
+        if total_distributed < lower_bound || total_distributed > upper_bound {
             return Err(format!(
-                "Total distributed {} doesn't match block_reward {} (diff: {})",
-                total_distributed, expected_total, diff
+                "Total distributed {} outside valid range {}-{} (block_reward: {}, expected_fee: ~{})",
+                total_distributed, 
+                lower_bound,
+                upper_bound,
+                expected_total,
+                expected_fee
             ));
         }
 
