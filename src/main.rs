@@ -825,8 +825,8 @@ async fn main() {
         let is_producing = is_producing_block_clone;
 
         // Give time for initial blockchain sync to complete before starting block production
-        // Reduced from 120s to 30s for faster startup and catchup response
-        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        // Reduced to 10s for faster catchup startup
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
         // Time-based catchup trigger: Check if we're behind schedule
         // Use time rather than block count to determine when to trigger catchup
@@ -1325,11 +1325,15 @@ async fn main() {
 
                     // Step 4: Wait for consensus to finalize the block
                     // The message_handler will add the block when precommit consensus is reached
-                    // We poll here to track progress and handle timeout
-
-                    let consensus_timeout = std::time::Duration::from_secs(30);
+                    // During catchup, check if peers have synced instead of waiting for timeout
+                    
+                    let consensus_timeout = if blocks_behind > 0 {
+                        std::time::Duration::from_secs(10) // Catchup: 10 second max wait
+                    } else {
+                        std::time::Duration::from_secs(30) // Normal: 30 second max wait
+                    };
                     let consensus_start = std::time::Instant::now();
-                    let check_interval = std::time::Duration::from_millis(500);
+                    let check_interval = std::time::Duration::from_millis(100); // Check frequently
 
                     loop {
                         tokio::time::sleep(check_interval).await;
@@ -1338,13 +1342,62 @@ async fn main() {
                         let new_height = block_blockchain.get_height();
                         if new_height >= block_height {
                             tracing::info!(
-                                "✅ Block {} finalized via Avalanche consensus!",
+                                "✅ Block {} finalized via consensus!",
                                 block_height
                             );
                             break;
                         }
 
-                        // Log consensus progress
+                        // During catchup: Check if most peers have synced to this height
+                        // This is much faster than waiting for full consensus timeout
+                        if blocks_behind > 0 && consensus_start.elapsed().as_millis() > 500 {
+                            let connected_peers = block_peer_registry.get_connected_peers().await;
+                            if !connected_peers.is_empty() {
+                                let mut synced_count = 0;
+                                let mut checked_count = 0;
+                                
+                                for peer_ip in &connected_peers {
+                                    if let Some(peer_height) = block_peer_registry.get_peer_height(peer_ip).await {
+                                        checked_count += 1;
+                                        if peer_height >= block_height {
+                                            synced_count += 1;
+                                        }
+                                    }
+                                }
+                                
+                                // If majority of reachable peers have synced, move on
+                                // This allows fast catchup without waiting for full consensus
+                                if checked_count > 0 {
+                                    let sync_percentage = (synced_count as f64 / checked_count as f64) * 100.0;
+                                    
+                                    if synced_count >= (checked_count * 2 / 3) && synced_count >= 2 {
+                                        tracing::info!(
+                                            "⚡ Block {} catchup: {}/{} peers synced ({:.0}%) - continuing",
+                                            block_height,
+                                            synced_count,
+                                            checked_count,
+                                            sync_percentage
+                                        );
+                                        break;
+                                    }
+                                    
+                                    // Log sync progress every 2 seconds
+                                    if consensus_start.elapsed().as_secs() % 2 == 0
+                                        && consensus_start.elapsed().as_millis() < 300
+                                    {
+                                        tracing::debug!(
+                                            "🔄 Block {} sync: {}/{} peers at height ({:.0}%)",
+                                            block_height,
+                                            synced_count,
+                                            checked_count,
+                                            sync_percentage
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
+                        // Log consensus progress periodically (normal mode or if peers not responding)
                         let prepare_weight = block_consensus_engine
                             .avalanche
                             .get_prepare_weight(block_hash);
