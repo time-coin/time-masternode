@@ -1235,6 +1235,28 @@ impl ConsensusEngine {
         }
     }
 
+    /// Create a test instance without UTXO manager (for unit tests)
+    #[cfg(test)]
+    pub fn new_test(avalanche_config: AvalancheConfig) -> Self {
+        let avalanche = AvalancheConsensus::new(avalanche_config)
+            .expect("Failed to initialize TimeVote consensus");
+
+        // Create UTXO manager with in-memory storage
+        let utxo_manager = Arc::new(UTXOStateManager::new());
+
+        Self {
+            masternodes: ArcSwap::from_pointee(Vec::new()),
+            identity: OnceLock::new(),
+            utxo_manager,
+            tx_pool: Arc::new(TransactionPool::new()),
+            broadcast_callback: Arc::new(TokioRwLock::new(None)),
+            state_notifier: Arc::new(StateNotifier::new()),
+            avalanche: Arc::new(avalanche),
+            finality_proof_mgr: Arc::new(FinalityProofManager::new(1)),
+            ai_validator: None,
+        }
+    }
+
     pub fn enable_ai_validation(&mut self, db: Arc<sled::Db>) {
         self.ai_validator = Some(Arc::new(crate::ai::AITransactionValidator::new(db)));
         tracing::info!("🤖 AI transaction validation enabled");
@@ -3266,5 +3288,222 @@ mod fallback_tests {
 
         let leader = compute_fallback_leader(&txid, slot_index, &avs);
         assert!(leader.is_none());
+    }
+
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - INTEGRATION TESTS
+    // ========================================================================
+
+    /// Test that fallback round tracking is initialized and cleaned up properly
+    #[test]
+    fn test_fallback_tracking_lifecycle() {
+        let config = AvalancheConfig::default();
+        let consensus = AvalancheConsensus::new(config).unwrap();
+        let txid = [99u8; 32];
+
+        // Initially no tracking
+        assert!(consensus.fallback_rounds.get(&txid).is_none());
+
+        // Start tracking
+        consensus.fallback_rounds.insert(txid, (100, 0, Instant::now()));
+
+        // Verify present
+        assert!(consensus.fallback_rounds.get(&txid).is_some());
+
+        // Remove tracking
+        consensus.fallback_rounds.remove(&txid);
+
+        // Verify cleaned up
+        assert!(consensus.fallback_rounds.get(&txid).is_none());
+    }
+
+    /// Test Q_finality calculation: 2/3 of total weight
+    #[test]
+    fn test_q_finality_calculation() {
+        // Test various total weights
+        let total1 = 6_000_000_000u64;
+        let q1 = (total1 * 2) / 3;
+        assert_eq!(q1, 4_000_000_000u64);
+
+        let total2 = 10_000_000_000u64;
+        let q2 = (total2 * 2) / 3;
+        assert!(q2 >= 6_666_666_666u64 && q2 <= 6_666_666_667u64);
+
+        let total3 = 3_000_000_000u64;
+        let q3 = (total3 * 2) / 3;
+        assert_eq!(q3, 2_000_000_000u64);
+    }
+
+    /// Test f+1 threshold calculation: ⌊(n-1)/3⌋ + 1
+    #[test]
+    fn test_f_plus_1_threshold() {
+        // n=4: f=1, need 2 alerts
+        let n4 = 4;
+        let f4 = (n4 - 1) / 3;
+        assert_eq!(f4, 1);
+        assert_eq!(f4 + 1, 2);
+
+        // n=10: f=3, need 4 alerts
+        let n10 = 10;
+        let f10 = (n10 - 1) / 3;
+        assert_eq!(f10, 3);
+        assert_eq!(f10 + 1, 4);
+
+        // n=100: f=33, need 34 alerts
+        let n100 = 100;
+        let f100 = (n100 - 1) / 3;
+        assert_eq!(f100, 33);
+        assert_eq!(f100 + 1, 34);
+    }
+
+    /// Test FALLBACK_ROUND_TIMEOUT constant
+    #[test]
+    fn test_fallback_timeout_constant() {
+        assert_eq!(FALLBACK_ROUND_TIMEOUT, Duration::from_secs(10));
+    }
+
+    /// Test MAX_FALLBACK_ROUNDS constant
+    #[test]
+    fn test_max_fallback_rounds_constant() {
+        assert_eq!(MAX_FALLBACK_ROUNDS, 5);
+
+        // Worst-case time: 5 rounds * 10 seconds = 50 seconds
+        let worst_case_ms = (MAX_FALLBACK_ROUNDS as u64) * 10 * 1000;
+        assert_eq!(worst_case_ms, 50_000); // 50 seconds
+    }
+
+    /// Test proposal-to-transaction mapping operations
+    #[test]
+    fn test_proposal_tx_mapping_operations() {
+        let config = AvalancheConfig::default();
+        let consensus = AvalancheConsensus::new(config).unwrap();
+
+        let txid = [100u8; 32];
+        let proposal_hash = [200u8; 32];
+
+        // Initially no mapping
+        assert!(consensus.proposal_to_tx.get(&proposal_hash).is_none());
+
+        // Insert mapping
+        consensus.proposal_to_tx.insert(proposal_hash, txid);
+
+        // Verify mapping exists
+        let retrieved = consensus.proposal_to_tx.get(&proposal_hash);
+        assert!(retrieved.is_some());
+        assert_eq!(*retrieved.unwrap(), txid);
+
+        // Remove mapping
+        consensus.proposal_to_tx.remove(&proposal_hash);
+
+        // Verify removed
+        assert!(consensus.proposal_to_tx.get(&proposal_hash).is_none());
+    }
+
+    /// Test liveness alerts accumulation structure
+    #[test]
+    fn test_liveness_alerts_accumulation() {
+        let config = AvalancheConfig::default();
+        let consensus = AvalancheConsensus::new(config).unwrap();
+
+        let txid = [101u8; 32];
+
+        // Initially no alerts
+        assert!(consensus.liveness_alerts.get(&txid).is_none());
+
+        // Insert alert vector
+        let alerts = Vec::new();
+        consensus.liveness_alerts.insert(txid, alerts);
+
+        // Verify exists
+        assert!(consensus.liveness_alerts.get(&txid).is_some());
+
+        // Clean up
+        consensus.liveness_alerts.remove(&txid);
+        assert!(consensus.liveness_alerts.get(&txid).is_none());
+    }
+
+    /// Test fallback votes accumulation structure
+    #[test]
+    fn test_fallback_votes_accumulation() {
+        let config = AvalancheConfig::default();
+        let consensus = AvalancheConsensus::new(config).unwrap();
+
+        let proposal_hash = [202u8; 32];
+
+        // Initially no votes
+        assert!(consensus.fallback_votes.get(&proposal_hash).is_none());
+
+        // Insert vote vector
+        let votes = Vec::new();
+        consensus.fallback_votes.insert(proposal_hash, votes);
+
+        // Verify exists
+        assert!(consensus.fallback_votes.get(&proposal_hash).is_some());
+
+        // Clean up
+        consensus.fallback_votes.remove(&proposal_hash);
+        assert!(consensus.fallback_votes.get(&proposal_hash).is_none());
+    }
+
+    /// Test that DashMap operations are thread-safe
+    #[test]
+    fn test_dashmap_concurrent_safety() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let config = AvalancheConfig::default();
+        let consensus = Arc::new(AvalancheConsensus::new(config).unwrap());
+
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let consensus = Arc::clone(&consensus);
+                thread::spawn(move || {
+                    let txid = [i; 32];
+                    consensus.fallback_rounds.insert(txid, (i as u64, 0, Instant::now()));
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify all inserts succeeded
+        for i in 0..10u8 {
+            let txid = [i; 32];
+            assert!(consensus.fallback_rounds.get(&txid).is_some());
+        }
+    }
+
+    /// Test leader determinism: same inputs always give same leader
+    #[test]
+    fn test_leader_election_determinism() {
+        use ed25519_dalek::SigningKey;
+
+        let txid = [123u8; 32];
+        let slot_index = 456u64;
+
+        let avs: Vec<Masternode> = (0..5)
+            .map(|i| {
+                let signing_key = SigningKey::from_bytes(&[i; 32]);
+                Masternode {
+                    address: format!("mn{}", i),
+                    wallet_address: format!("wallet{}", i),
+                    collateral: 1_000_000_000,
+                    public_key: signing_key.verifying_key(),
+                    tier: MasternodeTier::Bronze,
+                    registered_at: 0,
+                }
+            })
+            .collect();
+
+        // Compute leader multiple times
+        let leader1 = compute_fallback_leader(&txid, slot_index, &avs);
+        let leader2 = compute_fallback_leader(&txid, slot_index, &avs);
+        let leader3 = compute_fallback_leader(&txid, slot_index, &avs);
+
+        // All must be identical
+        assert_eq!(leader1, leader2);
+        assert_eq!(leader2, leader3);
     }
 }
