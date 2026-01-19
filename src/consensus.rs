@@ -624,6 +624,10 @@ pub struct AvalancheConsensus {
     /// proposal_hash -> Vec<FallbackVote> (accumulate votes from AVS members)
     fallback_votes: DashMap<Hash256, Vec<FallbackVote>>,
 
+    /// §7.6 Liveness Fallback: Proposal to transaction mapping
+    /// proposal_hash -> txid (track which proposal is for which transaction)
+    proposal_to_tx: DashMap<Hash256, Hash256>,
+
     /// §7.6 Liveness Fallback: Fallback round tracking
     /// txid -> (slot_index, round_count, started_at)
     fallback_rounds: DashMap<Hash256, (u64, u32, Instant)>,
@@ -661,6 +665,7 @@ impl AvalancheConsensus {
             stall_timers: Arc::new(DashMap::new()),
             liveness_alerts: DashMap::new(),
             fallback_votes: DashMap::new(),
+            proposal_to_tx: DashMap::new(),
             fallback_rounds: DashMap::new(),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
@@ -2118,7 +2123,7 @@ impl ConsensusEngine {
         self.avalanche
             .liveness_alerts
             .entry(txid)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(alert);
 
         // Count unique reporters (collect into Vec to avoid lifetime issues)
@@ -2165,7 +2170,7 @@ impl ConsensusEngine {
         self.avalanche
             .fallback_votes
             .entry(proposal_hash)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(vote);
 
         // Calculate weighted totals
@@ -2190,6 +2195,62 @@ impl ConsensusEngine {
             Some(FallbackVoteDecision::Reject)
         } else {
             None
+        }
+    }
+
+    /// Get current vote status for a proposal (for logging/debugging)
+    pub fn get_vote_status(&self, proposal_hash: &Hash256) -> Option<(u64, u64, usize)> {
+        self.avalanche.fallback_votes.get(proposal_hash).map(|votes| {
+            let mut approve_weight = 0u64;
+            let mut reject_weight = 0u64;
+            
+            for v in votes.iter() {
+                match v.vote {
+                    FallbackVoteDecision::Approve => approve_weight += v.voter_weight,
+                    FallbackVoteDecision::Reject => reject_weight += v.voter_weight,
+                }
+            }
+            
+            (approve_weight, reject_weight, votes.len())
+        })
+    }
+
+    /// Register a proposal for a transaction (tracking proposal_hash -> txid)
+    pub fn register_proposal(&self, proposal_hash: Hash256, txid: Hash256) {
+        self.avalanche.proposal_to_tx.insert(proposal_hash, txid);
+    }
+
+    /// Get transaction ID for a proposal hash
+    pub fn get_proposal_txid(&self, proposal_hash: &Hash256) -> Option<Hash256> {
+        self.avalanche.proposal_to_tx.get(proposal_hash).map(|v| *v)
+    }
+
+    /// Finalize transaction based on fallback vote result (§7.6.4)
+    pub fn finalize_from_fallback(
+        &self,
+        txid: Hash256,
+        decision: FallbackVoteDecision,
+        total_weight: u64,
+    ) {
+        match decision {
+            FallbackVoteDecision::Approve => {
+                // Transition to Finalized state
+                self.transition_to_finalized(txid, total_weight);
+                tracing::info!(
+                    "✅ Transaction {} finalized via fallback (Approved with weight {})",
+                    hex::encode(txid),
+                    total_weight
+                );
+            }
+            FallbackVoteDecision::Reject => {
+                // Transition to Rejected state
+                self.transition_to_rejected(txid, "Fallback consensus rejected".to_string());
+                tracing::warn!(
+                    "❌ Transaction {} rejected via fallback (weight {})",
+                    hex::encode(txid),
+                    total_weight
+                );
+            }
         }
     }
 

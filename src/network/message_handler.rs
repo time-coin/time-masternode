@@ -2158,9 +2158,23 @@ impl MessageHandler {
             .verify(&leader.masternode.public_key)
             .map_err(|e| format!("Invalid FinalityProposal signature: {}", e))?;
 
-        // TODO: Week 5-6 - Verify this node is deterministic leader
-        // TODO: Week 5-6 - Vote on the proposal
-        // TODO: Week 5-6 - Broadcast our FallbackVote
+        // §7.6 Week 5-6 Part 2: Register proposal and prepare for voting
+        if let Some(consensus) = &context.consensus {
+            // Register the mapping so we can finalize when votes come in
+            let proposal_hash = proposal.proposal_hash();
+            consensus.register_proposal(proposal_hash, proposal.txid);
+            
+            info!(
+                "[{}] Registered proposal {} for tx {}",
+                self.direction,
+                hex::encode(proposal_hash),
+                txid_hex
+            );
+        }
+
+        // TODO: Week 5-6 Part 3 - Verify this node is deterministic leader
+        // TODO: Week 5-6 Part 3 - Vote on the proposal
+        // TODO: Week 5-6 Part 3 - Broadcast our FallbackVote
 
         // Relay the proposal to other peers
         if let Some(broadcast_tx) = &context.broadcast_tx {
@@ -2194,9 +2208,75 @@ impl MessageHandler {
         vote.verify(&voter.masternode.public_key)
             .map_err(|e| format!("Invalid FallbackVote signature: {}", e))?;
 
-        // TODO: Week 5-6 - Accumulate votes
-        // TODO: Week 5-6 - Check if Q_finality threshold reached
-        // TODO: Week 5-6 - Finalize transaction if threshold met
+        // §7.6 Week 5-6 Part 2: Accumulate votes and check Q_finality threshold
+        if let Some(consensus) = &context.consensus {
+            // Calculate total AVS weight (sum of all masternode stakes)
+            let total_avs_weight: u64 = masternodes
+                .iter()
+                .map(|mn| mn.masternode.tier.collateral() / 1_000_000_000) // Convert to relative weight
+                .sum();
+
+            // Accumulate vote and check if quorum reached
+            if let Some(decision) = consensus.accumulate_fallback_vote(vote.clone(), total_avs_weight) {
+                // Q_finality threshold reached! Finalize the transaction
+                
+                info!(
+                    "[{}] 🎯 Q_finality reached for proposal {} (decision: {:?})",
+                    self.direction,
+                    proposal_hex,
+                    decision
+                );
+
+                // Get the transaction ID for this proposal
+                if let Some(txid) = consensus.get_proposal_txid(&vote.proposal_hash) {
+                    let txid_hex = hex::encode(txid);
+                    
+                    // Calculate total weight that voted for winning decision
+                    let (approve_weight, reject_weight, vote_count) = 
+                        consensus.get_vote_status(&vote.proposal_hash).unwrap_or((0, 0, 0));
+                    
+                    let winning_weight = match decision {
+                        crate::types::FallbackVoteDecision::Approve => approve_weight,
+                        crate::types::FallbackVoteDecision::Reject => reject_weight,
+                    };
+
+                    info!(
+                        "[{}] Finalizing tx {} via fallback: {:?} (weight: {}/{}, votes: {})",
+                        self.direction,
+                        txid_hex,
+                        decision,
+                        winning_weight,
+                        total_avs_weight,
+                        vote_count
+                    );
+
+                    // Finalize the transaction
+                    consensus.finalize_from_fallback(txid, decision, winning_weight);
+                } else {
+                    warn!(
+                        "[{}] ⚠️  Quorum reached but no txid mapping for proposal {}",
+                        self.direction,
+                        proposal_hex
+                    );
+                }
+            } else {
+                // Calculate current vote status for logging
+                if let Some((approve_weight, reject_weight, vote_count)) = 
+                    consensus.get_vote_status(&vote.proposal_hash) 
+                {
+                    let q_finality = (total_avs_weight * 2) / 3;
+                    debug!(
+                        "[{}] Vote accumulated for proposal {}: Approve={}, Reject={}, Total votes={}, Q_finality={}",
+                        self.direction,
+                        proposal_hex,
+                        approve_weight,
+                        reject_weight,
+                        vote_count,
+                        q_finality
+                    );
+                }
+            }
+        }
 
         // Relay the vote to other peers
         if let Some(broadcast_tx) = &context.broadcast_tx {

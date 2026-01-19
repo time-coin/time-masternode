@@ -1524,10 +1524,10 @@ impl Blockchain {
 
         // Get finalized transactions from consensus layer
         let finalized_txs = self.consensus.get_finalized_transactions_for_block();
-        
+
         // Calculate fees from current transactions (will be added to NEXT block)
         let current_block_fees = self.consensus.tx_pool.get_total_fees();
-        
+
         // Get fees from PREVIOUS block (stored during last block production)
         let previous_block_fees = self.get_pending_fees();
 
@@ -1551,10 +1551,10 @@ impl Blockchain {
             total_reward,
             rewards.len()
         );
-        
+
         // Store current block fees for NEXT block
         self.store_pending_fees(current_block_fees)?;
-        
+
         if current_block_fees > 0 {
             tracing::info!(
                 "💸 Block {}: collected {} satoshis in fees (will be added to block {})",
@@ -2189,9 +2189,7 @@ impl Blockchain {
     fn get_pending_fees(&self) -> u64 {
         let key = "pending_fees".as_bytes();
         match self.storage.get(key) {
-            Ok(Some(bytes)) => {
-                bincode::deserialize(&bytes).unwrap_or(0)
-            }
+            Ok(Some(bytes)) => bincode::deserialize(&bytes).unwrap_or(0),
             _ => 0, // No pending fees (genesis or first block after restart)
         }
     }
@@ -2443,12 +2441,12 @@ impl Blockchain {
 
         // Calculate expected fee (0.1% of block reward)
         let expected_fee = expected_total / 1000; // 0.1% = 1/1000
-        
+
         // Distributed should be approximately block_reward - 0.1%
         // Allow some tolerance for rounding (±1% of expected fee)
         let expected_distributed = expected_total.saturating_sub(expected_fee);
         let tolerance = expected_fee / 100; // 1% of the 0.1% fee = 0.001% of block reward
-        
+
         let lower_bound = expected_distributed.saturating_sub(tolerance);
         let upper_bound = expected_total; // Can't exceed block reward
 
