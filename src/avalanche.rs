@@ -1,7 +1,7 @@
-//! Avalanche consensus protocol implementation for TimeCoin
+//! timevote consensus protocol implementation for TimeCoin
 //! Provides instant transaction finality with continuous voting
 //!
-//! Note: This module provides the complete Avalanche protocol scaffolding.
+//! Note: This module provides the complete timevote protocol scaffolding.
 
 #![allow(dead_code)]
 
@@ -15,7 +15,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-/// Errors for Avalanche consensus
+/// Errors for timevote consensus
 #[derive(Error, Debug)]
 pub enum AvalancheError {
     #[error("Consensus error: {0}")]
@@ -31,7 +31,7 @@ pub enum AvalancheError {
     NetworkError(String),
 }
 
-/// Bridge between Avalanche consensus and TimeCoin transaction handling
+/// Bridge between timevote consensus and TimeCoin transaction handling
 #[allow(dead_code)]
 pub struct AvalancheHandler {
     consensus: Arc<AvalancheConsensus>,
@@ -76,7 +76,7 @@ impl AvalancheHandler {
         ))
     }
 
-    /// Initialize Avalanche with current validators
+    /// Initialize timevote with current validators
     pub async fn initialize_validators(&self) {
         let validators = self
             .masternode_registry
@@ -90,10 +90,10 @@ impl AvalancheHandler {
             .collect();
 
         self.consensus.update_validators(validators);
-        tracing::info!("🏔️ Avalanche consensus initialized with validators");
+        tracing::info!("🏔️ timevote consensus initialized with validators");
     }
 
-    /// Submit a transaction for Avalanche consensus
+    /// Submit a transaction for timevote consensus
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<Hash256, AvalancheError> {
         let txid = tx.txid();
 
@@ -115,11 +115,11 @@ impl AvalancheHandler {
                 .update_state(&input.previous_output, new_state);
         }
 
-        // Initiate Avalanche consensus with Accept preference
+        // Initiate timevote consensus with Accept preference
         self.consensus.initiate_consensus(txid, Preference::Accept);
 
         tracing::debug!(
-            "📋 Submitted TX {:?} for Avalanche consensus",
+            "📋 Submitted TX {:?} for timevote consensus",
             hex::encode(txid)
         );
 
@@ -129,7 +129,7 @@ impl AvalancheHandler {
         Ok(txid)
     }
 
-    /// Run Avalanche consensus rounds until transaction is finalized
+    /// Run timevote consensus rounds until transaction is finalized
     async fn run_consensus_to_completion(&self, txid: Hash256) -> Result<(), AvalancheError> {
         let max_rounds = 100;
         let mut round = 0;
@@ -141,7 +141,7 @@ impl AvalancheHandler {
                 round += 1;
                 if round >= max_rounds {
                     return Err(AvalancheError::ConsensusError(
-                        "Avalanche consensus timeout".to_string(),
+                        "timevote consensus timeout".to_string(),
                     ));
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
@@ -177,7 +177,7 @@ impl AvalancheHandler {
             round += 1;
             if round >= max_rounds {
                 return Err(AvalancheError::ConsensusError(
-                    "Avalanche consensus timeout".to_string(),
+                    "timevote consensus timeout".to_string(),
                 ));
             }
 
@@ -241,7 +241,7 @@ impl AvalancheHandler {
                 }
 
                 tracing::warn!(
-                    "❌ Transaction {:?} rejected by Avalanche",
+                    "❌ Transaction {:?} rejected by timevote",
                     hex::encode(txid)
                 );
                 Ok(())
@@ -294,7 +294,7 @@ pub struct AvalancheMetrics {
 
 /// Background task runner for continuous consensus rounds
 #[allow(dead_code)]
-pub async fn run_avalanche_loop(
+pub async fn run_timevote_loop(
     handler: Arc<AvalancheHandler>,
     mut finality_rx: mpsc::UnboundedReceiver<FinalityEvent>,
 ) {

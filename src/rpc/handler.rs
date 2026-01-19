@@ -75,7 +75,7 @@ impl RpcHandler {
             "masternodelist" => self.masternode_list().await,
             "masternodestatus" => self.masternode_status().await,
             "getconsensusinfo" => self.get_consensus_info().await,
-            "getavalanchestatus" => self.get_avalanche_status().await,
+            "gettimevotestatus" => self.get_timevote_status().await,
             "validateaddress" => self.validate_address(&params_array).await,
             "stop" => self.stop().await,
             "uptime" => self.uptime().await,
@@ -140,8 +140,8 @@ impl RpcHandler {
             "verificationprogress": 1.0,
             "chainwork": format!("{:064x}", height),
             "pruned": false,
-            "consensus": "Avalanche + TSDC",
-            "finality_mechanism": "Avalanche consensus",
+            "consensus": "timevote + TSDC",
+            "finality_mechanism": "timevote consensus",
             "instant_finality": true,
             "average_finality_time_ms": 750,
             "block_time_seconds": 600
@@ -397,12 +397,12 @@ impl RpcHandler {
         }
 
         // Process transaction through consensus
-        // Start Avalanche consensus to finalize this transaction
+        // Start timevote consensus to finalize this transaction
         tokio::spawn({
             let consensus = self.consensus.clone();
             let tx_for_consensus = tx.clone();
             async move {
-                // Initiate Avalanche consensus for transaction
+                // Initiate timevote consensus for transaction
                 if let Err(e) = consensus.add_transaction(tx_for_consensus).await {
                     tracing::error!("Failed to process transaction through consensus: {}", e);
                 }
@@ -669,10 +669,10 @@ impl RpcHandler {
         let masternodes = self.consensus.get_active_masternodes();
         let mn_count = masternodes.len();
 
-        // Avalanche consensus parameters
-        let avalanche_config = json!({
-            "protocol": "Avalanche + TSDC",
-            "avalanche": {
+        // timevote consensus parameters
+        let timevote_config = json!({
+            "protocol": "timevote + TSDC",
+            "timevote": {
                 "sample_size": 20,
                 "finality_confidence": 15,
                 "query_timeout_ms": 2000,
@@ -684,21 +684,21 @@ impl RpcHandler {
                 "description": "Deterministic 10-minute block production"
             },
             "active_validators": mn_count,
-            "finality_type": "Avalanche consensus (seconds) + TSDC blocks (10 minutes)",
+            "finality_type": "timevote consensus (seconds) + TimeLock Blocks (10 minutes)",
             "instant_finality": true,
             "average_finality_time_ms": 750
         });
 
-        Ok(avalanche_config)
+        Ok(timevote_config)
     }
 
-    /// Get Avalanche consensus status and metrics
-    async fn get_avalanche_status(&self) -> Result<Value, RpcError> {
+    /// Get timevote consensus status and metrics
+    async fn get_timevote_status(&self) -> Result<Value, RpcError> {
         let masternodes = self.consensus.get_active_masternodes();
         let active_validators = masternodes.len();
 
         Ok(json!({
-            "protocol": "Avalanche",
+            "protocol": "timevote",
             "status": "active",
             "active_validators": active_validators,
             "configuration": {
@@ -711,9 +711,9 @@ impl RpcHandler {
                 "average_finality_time_ms": 750,
                 "finality_type": "probabilistic (cryptographically secure)",
                 "validator_sampling": "random k-of-n",
-                "description": "Avalanche consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
+                "description": "timevote consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
             },
-            "note": "Transactions finalized by Avalanche in seconds, blocks produced every 10 minutes by TSDC"
+            "note": "Transactions finalized by timevote in seconds, blocks produced every 10 minutes by TSDC"
         }))
     }
 
@@ -1025,7 +1025,7 @@ impl RpcHandler {
                 "txid": txid,
                 "finalized": true,
                 "confirmations": confirmations,
-                "finality_type": "avalanche"
+                "finality_type": "timevote"
             }));
         }
 
@@ -1089,7 +1089,7 @@ impl RpcHandler {
                     "txid": txid,
                     "finalized": true,
                     "confirmations": confirmations,
-                    "finality_type": "avalanche",
+                    "finality_type": "timevote",
                     "wait_time_ms": start_time.elapsed().as_millis()
                 }));
             }

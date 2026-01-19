@@ -1,7 +1,7 @@
 //! Time-Scheduled Deterministic Consensus (TSDC) Protocol
 //!
 //! TSDC provides deterministic leader election and block production on a fixed 10-minute schedule.
-//! It works in conjunction with Avalanche for transaction finality.
+//! It works in conjunction with timevote for transaction finality.
 //!
 //! Key components:
 //! - VRF-based leader selection (deterministic via ECVRF)
@@ -544,7 +544,7 @@ impl TSCDConsensus {
 
         state.precommits_received.insert(validator_id, signature);
 
-        // Check if we have majority stake for finality (Avalanche consensus)
+        // Check if we have majority stake for finality (timevote consensus)
         let masternodes = match &self.masternode_registry {
             Some(registry) => registry.list_active().await,
             None => vec![],
@@ -745,7 +745,7 @@ impl TSCDConsensus {
     }
 
     /// Create a checkpoint of finalized transactions
-    /// This periodically bundles finalized Avalanche transactions for deterministic confirmation
+    /// This periodically bundles finalized timevote transactions for deterministic confirmation
     pub async fn create_checkpoint(
         &self,
         slot: u64,
@@ -789,7 +789,7 @@ impl TSCDConsensus {
     // ========================================================================
 
     /// Phase 3E.1: Create finality proof from majority precommit votes
-    /// Called when Avalanche consensus is reached (>50% of sample)
+    /// Called when timevote consensus is reached (>50% of sample)
     pub async fn create_finality_proof(
         &self,
         block_hash: Hash256,
@@ -832,7 +832,7 @@ impl TSCDConsensus {
             )));
         }
 
-        // Verify proof has majority stake for finality (Avalanche consensus)
+        // Verify proof has majority stake for finality (timevote consensus)
         let masternodes = match &self.masternode_registry {
             Some(registry) => registry.list_active().await,
             None => vec![],

@@ -1732,9 +1732,9 @@ impl PeerConnection {
                     }
                 }
             }
-            NetworkMessage::TSCDBlockProposal { .. }
-            | NetworkMessage::TSCDPrepareVote { .. }
-            | NetworkMessage::TSCDPrecommitVote { .. } => {
+            NetworkMessage::TimeLockBlockProposal { .. }
+            | NetworkMessage::TimeVotePrepare { .. }
+            | NetworkMessage::TimeVotePrecommit { .. } => {
                 // Use unified message handler for TSDC messages with shared resources
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
 

@@ -120,7 +120,7 @@ pub enum TransactionStatus {
     Finalized { finalized_at: i64, vfp_weight: u64 },
     /// Rejected due to conflict or invalidity
     Rejected { rejected_at: i64, reason: String },
-    /// Included in TSDC block, can be pruned
+    /// Included in TimeLock Block, can be pruned
     Archived { block_height: u64, archived_at: i64 },
 }
 
@@ -219,7 +219,7 @@ impl MasternodeTier {
         }
     }
 
-    /// Sampling weight for Avalanche consensus
+    /// Sampling weight for timevote consensus
     /// Used for stake-weighted sampling: P(sample node_i) = Weight_i / Total_Weight
     #[allow(dead_code)]
     pub fn sampling_weight(&self) -> usize {

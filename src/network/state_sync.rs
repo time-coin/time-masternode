@@ -231,14 +231,14 @@ impl StateSyncManager {
             }
         }
 
-        // Check if expected hash has Avalanche majority consensus (>50%)
+        // Check if expected hash has timevote majority consensus (>50%)
         let total_votes: u32 = hash_votes.values().sum();
         if total_votes == 0 {
             return Err("No responses from peers".to_string());
         }
 
         let expected_votes = hash_votes.get(&expected_hash).copied().unwrap_or(0);
-        let consensus_threshold = total_votes.div_ceil(2); // Pure Avalanche: >50%
+        let consensus_threshold = total_votes.div_ceil(2); // Pure timevote: >50%
 
         if expected_votes > consensus_threshold {
             info!(

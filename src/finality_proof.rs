@@ -1,6 +1,6 @@
 //! Verifiable Finality Proofs (VFP) Manager
 //! Implements protocol §8: Accumulation, validation, and tracking of finality votes
-//! Converts Avalanche's local acceptance into objectively verifiable global finality
+//! Converts timevote's local acceptance into objectively verifiable global finality
 //!
 //! Note: Methods form the complete VFP protocol scaffolding for future integration.
 
@@ -53,15 +53,15 @@ impl FinalityProofManager {
     }
 
     /// Check if a transaction has enough votes to be finalized
-    /// Uses Avalanche consensus model: finality achieved through continuous sampling
-    /// Returns total weight of votes if meets Avalanche quorum threshold, None otherwise
+    /// Uses timevote consensus model: finality achieved through continuous sampling
+    /// Returns total weight of votes if meets timevote quorum threshold, None otherwise
     /// Threshold: alpha (quorum size) positive responses = consensus
     pub fn check_finality_threshold(&self, txid: Hash256, total_avs_weight: u64) -> Option<u64> {
         if let Some(votes_entry) = self.votes.get(&txid) {
             let total_weight: u64 = votes_entry.iter().map(|v| v.voter_weight).sum();
 
-            // Avalanche consensus threshold: need quorum_size (14) positive responses
-            // For pure Avalanche: use sample majority (>50% of sample)
+            // timevote consensus threshold: need quorum_size (14) positive responses
+            // For pure timevote: use sample majority (>50% of sample)
             // Typical sample size k=20, need alpha=14 confirmations
             // This is equivalent to >70% of sampled validators
             let threshold = total_avs_weight.div_ceil(2); // Majority stake weight

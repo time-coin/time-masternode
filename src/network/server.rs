@@ -1183,7 +1183,7 @@ async fn handle_peer(
                                     // Received a vote from a peer
                                     tracing::debug!("📥 Vote from {} for TX {:?}: {}", peer.addr, hex::encode(txid), preference);
 
-                                    // Update our Avalanche consensus with this vote
+                                    // Update our timevote consensus with this vote
                                     // Convert preference string to Preference enum
                                     let pref = match preference.as_str() {
                                         "Accept" => crate::consensus::Preference::Accept,
@@ -1196,7 +1196,7 @@ async fn handle_peer(
                                         }
                                     };
 
-                                    // Submit vote to Avalanche consensus
+                                    // Submit vote to timevote consensus
                                     // The consensus engine will update Snowball state
                                     consensus.avalanche.submit_vote(*txid, peer.addr.clone(), pref);
 
@@ -1216,9 +1216,9 @@ async fn handle_peer(
                                         tracing::debug!("✅ Finality vote recorded from {}", peer.addr);
                                     }
                                 }
-                                NetworkMessage::TSCDBlockProposal { .. }
-                                | NetworkMessage::TSCDPrepareVote { .. }
-                                | NetworkMessage::TSCDPrecommitVote { .. } => {
+                                NetworkMessage::TimeLockBlockProposal { .. }
+                                | NetworkMessage::TimeVotePrepare { .. }
+                                | NetworkMessage::TimeVotePrecommit { .. } => {
                                     // Use unified message handler for TSDC messages
                                     let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
                                     let context = MessageContext::with_consensus(

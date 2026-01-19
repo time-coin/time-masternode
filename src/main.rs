@@ -849,7 +849,7 @@ async fn main() {
         let initial_wait = if blocks_behind > 2 {
             // More than 2 blocks behind - start catchup immediately
             tracing::info!(
-                "⚡ {} blocks behind - starting immediate TSDC catchup (>2 blocks threshold)",
+                "⚡ {} blocks behind - starting immediate TimeLock catchup (>2 blocks threshold)",
                 blocks_behind
             );
             0
@@ -857,7 +857,7 @@ async fn main() {
             // 1-2 blocks behind AND 5+ minutes past when block should have been produced
             // Start catchup immediately - normal production had its chance
             tracing::info!(
-                "⚡ {} blocks behind, {}s past expected block time - starting immediate TSDC catchup",
+                "⚡ {} blocks behind, {}s past expected block time - starting immediate TimeLock catchup",
                 blocks_behind,
                 time_since_expected
             );
@@ -971,7 +971,7 @@ async fn main() {
                 block_registry.get_eligible_for_rewards().await
             };
 
-            // Sync validators for Avalanche consensus (CRITICAL for block consensus to work)
+            // Sync validators for timevote consensus (CRITICAL for block consensus to work)
             let active_masternodes = block_registry.list_active().await;
             block_consensus_engine.sync_validators_from_masternodes(&active_masternodes);
 
@@ -1033,7 +1033,7 @@ async fn main() {
             // 2. If behind by 1+ blocks and 60s past scheduled: produce the block
             // 3. If way behind (network was down): sync first, then produce together
             // 4. Minority nodes that won't sync don't block majority progress
-            // 5. Use TSDC/Avalanche consensus for leader election
+            // 5. Use TSDC/timevote consensus for leader election
             // ═══════════════════════════════════════════════════════════════════════════════
 
             let next_height = current_height + 1;
@@ -1269,7 +1269,7 @@ async fn main() {
 
                     // TSDC Consensus Flow:
                     // 1. Cache block locally for finalization
-                    // 2. Broadcast TSCDBlockProposal to all peers (NOT add to chain yet)
+                    // 2. Broadcast TimeLockBlockProposal to all peers (NOT add to chain yet)
                     // 3. All nodes (including us) validate and vote
                     // 4. When >50% prepare votes → precommit phase
                     // 5. When >50% precommit votes → block finalized, all add to chain
@@ -1282,13 +1282,13 @@ async fn main() {
                     }
 
                     // Step 2: Broadcast proposal to all peers
-                    let proposal = crate::network::message::NetworkMessage::TSCDBlockProposal {
+                    let proposal = crate::network::message::NetworkMessage::TimeLockBlockProposal {
                         block: block.clone(),
                     };
                     block_peer_registry.broadcast(proposal).await;
 
                     tracing::info!(
-                        "📤 TSCDBlockProposal broadcast for block {} (hash: {}...)",
+                        "📤 TimeLockBlockProposal broadcast for block {} (hash: {}...)",
                         block_height,
                         hex::encode(&block_hash[..4])
                     );
@@ -1309,7 +1309,7 @@ async fn main() {
                         );
 
                         // Broadcast our prepare vote
-                        let vote = crate::network::message::NetworkMessage::TSCDPrepareVote {
+                        let vote = crate::network::message::NetworkMessage::TimeVotePrepare {
                             block_hash,
                             voter_id: our_addr.clone(),
                             signature: vec![], // TODO: Sign with masternode key
@@ -1449,7 +1449,7 @@ async fn main() {
                                 } else {
                                     // Broadcast the finalized block for late-joining nodes
                                     let finalized_msg =
-                                        crate::network::message::NetworkMessage::TSCDBlockProposal {
+                                        crate::network::message::NetworkMessage::TimeLockBlockProposal {
                                             block: block.clone(),
                                         };
                                     block_peer_registry.broadcast(finalized_msg).await;
@@ -1566,7 +1566,7 @@ async fn main() {
                                 }
                                 Err(_) => {
                                     // Sync failed - peers don't have blocks
-                                    // Check if we should be the TSDC catchup leader
+                                    // Check if we should be the TimeLock catchup leader
                                     // Use deterministic leader selection based only on expected_height
                                     if let Ok(tsdc_leader) = status_tsdc_clone.select_leader_for_catchup(0, expected_height).await {
                                         let is_leader = if let Some(ref our_addr) = status_masternode_addr_clone {
@@ -1579,18 +1579,18 @@ async fn main() {
                                             // Check if catchup blocks are enabled
                                             if status_config_clone.node.enable_catchup_blocks {
                                                 tracing::info!(
-                                                    "🎯 We are TSDC catchup leader - triggering catchup production immediately"
+                                                    "🎯 We are TimeLock catchup leader - triggering catchup production immediately"
                                                 );
                                                 // Notify block production task to run catchup immediately
                                                 status_catchup_trigger.notify_one();
                                             } else {
                                                 tracing::warn!(
-                                                    "⚠️  TSDC catchup leader but catchup blocks DISABLED in config"
+                                                    "⚠️  TimeLock catchup leader but catchup blocks DISABLED in config"
                                                 );
                                             }
                                         } else {
                                             tracing::info!(
-                                                "⏳ Waiting for TSDC catchup leader {} to produce blocks",
+                                                "⏳ Waiting for TimeLock catchup leader {} to produce blocks",
                                                 tsdc_leader.id
                                             );
                                         }
@@ -1801,7 +1801,7 @@ async fn main() {
             println!("║  Storage:    {:<40} ║", config.storage.backend);
             println!("║  P2P Port:   {:<40} ║", p2p_addr);
             println!("║  RPC Port:   {:<40} ║", rpc_addr);
-            println!("║  Consensus:  TSDC + Avalanche Hybrid                  ║");
+            println!("║  Consensus:  TSDC + timevote Hybrid                  ║");
             println!("║  Finality:   Instant (<10 seconds)                    ║");
             println!("╚═══════════════════════════════════════════════════════╝");
             println!("\nPress Ctrl+C to stop\n");

@@ -188,7 +188,7 @@ impl NodeIdentity {
 }
 
 // ============================================================================
-// AVALANCHE PROTOCOL TYPES
+// timevote PROTOCOL TYPES
 // ============================================================================
 
 /// TimeVote consensus errors
@@ -470,7 +470,7 @@ impl QueryRound {
 // ============================================================================
 
 /// Accumulates prepare votes for a block (Phase 3D)
-/// Pure Avalanche: Tracks continuous sampling votes until majority consensus
+/// Pure timevote: Tracks continuous sampling votes until majority consensus
 #[derive(Debug)]
 pub struct PrepareVoteAccumulator {
     /// block_hash -> Vec<(voter_id, weight)>
@@ -498,8 +498,8 @@ impl PrepareVoteAccumulator {
             .push((voter_id, weight));
     }
 
-    /// Check if Avalanche consensus reached: majority of sample votes for block
-    /// Pure Avalanche: need >50% of sampled validators to agree
+    /// Check if timevote consensus reached: majority of sample votes for block
+    /// Pure timevote: need >50% of sampled validators to agree
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
@@ -525,7 +525,7 @@ impl PrepareVoteAccumulator {
 }
 
 /// Accumulates precommit votes for a block (Phase 3E)
-/// Pure Avalanche: After prepare consensus, validators continue voting for finality
+/// Pure timevote: After prepare consensus, validators continue voting for finality
 #[derive(Debug)]
 pub struct PrecommitVoteAccumulator {
     /// block_hash -> Vec<(voter_id, weight)>
@@ -553,8 +553,8 @@ impl PrecommitVoteAccumulator {
             .push((voter_id, weight));
     }
 
-    /// Check if Avalanche consensus reached: majority of sample votes for block
-    /// Pure Avalanche: need >50% of sampled validators to agree (consistent with prepare)
+    /// Check if timevote consensus reached: majority of sample votes for block
+    /// Pure timevote: need >50% of sampled validators to agree (consistent with prepare)
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
@@ -603,10 +603,10 @@ pub struct AvalancheConsensus {
     /// txid -> accumulated votes
     vfp_votes: DashMap<Hash256, Vec<FinalityVote>>,
 
-    /// Phase 3D: Prepare vote accumulator for Avalanche blocks
+    /// Phase 3D: Prepare vote accumulator for timevote blocks
     prepare_votes: Arc<PrepareVoteAccumulator>,
 
-    /// Phase 3E: Precommit vote accumulator for Avalanche blocks
+    /// Phase 3E: Precommit vote accumulator for timevote blocks
     precommit_votes: Arc<PrecommitVoteAccumulator>,
 
     /// §7.6 Liveness Fallback: Transaction status tracking
@@ -1113,7 +1113,7 @@ impl AvalancheConsensus {
     }
 
     /// Check if prepare consensus reached (Phase 3D.2)
-    /// Pure Avalanche: majority of sampled validators must vote for block
+    /// Pure timevote: majority of sampled validators must vote for block
     pub fn check_prepare_consensus(&self, block_hash: Hash256) -> bool {
         let validators = self.get_validators();
         let sample_size = validators.len();
@@ -1158,7 +1158,7 @@ impl AvalancheConsensus {
     }
 
     /// Check if precommit consensus reached (Phase 3E.2)
-    /// Pure Avalanche: majority of sampled validators must vote for block
+    /// Pure timevote: majority of sampled validators must vote for block
     pub fn check_precommit_consensus(&self, block_hash: Hash256) -> bool {
         let validators = self.get_validators();
         let sample_size = validators.len();
@@ -1279,7 +1279,7 @@ impl ConsensusEngine {
         self.masternodes.store(Arc::new(masternodes));
     }
 
-    /// Sync Avalanche validators from a list of masternodes
+    /// Sync timevote validators from a list of masternodes
     /// This should be called whenever the masternode list changes
     pub fn sync_validators_from_masternodes(
         &self,
@@ -1736,8 +1736,8 @@ impl ConsensusEngine {
             .add_pending(tx.clone(), fee)
             .map_err(|e| format!("Failed to add to pool: {}", e))?;
 
-        // ===== AVALANCHE CONSENSUS INTEGRATION =====
-        // Start Avalanche Snowball consensus for this transaction
+        // ===== timevote CONSENSUS INTEGRATION =====
+        // Start timevote Snowball consensus for this transaction
         let validators_for_consensus = {
             let mut validator_infos = Vec::new();
             for masternode in masternodes.iter() {
@@ -1788,18 +1788,18 @@ impl ConsensusEngine {
             // Small initial delay for peer notifications
             tokio::time::sleep(Duration::from_millis(500)).await;
 
-            // Execute multiple Avalanche rounds for this transaction
+            // Execute multiple timevote rounds for this transaction
             let max_rounds = 10;
             for round_num in 0..max_rounds {
                 // §7.6 Integration: Check if transaction is in FallbackResolution state
-                // If in fallback, skip Avalanche sampling and let fallback protocol handle it
+                // If in fallback, skip timevote sampling and let fallback protocol handle it
                 if let Some(status_entry) = tx_status_map.get(&txid) {
                     if matches!(
                         status_entry.value(),
                         TransactionStatus::FallbackResolution { .. }
                     ) {
                         tracing::info!(
-                            "Round {}: TX {:?} in FallbackResolution, skipping Avalanche sampling",
+                            "Round {}: TX {:?} in FallbackResolution, skipping timevote sampling",
                             round_num,
                             hex::encode(txid)
                         );
@@ -2826,7 +2826,7 @@ impl ConsensusEngine {
         count
     }
 
-    /// Resume Avalanche sampling after fallback completes (§7.6.5)
+    /// Resume timevote sampling after fallback completes (§7.6.5)
     ///
     /// Transitions transaction from FallbackResolution back to Sampling state.
     /// Used when fallback times out or otherwise fails to finalize.
@@ -2834,7 +2834,7 @@ impl ConsensusEngine {
     /// # Protocol Flow (§7.6.5)
     /// 1. Fallback round times out (no Q_finality votes received in 10s)
     /// 2. Increment slot_index → new deterministic leader
-    /// 3. If MAX_FALLBACK_ROUNDS exceeded, resume Avalanche sampling
+    /// 3. If MAX_FALLBACK_ROUNDS exceeded, resume timevote sampling
     /// 4. Transaction gets fresh stall timer, returns to normal consensus
     ///
     /// # Arguments
@@ -2854,7 +2854,7 @@ impl ConsensusEngine {
     /// // After fallback timeout
     /// if fallback_round_failed && round_count >= MAX_FALLBACK_ROUNDS {
     ///     consensus.resume_sampling_after_fallback(txid)?;
-    ///     info!("Resumed Avalanche sampling for tx {}", hex::encode(txid));
+    ///     info!("Resumed timevote sampling for tx {}", hex::encode(txid));
     /// }
     /// ```
     pub fn resume_sampling_after_fallback(&self, txid: Hash256) -> Result<(), String> {
@@ -3037,7 +3037,7 @@ mod tests {
     }
 
     #[test]
-    fn test_avalanche_init() {
+    fn test_timevote_init() {
         let config = AvalancheConfig::default();
         let av = AvalancheConsensus::new(config).unwrap();
         assert_eq!(av.get_validators().len(), 0);
@@ -3094,7 +3094,7 @@ mod tests {
         // Votes recorded but not processed until round completes
     }
 
-    // Snowflake tests disabled - implementation replaced by newer Avalanche consensus
+    // Snowflake tests disabled - implementation replaced by newer timevote consensus
     #[test]
     #[ignore]
     fn test_snowflake() {

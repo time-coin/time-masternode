@@ -165,12 +165,12 @@ impl GenesisBlock {
             NetworkType::Testnet => (
                 "2025-12-01T00:00:00Z",
                 1764547200i64,
-                "TIME Coin Testnet Relaunch - December 1, 2025 - TSDC + Avalanche Consensus",
+                "TIME Coin Testnet Relaunch - December 1, 2025 - TSDC + timevote Consensus",
             ),
             NetworkType::Mainnet => (
                 "2026-01-01T00:00:00Z",
                 1767225600i64,
-                "TIME Coin Mainnet Launch - January 1, 2026 - TSDC + Avalanche Consensus",
+                "TIME Coin Mainnet Launch - January 1, 2026 - TSDC + timevote Consensus",
             ),
         };
 
@@ -328,7 +328,7 @@ impl GenesisBlock {
             "network": network_str,
             "version": 2,
             "message": format!(
-                "TIME Coin {} Genesis Block - TSDC + Avalanche Consensus",
+                "TIME Coin {} Genesis Block - TSDC + timevote Consensus",
                 if matches!(network, NetworkType::Mainnet) { "Mainnet" } else { "Testnet" }
             ),
             "block": {

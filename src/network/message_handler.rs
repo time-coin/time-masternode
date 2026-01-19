@@ -254,11 +254,11 @@ impl MessageHandler {
             }
 
             // === TSDC Consensus Messages ===
-            NetworkMessage::TSCDBlockProposal { block } => {
+            NetworkMessage::TimeLockBlockProposal { block } => {
                 self.handle_tsdc_block_proposal(block.clone(), context)
                     .await
             }
-            NetworkMessage::TSCDPrepareVote {
+            NetworkMessage::TimeVotePrepare {
                 block_hash,
                 voter_id,
                 signature,
@@ -271,7 +271,7 @@ impl MessageHandler {
                 )
                 .await
             }
-            NetworkMessage::TSCDPrecommitVote {
+            NetworkMessage::TimeVotePrecommit {
                 block_hash,
                 voter_id,
                 signature,
@@ -556,7 +556,7 @@ impl MessageHandler {
         Ok(Some(NetworkMessage::MasternodesResponse(mn_data)))
     }
 
-    /// Handle TSDC Block Proposal - cache and vote
+    /// Handle TimeLock Block Proposal - cache and vote
     async fn handle_tsdc_block_proposal(
         &self,
         block: Block,
@@ -565,7 +565,7 @@ impl MessageHandler {
         let block_height = block.header.height;
 
         info!(
-            "📦 [{}] Received TSDC block proposal at height {} from {}",
+            "📦 [{}] Received TimeLock Block proposal at height {} from {}",
             self.direction, block_height, self.peer_ip
         );
 
@@ -627,7 +627,7 @@ impl MessageHandler {
         // Broadcast prepare vote to all peers
         if let Some(broadcast_tx) = &context.broadcast_tx {
             let sig_bytes = vec![]; // TODO: Phase 3E.4: Sign with validator key
-            let prepare_vote = NetworkMessage::TSCDPrepareVote {
+            let prepare_vote = NetworkMessage::TimeVotePrepare {
                 block_hash,
                 voter_id: validator_id.clone(),
                 signature: sig_bytes,
@@ -689,7 +689,7 @@ impl MessageHandler {
             .avalanche
             .accumulate_prepare_vote(block_hash, voter_id.clone(), voter_weight);
 
-        // Check if prepare consensus reached (>50% majority Avalanche)
+        // Check if prepare consensus reached (>50% majority timevote)
         if consensus.avalanche.check_prepare_consensus(block_hash) {
             info!(
                 "✅ [{}] Prepare consensus reached for block {}",
@@ -720,7 +720,7 @@ impl MessageHandler {
 
             // Broadcast precommit vote
             if let Some(broadcast_tx) = &context.broadcast_tx {
-                let precommit_vote = NetworkMessage::TSCDPrecommitVote {
+                let precommit_vote = NetworkMessage::TimeVotePrecommit {
                     block_hash,
                     voter_id: validator_id,
                     signature: vec![],
@@ -777,7 +777,7 @@ impl MessageHandler {
             .avalanche
             .accumulate_precommit_vote(block_hash, voter_id.clone(), voter_weight);
 
-        // Check if precommit consensus reached (>50% majority Avalanche)
+        // Check if precommit consensus reached (>50% majority timevote)
         if consensus.avalanche.check_precommit_consensus(block_hash) {
             info!(
                 "✅ [{}] Precommit consensus reached for block {}",

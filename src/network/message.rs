@@ -125,7 +125,7 @@ pub enum NetworkMessage {
         consensus_peer_count: usize,
         message: String,
     },
-    // Avalanche consensus voting
+    // timevote consensus voting
     TransactionVoteRequest {
         txid: Hash256,
     },
@@ -145,16 +145,16 @@ pub enum NetworkMessage {
     FinalityVoteBroadcast {
         vote: crate::types::FinalityVote,
     },
-    // TSDC block production messages
-    TSCDBlockProposal {
+    // TimeLock Block production messages
+    TimeLockBlockProposal {
         block: Block,
     },
-    TSCDPrepareVote {
+    TimeVotePrepare {
         block_hash: Hash256,
         voter_id: String,
         signature: Vec<u8>,
     },
-    TSCDPrecommitVote {
+    TimeVotePrecommit {
         block_hash: Hash256,
         voter_id: String,
         signature: Vec<u8>,
@@ -267,9 +267,9 @@ impl NetworkMessage {
             NetworkMessage::FinalityVoteRequest { .. } => "FinalityVoteRequest",
             NetworkMessage::FinalityVoteResponse { .. } => "FinalityVoteResponse",
             NetworkMessage::FinalityVoteBroadcast { .. } => "FinalityVoteBroadcast",
-            NetworkMessage::TSCDBlockProposal { .. } => "TSCDBlockProposal",
-            NetworkMessage::TSCDPrepareVote { .. } => "TSCDPrepareVote",
-            NetworkMessage::TSCDPrecommitVote { .. } => "TSCDPrecommitVote",
+            NetworkMessage::TimeLockBlockProposal { .. } => "TimeLockBlockProposal",
+            NetworkMessage::TimeVotePrepare { .. } => "TimeVotePrepare",
+            NetworkMessage::TimeVotePrecommit { .. } => "TimeVotePrecommit",
             NetworkMessage::GetChainWork => "GetChainWork",
             NetworkMessage::ChainWorkResponse { .. } => "ChainWorkResponse",
             NetworkMessage::GetChainWorkAt(_) => "GetChainWorkAt",

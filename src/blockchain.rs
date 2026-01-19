@@ -74,7 +74,7 @@ pub struct UndoLog {
     pub block_hash: [u8; 32],
     /// UTXOs that were spent in this block (for restoration during rollback)
     pub spent_utxos: Vec<(OutPoint, UTXO)>,
-    /// Transaction IDs that were finalized by Avalanche before block inclusion
+    /// Transaction IDs that were finalized by timevote before block inclusion
     pub finalized_txs: Vec<[u8; 32]>,
     /// Timestamp when undo log was created
     pub created_at: i64,
@@ -2042,10 +2042,10 @@ impl Blockchain {
     /// Get all finalized transaction IDs in a height range (for reorg protection)
     ///
     /// This method scans blocks in the given range and identifies which transactions
-    /// were finalized by Avalanche consensus before being included in blocks.
+    /// were finalized by timevote consensus before being included in blocks.
     ///
     /// CRITICAL: Finalized transactions MUST be preserved during reorgs (Approach A).
-    /// Once Avalanche finalizes a transaction, it cannot be excluded from the chain,
+    /// Once timevote finalizes a transaction, it cannot be excluded from the chain,
     /// even if the block containing it is orphaned. Any fork missing a finalized
     /// transaction must be rejected.
     async fn get_finalized_txids_in_range(
@@ -2065,15 +2065,15 @@ impl Blockchain {
         // Block structure: [coinbase, reward_distribution, ...finalized_txs]
         // - Index 0: Coinbase (creates block reward)
         // - Index 1: Reward distribution (spends coinbase, distributes to masternodes)
-        // - Index 2+: Avalanche-finalized user transactions
+        // - Index 2+: timevote-finalized user transactions
         //
-        // Only transactions at index 2+ were finalized by Avalanche and need protection.
+        // Only transactions at index 2+ were finalized by timevote and need protection.
         // Coinbase and reward distribution are block-specific and regenerated during reorgs.
 
         for height in start_height..=end_height {
             if let Ok(block) = self.get_block_by_height(height).await {
                 // CRITICAL: Block structure is [coinbase, reward_distribution, ...finalized_txs]
-                // Only transactions at index 2+ are actual Avalanche-finalized user transactions.
+                // Only transactions at index 2+ are actual timevote-finalized user transactions.
                 // Coinbase (index 0) and reward distribution (index 1) are block-specific and
                 // must NOT be protected during reorgs - they're regenerated for each block.
                 for (idx, tx) in block.transactions.iter().enumerate() {
@@ -2184,7 +2184,7 @@ impl Blockchain {
         for tx in &block.transactions {
             let txid = tx.txid();
 
-            // Check if transaction was finalized by Avalanche before block inclusion
+            // Check if transaction was finalized by timevote before block inclusion
             // Simplified: If transaction doesn't exist in finalized pool, assume it's finalized
             // (More robust finalization tracking can be added later)
             let is_finalized = false; // Conservative: treat all as unfinalized for undo logs
@@ -3442,7 +3442,7 @@ impl Blockchain {
         tracing::info!("✅ All blocks validated successfully, proceeding with reorganization");
 
         // CRITICAL: Validate finalized transaction protection (Approach A)
-        // Once Avalanche finalizes a transaction, it MUST be in the canonical chain.
+        // Once timevote finalizes a transaction, it MUST be in the canonical chain.
         // Reject any fork that excludes a finalized transaction.
         tracing::info!("🔒 Checking finalized transaction protection...");
         let finalized_txs_to_check = self
@@ -3468,7 +3468,7 @@ impl Blockchain {
                 if !new_chain_txids.contains(txid) {
                     return Err(format!(
                         "⛔ REORG REJECTED: New chain is missing finalized transaction {} \
-                        (Avalanche instant finality guarantee violated). \
+                        (timevote instant finality guarantee violated). \
                         Finalized transactions cannot be excluded from the canonical chain.",
                         hex::encode(txid)
                     ));
