@@ -1475,48 +1475,16 @@ impl Blockchain {
             }
         }
 
-        // Use relaxed masternode selection when catching up (any blocks behind)
-        // or when explicitly producing catchup blocks (target_height provided)
-        // This avoids "No masternodes available" errors during catchup when
-        // connection status may be fluctuating due to rapid block production
-        let use_relaxed_selection = target_height.is_some() || blocks_behind > 0;
-
-        let masternodes = if use_relaxed_selection {
-            // Catchup mode - use all ACTIVE masternodes (skip connection check)
-            let active_mns = self.masternode_registry.list_active().await;
-            tracing::debug!(
-                "📊 Block {} (CATCHUP): using {} active masternodes for reward distribution",
-                next_height,
-                active_mns.len()
-            );
-            active_mns
-        } else {
-            // Normal mode - use only active AND connected masternodes
-            let conn_mgr = self.connection_manager.read().await;
-            let masternodes = if let Some(cm) = conn_mgr.as_ref() {
-                // Check connection status
-                let connected_active = self
-                    .masternode_registry
-                    .get_connected_active_masternodes(cm)
-                    .await;
-                tracing::debug!(
-                    "📊 Block {}: {} connected active masternodes for reward distribution",
-                    next_height,
-                    connected_active.len()
-                );
-                connected_active
-            } else {
-                // Fallback: if no connection manager set, use all active
-                let active_mns = self.masternode_registry.list_active().await;
-                tracing::warn!(
-                    "⚠️  Block {}: connection manager not set, using {} active masternodes (may include disconnected)",
-                    next_height,
-                    active_mns.len()
-                );
-                active_mns
-            };
-            masternodes
-        };
+        // ALWAYS use ALL active masternodes for reward distribution
+        // Rewards should be based on registration and activity, NOT connection status
+        // Connection filtering was causing 1-2 nodes to receive all rewards during network startup
+        let masternodes = self.masternode_registry.list_active().await;
+        
+        tracing::info!(
+            "💰 Block {}: distributing rewards to {} active masternodes",
+            next_height,
+            masternodes.len()
+        );
 
         if masternodes.is_empty() {
             return Err("No masternodes available for block production".to_string());
