@@ -1450,7 +1450,7 @@ impl Blockchain {
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
 
         // Check if we're catching up (used for relaxed masternode selection)
-        let blocks_behind = self
+        let _blocks_behind = self
             .calculate_expected_height()
             .saturating_sub(current_height);
 
@@ -1479,7 +1479,7 @@ impl Blockchain {
         // Rewards should be based on registration and activity, NOT connection status
         // Connection filtering was causing 1-2 nodes to receive all rewards during network startup
         let masternodes = self.masternode_registry.list_active().await;
-        
+
         tracing::info!(
             "💰 Block {}: distributing rewards to {} active masternodes",
             next_height,
@@ -2421,8 +2421,8 @@ impl Blockchain {
         if total_distributed < lower_bound || total_distributed > upper_bound {
             return Err(format!(
                 "Block {} total distributed {} outside valid range {}-{} (block_reward: {}, expected_fee: ~{})",
-                block.header.height, 
-                total_distributed, 
+                block.header.height,
+                total_distributed,
                 lower_bound,
                 upper_bound,
                 expected_total,

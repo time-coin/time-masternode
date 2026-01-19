@@ -2242,19 +2242,22 @@ impl ConsensusEngine {
 
     /// Get current vote status for a proposal (for logging/debugging)
     pub fn get_vote_status(&self, proposal_hash: &Hash256) -> Option<(u64, u64, usize)> {
-        self.avalanche.fallback_votes.get(proposal_hash).map(|votes| {
-            let mut approve_weight = 0u64;
-            let mut reject_weight = 0u64;
-            
-            for v in votes.iter() {
-                match v.vote {
-                    FallbackVoteDecision::Approve => approve_weight += v.voter_weight,
-                    FallbackVoteDecision::Reject => reject_weight += v.voter_weight,
+        self.avalanche
+            .fallback_votes
+            .get(proposal_hash)
+            .map(|votes| {
+                let mut approve_weight = 0u64;
+                let mut reject_weight = 0u64;
+
+                for v in votes.iter() {
+                    match v.vote {
+                        FallbackVoteDecision::Approve => approve_weight += v.voter_weight,
+                        FallbackVoteDecision::Reject => reject_weight += v.voter_weight,
+                    }
                 }
-            }
-            
-            (approve_weight, reject_weight, votes.len())
-        })
+
+                (approve_weight, reject_weight, votes.len())
+            })
     }
 
     /// Register a proposal for a transaction (tracking proposal_hash -> txid)
@@ -2371,10 +2374,7 @@ impl ConsensusEngine {
     ///     info!("Retried {} timed-out fallback rounds", retry_count);
     /// }
     /// ```
-    pub async fn check_fallback_timeouts(
-        &self,
-        masternode_registry: &MasternodeRegistry,
-    ) -> usize {
+    pub async fn check_fallback_timeouts(&self, masternode_registry: &MasternodeRegistry) -> usize {
         let now = Instant::now();
         let mut retried_count = 0;
 
@@ -2432,10 +2432,9 @@ impl ConsensusEngine {
                 );
 
                 // Update fallback round tracker
-                self.avalanche.fallback_rounds.insert(
-                    txid,
-                    (new_slot_index, new_round_count, Instant::now()),
-                );
+                self.avalanche
+                    .fallback_rounds
+                    .insert(txid, (new_slot_index, new_round_count, Instant::now()));
 
                 // Compute new leader
                 let masternodes = masternode_registry.list_all().await;
@@ -2472,11 +2471,7 @@ impl ConsensusEngine {
 
                             // Broadcast the proposal
                             if let Err(e) = self
-                                .broadcast_finality_proposal(
-                                    txid,
-                                    new_slot_index,
-                                    decision,
-                                )
+                                .broadcast_finality_proposal(txid, new_slot_index, decision)
                                 .await
                             {
                                 tracing::error!(
@@ -3305,7 +3300,9 @@ mod fallback_tests {
         assert!(consensus.fallback_rounds.get(&txid).is_none());
 
         // Start tracking
-        consensus.fallback_rounds.insert(txid, (100, 0, Instant::now()));
+        consensus
+            .fallback_rounds
+            .insert(txid, (100, 0, Instant::now()));
 
         // Verify present
         assert!(consensus.fallback_rounds.get(&txid).is_some());
@@ -3327,7 +3324,7 @@ mod fallback_tests {
 
         let total2 = 10_000_000_000u64;
         let q2 = (total2 * 2) / 3;
-        assert!(q2 >= 6_666_666_666u64 && q2 <= 6_666_666_667u64);
+        assert!((6_666_666_666u64..=6_666_666_667u64).contains(&q2));
 
         let total3 = 3_000_000_000u64;
         let q3 = (total3 * 2) / 3;
@@ -3459,7 +3456,9 @@ mod fallback_tests {
                 let consensus = Arc::clone(&consensus);
                 thread::spawn(move || {
                     let txid = [i; 32];
-                    consensus.fallback_rounds.insert(txid, (i as u64, 0, Instant::now()));
+                    consensus
+                        .fallback_rounds
+                        .insert(txid, (i as u64, 0, Instant::now()));
                 })
             })
             .collect();

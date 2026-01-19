@@ -2163,7 +2163,7 @@ impl MessageHandler {
             // Register the mapping so we can finalize when votes come in
             let proposal_hash = proposal.proposal_hash();
             consensus.register_proposal(proposal_hash, proposal.txid);
-            
+
             info!(
                 "[{}] Registered proposal {} for tx {}",
                 self.direction,
@@ -2212,10 +2212,7 @@ impl MessageHandler {
                         .broadcast_fallback_vote(proposal_hash, vote_decision, voter_weight)
                         .await
                     {
-                        warn!(
-                            "[{}] Failed to broadcast vote: {}",
-                            self.direction, e
-                        );
+                        warn!("[{}] Failed to broadcast vote: {}", self.direction, e);
                     }
                 }
                 Some(expected_mn_id) => {
@@ -2277,24 +2274,25 @@ impl MessageHandler {
                 .sum();
 
             // Accumulate vote and check if quorum reached
-            if let Some(decision) = consensus.accumulate_fallback_vote(vote.clone(), total_avs_weight) {
+            if let Some(decision) =
+                consensus.accumulate_fallback_vote(vote.clone(), total_avs_weight)
+            {
                 // Q_finality threshold reached! Finalize the transaction
-                
+
                 info!(
                     "[{}] 🎯 Q_finality reached for proposal {} (decision: {:?})",
-                    self.direction,
-                    proposal_hex,
-                    decision
+                    self.direction, proposal_hex, decision
                 );
 
                 // Get the transaction ID for this proposal
                 if let Some(txid) = consensus.get_proposal_txid(&vote.proposal_hash) {
                     let txid_hex = hex::encode(txid);
-                    
+
                     // Calculate total weight that voted for winning decision
-                    let (approve_weight, reject_weight, vote_count) = 
-                        consensus.get_vote_status(&vote.proposal_hash).unwrap_or((0, 0, 0));
-                    
+                    let (approve_weight, reject_weight, vote_count) = consensus
+                        .get_vote_status(&vote.proposal_hash)
+                        .unwrap_or((0, 0, 0));
+
                     let winning_weight = match decision {
                         crate::types::FallbackVoteDecision::Approve => approve_weight,
                         crate::types::FallbackVoteDecision::Reject => reject_weight,
@@ -2315,14 +2313,13 @@ impl MessageHandler {
                 } else {
                     warn!(
                         "[{}] ⚠️  Quorum reached but no txid mapping for proposal {}",
-                        self.direction,
-                        proposal_hex
+                        self.direction, proposal_hex
                     );
                 }
             } else {
                 // Calculate current vote status for logging
-                if let Some((approve_weight, reject_weight, vote_count)) = 
-                    consensus.get_vote_status(&vote.proposal_hash) 
+                if let Some((approve_weight, reject_weight, vote_count)) =
+                    consensus.get_vote_status(&vote.proposal_hash)
                 {
                     let q_finality = (total_avs_weight * 2) / 3;
                     debug!(
@@ -2521,7 +2518,7 @@ impl MessageHandler {
         if total_distributed < lower_bound || total_distributed > upper_bound {
             return Err(format!(
                 "Total distributed {} outside valid range {}-{} (block_reward: {}, expected_fee: ~{})",
-                total_distributed, 
+                total_distributed,
                 lower_bound,
                 upper_bound,
                 expected_total,
