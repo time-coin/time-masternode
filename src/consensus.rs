@@ -1749,7 +1749,10 @@ impl ConsensusEngine {
                 // §7.6 Integration: Check if transaction is in FallbackResolution state
                 // If in fallback, skip Avalanche sampling and let fallback protocol handle it
                 if let Some(status_entry) = tx_status_map.get(&txid) {
-                    if matches!(status_entry.value(), TransactionStatus::FallbackResolution { .. }) {
+                    if matches!(
+                        status_entry.value(),
+                        TransactionStatus::FallbackResolution { .. }
+                    ) {
                         tracing::info!(
                             "Round {}: TX {:?} in FallbackResolution, skipping Avalanche sampling",
                             round_num,
@@ -1856,7 +1859,7 @@ impl ConsensusEngine {
                                 tracing::info!("TX {:?} → Finalized", hex::encode(txid));
                             }
                         }
-                        
+
                         tracing::info!(
                             "✅ TX {:?} finalized via TimeVote after round {} (progressive finality)",
                             hex::encode(txid),
