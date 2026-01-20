@@ -70,8 +70,9 @@ impl DeterministicBlockGenerator {
             .map(|tx| *fee_map.get(&tx.txid()).unwrap_or(&0))
             .sum();
 
-        // Calculate total reward using logarithmic scaling
-        let base_reward = Self::calculate_total_masternode_reward(masternodes_sorted.len() as u64);
+        // Use flat 100 TIME block reward
+        const BLOCK_REWARD_SATOSHIS: u64 = 100 * 100_000_000; // 100 TIME
+        let base_reward = BLOCK_REWARD_SATOSHIS;
         let total_reward = base_reward + total_fees;
 
         // Calculate total weight (proportional to collateral for fair APY)
@@ -86,20 +87,22 @@ impl DeterministicBlockGenerator {
 
         // Distribute masternode rewards proportionally by weight
         // Rewards are stored in masternode_rewards field and converted to UTXOs when block is processed
-        // NOTE: Fees are deducted from rewards (0.1% fee on masternode rewards)
         let mut masternode_rewards = Vec::new();
+        let mut distributed = 0u64;
 
         if total_weight > 0 && !masternodes_sorted.is_empty() {
-            for mn in &masternodes_sorted {
+            for (i, mn) in masternodes_sorted.iter().enumerate() {
                 let weight = mn.tier.reward_weight();
-                let gross_reward = (masternode_pool * weight) / total_weight;
+                let reward = if i == masternodes_sorted.len() - 1 {
+                    // Last masternode gets remainder to avoid rounding errors
+                    masternode_pool - distributed
+                } else {
+                    (masternode_pool * weight) / total_weight
+                };
 
-                // Deduct 0.1% fee from masternode reward
-                let fee = gross_reward / 1000; // 0.1% = 1/1000
-                let net_reward = gross_reward.saturating_sub(fee);
-
-                if net_reward > 0 {
-                    masternode_rewards.push((mn.wallet_address.clone(), net_reward));
+                if reward > 0 {
+                    masternode_rewards.push((mn.wallet_address.clone(), reward));
+                    distributed += reward;
                 }
             }
         }
