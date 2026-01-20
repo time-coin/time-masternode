@@ -2374,6 +2374,22 @@ impl Blockchain {
             ));
         }
 
+        // CRITICAL: Validate the block_reward is correct (base reward + fees from previous block)
+        // Get fees from previous block (stored during block production)
+        let previous_block_fees = self.get_pending_fees();
+        let expected_reward = BLOCK_REWARD_SATOSHIS + previous_block_fees;
+
+        if block.header.block_reward != expected_reward {
+            return Err(format!(
+                "Block {} has incorrect block_reward: expected {} (base {} + fees {}), got {}",
+                block.header.height,
+                expected_reward,
+                BLOCK_REWARD_SATOSHIS,
+                previous_block_fees,
+                block.header.block_reward
+            ));
+        }
+
         // Transaction 1 should be reward distribution
         let reward_dist = &block.transactions[1];
 
