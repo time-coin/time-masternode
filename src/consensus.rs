@@ -526,6 +526,14 @@ impl PrepareVoteAccumulator {
             .unwrap_or(0)
     }
 
+    /// Get list of voter IDs who voted for this block
+    pub fn get_voters(&self, block_hash: Hash256) -> Vec<String> {
+        self.votes
+            .get(&block_hash)
+            .map(|entry| entry.iter().map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Clear votes for a block after finalization
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
@@ -581,6 +589,14 @@ impl PrecommitVoteAccumulator {
             .unwrap_or(0)
     }
 
+    /// Get list of voter IDs who voted for this block
+    pub fn get_voters(&self, block_hash: Hash256) -> Vec<String> {
+        self.votes
+            .get(&block_hash)
+            .map(|entry| entry.iter().map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Clear votes for a block after finalization
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
@@ -612,10 +628,10 @@ pub struct AvalancheConsensus {
     vfp_votes: DashMap<Hash256, Vec<FinalityVote>>,
 
     /// Phase 3D: Prepare vote accumulator for timevote blocks
-    prepare_votes: Arc<PrepareVoteAccumulator>,
+    pub prepare_votes: Arc<PrepareVoteAccumulator>,
 
     /// Phase 3E: Precommit vote accumulator for timevote blocks
-    precommit_votes: Arc<PrecommitVoteAccumulator>,
+    pub precommit_votes: Arc<PrecommitVoteAccumulator>,
 
     /// §7.6 Liveness Fallback: Transaction status tracking
     /// Per protocol §7.3 and §7.6 - explicit state machine

@@ -1846,6 +1846,18 @@ impl Blockchain {
         Ok(block.hash())
     }
 
+    /// Get the list of masternodes that participated in consensus for a specific block
+    /// This is used to determine reward eligibility based on actual participation
+    pub fn get_block_consensus_voters(&self, height: u64) -> Vec<String> {
+        match self.get_block(height) {
+            Ok(block) => {
+                let block_hash = block.hash();
+                self.consensus.avalanche.prepare_votes.get_voters(block_hash)
+            }
+            Err(_) => vec![],
+        }
+    }
+
     /// Get current blockchain height (lock-free - 100x faster than RwLock)
     pub fn get_height(&self) -> u64 {
         self.current_height.load(Ordering::Acquire)

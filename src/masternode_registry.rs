@@ -445,21 +445,21 @@ impl MasternodeRegistry {
         self.get_active_masternodes().await
     }
 
-    /// Get masternodes eligible for block rewards based on recent blockchain participation
-    /// This is consensus-safe: all nodes agree based on which masternodes received rewards
-    /// in recent blocks (on-chain data). This prevents:
-    /// 1. Paying masternodes that have gone down
-    /// 2. Fork issues from different connection views
+    /// Get masternodes eligible for block rewards based on consensus participation
+    /// This is consensus-safe: all nodes agree based on which masternodes voted in the
+    /// previous block (on-chain data). This prevents:
+    /// 1. Paying masternodes that have gone down (they won't vote)
+    /// 2. Fork issues from different connection views (consensus votes are deterministic)
+    ///
+    /// NOTE: This makes the heartbeat mechanism obsolete since consensus participation
+    /// proves a masternode is active and participating in the network.
     pub async fn get_masternodes_for_rewards(
         &self,
         blockchain: &crate::blockchain::Blockchain,
     ) -> Vec<MasternodeInfo> {
         // DETERMINISTIC MASTERNODE SELECTION FOR CONSENSUS
         // All nodes must agree on which masternodes receive rewards to avoid forks.
-        // We select masternodes deterministically based on:
-        // 1. Block height as the seed (all nodes agree on this)
-        // 2. Sorted list of registered masternodes (deterministic ordering)
-        // 3. Filter to only "active" masternodes (registered recently)
+        // We select masternodes based on consensus participation in the previous block.
 
         let height = blockchain.get_height();
         let masternodes = self.masternodes.read().await;
@@ -475,58 +475,59 @@ impl MasternodeRegistry {
             return vec![];
         }
 
+        // For genesis and first few blocks, use registration time as fallback
+        if height <= 3 {
+            tracing::info!(
+                "💰 Genesis/early blocks: using all {} registered masternodes",
+                all_nodes.len()
+            );
+            all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+            return all_nodes;
+        }
+
+        // Get the previous block to check which masternodes participated in consensus
+        let prev_height = height - 1;
+        
+        // Get voters from previous block's consensus (prepare votes)
+        let voters = blockchain.get_block_consensus_voters(prev_height);
+
+        if voters.is_empty() {
+            tracing::warn!(
+                "⚠️  No consensus voters found for previous block {}, using all registered masternodes",
+                prev_height
+            );
+            all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+            return all_nodes;
+        }
+
         // Sort deterministically by address to ensure all nodes agree on ordering
         all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
-        // Use block height as seed for deterministic selection
-        // This creates a rotating reward schedule that all nodes compute the same way
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(height.to_le_bytes());
-        let seed = hasher.finalize();
-        let seed_u64 = u64::from_le_bytes([
-            seed[0], seed[1], seed[2], seed[3], seed[4], seed[5], seed[6], seed[7],
-        ]);
-
-        // Select masternodes deterministically
-        // In the future with 10,000 nodes, we might select a subset (e.g., 100 per block)
-        // For now, select all active nodes (registered within timeframe)
+        // Filter to only masternodes that voted in the previous block
         let selected: Vec<MasternodeInfo> = all_nodes
             .into_iter()
-            .enumerate()
-            .filter(|(idx, mn)| {
-                // Include this masternode if:
-                // 1. It's registered (exists in the list)
-                // 2. For future scalability: we can use (seed + idx) % total to select a subset
-                // For now, include all registered nodes
-                let _ = (seed_u64.wrapping_add(*idx as u64)) % 1000; // Future: use this for subset selection
-
-                // Filter out masternodes that haven't registered recently
-                // This prevents paying rewards to nodes that disappeared
-                let now = Self::now();
-                let time_since_registration = now.saturating_sub(mn.masternode.registered_at);
-
-                // Only include nodes that registered within the last 24 hours
-                // This is consensus-safe because all nodes check the same timestamps
-                time_since_registration < 86400
+            .filter(|mn| {
+                // Include this masternode only if it participated in consensus for the previous block
+                voters.contains(&mn.masternode.address)
             })
-            .map(|(_, mn)| mn)
             .collect();
 
         tracing::info!(
-            "💰 Deterministic selection at height {}: {} eligible masternodes (from {} registered)",
+            "💰 Consensus-based selection at height {}: {} eligible masternodes participated in block {} (from {} registered, {} voters)",
             height,
             selected.len(),
-            masternodes.len()
+            prev_height,
+            masternodes.len(),
+            voters.len()
         );
 
-        // Debug: log first few selected nodes for verification
+        // Debug: log selected nodes for verification
         for (i, mn) in selected.iter().take(5).enumerate() {
             tracing::debug!(
-                "   [{}] {} (registered {} ago)",
+                "   [{}] {} (voted in block {})",
                 i,
                 mn.masternode.address,
-                Self::now().saturating_sub(mn.masternode.registered_at)
+                prev_height
             );
         }
 
