@@ -534,10 +534,23 @@ impl RpcHandler {
 
             Ok(json!(balance as f64 / 100_000_000.0))
         } else {
-            // Get total wallet balance
+            // Get wallet balance for this masternode's reward address
+            // If not a masternode, return total of all UTXOs
             let utxos = self.utxo_manager.list_all_utxos().await;
-            let balance: u64 = utxos.iter().map(|u| u.value).sum();
-            Ok(json!(balance as f64 / 100_000_000.0))
+
+            // Try to get this masternode's reward address
+            if let Some(local_mn) = self.registry.get_local_masternode().await {
+                let balance: u64 = utxos
+                    .iter()
+                    .filter(|u| u.address == local_mn.reward_address)
+                    .map(|u| u.value)
+                    .sum();
+                Ok(json!(balance as f64 / 100_000_000.0))
+            } else {
+                // Not a masternode - return all UTXOs (for testing/debug)
+                let balance: u64 = utxos.iter().map(|u| u.value).sum();
+                Ok(json!(balance as f64 / 100_000_000.0))
+            }
         }
     }
 
