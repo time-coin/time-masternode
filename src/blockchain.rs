@@ -1486,6 +1486,16 @@ impl Blockchain {
             masternodes.len()
         );
 
+        // Debug: Log each masternode receiving rewards
+        for mn in &masternodes {
+            tracing::debug!(
+                "   → Masternode {} (tier: {:?}, weight: {})",
+                mn.masternode.address,
+                mn.masternode.tier,
+                mn.masternode.tier.reward_weight()
+            );
+        }
+
         if masternodes.is_empty() {
             return Err("No masternodes available for block production".to_string());
         }
@@ -2678,31 +2688,12 @@ impl Blockchain {
 
                     // Get the block to identify transactions for mempool
                     if let Ok(block) = self.get_block_by_height(height).await {
-                        // FIRST: Remove masternode reward UTXOs
-                        let coinbase_txid = if !block.transactions.is_empty() {
-                            block.transactions[0].txid()
-                        } else {
-                            block.hash()
-                        };
+                        // NOTE: block.masternode_rewards is metadata only - the actual reward UTXOs
+                        // are created by the reward distribution transaction. We do NOT remove
+                        // separate UTXOs from the masternode_rewards array (they don't exist).
+                        // The reward_distribution transaction outputs are removed below with all other transactions.
 
-                        for (vout, _) in block.masternode_rewards.iter().enumerate() {
-                            let outpoint = OutPoint {
-                                txid: coinbase_txid,
-                                vout: vout as u32,
-                            };
-                            if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
-                                tracing::debug!(
-                                    "Could not remove reward UTXO {:?} at height {}: {}",
-                                    outpoint,
-                                    height,
-                                    e
-                                );
-                            } else {
-                                utxo_rollback_count += 1;
-                            }
-                        }
-
-                        // SECOND: Remove transaction outputs
+                        // Remove transaction outputs
                         for tx in block.transactions.iter() {
                             let txid = tx.txid();
 
