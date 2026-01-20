@@ -309,6 +309,12 @@ impl Blockchain {
         *self.connection_manager.write().await = Some(connection_manager);
     }
 
+    pub async fn get_connection_manager(
+        &self,
+    ) -> Option<Arc<crate::network::connection_manager::ConnectionManager>> {
+        self.connection_manager.read().await.clone()
+    }
+
     pub fn genesis_timestamp(&self) -> i64 {
         self.genesis_timestamp // Use cached value
     }

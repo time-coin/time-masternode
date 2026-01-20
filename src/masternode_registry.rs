@@ -454,55 +454,35 @@ impl MasternodeRegistry {
         &self,
         blockchain: &crate::blockchain::Blockchain,
     ) -> Vec<MasternodeInfo> {
-        use std::collections::HashMap;
-
-        const LOOKBACK_BLOCKS: u64 = 10; // Look at last 10 blocks
-        const MIN_PARTICIPATION: usize = 3; // Must have received rewards in at least 3 of last 10 blocks
-
-        // Get masternodes that participated in recent blocks
-        let mut participation_count: HashMap<String, usize> = HashMap::new();
-
-        let current_height = blockchain.get_height();
-
-        // For first 10 blocks, use all registered masternodes (bootstrap)
-        if current_height < LOOKBACK_BLOCKS {
-            return self.masternodes.read().await.values().cloned().collect();
-        }
-
-        let start_height = current_height.saturating_sub(LOOKBACK_BLOCKS);
-
-        // Count how many times each masternode received rewards in recent blocks
-        for height in start_height..current_height {
-            if let Ok(block) = blockchain.get_block_by_height(height).await {
-                for (addr, _amount) in &block.masternode_rewards {
-                    *participation_count.entry(addr.clone()).or_insert(0) += 1;
-                }
+        // Get connection manager to check if masternodes are currently connected
+        let connection_manager = match blockchain.get_connection_manager().await {
+            Some(cm) => cm,
+            None => {
+                tracing::warn!("⚠️  No connection manager available, using all active masternodes");
+                return self.get_active_masternodes().await;
             }
+        };
+
+        // Get only masternodes that are currently connected
+        // This prevents paying rewards to nodes that have gone down
+        let connected = self
+            .get_connected_active_masternodes(&connection_manager)
+            .await;
+
+        if connected.is_empty() {
+            tracing::warn!(
+                "⚠️  No connected active masternodes found, using all active masternodes"
+            );
+            return self.get_active_masternodes().await;
         }
 
-        // Get all registered masternodes
-        let all_masternodes = self.masternodes.read().await;
+        tracing::info!(
+            "💰 Selected {} connected active masternodes for rewards (out of {} registered)",
+            connected.len(),
+            self.masternodes.read().await.len()
+        );
 
-        // Filter to those with sufficient recent participation
-        let eligible: Vec<_> = all_masternodes
-            .values()
-            .filter(|info| {
-                let count = participation_count
-                    .get(&info.masternode.address)
-                    .copied()
-                    .unwrap_or(0);
-                count >= MIN_PARTICIPATION
-            })
-            .cloned()
-            .collect();
-
-        // If no masternodes meet the criteria (network restart), use all registered
-        if eligible.is_empty() {
-            tracing::warn!("⚠️  No masternodes met participation threshold, using all registered");
-            all_masternodes.values().cloned().collect()
-        } else {
-            eligible
-        }
+        connected
     }
 
     /// Count all registered masternodes (not just active ones)
