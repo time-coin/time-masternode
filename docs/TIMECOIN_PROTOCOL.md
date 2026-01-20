@@ -182,9 +182,36 @@ When queried about transaction `X`, a validator MUST:
 2. Check UTXO availability
 3. Check for conflicts with preferred transactions
 4. If valid and preferred: **Sign and return `FinalityVote`** with decision=Accept (§8.1)
-5. If invalid or conflicting: Return `VoteResponse` with decision=Reject (no signature needed)
+5. If invalid or conflicting: **Sign and return `FinalityVote`** with decision=Reject (§8.1)
 
-**Critical:** Every positive vote MUST include a signed `FinalityVote` immediately. This vote contributes directly to the TimeProof.
+**CRITICAL SECURITY REQUIREMENT:** ALL votes MUST be signed, including Reject votes.
+
+**Rationale (Equivocation Attack Prevention):**
+
+Without signatures on Reject votes, the following attack is possible:
+
+```
+Attack Scenario (Network Partition):
+1. Attacker broadcasts conflicting transactions tx_A and tx_B simultaneously
+2. Network temporarily partitions (natural or induced)
+3. Partition 1 sees tx_A first → 40% of validators vote Accept (signed)
+4. Partition 2 sees tx_B first → 40% of validators vote Accept (signed)
+5. Remaining 20% validators see both → vote Reject (unsigned)
+
+Problem: The 20% can CHANGE their votes after partition heals:
+- They have no cryptographic commitment to their Reject decision
+- Could vote Accept for tx_A after seeing it reached 40%
+- Or vote Accept for tx_B after seeing it reached 40%
+- Both transactions could appear to reach 67% threshold (equivocation)
+```
+
+**With signed Reject votes:**
+- Each validator creates cryptographic evidence of voting history
+- Cannot later claim to have voted Accept when they voted Reject
+- Equivocation becomes provably fraudulent (slashable offense)
+- Network converges to single truth despite partitions
+
+**Critical:** Every vote (Accept AND Reject) MUST include a signed `FinalityVote` immediately. This vote contributes to consensus safety.
 
 Responder MUST NOT return `Accept` for two conflicting txs for the same outpoint.
 
@@ -468,27 +495,39 @@ TimeProof is the mechanism for achieving finality in TimeCoin. A TimeProof is as
 ### 8.1 Finality Vote
 A **FinalityVote** is a signed statement:
 
-`FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, voter_mn_id, voter_weight, signature }`
+`FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, decision, voter_mn_id, voter_weight, signature }`
 
 Where:
+- `decision ∈ {Accept, Reject}` - REQUIRED: The voter's decision on this transaction
 - `tx_hash_commitment = H(canonical_tx_bytes)` (canonical serialization MUST be specified)
 - `slot_index` is the slot when the vote is issued (prevents indefinite replay)
 
-Signature covers all fields.
+Signature covers all fields including the `decision`.
 
 **Eligibility:** A vote counts only if the voter is AVS-active in the referenced `slot_index` (see §8.4).
+
+**Security Note:** Both Accept AND Reject votes MUST be signed to prevent equivocation attacks (see §7.2). A validator who signs "Reject" for transaction X creates cryptographic proof they rejected it, preventing them from later claiming they voted "Accept" during network partitions.
 
 ### 8.2 TimeProof Definition
 A **TimeProof** for transaction `X` is:
 
 `TimeProof(X) = { tx, slot_index, votes[] }`
 
+Where `votes[]` contains ONLY votes with `decision=Accept`.
+
 Validity conditions:
 1. All `votes[]` signatures verify.
 2. All votes agree on `(chain_id, txid, tx_hash_commitment, slot_index)`.
-3. Voters are distinct (by `voter_mn_id`).
-4. Each voter is a member of the **AVS snapshot** for that `slot_index`.
-5. Sum of distinct voter weights `Σ w_i ≥ Q_finality(slot_index)`.
+3. **All votes have `decision=Accept`** (Reject votes are signed but do NOT contribute to finality weight).
+4. Voters are distinct (by `voter_mn_id`).
+5. Each voter is a member of the **AVS snapshot** for that `slot_index`.
+6. Sum of distinct voter weights `Σ w_i ≥ Q_finality(slot_index)`.
+
+**Note on Reject Votes:**
+- Reject votes MUST be signed (equivocation prevention per §7.2)
+- Reject votes create cryptographic proof of rejection
+- Reject votes do NOT count toward the 67% finality threshold
+- Only Accept votes accumulate toward TimeProof finality weight
 
 ### 8.3 Finality threshold
 Let `total_AVS_weight(slot_index)` be the total weight of the AVS at that slot.
@@ -543,6 +582,9 @@ For each masternode `i` in the AVS at `slot_index`:
 - `score_i = VRF(prev_block_hash || slot_time || chain_id, sk_i)`
 
 Lower `score_i` is better.
+
+**Security Note (VRF Grinding Mitigation):**  
+The VRF input MUST include `prev_block_hash` as the first component to prevent grinding attacks. Without this unpredictable entropy, an adversary with multiple masternodes could pre-compute VRF outputs for future slots (since `slot_time` and `chain_id` are predictable) and selectively register only masternodes that will win valuable future slots. The `prev_block_hash` changes with each block and cannot be known in advance, making pre-computation attacks infeasible. This follows best practices from Algorand, Ethereum 2.0, and Cardano.
 
 ### 9.3 Canonical block selection (no timeout proofs)
 Any AVS-active masternode MAY publish a candidate block for the slot.
@@ -648,11 +690,20 @@ pub enum NetworkMessage {
 pub struct TxVoteBundle {
     pub txid: Hash256,
     pub vote: VoteResponse, // Valid/Invalid/Unknown
-    pub finality_vote: Option<FinalityVote>, // present iff vote==Valid and want_votes==true
+    pub finality_vote: FinalityVote, // REQUIRED: signed vote (includes decision: Accept/Reject)
 }
 
 pub enum VoteResponse { Valid, Invalid, Unknown }
 ```
+
+**CRITICAL CHANGE (Security Enhancement):**
+
+Previously, `finality_vote` was `Option<FinalityVote>` and only included for Valid votes. This created an equivocation vulnerability where validators could change their Reject votes after network partitions.
+
+**New Requirement:** `finality_vote` is REQUIRED for ALL responses (Valid, Invalid, Unknown):
+- `Valid` → `FinalityVote { decision: Accept, ... }`
+- `Invalid` → `FinalityVote { decision: Reject, ... }`
+- `Unknown` → `FinalityVote { decision: Reject, ... }` (conservative: unknown = unsafe)
 
 ### 11.2 Anti-replay / validation
 All signed messages MUST include `chain_id` and a time/slot domain separator.
@@ -763,6 +814,40 @@ Alternative: deterministic construction from Ed25519 private key
 vrf_input = H_BLAKE3(prev_block_hash || uint64_le(slot_time) || uint32_le(chain_id))
 (vrf_output, vrf_proof) = VRF_Prove(vrf_sk, vrf_input)
 ```
+
+**CRITICAL: VRF Grinding Attack Prevention**
+
+The order of VRF input components is security-critical:
+
+1. **`prev_block_hash` MUST be first** - Provides unpredictable entropy that changes with each block
+2. **`slot_time`** - Deterministic but safe when combined with unpredictable hash
+3. **`chain_id`** - Domain separator to prevent cross-chain replay
+
+**Why this ordering matters:**
+
+Without `prev_block_hash`, an attacker with many potential masternode keys could:
+```
+For each candidate_key in [key_1, ..., key_N]:
+    For each future_slot in [t+1, t+2, ..., t+1000]:
+        vrf_score = VRF(candidate_key, future_slot)
+        if vrf_score wins:
+            register this key as masternode
+```
+
+This allows selective registration of only "winning" keys, centralizing block production.
+
+**With `prev_block_hash`:**
+- Attacker cannot compute VRF(slot_t+2) until block_t+1 is produced
+- Block hashes depend on transaction content (unpredictable)
+- Pre-computation beyond 1 block ahead is cryptographically infeasible
+- Fair competition among all registered masternodes
+
+This mitigation follows proven approaches from:
+- **Algorand:** Uses previous block hash in VRF sortition
+- **Ethereum 2.0:** Uses RANDAO (previous block randomness) 
+- **Cardano (Ouroboros Praos):** Uses epoch nonce from prior blocks
+
+**Implementation Version:** TIMECOIN_VRF_V2 (grinding-resistant)
 
 **Why VRF (not Ed25519 or BLAKE3 alone)?**  
 - Ed25519 signatures cannot be ranked (are just bytes, not sortition-ready)
@@ -1226,26 +1311,142 @@ fee_per_byte = median(fees_in_recent_finalized_txs / tx_size)
 ### 25.1 Initial Supply
 ```
 INITIAL_SUPPLY = 0 (fair launch with no pre-mine)
-// Alternative: X TIME reserved for foundation (to be decided)
 ```
 
 ### 25.2 Reward Schedule
+
+**Implementation:**
 ```
 Per checkpoint block (§10):
-R = 100 * (1 + ln(N))
-where N = |AVS| at the block's slot_index
+BLOCK_REWARD = 100 TIME (fixed)
+Total reward = BLOCK_REWARD + transaction_fees
+
+Blocks per year: 52,596 (600-second intervals)
+Annual issuance: 5,259,600 TIME/year (constant)
 ```
 
-**Example rewards:**
-- N = 10: R ≈ 100 * (1 + 2.30) = 330 TIME
-- N = 100: R ≈ 100 * (1 + 4.61) = 561 TIME
-- N = 1000: R ≈ 100 * (1 + 6.91) = 791 TIME
+**Inflation Rate Projection:**
 
-**Note:** Logarithmic growth has no hard cap. Consider governance discussion on whether a cap is desired.
+| Year | Total Supply | Annual Inflation | Notes |
+|------|--------------|------------------|-------|
+| 1 | 5.26M TIME | ∞% → 0% | Bootstrap year |
+| 5 | 26.3M TIME | 20% | Early growth |
+| 10 | 52.6M TIME | 10% | Maturing network |
+| 20 | 105M TIME | 5% | Stable operation |
+| 50 | 263M TIME | 2% | Long-term equilibrium |
 
-### 25.3 Reward Distribution
-- **Producer:** 10% of (R + tx_fees)
-- **AVS validators:** 90% of (R + tx_fees) proportional to weight
+**Key Characteristics:**
+- **Fixed issuance** (not supply-capped like Bitcoin)
+- **Decreasing inflation rate** (percentage declines as supply grows)
+- **Perpetual security budget** (always incentivizes validators)
+- **No halving events** (predictable for economic planning)
+
+### 25.3 Economic Philosophy: Transactional Utility Over Scarcity
+
+**Design Goal:** TIME Coin is optimized as a **medium of exchange**, not a store of value.
+
+**Rationale:**
+
+Bitcoin's scarcity-driven model (21M cap) created a fundamental tension:
+- **Success → High value → Poor for everyday transactions**
+- Small purchases become impractical (e.g., $0.50 coffee requires 0.000001 BTC)
+- Users hoard rather than spend (Gresham's law: "good money drives out bad")
+- Psychological barrier: "I paid 10,000 BTC for pizza" regret
+
+**TIME Coin's Alternative Approach:**
+
+1. **Stable Value Target**
+   - Predictable, modest inflation creates stable purchasing power
+   - Similar philosophy to fiat currencies or algorithmic stablecoins
+   - Goal: 1 TIME ≈ consistent real-world value over years
+   - Encourages spending and circulation (velocity of money)
+
+2. **Transaction-First Economics**
+   - Low, predictable fees (§24: 0.001 TIME minimum)
+   - Fast finality (<1s) removes friction from daily use
+   - Economic incentives favor network usage over hoarding
+
+3. **Security Through Utility**
+   - Bitcoin's long-term security depends on fees (after 2140)
+   - TIME Coin maintains security through perpetual issuance
+   - No "fee pressure crisis" when block rewards end
+   - Validator incentives remain strong regardless of transaction volume
+
+4. **Controlled Inflation vs. Hyperinflation**
+   - Fixed 100 TIME/block ≠ unlimited money printing
+   - Inflation rate naturally decreases: 20% (year 5) → 2% (year 50)
+   - Similar to Ethereum post-merge (~1-2% annual issuance)
+   - Predictable, algorithmic issuance (not central bank discretion)
+
+**Comparison:**
+
+| Aspect | Bitcoin | TIME Coin |
+|--------|---------|-----------|
+| **Supply Cap** | 21M BTC (hard cap) | No cap (decreasing % inflation) |
+| **Issuance** | Halving every 4 years | Fixed 100/block forever |
+| **Philosophy** | Digital gold / Store of value | Digital cash / Medium of exchange |
+| **User Behavior** | Encouraged to hold | Encouraged to transact |
+| **Long-term Security** | Dependent on fees alone | Perpetual block rewards |
+| **Price Stability** | High volatility expected | Stable value preferred |
+| **Use Case** | Savings / Investment | Daily transactions / Payments |
+
+**Trade-offs Acknowledged:**
+
+❌ **Not optimized for:**
+- "Number go up" investment thesis
+- Scarcity-driven value appreciation
+- Deflationary store-of-value narrative
+
+✅ **Optimized for:**
+- Everyday payments and transactions
+- Predictable purchasing power
+- Network utility and adoption
+- Long-term validator economics
+- Real-world usability
+
+**Governance Note:**
+
+This economic model is subject to community consensus. Future governance proposals may:
+- Implement fee burning (reduce net inflation during high usage)
+- Adjust reward schedule based on network maturity
+- Introduce supply cap if community decides scarcity is preferred
+- Modify parameters through on-chain voting (requires protocol upgrade)
+
+**Reference:** This design philosophy aligns with Satoshi Nakamoto's original Bitcoin whitepaper subtitle: "A Peer-to-Peer **Electronic Cash System**" — emphasizing the transactional use case that Bitcoin's scarcity model ultimately moved away from.
+
+### 25.4 Reward Distribution
+
+**Per Block:**
+```
+Total Reward = 100 TIME + transaction_fees
+
+Distribution:
+- 100% to Active Validator Set (AVS) masternodes
+- Proportional to tier weight (Gold=1000, Silver=100, Bronze=10, Free=1)
+- No block producer premium (all masternodes share equally by weight)
+- No treasury allocation (pure validator rewards)
+```
+
+**Example Distribution (100 masternodes):**
+```
+AVS Composition:
+- 1 Gold (weight 1000) → 50% of rewards
+- 10 Silver (weight 100 each) → 45% of rewards  
+- 89 Bronze/Free (weight ~10-1) → 5% of rewards
+
+For a 100 TIME block:
+- Gold masternode: 50 TIME
+- Each Silver: 4.5 TIME
+- Each Bronze/Free: 0.05-0.5 TIME
+```
+
+**Fair APY Design:**
+- Rewards proportional to collateral (weight reflects stake)
+- All tiers earn similar % return on investment
+- Encourages network decentralization (low barrier to entry)
+- No winner-take-all dynamics
+
+See §10 for technical reward calculation details.
 
 See §10 for details.
 

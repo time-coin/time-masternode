@@ -237,13 +237,21 @@ impl MasternodeTier {
 // ============================================================================
 
 /// A finality vote signed by a masternode
-/// Per protocol: FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, voter_mn_id, voter_weight, signature }
+/// Vote decision for finality consensus
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VoteDecision {
+    Accept, // Transaction is valid and preferred
+    Reject, // Transaction is invalid or conflicts with preferred transaction
+}
+
+/// Per protocol: FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, decision, voter_mn_id, voter_weight, signature }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FinalityVote {
     pub chain_id: u32,
     pub txid: Hash256,
     pub tx_hash_commitment: Hash256, // H(canonical_tx_bytes)
     pub slot_index: u64,
+    pub decision: VoteDecision, // Accept or Reject (REQUIRED for equivocation prevention)
     pub voter_mn_id: String,
     pub voter_weight: u64,
     pub signature: Vec<u8>, // Ed25519 signature
@@ -269,6 +277,11 @@ impl FinalityVote {
         msg.extend_from_slice(&self.txid);
         msg.extend_from_slice(&self.tx_hash_commitment);
         msg.extend_from_slice(&self.slot_index.to_le_bytes());
+        // CRITICAL: Include decision in signature to prevent equivocation
+        msg.push(match self.decision {
+            VoteDecision::Accept => 0x01,
+            VoteDecision::Reject => 0x00,
+        });
         msg.extend_from_slice(self.voter_mn_id.as_bytes());
         msg.extend_from_slice(&self.voter_weight.to_le_bytes());
         msg

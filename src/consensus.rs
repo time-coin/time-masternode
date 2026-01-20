@@ -57,12 +57,14 @@ struct NodeIdentity {
 
 impl NodeIdentity {
     /// Sign a finality vote with this node's key
+    #[allow(clippy::too_many_arguments)]
     fn sign_finality_vote(
         &self,
         chain_id: u32,
         txid: Hash256,
         tx_hash_commitment: Hash256,
         slot_index: u64,
+        decision: VoteDecision, // NEW: Accept or Reject
         voter_mn_id: String,
         voter_weight: u64,
     ) -> FinalityVote {
@@ -74,6 +76,11 @@ impl NodeIdentity {
         msg.extend_from_slice(&txid);
         msg.extend_from_slice(&tx_hash_commitment);
         msg.extend_from_slice(&slot_index.to_le_bytes());
+        // CRITICAL: Include decision in signature (equivocation prevention)
+        msg.push(match decision {
+            VoteDecision::Accept => 0x01,
+            VoteDecision::Reject => 0x00,
+        });
         msg.extend_from_slice(voter_mn_id.as_bytes());
         msg.extend_from_slice(&voter_weight.to_le_bytes());
 
@@ -85,6 +92,7 @@ impl NodeIdentity {
             txid,
             tx_hash_commitment,
             slot_index,
+            decision, // Include decision in vote
             voter_mn_id,
             voter_weight,
             signature: signature.to_bytes().to_vec(),
@@ -1342,6 +1350,7 @@ impl ConsensusEngine {
             txid,
             tx_hash_commitment,
             slot_index,
+            VoteDecision::Accept, // This vote is for a valid/preferred transaction
             voter_mn_id,
             voter_weight,
         );

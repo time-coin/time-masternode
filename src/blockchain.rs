@@ -1475,10 +1475,13 @@ impl Blockchain {
             }
         }
 
-        // ALWAYS use ALL active masternodes for reward distribution
-        // Rewards should be based on registration and activity, NOT connection status
-        // Connection filtering was causing 1-2 nodes to receive all rewards during network startup
-        let masternodes = self.masternode_registry.list_active().await;
+        // Use blockchain-based masternode eligibility for rewards (consensus-safe)
+        // This ensures all nodes agree on which masternodes get rewards, preventing forks
+        // Only masternodes that participated in recent blocks are eligible
+        let masternodes = self
+            .masternode_registry
+            .get_masternodes_for_rewards(self)
+            .await;
 
         tracing::info!(
             "💰 Block {}: distributing rewards to {} active masternodes",

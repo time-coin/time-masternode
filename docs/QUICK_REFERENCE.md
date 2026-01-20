@@ -224,15 +224,17 @@ FinalityVote:
   txid: Hash256
   tx_hash_commitment: BLAKE3(canonical_tx)
   slot_index: u64
+  decision: Accept | Reject  (REQUIRED: prevents equivocation)
   voter_mn_id: Hash256
   voter_weight: u16
   signature: [u8; 64] (Ed25519)
 
 TimeProof validation:
-  1. All signatures verify
+  1. All signatures verify (including decision field)
   2. All votes agree on (chain_id, txid, tx_hash_commitment, slot_index)
-  3. Voters distinct
-  4. Sum of weights ≥ 67% of AVS weight at slot_index
+  3. All votes have decision=Accept (only Accept votes count toward finality)
+  4. Voters distinct
+  5. Sum of weights ≥ 67% of AVS weight at slot_index
 ```
 
 ---

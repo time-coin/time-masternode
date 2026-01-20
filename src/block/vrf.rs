@@ -101,12 +101,20 @@ pub fn vrf_output_to_score(vrf_output: &Hash256) -> u64 {
 /// Create VRF input from block context
 ///
 /// VRF input must be deterministic and unpredictable before block production.
-/// We use: SHA256(height || previous_hash || "TIMECOIN_VRF_V1")
+///
+/// **Security Note:** We include previous_hash to provide unpredictable entropy.
+/// This prevents VRF grinding attacks where an adversary with multiple masternodes
+/// could pre-compute VRF outputs for future slots (since height/time are predictable).
+///
+/// The previous block hash changes with each block and cannot be predicted far in advance,
+/// preventing attackers from selectively registering masternodes that will win specific future slots.
+///
+/// We use: SHA256("TIMECOIN_VRF_V2" || height || previous_hash)
 fn create_vrf_input(height: u64, previous_hash: &Hash256) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(b"TIMECOIN_VRF_V1");
+    hasher.update(b"TIMECOIN_VRF_V2"); // Version bumped for security enhancement
     hasher.update(height.to_le_bytes());
-    hasher.update(previous_hash);
+    hasher.update(previous_hash); // Unpredictable entropy (changes each block)
     hasher.finalize().to_vec()
 }
 
@@ -114,11 +122,14 @@ fn create_vrf_input(height: u64, previous_hash: &Hash256) -> Vec<u8> {
 ///
 /// Uses deterministic hashing instead of cryptographic VRF.
 /// This should never happen in production, but provides graceful degradation.
+///
+/// **Security:** Even in fallback mode, we maintain grinding resistance by
+/// including the unpredictable previous_hash in the input.
 fn fallback_vrf(height: u64, previous_hash: &Hash256) -> (Vec<u8>, Hash256, u64) {
     let mut hasher = Sha256::new();
-    hasher.update(b"TIMECOIN_VRF_FALLBACK_V1");
+    hasher.update(b"TIMECOIN_VRF_FALLBACK_V2"); // Version bumped
     hasher.update(height.to_le_bytes());
-    hasher.update(previous_hash);
+    hasher.update(previous_hash); // Unpredictable entropy
     let hash: [u8; 32] = hasher.finalize().into();
 
     let score = u64::from_be_bytes(hash[0..8].try_into().unwrap());

@@ -445,6 +445,66 @@ impl MasternodeRegistry {
         self.get_active_masternodes().await
     }
 
+    /// Get masternodes eligible for block rewards based on recent blockchain participation
+    /// This is consensus-safe: all nodes agree based on which masternodes received rewards
+    /// in recent blocks (on-chain data). This prevents:
+    /// 1. Paying masternodes that have gone down
+    /// 2. Fork issues from different connection views
+    pub async fn get_masternodes_for_rewards(
+        &self,
+        blockchain: &crate::blockchain::Blockchain,
+    ) -> Vec<MasternodeInfo> {
+        use std::collections::HashMap;
+
+        const LOOKBACK_BLOCKS: u64 = 10; // Look at last 10 blocks
+        const MIN_PARTICIPATION: usize = 3; // Must have received rewards in at least 3 of last 10 blocks
+
+        // Get masternodes that participated in recent blocks
+        let mut participation_count: HashMap<String, usize> = HashMap::new();
+
+        let current_height = blockchain.get_height();
+
+        // For first 10 blocks, use all registered masternodes (bootstrap)
+        if current_height < LOOKBACK_BLOCKS {
+            return self.masternodes.read().await.values().cloned().collect();
+        }
+
+        let start_height = current_height.saturating_sub(LOOKBACK_BLOCKS);
+
+        // Count how many times each masternode received rewards in recent blocks
+        for height in start_height..current_height {
+            if let Ok(block) = blockchain.get_block_by_height(height).await {
+                for (addr, _amount) in &block.masternode_rewards {
+                    *participation_count.entry(addr.clone()).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Get all registered masternodes
+        let all_masternodes = self.masternodes.read().await;
+
+        // Filter to those with sufficient recent participation
+        let eligible: Vec<_> = all_masternodes
+            .values()
+            .filter(|info| {
+                let count = participation_count
+                    .get(&info.masternode.address)
+                    .copied()
+                    .unwrap_or(0);
+                count >= MIN_PARTICIPATION
+            })
+            .cloned()
+            .collect();
+
+        // If no masternodes meet the criteria (network restart), use all registered
+        if eligible.is_empty() {
+            tracing::warn!("⚠️  No masternodes met participation threshold, using all registered");
+            all_masternodes.values().cloned().collect()
+        } else {
+            eligible
+        }
+    }
+
     /// Count all registered masternodes (not just active ones)
     /// Used during genesis and catchup when heartbeat requirements are relaxed
     pub async fn total_count(&self) -> usize {
