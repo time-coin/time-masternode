@@ -985,11 +985,8 @@ async fn main() {
             let now_timestamp = chrono::Utc::now().timestamp();
 
             // Require minimum masternodes for production
-            // Exception: During catchup when we're behind, allow production with fewer nodes
-            // to prevent deadlock where network can't progress because no masternodes,
-            // and can't get masternodes because network isn't progressing
-            if masternodes.len() < 3 && current_height > 0 && blocks_behind == 0 {
-                // Only enforce minimum when we're caught up (normal operation)
+            // Always enforce minimum 3 masternodes for block production
+            if masternodes.len() < 3 {
                 // Log periodically (every 60s) to avoid spam
                 static LAST_WARN: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
@@ -998,7 +995,7 @@ async fn main() {
                 if now_secs - last_warn >= 60 {
                     LAST_WARN.store(now_secs, Ordering::Relaxed);
                     tracing::warn!(
-                        "⚠️ Skipping normal block production: only {} masternodes active (minimum 3 required). Height: {}, Expected: {}",
+                        "⚠️ Skipping block production: only {} masternodes active (minimum 3 required). Height: {}, Expected: {}",
                         masternodes.len(),
                         current_height,
                         expected_height
@@ -1007,7 +1004,7 @@ async fn main() {
                 continue;
             }
 
-            // During initial bootstrap (height 0), allow 1 masternode to produce blocks
+            // Check we have masternodes
             if masternodes.is_empty() {
                 // Log periodically (every 60s) to avoid spam
                 static LAST_EMPTY_WARN: std::sync::atomic::AtomicI64 =

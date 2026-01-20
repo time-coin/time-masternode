@@ -1500,6 +1500,14 @@ impl Blockchain {
             return Err("No masternodes available for block production".to_string());
         }
 
+        // Require at least 3 active masternodes before producing blocks
+        if masternodes.len() < 3 {
+            return Err(format!(
+                "Insufficient masternodes for block production: {} active (minimum 3 required)",
+                masternodes.len()
+            ));
+        }
+
         // Get finalized transactions from consensus layer
         let finalized_txs = self.consensus.get_finalized_transactions_for_block();
 
