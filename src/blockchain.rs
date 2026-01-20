@@ -2276,7 +2276,7 @@ impl Blockchain {
         let per_masternode = BLOCK_REWARD_SATOSHIS / masternodes.len() as u64;
         masternodes
             .iter()
-            .map(|mn| (mn.masternode.address.clone(), per_masternode))
+            .map(|mn| (mn.masternode.wallet_address.clone(), per_masternode))
             .collect()
     }
 
@@ -2328,7 +2328,7 @@ impl Blockchain {
                 share / 100_000_000
             );
 
-            rewards.push((mn.masternode.address.clone(), share));
+            rewards.push((mn.masternode.wallet_address.clone(), share));
             distributed += share;
         }
 
