@@ -116,6 +116,26 @@ enum Commands {
     /// Get masternode status
     MasternodeStatus,
 
+    /// Register a new masternode with locked collateral
+    MasternodeRegister {
+        /// Masternode tier (bronze, silver, gold)
+        tier: String,
+        /// Collateral transaction ID (hex)
+        collateral_txid: String,
+        /// Collateral output index
+        vout: u32,
+        /// Reward address for masternode payments
+        reward_address: String,
+        /// Node address/identifier
+        node_address: String,
+    },
+
+    /// Unlock masternode collateral and deregister
+    MasternodeUnlock {
+        /// Node address (optional, uses local if not provided)
+        node_address: Option<String>,
+    },
+
     /// Get consensus information
     GetConsensusInfo,
 
@@ -226,6 +246,24 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::MasternodeList => ("masternodelist", json!([])),
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
+        Commands::MasternodeRegister {
+            tier,
+            collateral_txid,
+            vout,
+            reward_address,
+            node_address,
+        } => (
+            "masternoderegister",
+            json!([tier, collateral_txid, vout, reward_address, node_address]),
+        ),
+        Commands::MasternodeUnlock { node_address } => (
+            "masternodeunlock",
+            if let Some(addr) = node_address {
+                json!([addr])
+            } else {
+                json!([])
+            },
+        ),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
@@ -479,6 +517,106 @@ fn print_human_readable(
                     result.get("message").and_then(|v| v.as_str()).unwrap_or("")
                 );
             }
+        }
+        Commands::MasternodeRegister { .. } => {
+            println!("🎉 Masternode Registration Successful!");
+            println!();
+            println!(
+                "  Result:          {}",
+                result
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Node Address:    {}",
+                result
+                    .get("masternode_address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Reward Address:  {}",
+                result
+                    .get("reward_address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Tier:            {}",
+                result.get("tier").and_then(|v| v.as_str()).unwrap_or("N/A")
+            );
+            println!(
+                "  Collateral:      {} TIME",
+                result
+                    .get("collateral")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            );
+            println!(
+                "  Collateral UTXO: {}",
+                result
+                    .get("collateral_outpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Locked at Height: {}",
+                result
+                    .get("locked_at_height")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            );
+            println!(
+                "  Public Key:      {}",
+                result
+                    .get("public_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!();
+            println!("⚠️  IMPORTANT - SAVE THIS SIGNING KEY SECURELY:");
+            println!(
+                "  Signing Key:     {}",
+                result
+                    .get("signing_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!();
+            println!(
+                "  Message:         {}",
+                result.get("message").and_then(|v| v.as_str()).unwrap_or("")
+            );
+        }
+        Commands::MasternodeUnlock { .. } => {
+            println!("✅ Masternode Deregistered Successfully!");
+            println!();
+            println!(
+                "  Result:          {}",
+                result
+                    .get("result")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Node Address:    {}",
+                result
+                    .get("masternode_address")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Collateral UTXO: {}",
+                result
+                    .get("collateral_outpoint")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Message:         {}",
+                result.get("message").and_then(|v| v.as_str()).unwrap_or("")
+            );
         }
         _ => {
             // For commands without specific formatting, fall back to pretty JSON

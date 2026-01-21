@@ -1390,7 +1390,7 @@ impl RpcHandler {
 
         // Parse parameters
         let tier_str = params
-            .get(0)
+            .first()
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
