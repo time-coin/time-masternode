@@ -1,9 +1,9 @@
 # TIME Coin Protocol Node
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)
+![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 ![Protocol](https://img.shields.io/badge/protocol-v6-green.svg)
-![Version](https://img.shields.io/badge/version-1.0.0-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
 
 A high-performance implementation of the TIME Coin Protocol v6 with sub-second instant finality via Avalanche consensus, Verifiable Finality Proofs (VFP), deterministic block checkpointing, and integrated AI optimization systems.
 
@@ -75,7 +75,7 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
 
 ## 📋 Requirements
 
-- Rust 1.70 or higher
+- Rust 1.75 or higher
 - 2GB RAM minimum
 - 10GB disk space for full node
 
@@ -111,20 +111,59 @@ For complete deployment guide, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
 
 ### Run as a Masternode
 
-Edit `config.toml`:
+#### Quick Configuration
+
+Use the interactive configuration script:
+
+```bash
+# Linux/macOS - Configure mainnet (default)
+./scripts/configure-masternode.sh
+
+# Configure testnet
+./scripts/configure-masternode.sh testnet
+
+# Windows - Configure mainnet (default)
+scripts\configure-masternode.bat
+
+# Configure testnet
+scripts\configure-masternode.bat testnet
+```
+
+#### Manual Configuration
+
+Edit `~/.timecoin/config.toml` (or `~/.timecoin/testnet/config.toml` for testnet):
 
 ```toml
 [masternode]
 enabled = true
-tier = "Free"  # Free, Bronze, Silver, or Gold
-wallet_address = "your_wallet_address_here"
+tier = "bronze"  # free, bronze, silver, or gold
+reward_address = "TIMEyouraddresshere"
+collateral_txid = ""  # Set after creating collateral
+collateral_vout = 0
 ```
 
-Then start:
+#### Register with Locked Collateral
 
 ```bash
-./target/release/timed
+# 1. Create collateral UTXO
+time-cli sendtoaddress <your_address> 1000.0  # For Bronze
+
+# 2. Wait for confirmations (30 minutes)
+time-cli listunspent
+
+# 3. Register masternode
+time-cli masternoderegister \
+  --tier bronze \
+  --collateral-txid <txid> \
+  --vout 0 \
+  --reward-address <your_address>
+
+# 4. Verify
+time-cli getbalance  # Shows locked collateral
+time-cli masternodelist  # Shows 🔒 Locked
 ```
+
+See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup guide.
 
 ## 💻 CLI Usage
 
@@ -135,17 +174,27 @@ Then start:
 # Get block count
 ./target/release/time-cli getblockcount
 
+# Check wallet balance (shows total/locked/available)
+./target/release/time-cli getbalance
+
+# List unspent outputs (node-specific)
+./target/release/time-cli listunspent
+
 # List masternodes
 ./target/release/time-cli masternodelist
 
 # Register masternode with locked collateral
-./target/release/time-cli masternoderegister bronze <txid> <vout> <reward_addr> <node_addr>
+./target/release/time-cli masternoderegister \
+  --tier bronze \
+  --collateral-txid <txid> \
+  --vout <vout> \
+  --reward-address <address>
 
 # List all locked collaterals
 ./target/release/time-cli listlockedcollaterals
 
 # Unlock masternode collateral
-./target/release/time-cli masternodeunlock [node_address]
+./target/release/time-cli masternodeunlock
 
 # Get network info
 ./target/release/time-cli getnetworkinfo
@@ -156,6 +205,8 @@ Then start:
 # Check uptime
 ./target/release/time-cli uptime
 ```
+
+See **[docs/CLI_GUIDE.md](docs/CLI_GUIDE.md)** for complete command reference.
 
 ## 🌐 Network Ports
 
@@ -289,6 +340,7 @@ timecoin/
 ### Core Documentation
 - **[INDEX.md](docs/INDEX.md)** - Documentation roadmap (START HERE)
 - **[TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md)** - Protocol v6 specification (§1–§27)
+- **[MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** - Complete masternode setup guide
 - **[AI_SYSTEM.md](docs/AI_SYSTEM.md)** - AI optimization systems (v1.0.0)
 - **[IMPLEMENTATION_DETAILS.md](docs/IMPLEMENTATION_DETAILS.md)** - Technical implementation spec
 
@@ -390,9 +442,9 @@ finality_timeout = 3000  # milliseconds
 
 ## 🛣️ Development Status
 
-**Current Status:** ✅ **v1.0.0 Production Release** (January 2026)
+**Current Status:** ✅ **v1.1.0 Production Release** (January 2026)
 
-### ✅ Completed (v1.0.0)
+### ✅ Completed (v1.1.0)
 
 #### Core Implementation
 - ✅ BLAKE3 hashing, Ed25519 signing, ECVRF sortition
@@ -401,7 +453,15 @@ finality_timeout = 3000  # milliseconds
 - ✅ Verifiable Finality Proofs (VFP)
 - ✅ UTXO state machine with archival
 - ✅ Masternode registry with tiered system
+- ✅ **Locked Collateral System (Dash-style)** - NEW in v1.1.0
+  - Prevents accidental spending
+  - On-chain proof of stake
+  - Automatic validation and cleanup
+  - Full backward compatibility
 - ✅ Heartbeat attestation and uptime tracking
+- ✅ **Enhanced Wallet Balance Display** - NEW in v1.1.0
+  - Shows total/locked/available breakdown
+  - Clear collateral visibility
 
 #### Network Layer
 - ✅ TCP P2P transport with message signing
@@ -425,13 +485,13 @@ finality_timeout = 3000  # milliseconds
 - ✅ CLI tools (timed, time-cli)
 - ✅ Mainnet and Testnet support
 
-### 🔮 Future Roadmap (v1.1+)
+### 🔮 Future Roadmap (v1.2+)
 
-**v1.1.0** (Q1 2026):
-- [ ] TLS encryption integration for P2P
-- [ ] Enhanced light client support
-- [ ] Improved block explorer integration
-- [ ] Performance optimizations
+**v1.2.0** (Q1 2026):
+- [ ] Hot/cold wallet separation
+- [ ] Masternode key auto-generation
+- [ ] Enhanced monitoring dashboard
+- [ ] Auto-registration from config.toml
 
 **v2.0.0** (Q2 2026):
 - [ ] Hardware wallet support
