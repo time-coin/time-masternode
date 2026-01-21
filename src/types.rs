@@ -151,9 +151,67 @@ pub struct Masternode {
     pub address: String,
     pub wallet_address: String,
     pub collateral: u64,
+    /// The specific UTXO locked as collateral (None for legacy masternodes)
+    pub collateral_outpoint: Option<OutPoint>,
+    /// Timestamp when collateral was locked
+    pub locked_at: u64,
+    /// Optional block height when unlock can be completed (for time-locked unlocks)
+    pub unlock_height: Option<u64>,
     pub public_key: VerifyingKey,
     pub tier: MasternodeTier,
     pub registered_at: u64,
+}
+
+impl Masternode {
+    /// Create a new legacy masternode without locked collateral (for migration)
+    pub fn new_legacy(
+        address: String,
+        wallet_address: String,
+        collateral: u64,
+        public_key: VerifyingKey,
+        tier: MasternodeTier,
+        registered_at: u64,
+    ) -> Self {
+        Self {
+            address,
+            wallet_address,
+            collateral,
+            collateral_outpoint: None,
+            locked_at: registered_at,
+            unlock_height: None,
+            public_key,
+            tier,
+            registered_at,
+        }
+    }
+
+    /// Create a new masternode with locked collateral
+    pub fn new_with_collateral(
+        address: String,
+        wallet_address: String,
+        collateral: u64,
+        collateral_outpoint: OutPoint,
+        public_key: VerifyingKey,
+        tier: MasternodeTier,
+        registered_at: u64,
+    ) -> Self {
+        Self {
+            address,
+            wallet_address,
+            collateral,
+            collateral_outpoint: Some(collateral_outpoint),
+            locked_at: registered_at,
+            unlock_height: None,
+            public_key,
+            tier,
+            registered_at,
+        }
+    }
+
+    /// Check if this masternode has locked collateral
+    pub fn has_locked_collateral(&self) -> bool {
+        self.collateral_outpoint.is_some()
+    }
 }
 
 /// Sort masternodes deterministically by address for consensus
@@ -228,6 +286,56 @@ impl MasternodeTier {
             MasternodeTier::Bronze => 10,  // 10x weight
             MasternodeTier::Silver => 100, // 100x weight
             MasternodeTier::Gold => 1000,  // 1000x weight
+        }
+    }
+}
+
+// ============================================================================
+// Collateral Locking
+// ============================================================================
+
+/// Information about a locked UTXO used as masternode collateral
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockedCollateral {
+    /// The UTXO being locked
+    pub outpoint: OutPoint,
+    /// Masternode address that locked it
+    pub masternode_address: String,
+    /// Block height when locked
+    pub lock_height: u64,
+    /// Timestamp when locked
+    pub locked_at: u64,
+    /// Optional unlock height (for time-locked unlocks)
+    pub unlock_height: Option<u64>,
+    /// Amount locked
+    pub amount: u64,
+}
+
+impl LockedCollateral {
+    pub fn new(
+        outpoint: OutPoint,
+        masternode_address: String,
+        lock_height: u64,
+        amount: u64,
+    ) -> Self {
+        Self {
+            outpoint,
+            masternode_address,
+            lock_height,
+            locked_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            unlock_height: None,
+            amount,
+        }
+    }
+
+    pub fn is_unlockable(&self, current_height: u64) -> bool {
+        if let Some(unlock_height) = self.unlock_height {
+            current_height >= unlock_height
+        } else {
+            false
         }
     }
 }

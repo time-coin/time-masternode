@@ -194,17 +194,17 @@ async fn main() {
             .unwrap_or(&full_address)
             .to_string();
 
-        let masternode = types::Masternode {
-            address: ip_only,
-            wallet_address: wallet_address.clone(),
-            collateral: tier.collateral(),
+        let masternode = types::Masternode::new_legacy(
+            ip_only,
+            wallet_address.clone(),
+            tier.collateral(),
+            *wallet.public_key(),
             tier,
-            public_key: *wallet.public_key(),
-            registered_at: std::time::SystemTime::now()
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-        };
+        );
 
         println!("✓ Running as {:?} masternode", tier);
         println!("  └─ Wallet: {}", wallet_address);

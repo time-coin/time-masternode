@@ -1403,17 +1403,17 @@ impl MessageHandler {
             self.direction, peer_ip, address
         );
 
-        let mn = crate::types::Masternode {
-            address: peer_ip.clone(),
-            wallet_address: reward_address.clone(),
-            collateral: tier.collateral(),
-            tier,
+        let mn = crate::types::Masternode::new_legacy(
+            peer_ip.clone(),
+            reward_address.clone(),
+            tier.collateral(),
             public_key,
-            registered_at: std::time::SystemTime::now()
+            tier,
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-        };
+        );
 
         match context
             .masternode_registry
@@ -1463,14 +1463,14 @@ impl MessageHandler {
 
         let mut registered = 0;
         for mn_data in masternodes {
-            let masternode = crate::types::Masternode {
-                address: mn_data.address.clone(),
-                wallet_address: mn_data.reward_address.clone(),
-                tier: mn_data.tier,
-                public_key: mn_data.public_key,
-                collateral: 0,
-                registered_at: now,
-            };
+            let masternode = crate::types::Masternode::new_legacy(
+                mn_data.address.clone(),
+                mn_data.reward_address.clone(),
+                0,
+                mn_data.public_key,
+                mn_data.tier,
+                now,
+            );
 
             if context
                 .masternode_registry

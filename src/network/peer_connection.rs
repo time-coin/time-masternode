@@ -1843,17 +1843,17 @@ impl PeerConnection {
                 public_key,
             } => {
                 // Register masternode from announcement
-                let masternode = crate::types::Masternode {
-                    address: address.clone(),
-                    wallet_address: reward_address.clone(),
-                    tier: *tier,
-                    public_key: *public_key,
-                    collateral: 0,
-                    registered_at: std::time::SystemTime::now()
+                let masternode = crate::types::Masternode::new_legacy(
+                    address.clone(),
+                    reward_address.clone(),
+                    0,
+                    *public_key,
+                    *tier,
+                    std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap_or_default()
                         .as_secs(),
-                };
+                );
                 if let Err(e) = masternode_registry
                     .register(masternode, reward_address.clone())
                     .await
@@ -1885,14 +1885,14 @@ impl PeerConnection {
 
                 let mut registered = 0;
                 for mn_data in masternodes {
-                    let masternode = crate::types::Masternode {
-                        address: mn_data.address.clone(),
-                        wallet_address: mn_data.reward_address.clone(),
-                        tier: mn_data.tier,
-                        public_key: mn_data.public_key,
-                        collateral: 0,
-                        registered_at: now,
-                    };
+                    let masternode = crate::types::Masternode::new_legacy(
+                        mn_data.address.clone(),
+                        mn_data.reward_address.clone(),
+                        0,
+                        mn_data.public_key,
+                        mn_data.tier,
+                        now,
+                    );
 
                     if masternode_registry
                         .register_internal(masternode, mn_data.reward_address.clone(), false)

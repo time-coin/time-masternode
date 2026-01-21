@@ -582,19 +582,19 @@ impl MasternodeRegistry {
         tier: MasternodeTier,
         public_key: ed25519_dalek::VerifyingKey,
     ) -> Result<(), RegistryError> {
-        let masternode = Masternode {
-            address: address.clone(),
-            wallet_address: reward_address.clone(),
-            collateral: match tier {
+        let masternode = Masternode::new_legacy(
+            address.clone(),
+            reward_address.clone(),
+            match tier {
                 MasternodeTier::Free => 0,
                 MasternodeTier::Bronze => 1_000,
                 MasternodeTier::Silver => 10_000,
                 MasternodeTier::Gold => 100_000,
             },
-            tier,
             public_key,
-            registered_at: Self::now(),
-        };
+            tier,
+            Self::now(),
+        );
 
         self.register(masternode, reward_address).await
     }
@@ -772,14 +772,14 @@ impl MasternodeRegistry {
             let reward_address = format!("TIME{}", &mn_address.replace('.', ""));
 
             let info = MasternodeInfo {
-                masternode: crate::types::Masternode {
-                    address: mn_address.clone(),
-                    wallet_address: reward_address.clone(),
-                    collateral: 0,                            // Unknown from heartbeat
-                    tier: crate::types::MasternodeTier::Free, // Assume free tier
-                    public_key: heartbeat.masternode_pubkey,
-                    registered_at: now,
-                },
+                masternode: crate::types::Masternode::new_legacy(
+                    mn_address.clone(),
+                    reward_address.clone(),
+                    0, // Unknown from heartbeat
+                    heartbeat.masternode_pubkey,
+                    crate::types::MasternodeTier::Free,
+                    now,
+                ),
                 reward_address,
                 last_heartbeat: now,
                 uptime_start: now,

@@ -780,17 +780,17 @@ async fn handle_peer(
 
                                     tracing::info!("📨 Received masternode announcement from {} (IP: {})", peer.addr, peer_ip);
 
-                                    let mn = crate::types::Masternode {
-                                        address: peer_ip.clone(), // Store only IP
-                                        wallet_address: reward_address.clone(),
-                                        collateral: tier.collateral(),
-                                        tier: *tier,
-                                        public_key: *public_key,
-                                        registered_at: std::time::SystemTime::now()
+                                    let mn = crate::types::Masternode::new_legacy(
+                                        peer_ip.clone(),
+                                        reward_address.clone(),
+                                        tier.collateral(),
+                                        *public_key,
+                                        *tier,
+                                        std::time::SystemTime::now()
                                             .duration_since(std::time::UNIX_EPOCH)
                                             .unwrap()
                                             .as_secs(),
-                                    };
+                                    );
 
                                     match masternode_registry.register(mn, reward_address.clone()).await {
                                         Ok(()) => {
