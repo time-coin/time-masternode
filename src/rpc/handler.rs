@@ -79,6 +79,8 @@ impl RpcHandler {
             "getwalletinfo" => self.get_wallet_info().await,
             "masternodelist" => self.masternode_list().await,
             "masternodestatus" => self.masternode_status().await,
+            "masternoderegister" => self.masternode_register(&params_array).await,
+            "masternodeunlock" => self.masternode_unlock(&params_array).await,
             "getconsensusinfo" => self.get_consensus_info().await,
             "gettimevotestatus" => self.get_timevote_status().await,
             "validateaddress" => self.validate_address(&params_array).await,
@@ -1377,5 +1379,257 @@ impl RpcHandler {
                 message: "Node is not configured as a masternode".to_string(),
             })
         }
+    }
+
+    /// Register a masternode with locked collateral
+    /// Parameters: [tier, collateral_txid, vout, reward_address, node_address]
+    /// Example: masternoderegister "bronze" "abc123..." 0 "wallet_addr" "node_addr"
+    async fn masternode_register(&self, params: &[Value]) -> Result<Value, RpcError> {
+        use crate::types::{Masternode, MasternodeTier};
+        use ed25519_dalek::SigningKey;
+
+        // Parse parameters
+        let tier_str = params
+            .get(0)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing tier parameter (bronze/silver/gold)".to_string(),
+            })?;
+
+        let collateral_txid = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing collateral_txid parameter".to_string(),
+            })?;
+
+        let vout = params
+            .get(2)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing vout parameter".to_string(),
+            })? as u32;
+
+        let reward_address = params
+            .get(3)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing reward_address parameter".to_string(),
+            })?;
+
+        let node_address = params
+            .get(4)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing node_address parameter".to_string(),
+            })?;
+
+        // Parse tier
+        let tier = match tier_str.to_lowercase().as_str() {
+            "bronze" => MasternodeTier::Bronze,
+            "silver" => MasternodeTier::Silver,
+            "gold" => MasternodeTier::Gold,
+            _ => {
+                return Err(RpcError {
+                    code: -32602,
+                    message: "Invalid tier. Must be bronze, silver, or gold".to_string(),
+                });
+            }
+        };
+
+        // Get tier requirement
+        let required_collateral = match tier {
+            MasternodeTier::Free => 0,
+            MasternodeTier::Bronze => 1_000 * 100_000_000, // 1,000 TIME in units
+            MasternodeTier::Silver => 10_000 * 100_000_000, // 10,000 TIME in units
+            MasternodeTier::Gold => 100_000 * 100_000_000, // 100,000 TIME in units
+        };
+
+        // Parse collateral outpoint
+        let txid_bytes = hex::decode(collateral_txid).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid collateral_txid hex".to_string(),
+        })?;
+
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "collateral_txid must be 32 bytes".to_string(),
+            });
+        }
+
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+
+        let collateral_outpoint = OutPoint { txid, vout };
+
+        // Validate UTXO exists
+        let utxo = self
+            .utxo_manager
+            .get_utxo(&collateral_outpoint)
+            .await
+            .map_err(|_| RpcError {
+                code: -5,
+                message: "Collateral UTXO not found".to_string(),
+            })?;
+
+        // Validate UTXO amount
+        if utxo.value < required_collateral {
+            return Err(RpcError {
+                code: -5,
+                message: format!(
+                    "Insufficient collateral. Required: {} TIME, Found: {} TIME",
+                    required_collateral / 100_000_000,
+                    utxo.value / 100_000_000
+                ),
+            });
+        }
+
+        // Verify UTXO is not already locked
+        if self.utxo_manager.is_collateral_locked(&collateral_outpoint) {
+            return Err(RpcError {
+                code: -5,
+                message: "Collateral UTXO is already locked".to_string(),
+            });
+        }
+
+        // Verify UTXO belongs to reward address
+        if utxo.address != reward_address {
+            return Err(RpcError {
+                code: -5,
+                message: "Collateral UTXO does not belong to reward address".to_string(),
+            });
+        }
+
+        // Generate masternode keypair
+        use rand::rngs::OsRng;
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
+        let public_key = signing_key.verifying_key();
+
+        // Get current block height
+        let lock_height = self.blockchain.get_height();
+
+        // Lock the UTXO atomically
+        self.utxo_manager
+            .lock_collateral(
+                collateral_outpoint.clone(),
+                node_address.to_string(),
+                lock_height,
+                utxo.value,
+            )
+            .map_err(|e| RpcError {
+                code: -5,
+                message: format!("Failed to lock collateral: {:?}", e),
+            })?;
+
+        // Create masternode with collateral
+        let masternode = Masternode::new_with_collateral(
+            node_address.to_string(),
+            reward_address.to_string(),
+            utxo.value,
+            collateral_outpoint.clone(),
+            public_key,
+            tier,
+            lock_height,
+        );
+
+        // Register with registry
+        self.registry
+            .register(masternode.clone(), reward_address.to_string())
+            .await
+            .map_err(|e| RpcError {
+                code: -5,
+                message: format!("Failed to register masternode: {:?}", e),
+            })?;
+
+        // Set as local masternode
+        self.registry
+            .set_local_masternode(node_address.to_string())
+            .await;
+
+        // Save signing key (in production, this should be saved securely)
+        // For now, we'll return it to the user
+        let signing_key_hex = hex::encode(signing_key.to_bytes());
+
+        Ok(json!({
+            "result": "success",
+            "masternode_address": node_address,
+            "reward_address": reward_address,
+            "tier": format!("{:?}", tier),
+            "collateral": utxo.value / 100_000_000,
+            "collateral_outpoint": format!("{}:{}", hex::encode(collateral_outpoint.txid), collateral_outpoint.vout),
+            "locked_at_height": lock_height,
+            "public_key": hex::encode(public_key.to_bytes()),
+            "signing_key": signing_key_hex,
+            "message": "Masternode registered successfully. SAVE THE SIGNING KEY SECURELY!"
+        }))
+    }
+
+    /// Unlock masternode collateral and deregister
+    /// Parameters: [node_address] (optional, uses local if not provided)
+    async fn masternode_unlock(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // Get node address
+        let node_address = if let Some(addr) = params.first().and_then(|v| v.as_str()) {
+            addr.to_string()
+        } else {
+            // Use local masternode
+            self.registry
+                .get_local_address()
+                .await
+                .ok_or_else(|| RpcError {
+                    code: -4,
+                    message: "No local masternode configured".to_string(),
+                })?
+        };
+
+        // Get masternode info
+        let mn_info = self
+            .registry
+            .get(&node_address)
+            .await
+            .ok_or_else(|| RpcError {
+                code: -5,
+                message: "Masternode not found".to_string(),
+            })?;
+
+        // Check if has locked collateral
+        let collateral_outpoint =
+            mn_info
+                .masternode
+                .collateral_outpoint
+                .ok_or_else(|| RpcError {
+                    code: -5,
+                    message: "Masternode has no locked collateral (legacy masternode)".to_string(),
+                })?;
+
+        // Unlock the collateral
+        self.utxo_manager
+            .unlock_collateral(&collateral_outpoint)
+            .map_err(|e| RpcError {
+                code: -5,
+                message: format!("Failed to unlock collateral: {:?}", e),
+            })?;
+
+        // Deregister the masternode
+        self.registry
+            .unregister(&node_address)
+            .await
+            .map_err(|e| RpcError {
+                code: -5,
+                message: format!("Failed to deregister masternode: {:?}", e),
+            })?;
+
+        Ok(json!({
+            "result": "success",
+            "masternode_address": node_address,
+            "collateral_outpoint": format!("{}:{}", hex::encode(collateral_outpoint.txid), collateral_outpoint.vout),
+            "message": "Masternode deregistered and collateral unlocked"
+        }))
     }
 }
