@@ -445,21 +445,24 @@ impl MasternodeRegistry {
         self.get_active_masternodes().await
     }
 
-    /// Get masternodes eligible for block rewards based on consensus participation
-    /// This is consensus-safe: all nodes agree based on which masternodes voted in the
-    /// previous block (on-chain data). This prevents:
-    /// 1. Paying masternodes that have gone down (they won't vote)
-    /// 2. Fork issues from different connection views (consensus votes are deterministic)
+    /// Get masternodes eligible for rewards using 10-node rotation
     ///
-    /// NOTE: This makes the heartbeat mechanism obsolete since consensus participation
-    /// proves a masternode is active and participating in the network.
+    /// DETERMINISTIC SELECTION: Returns masternodes based on a round-robin rotation
+    /// system that selects 10 masternodes per block. This ensures:
+    /// 1. Rewards remain meaningful even with thousands of masternodes
+    /// 2. All nodes eventually receive rewards through rotation
+    /// 3. Deterministic selection prevents forks (all nodes agree)
+    /// 4. Fair distribution over time
+    ///
+    /// ROTATION ALGORITHM:
+    /// - Sort all registered masternodes by address (deterministic)
+    /// - Select 10 nodes starting from: (height * 10) % total_nodes
+    /// - Each node receives rewards every N/10 blocks (where N = total masternodes)
     pub async fn get_masternodes_for_rewards(
         &self,
         blockchain: &crate::blockchain::Blockchain,
     ) -> Vec<MasternodeInfo> {
-        // DETERMINISTIC MASTERNODE SELECTION FOR CONSENSUS
-        // All nodes must agree on which masternodes receive rewards to avoid forks.
-        // We select masternodes based on consensus participation in the previous block.
+        const REWARD_SLOTS: usize = 10; // Number of masternodes to reward per block
 
         let height = blockchain.get_height();
         let masternodes = self.masternodes.read().await;
@@ -475,27 +478,49 @@ impl MasternodeRegistry {
             return vec![];
         }
 
-        // For genesis and first few blocks, use registration time as fallback
-        if height <= 3 {
+        // Sort deterministically by address (ensures all nodes agree on order)
+        all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+
+        // For genesis and first few blocks, use all masternodes if less than 10
+        if height <= 3 || all_nodes.len() <= REWARD_SLOTS {
             tracing::info!(
-                "💰 Genesis/early blocks: using all {} registered masternodes",
+                "💰 Block {}: using all {} registered masternodes (below rotation threshold)",
+                height,
                 all_nodes.len()
             );
-            all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
             return all_nodes;
         }
 
-        // Use all registered masternodes
-        // They must be registered (deterministic) and connected (each node validates this)
-        all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+        // ROTATION LOGIC: Select 10 masternodes based on block height
+        // The starting position rotates through all masternodes
+        let total_nodes = all_nodes.len();
+        let start_index = ((height as usize) * REWARD_SLOTS) % total_nodes;
+
+        let mut selected_nodes = Vec::with_capacity(REWARD_SLOTS);
+        for i in 0..REWARD_SLOTS {
+            let index = (start_index + i) % total_nodes;
+            selected_nodes.push(all_nodes[index].clone());
+        }
 
         tracing::info!(
-            "💰 Reward distribution at height {}: {} registered masternodes eligible",
+            "💰 Block {}: rotation selected {} of {} masternodes (rotation starts at index {})",
             height,
-            all_nodes.len()
+            selected_nodes.len(),
+            total_nodes,
+            start_index
         );
 
-        all_nodes
+        // Log which masternodes are selected in this rotation
+        for (i, node) in selected_nodes.iter().enumerate() {
+            tracing::debug!(
+                "   Slot {}: {} (tier {:?})",
+                i + 1,
+                node.masternode.address,
+                node.masternode.tier
+            );
+        }
+
+        selected_nodes
     }
 
     /// Count all registered masternodes (not just active ones)
