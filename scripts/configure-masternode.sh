@@ -46,32 +46,16 @@ if [ -n "$1" ]; then
             echo "Examples:"
             echo "  $0 mainnet    # Configure mainnet"
             echo "  $0 testnet    # Configure testnet"
-            echo "  $0            # Interactive mode"
+            echo "  $0            # Defaults to mainnet"
             exit 1
             ;;
     esac
 else
-    # Interactive mode - ask which network to configure
-    echo "Which network do you want to configure?"
-    echo "  1. Mainnet (~/.timecoin/config.toml)"
-    echo "  2. Testnet (~/.timecoin/testnet/config.toml)"
+    # Default to mainnet if no argument provided
+    CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
+    NETWORK="mainnet"
+    echo -e "${BLUE}No network specified, defaulting to mainnet${NC}"
     echo ""
-    read -p "Enter choice (1 or 2): " network_choice
-
-    case "$network_choice" in
-        1)
-            CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
-            NETWORK="mainnet"
-            ;;
-        2)
-            CONFIG_FILE="$USER_HOME/.timecoin/testnet/config.toml"
-            NETWORK="testnet"
-            ;;
-        *)
-            echo -e "${RED}Invalid choice. Exiting.${NC}"
-            exit 1
-            ;;
-    esac
 fi
 
 # Check if config file exists

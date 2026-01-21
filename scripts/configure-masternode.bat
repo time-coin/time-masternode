@@ -39,30 +39,17 @@ if not "%~1"=="" (
         echo Examples:
         echo   %~nx0 mainnet    # Configure mainnet
         echo   %~nx0 testnet    # Configure testnet
-        echo   %~nx0            # Interactive mode
+        echo   %~nx0            # Defaults to mainnet
         pause
         exit /b 1
     )
 )
 
-REM Interactive mode - ask which network to configure
-echo Which network do you want to configure?
-echo   1. Mainnet (%TIMECOIN_DIR%\config.toml)
-echo   2. Testnet (%TIMECOIN_DIR%\testnet\config.toml)
+REM Default to mainnet if no argument provided
+set "CONFIG_FILE=%TIMECOIN_DIR%\config.toml"
+set "NETWORK=mainnet"
+echo No network specified, defaulting to mainnet
 echo.
-set /p "network_choice=Enter choice (1 or 2): "
-
-if "%network_choice%"=="1" (
-    set "CONFIG_FILE=%TIMECOIN_DIR%\config.toml"
-    set "NETWORK=mainnet"
-) else if "%network_choice%"=="2" (
-    set "CONFIG_FILE=%TIMECOIN_DIR%\testnet\config.toml"
-    set "NETWORK=testnet"
-) else (
-    echo [ERROR] Invalid choice. Exiting.
-    pause
-    exit /b 1
-)
 
 :check_config
 
