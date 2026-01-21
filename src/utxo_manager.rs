@@ -514,6 +514,11 @@ impl UTXOStateManager {
             None => return Err(UtxoError::NotFound),
         }
 
+        // Check if already locked as collateral
+        if self.locked_collaterals.contains_key(&outpoint) {
+            return Err(UtxoError::LockedAsCollateral);
+        }
+
         // Create locked collateral entry
         let locked_collateral =
             LockedCollateral::new(outpoint.clone(), masternode_address, lock_height, amount);
@@ -1086,5 +1091,177 @@ mod tests {
 
         // Now should be spendable
         assert!(manager.is_spendable(&outpoint, None));
+    }
+
+    // ========== Phase 5: Additional Edge Case Tests ==========
+
+    /// Phase 5 Test 1: Lock collateral twice (should fail)
+    #[tokio::test]
+    async fn test_double_lock_collateral() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(200);
+        let utxo = create_test_utxo(200);
+
+        manager.add_utxo(utxo).await.unwrap();
+
+        // First lock succeeds
+        assert!(manager
+            .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+            .is_ok());
+
+        // Second lock should fail
+        assert!(manager
+            .lock_collateral(outpoint.clone(), "masternode2".to_string(), 1000, 1000)
+            .is_err());
+    }
+
+    /// Phase 5 Test 2: Lock non-existent UTXO (should fail)
+    #[tokio::test]
+    async fn test_lock_nonexistent_utxo() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(201);
+
+        // Try to lock without adding UTXO first
+        let result =
+            manager.lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000);
+
+        assert!(result.is_err());
+    }
+
+    /// Phase 5 Test 3: Unlock non-locked collateral
+    #[tokio::test]
+    async fn test_unlock_nonlocked_collateral() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(202);
+        let utxo = create_test_utxo(202);
+
+        manager.add_utxo(utxo).await.unwrap();
+
+        // Try to unlock without locking first
+        let result = manager.unlock_collateral(&outpoint);
+
+        assert!(result.is_err());
+    }
+
+    /// Phase 5 Test 4: List collaterals for specific masternode (multiple collaterals)
+    #[tokio::test]
+    async fn test_list_multiple_collaterals_for_masternode() {
+        let manager = UTXOStateManager::new();
+
+        // Add and lock multiple UTXOs for same masternode
+        for i in 70..73 {
+            let outpoint = create_test_outpoint(i);
+            let utxo = create_test_utxo(i);
+            manager.add_utxo(utxo).await.unwrap();
+            manager
+                .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+                .unwrap();
+        }
+
+        // Add one for different masternode
+        let outpoint4 = create_test_outpoint(73);
+        let utxo4 = create_test_utxo(73);
+        manager.add_utxo(utxo4).await.unwrap();
+        manager
+            .lock_collateral(outpoint4.clone(), "masternode2".to_string(), 1000, 1000)
+            .unwrap();
+
+        // List for masternode1
+        let collaterals = manager.list_collaterals_for_masternode("masternode1");
+        assert_eq!(collaterals.len(), 3);
+
+        // List for masternode2
+        let collaterals2 = manager.list_collaterals_for_masternode("masternode2");
+        assert_eq!(collaterals2.len(), 1);
+    }
+
+    /// Phase 5 Test 5: Spend UTXO removes from collateral tracking
+    #[tokio::test]
+    async fn test_spend_utxo_removes_collateral() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(80);
+        let utxo = create_test_utxo(80);
+
+        manager.add_utxo(utxo).await.unwrap();
+        manager
+            .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+            .unwrap();
+
+        // Unlock first (required before spending)
+        manager.unlock_collateral(&outpoint).unwrap();
+
+        // Now spend it
+        manager.spend_utxo(&outpoint).await.unwrap();
+
+        // Verify it's no longer tracked
+        assert!(!manager.is_collateral_locked(&outpoint));
+        assert!(manager.get_locked_collateral(&outpoint).is_none());
+    }
+
+    /// Phase 5 Test 6: List all locked collaterals
+    #[tokio::test]
+    async fn test_list_all_locked_collaterals() {
+        let manager = UTXOStateManager::new();
+
+        // Lock multiple collaterals
+        for i in 50..55 {
+            let outpoint = create_test_outpoint(i);
+            let utxo = create_test_utxo(i);
+            manager.add_utxo(utxo).await.unwrap();
+            manager
+                .lock_collateral(
+                    outpoint.clone(),
+                    format!("masternode{}", i),
+                    1000,
+                    (i as u64) * 1000,
+                )
+                .unwrap();
+        }
+
+        // List all
+        let all_collaterals = manager.list_locked_collaterals();
+        assert_eq!(all_collaterals.len(), 5);
+
+        // Verify amounts are different
+        let amounts: Vec<u64> = all_collaterals.iter().map(|c| c.amount).collect();
+        assert!(amounts.contains(&50000));
+        assert!(amounts.contains(&54000));
+    }
+
+    /// Phase 5 Test 7: Concurrent collateral operations
+    #[tokio::test]
+    async fn test_concurrent_collateral_operations() {
+        let manager = Arc::new(UTXOStateManager::new());
+
+        // Add UTXOs
+        for i in 60..70 {
+            let outpoint = create_test_outpoint(i);
+            let utxo = create_test_utxo(i);
+            manager.add_utxo(utxo).await.unwrap();
+        }
+
+        // Spawn concurrent lock operations
+        let mut handles = vec![];
+        for i in 60..70 {
+            let mgr = Arc::clone(&manager);
+            let handle = tokio::spawn(async move {
+                mgr.lock_collateral(
+                    create_test_outpoint(i),
+                    format!("masternode{}", i),
+                    1000,
+                    1000,
+                )
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete
+        for handle in handles {
+            assert!(handle.await.unwrap().is_ok());
+        }
+
+        // Verify all are locked
+        let all_collaterals = manager.list_locked_collaterals();
+        assert_eq!(all_collaterals.len(), 10);
     }
 }

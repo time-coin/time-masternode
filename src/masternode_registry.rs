@@ -995,3 +995,288 @@ impl Clone for MasternodeRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{MasternodeTier, OutPoint, UTXO};
+    use crate::utxo_manager::UTXOStateManager;
+    use std::sync::Arc;
+
+    fn create_test_registry() -> MasternodeRegistry {
+        let db = sled::Config::new().temporary(true).open().unwrap();
+        MasternodeRegistry::new(Arc::new(db), NetworkType::Testnet)
+    }
+
+    fn create_test_utxo_manager() -> Arc<UTXOStateManager> {
+        Arc::new(UTXOStateManager::new())
+    }
+
+    fn create_test_outpoint(index: u32) -> OutPoint {
+        OutPoint {
+            txid: [index as u8; 32],
+            vout: index,
+        }
+    }
+
+    async fn add_test_utxo(manager: &UTXOStateManager, index: u32, amount: u64) {
+        let outpoint = create_test_outpoint(index);
+        let utxo = UTXO {
+            outpoint: outpoint.clone(),
+            value: amount,
+            script_pubkey: vec![1, 2, 3],
+            address: format!("test_address_{}", index),
+        };
+        manager.add_utxo(utxo).await.unwrap();
+    }
+
+    // ========== Phase 5: Collateral Validation Tests ==========
+
+    #[tokio::test]
+    async fn test_validate_collateral_success() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        // Add a UTXO with sufficient amount for Bronze tier
+        let outpoint = create_test_outpoint(1);
+        add_test_utxo(&utxo_manager, 1, 1_000 * 100_000_000).await; // 1,000 TIME
+
+        // Validate collateral for Bronze tier
+        let result = registry
+            .validate_collateral(&outpoint, MasternodeTier::Bronze, &utxo_manager, 10)
+            .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_collateral_not_found() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        let outpoint = create_test_outpoint(999);
+
+        // Try to validate non-existent UTXO
+        let result = registry
+            .validate_collateral(&outpoint, MasternodeTier::Bronze, &utxo_manager, 10)
+            .await;
+
+        assert!(matches!(result, Err(RegistryError::CollateralNotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_validate_collateral_insufficient_amount() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        // Add a UTXO with insufficient amount for Bronze tier
+        let outpoint = create_test_outpoint(2);
+        add_test_utxo(&utxo_manager, 2, 500 * 100_000_000).await; // Only 500 TIME
+
+        // Try to validate for Bronze (needs 1,000 TIME)
+        let result = registry
+            .validate_collateral(&outpoint, MasternodeTier::Bronze, &utxo_manager, 10)
+            .await;
+
+        assert!(matches!(result, Err(RegistryError::InvalidCollateral)));
+    }
+
+    #[tokio::test]
+    async fn test_validate_collateral_already_locked() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        // Add and lock a UTXO
+        let outpoint = create_test_outpoint(3);
+        add_test_utxo(&utxo_manager, 3, 1_000 * 100_000_000).await;
+        utxo_manager
+            .lock_collateral(
+                outpoint.clone(),
+                "other_masternode".to_string(),
+                10,
+                1_000 * 100_000_000,
+            )
+            .unwrap();
+
+        // Try to validate already locked collateral
+        let result = registry
+            .validate_collateral(&outpoint, MasternodeTier::Bronze, &utxo_manager, 10)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(RegistryError::CollateralAlreadyLocked)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_validate_collateral_tier_amounts() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        // Test Bronze tier (1,000 TIME)
+        let outpoint1 = create_test_outpoint(10);
+        add_test_utxo(&utxo_manager, 10, 1_000 * 100_000_000).await;
+        assert!(registry
+            .validate_collateral(&outpoint1, MasternodeTier::Bronze, &utxo_manager, 10)
+            .await
+            .is_ok());
+
+        // Test Silver tier (10,000 TIME)
+        let outpoint2 = create_test_outpoint(11);
+        add_test_utxo(&utxo_manager, 11, 10_000 * 100_000_000).await;
+        assert!(registry
+            .validate_collateral(&outpoint2, MasternodeTier::Silver, &utxo_manager, 10)
+            .await
+            .is_ok());
+
+        // Test Gold tier (100,000 TIME)
+        let outpoint3 = create_test_outpoint(12);
+        add_test_utxo(&utxo_manager, 12, 100_000 * 100_000_000).await;
+        assert!(registry
+            .validate_collateral(&outpoint3, MasternodeTier::Gold, &utxo_manager, 10)
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_cleanup_invalid_collaterals() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        // Register a masternode with collateral
+        let outpoint = create_test_outpoint(20);
+        add_test_utxo(&utxo_manager, 20, 1_000 * 100_000_000).await;
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let public_key = signing_key.verifying_key();
+
+        let masternode = crate::types::Masternode::new_with_collateral(
+            "test_node".to_string(),
+            "test_reward".to_string(),
+            1_000,
+            outpoint.clone(),
+            public_key,
+            MasternodeTier::Bronze,
+            MasternodeRegistry::now(),
+        );
+
+        registry
+            .register(masternode, "test_reward".to_string())
+            .await
+            .unwrap();
+
+        // Lock the collateral
+        utxo_manager
+            .lock_collateral(
+                outpoint.clone(),
+                "test_node".to_string(),
+                10,
+                1_000 * 100_000_000,
+            )
+            .unwrap();
+
+        // Verify masternode is registered
+        assert_eq!(registry.count().await, 1);
+
+        // Unlock and spend the collateral (simulating spent collateral)
+        utxo_manager.unlock_collateral(&outpoint).unwrap();
+        utxo_manager.spend_utxo(&outpoint).await.unwrap();
+
+        // Run cleanup
+        let cleanup_count = registry.cleanup_invalid_collaterals(&utxo_manager).await;
+
+        // Masternode should be removed
+        assert_eq!(cleanup_count, 1);
+        assert_eq!(registry.count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_check_collateral_validity() {
+        let registry = create_test_registry();
+        let utxo_manager = create_test_utxo_manager();
+
+        // Register a masternode with valid collateral
+        let outpoint = create_test_outpoint(30);
+        add_test_utxo(&utxo_manager, 30, 1_000 * 100_000_000).await;
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let public_key = signing_key.verifying_key();
+
+        let masternode = crate::types::Masternode::new_with_collateral(
+            "valid_node".to_string(),
+            "valid_reward".to_string(),
+            1_000,
+            outpoint.clone(),
+            public_key,
+            MasternodeTier::Bronze,
+            MasternodeRegistry::now(),
+        );
+
+        registry
+            .register(masternode.clone(), "valid_reward".to_string())
+            .await
+            .unwrap();
+
+        // Lock the collateral
+        utxo_manager
+            .lock_collateral(
+                outpoint.clone(),
+                "valid_node".to_string(),
+                10,
+                1_000 * 100_000_000,
+            )
+            .unwrap();
+
+        // Check validity - should be valid
+        let is_valid = registry
+            .check_collateral_validity("valid_node", &utxo_manager)
+            .await;
+        assert!(is_valid);
+
+        // Unlock and spend the collateral
+        utxo_manager.unlock_collateral(&outpoint).unwrap();
+        utxo_manager.spend_utxo(&outpoint).await.unwrap();
+
+        // Check validity again - should be invalid
+        let is_valid = registry
+            .check_collateral_validity("valid_node", &utxo_manager)
+            .await;
+        assert!(!is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_masternode_no_collateral_validation() {
+        let registry = create_test_registry();
+
+        // Register a legacy masternode (no collateral)
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let public_key = signing_key.verifying_key();
+
+        let masternode = crate::types::Masternode::new_legacy(
+            "legacy_node".to_string(),
+            "legacy_reward".to_string(),
+            1_000,
+            public_key,
+            MasternodeTier::Bronze,
+            MasternodeRegistry::now(),
+        );
+
+        registry
+            .register(masternode.clone(), "legacy_reward".to_string())
+            .await
+            .unwrap();
+
+        // Legacy masternodes should always be valid (no collateral to check)
+        let utxo_manager = create_test_utxo_manager();
+        let is_valid = registry
+            .check_collateral_validity("legacy_node", &utxo_manager)
+            .await;
+        assert!(is_valid);
+
+        // Cleanup should not remove legacy masternodes
+        let cleanup_count = registry.cleanup_invalid_collaterals(&utxo_manager).await;
+        assert_eq!(cleanup_count, 0);
+        assert_eq!(registry.count().await, 1);
+    }
+}
