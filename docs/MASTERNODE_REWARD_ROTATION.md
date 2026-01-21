@@ -30,23 +30,68 @@ Instead of distributing to ALL masternodes every block, distribute to a rotating
 2. **Deterministic Selection:** All nodes must select identical masternodes (consensus-safe)
 3. **Fair Rotation:** Every masternode participates equally over time
 4. **Tier Support:** Support Bronze, Silver, Gold tiers with weighted rewards
+5. **Anti-Gaming:** Require 1-hour consensus participation before eligibility
 
 ---
 
 ## Algorithm Specification
 
-### 1. Masternode Ordering
+### 1. Eligibility Requirements
 
-All nodes MUST use **identical ordering** of registered masternodes:
+Before a masternode can receive rewards, it MUST:
+
+1. **Be registered** in the masternode registry
+2. **Participate in consensus** for at least 1 hour (60 minutes)
+
+**Participation Tracking:**
+```rust
+// A masternode is eligible if it has voted on any block in the last hour
+fn is_eligible_for_rewards(
+    mn: &Masternode,
+    current_height: u64,
+    blockchain: &Blockchain
+) -> bool {
+    // Look back approximately 60 blocks (~1 hour at 1 block/min)
+    let lookback_height = current_height.saturating_sub(60);
+    
+    // Check if masternode voted on ANY block in this range
+    for height in lookback_height..current_height {
+        if blockchain.has_consensus_vote(height, &mn.ip_address) {
+            return true;
+        }
+    }
+    
+    false
+}
+```
+
+**Why 1 Hour?**
+- Prevents "reward gaming" (spinning up nodes just before their rotation slot)
+- Ensures masternodes contribute to network security before receiving rewards
+- Long enough to prove commitment, short enough to allow quick onboarding
+- Consensus-safe: all nodes can verify the same vote history on-chain
+
+### 2. Masternode Ordering
+
+All nodes MUST use **identical ordering** of ELIGIBLE masternodes:
 
 ```rust
-fn get_sorted_masternodes(block_height: u64) -> Vec<Masternode> {
-    let mut masternodes = get_all_registered_masternodes();
+fn get_sorted_eligible_masternodes(
+    block_height: u64,
+    blockchain: &Blockchain
+) -> Vec<Masternode> {
+    let all_masternodes = get_all_registered_masternodes();
+    
+    // Filter to only eligible masternodes
+    let mut eligible: Vec<_> = all_masternodes
+        .into_iter()
+        .filter(|mn| is_eligible_for_rewards(mn, block_height, blockchain))
+        .collect();
     
     // Sort by IP address (lexicographic order)
-    masternodes.sort_by(|a, b| a.ip_address.cmp(&b.ip_address));
+    eligible.sort_by(|a, b| a.ip_address.cmp(&b.ip_address));
     
-    masternodes
+    eligible
 }
 ```
 
@@ -56,7 +101,7 @@ fn get_sorted_masternodes(block_height: u64) -> Vec<Masternode> {
 - No floating-point arithmetic
 - Simple to implement and verify
 
-### 2. Rotation Index Calculation
+### 3. Rotation Index Calculation
 
 ```rust
 fn calculate_rotation_offset(block_height: u64, total_masternodes: usize) -> usize {
@@ -69,7 +114,7 @@ fn calculate_rotation_offset(block_height: u64, total_masternodes: usize) -> usi
 - Block 1784, 100 masternodes: `1784 % 100 = 84`
 - Block 1885, 100 masternodes: `1885 % 100 = 85`
 
-### 3. Select 10 Nodes (Circular Wrap)
+### 4. Select 10 Nodes (Circular Wrap)
 
 ```rust
 fn select_reward_recipients(
@@ -93,7 +138,7 @@ fn select_reward_recipients(
 - 100 masternodes, block 1796 → offset = 96
 - Select nodes: 96, 97, 98, 99, 0, 1, 2, 3, 4, 5
 
-### 4. Tier Weighting
+### 5. Tier Weighting
 
 Each masternode tier has a weight that affects reward distribution:
 
@@ -106,7 +151,7 @@ Each masternode tier has a weight that affects reward distribution:
 
 **Note:** Reward estimates assume $0.10/TIME, 100 masternodes, 10-block rotation cycle.
 
-### 5. Reward Distribution
+### 6. Reward Distribution
 
 ```rust
 fn distribute_rewards(
@@ -187,17 +232,19 @@ fn distribute_rewards(
 ### Critical Requirements
 
 All nodes MUST:
-1. ✅ Use **identical sorting** (lexicographic by IP)
-2. ✅ Use **same rotation formula** (`block_height % total_masternodes`)
-3. ✅ Use **same tier weights** (Free=100, Bronze=200, Silver=500, Gold=1000)
-4. ✅ Use **same registered masternode list** at block height
+1. ✅ Use **identical eligibility check** (60-block lookback for consensus votes)
+2. ✅ Use **identical sorting** (lexicographic by IP)
+3. ✅ Use **same rotation formula** (`block_height % total_eligible_masternodes`)
+4. ✅ Use **same tier weights** (Free=100, Bronze=200, Silver=500, Gold=1000)
+5. ✅ Use **same consensus vote history** at block height
 
 ### Why This Is Safe
 
 1. **Deterministic:** Same inputs → same outputs on all nodes
 2. **No Randomness:** No VRF, no probabilistic selection
-3. **No External Dependencies:** Uses only on-chain data (IP addresses, block height)
+3. **On-Chain Verification:** Consensus votes are recorded in blocks
 4. **Fork-Free:** Conflicting blocks would select identical reward recipients
+5. **Gaming-Resistant:** 1-hour participation requirement prevents manipulation
 
 ### Validation During Block Verification
 
@@ -245,43 +292,58 @@ fn verify_block_rewards(block: &Block) -> Result<(), Error> {
 
 ## Edge Cases
 
-### Case 1: Fewer Than 10 Masternodes
+### Case 1: New Masternode (< 1 Hour Participation)
 
-If `total_masternodes < 10`:
-- Select ALL masternodes
+A masternode registers at block 1750:
+- Block 1750-1809: NOT eligible (< 60 blocks of participation)
+- Block 1810+: Eligible for rewards (voted on blocks 1750-1809)
+- Will participate in rotation once eligible
+
+### Case 2: Inactive Masternode (No Recent Votes)
+
+A masternode stops voting at block 1750:
+- Block 1750-1809: Still eligible (has votes in 60-block lookback)
+- Block 1810+: NOT eligible (no votes in lookback window)
+- Automatically excluded from rotation
+
+### Case 3: Fewer Than 10 Eligible Masternodes
+
+If `eligible_masternodes < 10`:
+- Select ALL eligible masternodes
 - Distribute 100 TIME among them proportionally
-- Example: 6 masternodes → each Free tier gets ~16.67 TIME
+- Example: 6 eligible masternodes → each Free tier gets ~16.67 TIME
 
 ```rust
-let select_count = std::cmp::min(10, masternodes.len());
+let select_count = std::cmp::min(10, eligible_masternodes.len());
 ```
 
-### Case 2: Exactly 10 Masternodes
+### Case 4: Exactly 10 Eligible Masternodes
 
-- Perfect case: each block, all 10 masternodes receive rewards
+- Perfect case: each block, all 10 eligible masternodes receive rewards
 - No rotation needed (offset is irrelevant)
 
-### Case 3: Masternode Joins/Leaves During Rotation
+### Case 5: Masternode Joins/Leaves During Rotation
 
 **Masternode joins at block 1785:**
-- Block 1784: 100 masternodes, offset = 84
-- Block 1785: 101 masternodes, offset = 85
-- New masternode gets inserted into sorted list
+- Block 1785-1844: NOT eligible (needs 60 blocks of votes)
+- Block 1845: Becomes eligible
+- Gets inserted into sorted list at correct IP position
 - Offset continues normally (no disruption)
 
 **Masternode leaves at block 1785:**
-- Block 1784: 100 masternodes, offset = 84
-- Block 1785: 99 masternodes, offset = 85
-- Removed masternode is deleted from sorted list
+- Block 1785-1844: Still eligible (has recent votes)
+- Block 1845+: NOT eligible (no votes in lookback)
+- Removed from sorted list
 - Offset continues normally
 
-**Important:** Rotation is recalculated fresh each block using current masternode list.
+**Important:** Eligibility is recalculated fresh each block using 60-block lookback.
 
-### Case 4: Genesis/Early Blocks
+### Case 6: Genesis/Early Blocks
 
-- Block 0-2: May have < 3 masternodes (minimum required)
+- Block 0-59: No masternodes eligible yet (need 60 blocks of participation)
+- Block 60+: Masternodes that voted on blocks 0-59 become eligible
 - System waits until 3+ masternodes before producing blocks
-- Once 3+ registered, rotation begins normally
+- Once 3+ eligible, rotation begins normally
 
 ---
 
