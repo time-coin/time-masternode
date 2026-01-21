@@ -1,10 +1,86 @@
-# Installation Scripts
+# Installation and Configuration Scripts
 
-This directory contains scripts for installing, managing, and uninstalling TIME Coin masternodes on Linux systems.
+This directory contains scripts for installing, managing, configuring, and uninstalling TIME Coin masternodes on Linux and Windows systems.
 
 ---
 
 ## 📦 Scripts
+
+### configure-masternode.sh / configure-masternode.bat
+**NEW!** Interactive configuration tool for masternode setup.
+
+**Features**:
+- ✅ Interactive prompts for all masternode settings
+- ✅ Validates all inputs (addresses, txids, vouts)
+- ✅ Automatically updates config.toml in user's data directory
+- ✅ Creates backup before making changes
+- ✅ Provides next steps after configuration
+- ✅ Cross-platform (Linux/macOS via .sh, Windows via .bat)
+- ✅ Supports both mainnet and testnet
+
+**Config File Locations**:
+- **Linux/macOS Mainnet**: `~/.timecoin/config.toml`
+- **Linux/macOS Testnet**: `~/.timecoin/testnet/config.toml`
+- **Windows Mainnet**: `%APPDATA%\timecoin\config.toml`
+- **Windows Testnet**: `%APPDATA%\timecoin\testnet\config.toml`
+
+**Usage (Linux/macOS)**:
+```bash
+# Make executable
+chmod +x scripts/configure-masternode.sh
+
+# Run the script
+./scripts/configure-masternode.sh
+
+# Select network when prompted:
+#   1. Mainnet
+#   2. Testnet
+```
+
+**Usage (Windows)**:
+```cmd
+# Run the script
+scripts\configure-masternode.bat
+
+# Select network when prompted:
+#   1. Mainnet
+#   2. Testnet
+```
+
+**What it configures**:
+1. Enable/disable masternode
+2. Masternode tier (Free/Bronze/Silver/Gold)
+3. Reward address
+4. Collateral UTXO (txid and vout) - optional
+
+**Example Session**:
+```
+Step 1: Enable Masternode
+Do you want to enable masternode functionality? (y/n)
+> y
+
+Step 2: Select Masternode Tier
+Available tiers:
+  - Free:   No collateral (basic rewards, no governance voting)
+  - Bronze: 1,000 TIME collateral (10x rewards, governance voting)
+  - Silver: 10,000 TIME collateral (100x rewards, governance voting)
+  - Gold:   100,000 TIME collateral (1000x rewards, governance voting)
+
+Enter tier (free/bronze/silver/gold):
+> bronze
+
+Step 3: Reward Address
+Enter your TIME address where you want to receive rewards:
+> TIME1abc123...
+
+Step 4: Collateral Information
+Enter collateral transaction ID (txid):
+> abc123def456... (or leave empty to configure later)
+
+Configuration saved successfully!
+```
+
+---
 
 ### install-masternode.sh
 Automated installation script for fresh Linux machines.
@@ -94,6 +170,51 @@ After running `install-masternode.sh`, files will be organized as:
 ---
 
 ## 🚀 Quick Start
+
+### Method 1: Using Configuration Script (Recommended)
+
+**Step 1: Run Configuration Tool**
+```bash
+# Linux/macOS
+./scripts/configure-masternode.sh
+
+# Windows
+scripts\configure-masternode.bat
+```
+
+**Step 2: Follow Interactive Prompts**
+- Enable masternode: Yes
+- Select tier: Bronze/Silver/Gold
+- Enter reward address
+- Enter collateral info (or skip for later)
+
+**Step 3: Create Collateral UTXO** (if not done yet)
+```bash
+# Send collateral to yourself
+time-cli sendtoaddress <your_address> 1000.0
+
+# Wait 30 minutes for confirmations
+time-cli listunspent
+```
+
+**Step 4: Register Masternode**
+```bash
+time-cli masternoderegister \
+  --tier Bronze \
+  --collateral-txid <txid> \
+  --vout 0 \
+  --reward-address <your_address>
+```
+
+**Step 5: Verify**
+```bash
+time-cli masternodelist
+time-cli getbalance
+```
+
+---
+
+### Method 2: Manual Installation (Linux)
 
 ### 1. Install (Mainnet)
 ```bash
