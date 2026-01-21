@@ -1613,6 +1613,21 @@ impl RpcHandler {
                 message: format!("Failed to deregister masternode: {:?}", e),
             })?;
 
+        // Broadcast unlock announcement to network
+        use crate::network::message::NetworkMessage;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let unlock_msg = NetworkMessage::MasternodeUnlock {
+            address: node_address.clone(),
+            collateral_outpoint: collateral_outpoint.clone(),
+            timestamp: now,
+        };
+
+        self.registry.broadcast_message(unlock_msg).await;
+
         Ok(json!({
             "result": "success",
             "masternode_address": node_address,

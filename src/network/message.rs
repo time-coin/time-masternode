@@ -64,6 +64,12 @@ pub enum NetworkMessage {
         tier: MasternodeTier,
         public_key: VerifyingKey,
     },
+    /// Announce masternode deregistration and collateral unlock
+    MasternodeUnlock {
+        address: String,
+        collateral_outpoint: OutPoint,
+        timestamp: u64,
+    },
     GetMasternodes,
     MasternodesResponse(Vec<MasternodeAnnouncementData>),
     Version {
@@ -208,6 +214,10 @@ pub struct MasternodeAnnouncementData {
     pub reward_address: String,
     pub tier: MasternodeTier,
     pub public_key: VerifyingKey,
+    /// Collateral outpoint (None for legacy masternodes)
+    pub collateral_outpoint: Option<OutPoint>,
+    /// Timestamp when registered
+    pub registered_at: u64,
 }
 
 impl NetworkMessage {
@@ -245,6 +255,7 @@ impl NetworkMessage {
             NetworkMessage::GetUTXOStateHash => "GetUTXOStateHash",
             NetworkMessage::UTXOStateHashResponse { .. } => "UTXOStateHashResponse",
             NetworkMessage::MasternodeAnnouncement { .. } => "MasternodeAnnouncement",
+            NetworkMessage::MasternodeUnlock { .. } => "MasternodeUnlock",
             NetworkMessage::GetMasternodes => "GetMasternodes",
             NetworkMessage::MasternodesResponse(_) => "MasternodesResponse",
             NetworkMessage::Version { .. } => "Version",

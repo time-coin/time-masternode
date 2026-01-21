@@ -220,6 +220,19 @@ impl MessageHandler {
                 )
                 .await
             }
+            NetworkMessage::MasternodeUnlock {
+                address,
+                collateral_outpoint,
+                timestamp,
+            } => {
+                self.handle_masternode_unlock(
+                    address.clone(),
+                    collateral_outpoint.clone(),
+                    *timestamp,
+                    context,
+                )
+                .await
+            }
             NetworkMessage::MasternodesResponse(masternodes) => {
                 self.handle_masternodes_response(masternodes.clone(), context)
                     .await
@@ -542,6 +555,8 @@ impl MessageHandler {
                     reward_address: mn_info.reward_address.clone(),
                     tier: mn_info.masternode.tier,
                     public_key: mn_info.masternode.public_key,
+                    collateral_outpoint: mn_info.masternode.collateral_outpoint.clone(),
+                    registered_at: mn_info.masternode.registered_at,
                 }
             })
             .collect();
@@ -1438,6 +1453,64 @@ impl MessageHandler {
                     self.direction, peer_ip, e
                 );
             }
+        }
+
+        Ok(None)
+    }
+
+    /// Handle MasternodeUnlock announcement
+    async fn handle_masternode_unlock(
+        &self,
+        address: String,
+        collateral_outpoint: crate::types::OutPoint,
+        timestamp: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📥 [{}] Received MasternodeUnlock from {} for masternode {}",
+            self.direction, self.peer_ip, address
+        );
+
+        // Verify masternode exists
+        if let Some(_mn_info) = context.masternode_registry.get(&address).await {
+            // Unregister the masternode
+            match context.masternode_registry.unregister(&address).await {
+                Ok(()) => {
+                    info!(
+                        "✅ [{}] Deregistered masternode {} (unlock timestamp: {})",
+                        self.direction, address, timestamp
+                    );
+
+                    // Unlock the collateral in UTXO manager if available
+                    if let Some(utxo_manager) = &context.utxo_manager {
+                        match utxo_manager.unlock_collateral(&collateral_outpoint) {
+                            Ok(()) => {
+                                info!(
+                                    "🔓 [{}] Unlocked collateral {:?} for masternode {}",
+                                    self.direction, collateral_outpoint, address
+                                );
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "⚠️ [{}] Failed to unlock collateral {:?}: {:?}",
+                                    self.direction, collateral_outpoint, e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "❌ [{}] Failed to deregister masternode {}: {}",
+                        self.direction, address, e
+                    );
+                }
+            }
+        } else {
+            warn!(
+                "⚠️ [{}] Received unlock for unknown masternode {}",
+                self.direction, address
+            );
         }
 
         Ok(None)
