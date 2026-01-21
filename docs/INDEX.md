@@ -26,6 +26,7 @@
 | Document | Purpose | Audience |
 |----------|---------|----------|
 | [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) | Complete protocol specification | Developers, Researchers |
+| [MASTERNODE_REWARD_ROTATION.md](MASTERNODE_REWARD_ROTATION.md) | 10-node reward rotation system | Masternode Operators |
 | [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) | Network layer design & modules | Network Developers |
 | [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) | System architecture overview | All Developers |
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | Command reference & quick facts | All Users |
@@ -285,6 +286,7 @@ analysis/
 - [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)
 - [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md)
 - [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md)
+- [MASTERNODE_REWARD_ROTATION.md](MASTERNODE_REWARD_ROTATION.md)
 - [CRYPTOGRAPHY_RATIONALE.md](CRYPTOGRAPHY_RATIONALE.md)
 - [SECURITY.md](SECURITY.md)
 

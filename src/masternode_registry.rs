@@ -463,16 +463,28 @@ impl MasternodeRegistry {
         blockchain: &crate::blockchain::Blockchain,
     ) -> Vec<MasternodeInfo> {
         const REWARD_SLOTS: usize = 10; // Number of masternodes to reward per block
+        const MIN_PARTICIPATION_SECS: u64 = 3600; // 1 hour minimum participation before eligible
 
         let height = blockchain.get_height();
         let masternodes = self.masternodes.read().await;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-        // Get all registered masternodes
-        let mut all_nodes: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
+        // Get all registered masternodes that have participated for at least 1 hour
+        let mut all_nodes: Vec<MasternodeInfo> = masternodes
+            .values()
+            .filter(|mn| {
+                let participation_time = now.saturating_sub(mn.masternode.registered_at);
+                participation_time >= MIN_PARTICIPATION_SECS
+            })
+            .cloned()
+            .collect();
 
         if all_nodes.is_empty() {
             tracing::warn!(
-                "⚠️  No masternodes registered for rewards at height {}",
+                "⚠️  No masternodes with 1+ hour participation for rewards at height {}",
                 height
             );
             return vec![];
