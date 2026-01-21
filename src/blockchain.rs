@@ -1806,6 +1806,21 @@ impl Blockchain {
         // Clear finalized transactions now that they're in a block (archived)
         self.consensus.clear_finalized_transactions();
 
+        // Phase 3.3: Cleanup invalid collaterals after block processing
+        // This ensures masternodes with spent collateral are automatically deregistered
+        let cleanup_count = self
+            .masternode_registry
+            .cleanup_invalid_collaterals(&self.utxo_manager)
+            .await;
+
+        if cleanup_count > 0 {
+            tracing::warn!(
+                "🗑️ Auto-deregistered {} masternode(s) with invalid collateral at height {}",
+                cleanup_count,
+                block.header.height
+            );
+        }
+
         tracing::debug!(
             "✓ Block {} added (txs: {}, work: {}), finalized pool cleared",
             block.header.height,
@@ -2383,16 +2398,39 @@ impl Blockchain {
 
     /// Select masternodes for reward distribution using deterministic rotation
     /// Returns up to max_recipients masternodes, rotating fairly based on block height
+    /// Phase 3.3: Only selects masternodes with valid locked collateral
     fn select_reward_recipients(
         &self,
         masternodes: &[MasternodeInfo],
         max_recipients: usize,
     ) -> Vec<MasternodeInfo> {
-        let total_nodes = masternodes.len();
+        // Phase 3.3: Filter out masternodes without valid locked collateral
+        let eligible_masternodes: Vec<MasternodeInfo> = masternodes
+            .iter()
+            .filter(|mn| {
+                // Legacy masternodes (no collateral_outpoint) are still eligible for now
+                // New masternodes must have locked collateral
+                if let Some(collateral_outpoint) = &mn.masternode.collateral_outpoint {
+                    // Check if collateral is still locked
+                    if !self.utxo_manager.is_collateral_locked(collateral_outpoint) {
+                        tracing::debug!(
+                            "⚠️ Masternode {} excluded from rewards: collateral {:?} not locked",
+                            mn.masternode.address,
+                            collateral_outpoint
+                        );
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
 
-        // If we have fewer than max, reward all
+        let total_nodes = eligible_masternodes.len();
+
+        // If we have fewer than max, reward all eligible
         if total_nodes <= max_recipients {
-            return masternodes.to_vec();
+            return eligible_masternodes;
         }
 
         // Deterministic selection based on block height
@@ -2400,7 +2438,7 @@ impl Blockchain {
         let current_height = self.get_height();
 
         // Sort masternodes by address to ensure consistent ordering across all nodes
-        let mut sorted_masternodes = masternodes.to_vec();
+        let mut sorted_masternodes = eligible_masternodes;
         sorted_masternodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
         // Calculate starting offset based on block height
