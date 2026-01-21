@@ -1442,8 +1442,8 @@ impl RpcHandler {
             }
         };
 
-        // Get tier requirement
-        let required_collateral = match tier {
+        // Get tier requirement (for validation logic, not returned)
+        let _required_collateral = match tier {
             MasternodeTier::Free => 0,
             MasternodeTier::Bronze => 1_000 * 100_000_000, // 1,000 TIME in units
             MasternodeTier::Silver => 10_000 * 100_000_000, // 10,000 TIME in units
@@ -1468,7 +1468,19 @@ impl RpcHandler {
 
         let collateral_outpoint = OutPoint { txid, vout };
 
-        // Validate UTXO exists
+        // Get current block height
+        let lock_height = self.blockchain.get_height();
+
+        // Validate collateral using registry validation
+        self.registry
+            .validate_collateral(&collateral_outpoint, tier, &self.utxo_manager, lock_height)
+            .await
+            .map_err(|e| RpcError {
+                code: -5,
+                message: format!("Collateral validation failed: {}", e),
+            })?;
+
+        // Additional check: Verify UTXO belongs to reward address
         let utxo = self
             .utxo_manager
             .get_utxo(&collateral_outpoint)
@@ -1478,27 +1490,6 @@ impl RpcHandler {
                 message: "Collateral UTXO not found".to_string(),
             })?;
 
-        // Validate UTXO amount
-        if utxo.value < required_collateral {
-            return Err(RpcError {
-                code: -5,
-                message: format!(
-                    "Insufficient collateral. Required: {} TIME, Found: {} TIME",
-                    required_collateral / 100_000_000,
-                    utxo.value / 100_000_000
-                ),
-            });
-        }
-
-        // Verify UTXO is not already locked
-        if self.utxo_manager.is_collateral_locked(&collateral_outpoint) {
-            return Err(RpcError {
-                code: -5,
-                message: "Collateral UTXO is already locked".to_string(),
-            });
-        }
-
-        // Verify UTXO belongs to reward address
         if utxo.address != reward_address {
             return Err(RpcError {
                 code: -5,
@@ -1511,9 +1502,6 @@ impl RpcHandler {
         let mut csprng = OsRng;
         let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
         let public_key = signing_key.verifying_key();
-
-        // Get current block height
-        let lock_height = self.blockchain.get_height();
 
         // Lock the UTXO atomically
         self.utxo_manager
