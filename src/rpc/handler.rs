@@ -534,28 +534,60 @@ impl RpcHandler {
         if let Some(addr) = address {
             // Get balance for specific address
             let utxos = self.utxo_manager.list_all_utxos().await;
-            let balance: u64 = utxos
+
+            let total_balance: u64 = utxos
                 .iter()
                 .filter(|u| u.address == addr)
                 .map(|u| u.value)
                 .sum();
 
-            Ok(json!(balance as f64 / 100_000_000.0))
+            let locked_balance: u64 = utxos
+                .iter()
+                .filter(|u| u.address == addr)
+                .filter(|u| self.utxo_manager.is_collateral_locked(&u.outpoint))
+                .map(|u| u.value)
+                .sum();
+
+            let available_balance = total_balance.saturating_sub(locked_balance);
+
+            Ok(json!({
+                "balance": total_balance as f64 / 100_000_000.0,
+                "locked": locked_balance as f64 / 100_000_000.0,
+                "available": available_balance as f64 / 100_000_000.0
+            }))
         } else {
             // Get wallet balance for this masternode's reward address
             let utxos = self.utxo_manager.list_all_utxos().await;
 
             // Try to get this masternode's reward address
             if let Some(local_mn) = self.registry.get_local_masternode().await {
-                let balance: u64 = utxos
+                let total_balance: u64 = utxos
                     .iter()
                     .filter(|u| u.address == local_mn.reward_address)
                     .map(|u| u.value)
                     .sum();
-                Ok(json!(balance as f64 / 100_000_000.0))
+
+                let locked_balance: u64 = utxos
+                    .iter()
+                    .filter(|u| u.address == local_mn.reward_address)
+                    .filter(|u| self.utxo_manager.is_collateral_locked(&u.outpoint))
+                    .map(|u| u.value)
+                    .sum();
+
+                let available_balance = total_balance.saturating_sub(locked_balance);
+
+                Ok(json!({
+                    "balance": total_balance as f64 / 100_000_000.0,
+                    "locked": locked_balance as f64 / 100_000_000.0,
+                    "available": available_balance as f64 / 100_000_000.0
+                }))
             } else {
                 // Not a masternode - return 0 balance
-                Ok(json!(0.0))
+                Ok(json!({
+                    "balance": 0.0,
+                    "locked": 0.0,
+                    "available": 0.0
+                }))
             }
         }
     }
@@ -1357,12 +1389,23 @@ impl RpcHandler {
         if let Some(local_mn) = self.registry.get_local_masternode().await {
             let utxos = self.utxo_manager.list_all_utxos().await;
 
-            // Calculate balance for this wallet
-            let balance: u64 = utxos
+            // Calculate total balance for this wallet
+            let total_balance: u64 = utxos
                 .iter()
                 .filter(|u| u.address == local_mn.reward_address)
                 .map(|u| u.value)
                 .sum();
+
+            // Calculate locked balance (collateral)
+            let locked_balance: u64 = utxos
+                .iter()
+                .filter(|u| u.address == local_mn.reward_address)
+                .filter(|u| self.utxo_manager.is_collateral_locked(&u.outpoint))
+                .map(|u| u.value)
+                .sum();
+
+            // Available = total - locked
+            let available_balance = total_balance.saturating_sub(locked_balance);
 
             let unconfirmed_balance = 0u64; // TIME has instant finality
             let immature_balance = 0u64;
@@ -1376,7 +1419,9 @@ impl RpcHandler {
                 "walletname": "default",
                 "walletversion": 1,
                 "format": "timecoin",
-                "balance": balance as f64 / 100_000_000.0,
+                "balance": total_balance as f64 / 100_000_000.0,
+                "locked": locked_balance as f64 / 100_000_000.0,
+                "available": available_balance as f64 / 100_000_000.0,
                 "unconfirmed_balance": unconfirmed_balance as f64 / 100_000_000.0,
                 "immature_balance": immature_balance as f64 / 100_000_000.0,
                 "txcount": utxo_count,

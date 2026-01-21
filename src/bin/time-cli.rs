@@ -358,7 +358,19 @@ fn print_human_readable(
             println!("Block Hash: {}", result.as_str().unwrap_or("N/A"));
         }
         Commands::GetBalance => {
-            println!("Balance: {} TIME", result.as_f64().unwrap_or(0.0));
+            if let Some(obj) = result.as_object() {
+                let balance = obj.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let locked = obj.get("locked").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let available = obj.get("available").and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+                println!("Wallet Balance:");
+                println!("  Total:         {:.8} TIME", balance);
+                println!("  Locked:        {:.8} TIME (collateral)", locked);
+                println!("  Available:     {:.8} TIME (spendable)", available);
+            } else {
+                // Fallback for old format
+                println!("Balance: {} TIME", result.as_f64().unwrap_or(0.0));
+            }
         }
         Commands::GetNewAddress => {
             println!("Address: {}", result.as_str().unwrap_or("N/A"));
@@ -376,6 +388,17 @@ fn print_human_readable(
                 "  Balance:              {} TIME",
                 result
                     .get("balance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            );
+            println!(
+                "  Locked:               {} TIME (collateral)",
+                result.get("locked").and_then(|v| v.as_f64()).unwrap_or(0.0)
+            );
+            println!(
+                "  Available:            {} TIME (spendable)",
+                result
+                    .get("available")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0)
             );
