@@ -2323,14 +2323,26 @@ impl Blockchain {
             return vec![];
         }
 
+        // Maximum nodes that receive rewards per block (for scalability)
+        const MAX_REWARD_RECIPIENTS: usize = 10;
+
+        // Select masternodes for rewards using deterministic rotation
+        let selected_masternodes =
+            self.select_reward_recipients(masternodes, MAX_REWARD_RECIPIENTS);
+
+        if selected_masternodes.is_empty() {
+            return vec![];
+        }
+
         // Calculate total weight using tier's reward_weight
-        let total_weight: u64 = masternodes
+        let total_weight: u64 = selected_masternodes
             .iter()
             .map(|mn| mn.masternode.tier.reward_weight())
             .sum();
 
         tracing::info!(
-            "💰 Reward calculation: {} masternodes, total_reward={} satoshis ({} TIME), total_weight={}",
+            "💰 Reward calculation: {} of {} masternodes selected, total_reward={} satoshis ({} TIME), total_weight={}",
+            selected_masternodes.len(),
             masternodes.len(),
             total_reward,
             total_reward / 100_000_000,
@@ -2345,8 +2357,8 @@ impl Blockchain {
         let mut rewards = Vec::new();
         let mut distributed = 0u64;
 
-        for (i, mn) in masternodes.iter().enumerate() {
-            let share = if i == masternodes.len() - 1 {
+        for (i, mn) in selected_masternodes.iter().enumerate() {
+            let share = if i == selected_masternodes.len() - 1 {
                 // Last masternode gets remainder to avoid rounding errors
                 total_reward - distributed
             } else {
@@ -2367,6 +2379,50 @@ impl Blockchain {
         }
 
         rewards
+    }
+
+    /// Select masternodes for reward distribution using deterministic rotation
+    /// Returns up to max_recipients masternodes, rotating fairly based on block height
+    fn select_reward_recipients(
+        &self,
+        masternodes: &[MasternodeInfo],
+        max_recipients: usize,
+    ) -> Vec<MasternodeInfo> {
+        let total_nodes = masternodes.len();
+
+        // If we have fewer than max, reward all
+        if total_nodes <= max_recipients {
+            return masternodes.to_vec();
+        }
+
+        // Deterministic selection based on block height
+        // This ensures all nodes agree on who gets rewarded
+        let current_height = self.get_height();
+
+        // Sort masternodes by address to ensure consistent ordering across all nodes
+        let mut sorted_masternodes = masternodes.to_vec();
+        sorted_masternodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+
+        // Calculate starting offset based on block height
+        // Each block rotates by max_recipients, so every node gets a turn
+        let offset = (current_height as usize * max_recipients) % total_nodes;
+
+        // Select max_recipients nodes starting from offset, wrapping around if needed
+        let mut selected = Vec::new();
+        for i in 0..max_recipients {
+            let idx = (offset + i) % total_nodes;
+            selected.push(sorted_masternodes[idx].clone());
+        }
+
+        tracing::info!(
+            "🎯 Reward rotation at height {}: selected {} nodes starting from position {} of {} total",
+            current_height,
+            selected.len(),
+            offset,
+            total_nodes
+        );
+
+        selected
     }
 
     /// Validate block rewards are correct and not double-counted
