@@ -52,7 +52,7 @@ CONFIG_DIR="$DATA_DIR"  # Config goes in same directory as data
 LOG_DIR="$DATA_DIR/logs"
 
 # Version info
-VERSION="0.1.0"
+VERSION="1.1.0"
 
 #------------------------------------------------------------------------------
 # Helper Functions
@@ -174,7 +174,23 @@ check_rust() {
     if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
         local rust_version=$(rustc --version | cut -d' ' -f2)
         print_info "Rust $rust_version is installed"
-        return 0
+        
+        # Check minimum version (1.75)
+        local min_version="1.75.0"
+        local current_version=$(rustc --version | cut -d' ' -f2 | cut -d'-' -f1)
+        
+        if [ "$(printf '%s\n' "$min_version" "$current_version" | sort -V | head -n1)" = "$min_version" ]; then
+            print_success "Rust version is sufficient (>= 1.75)"
+            return 0
+        else
+            print_warn "Rust version $current_version is too old (need >= 1.75)"
+            print_info "Updating Rust..."
+            if [ -f "$HOME/.cargo/env" ]; then
+                source "$HOME/.cargo/env"
+            fi
+            rustup update stable
+            return 0
+        fi
     else
         print_warn "Rust is not installed"
         return 1
