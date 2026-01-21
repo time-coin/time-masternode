@@ -535,7 +535,6 @@ impl RpcHandler {
             Ok(json!(balance as f64 / 100_000_000.0))
         } else {
             // Get wallet balance for this masternode's reward address
-            // If not a masternode, return total of all UTXOs
             let utxos = self.utxo_manager.list_all_utxos().await;
 
             // Try to get this masternode's reward address
@@ -547,9 +546,8 @@ impl RpcHandler {
                     .sum();
                 Ok(json!(balance as f64 / 100_000_000.0))
             } else {
-                // Not a masternode - return all UTXOs (for testing/debug)
-                let balance: u64 = utxos.iter().map(|u| u.value).sum();
-                Ok(json!(balance as f64 / 100_000_000.0))
+                // Not a masternode - return 0 balance
+                Ok(json!(0.0))
             }
         }
     }
@@ -561,9 +559,27 @@ impl RpcHandler {
 
         let utxos = self.utxo_manager.list_all_utxos().await;
 
+        // Get local masternode's reward address to filter UTXOs
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address);
+
         let filtered: Vec<Value> = utxos
             .iter()
             .filter(|u| {
+                // First filter by local wallet address (only show this node's UTXOs)
+                if let Some(ref local_addr) = local_address {
+                    if u.address != *local_addr {
+                        return false;
+                    }
+                } else {
+                    // If not a masternode, don't show any UTXOs
+                    return false;
+                }
+
+                // Then filter by specific addresses if provided
                 if let Some(addrs) = addresses {
                     addrs.iter().any(|a| a.as_str() == Some(&u.address))
                 } else {
@@ -784,7 +800,24 @@ impl RpcHandler {
         let amount_units = (amount * 100_000_000.0) as u64;
 
         // Get UTXOs for this wallet
-        let utxos = self.utxo_manager.list_all_utxos().await;
+        let all_utxos = self.utxo_manager.list_all_utxos().await;
+
+        // Get local masternode's reward address
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode".to_string(),
+            })?
+            .reward_address;
+
+        // Filter to only this node's UTXOs
+        let utxos: Vec<_> = all_utxos
+            .into_iter()
+            .filter(|u| u.address == local_address)
+            .collect();
 
         // Calculate required fee (0.1% of amount to match validation requirements)
         let fee = amount_units / 1000; // 0.1% fee rate (matches consensus.rs:1251)
@@ -866,9 +899,22 @@ impl RpcHandler {
         // Get all UTXOs
         let mut utxos = self.utxo_manager.list_all_utxos().await;
 
-        // Filter by address if specified
+        // Get local masternode's reward address
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode".to_string(),
+            })?
+            .reward_address;
+
+        // Filter to only this node's UTXOs, or specific address if provided
         if let Some(addr) = filter_address {
             utxos.retain(|utxo| utxo.address == addr);
+        } else {
+            utxos.retain(|utxo| utxo.address == local_address);
         }
 
         // Check if we have enough UTXOs to merge
