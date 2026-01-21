@@ -2404,26 +2404,31 @@ impl Blockchain {
         masternodes: &[MasternodeInfo],
         max_recipients: usize,
     ) -> Vec<MasternodeInfo> {
-        // Phase 3.3: Filter out masternodes without valid locked collateral
+        // Phase 3.3: Filter masternodes by collateral status
+        // NOTE: We're lenient here to prevent network stalls. Masternodes with configured
+        // but unlocked collateral are warned but still allowed to participate.
         let eligible_masternodes: Vec<MasternodeInfo> = masternodes
             .iter()
-            .filter(|mn| {
-                // Legacy masternodes (no collateral_outpoint) are still eligible for now
-                // New masternodes must have locked collateral
+            .filter_map(|mn| {
+                // Legacy masternodes (no collateral_outpoint) are always eligible
+                if mn.masternode.collateral_outpoint.is_none() {
+                    return Some(mn.clone());
+                }
+                
+                // New masternodes should have locked collateral, but we allow participation
+                // even if collateral isn't locked to prevent network stalls
                 if let Some(collateral_outpoint) = &mn.masternode.collateral_outpoint {
-                    // Check if collateral is still locked
                     if !self.utxo_manager.is_collateral_locked(collateral_outpoint) {
-                        tracing::debug!(
-                            "⚠️ Masternode {} excluded from rewards: collateral {:?} not locked",
+                        tracing::warn!(
+                            "⚠️ Masternode {} participating without locked collateral {:?} - should lock collateral soon",
                             mn.masternode.address,
                             collateral_outpoint
                         );
-                        return false;
                     }
                 }
-                true
+                
+                Some(mn.clone())
             })
-            .cloned()
             .collect();
 
         let total_nodes = eligible_masternodes.len();
