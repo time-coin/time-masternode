@@ -63,6 +63,8 @@ impl RpcHandler {
             "getblockchaininfo" => self.get_blockchain_info().await,
             "getblockcount" => self.get_block_count().await,
             "getblock" => self.get_block(&params_array).await,
+            "getbestblockhash" => self.get_best_block_hash().await,
+            "getblockhash" => self.get_block_hash(&params_array).await,
             "getnetworkinfo" => self.get_network_info().await,
             "getpeerinfo" => self.get_peer_info().await,
             "gettxoutsetinfo" => self.get_txout_set_info().await,
@@ -70,8 +72,11 @@ impl RpcHandler {
             "gettransaction" => self.get_transaction(&params_array).await,
             "sendrawtransaction" => self.send_raw_transaction(&params_array).await,
             "createrawtransaction" => self.create_raw_transaction(&params_array).await,
+            "decoderawtransaction" => self.decode_raw_transaction(&params_array).await,
             "getbalance" => self.get_balance(&params_array).await,
             "listunspent" => self.list_unspent(&params_array).await,
+            "getnewaddress" => self.get_new_address(&params_array).await,
+            "getwalletinfo" => self.get_wallet_info().await,
             "masternodelist" => self.masternode_list().await,
             "masternodestatus" => self.masternode_status().await,
             "getconsensusinfo" => self.get_consensus_info().await,
@@ -1242,5 +1247,135 @@ impl RpcHandler {
             "active_violations": violations,
             "whitelisted": whitelist
         }))
+    }
+
+    async fn get_best_block_hash(&self) -> Result<Value, RpcError> {
+        let height = self.blockchain.get_height();
+        match self.blockchain.get_block_by_height(height).await {
+            Ok(block) => Ok(json!(hex::encode(block.hash()))),
+            Err(_) => Err(RpcError {
+                code: -1,
+                message: "Block not found".to_string(),
+            }),
+        }
+    }
+
+    async fn get_block_hash(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let height = params
+            .first()
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Block height parameter required".to_string(),
+            })?;
+
+        match self.blockchain.get_block_by_height(height).await {
+            Ok(block) => Ok(json!(hex::encode(block.hash()))),
+            Err(_) => Err(RpcError {
+                code: -5,
+                message: "Block not found".to_string(),
+            }),
+        }
+    }
+
+    async fn decode_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let hex_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Hex-encoded transaction required".to_string(),
+            })?;
+
+        let tx_bytes = hex::decode(hex_str).map_err(|_| RpcError {
+            code: -22,
+            message: "Invalid hex encoding".to_string(),
+        })?;
+
+        let tx: Transaction = bincode::deserialize(&tx_bytes).map_err(|_| RpcError {
+            code: -22,
+            message: "Invalid transaction encoding".to_string(),
+        })?;
+
+        let txid = tx.txid();
+
+        Ok(json!({
+            "txid": hex::encode(txid),
+            "version": tx.version,
+            "locktime": tx.lock_time,
+            "timestamp": tx.timestamp,
+            "vin": tx.inputs.iter().map(|input| {
+                json!({
+                    "txid": hex::encode(input.previous_output.txid),
+                    "vout": input.previous_output.vout,
+                    "scriptSig": hex::encode(&input.script_sig),
+                    "sequence": input.sequence
+                })
+            }).collect::<Vec<_>>(),
+            "vout": tx.outputs.iter().enumerate().map(|(i, output)| {
+                json!({
+                    "value": output.value as f64 / 100_000_000.0,
+                    "n": i,
+                    "scriptPubKey": hex::encode(&output.script_pubkey)
+                })
+            }).collect::<Vec<_>>()
+        }))
+    }
+
+    async fn get_new_address(&self, _params: &[Value]) -> Result<Value, RpcError> {
+        // Get local masternode's reward address
+        if let Some(local_mn) = self.registry.get_local_masternode().await {
+            Ok(json!(local_mn.reward_address))
+        } else {
+            Err(RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode. Cannot generate address."
+                    .to_string(),
+            })
+        }
+    }
+
+    async fn get_wallet_info(&self) -> Result<Value, RpcError> {
+        // Get local masternode info
+        if let Some(local_mn) = self.registry.get_local_masternode().await {
+            let utxos = self.utxo_manager.list_all_utxos().await;
+
+            // Calculate balance for this wallet
+            let balance: u64 = utxos
+                .iter()
+                .filter(|u| u.address == local_mn.reward_address)
+                .map(|u| u.value)
+                .sum();
+
+            let unconfirmed_balance = 0u64; // TIME has instant finality
+            let immature_balance = 0u64;
+
+            let utxo_count = utxos
+                .iter()
+                .filter(|u| u.address == local_mn.reward_address)
+                .count();
+
+            Ok(json!({
+                "walletname": "default",
+                "walletversion": 1,
+                "format": "timecoin",
+                "balance": balance as f64 / 100_000_000.0,
+                "unconfirmed_balance": unconfirmed_balance as f64 / 100_000_000.0,
+                "immature_balance": immature_balance as f64 / 100_000_000.0,
+                "txcount": utxo_count,
+                "keypoolsize": 1,
+                "unlocked_until": 0,
+                "paytxfee": 0.00001,
+                "private_keys_enabled": true,
+                "avoid_reuse": false,
+                "scanning": false,
+                "descriptors": false
+            }))
+        } else {
+            Err(RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode".to_string(),
+            })
+        }
     }
 }

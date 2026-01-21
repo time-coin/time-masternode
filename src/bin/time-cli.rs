@@ -38,6 +38,15 @@ enum Commands {
     /// Get the current block count
     GetBlockCount,
 
+    /// Get the hash of the best (tip) block
+    GetBestBlockHash,
+
+    /// Get block hash at a given height
+    GetBlockHash {
+        /// Block height
+        height: u64,
+    },
+
     /// Get network information
     GetNetworkInfo,
 
@@ -76,6 +85,12 @@ enum Commands {
         outputs: String,
     },
 
+    /// Decode a raw transaction
+    DecodeRawTransaction {
+        /// Hex-encoded transaction
+        hex: String,
+    },
+
     /// Get wallet balance
     GetBalance,
 
@@ -88,6 +103,12 @@ enum Commands {
         #[arg(default_value = "9999999")]
         maxconf: u32,
     },
+
+    /// Get a new receiving address
+    GetNewAddress,
+
+    /// Get wallet information
+    GetWalletInfo,
 
     /// Get masternode information
     MasternodeList,
@@ -183,6 +204,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
         Commands::GetBlockCount => ("getblockcount", json!([])),
+        Commands::GetBestBlockHash => ("getbestblockhash", json!([])),
+        Commands::GetBlockHash { height } => ("getblockhash", json!([height])),
         Commands::GetNetworkInfo => ("getnetworkinfo", json!([])),
         Commands::GetPeerInfo => ("getpeerinfo", json!([])),
         Commands::GetTxOutSetInfo => ("gettxoutsetinfo", json!([])),
@@ -196,8 +219,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             let outputs_json: Value = serde_json::from_str(outputs)?;
             ("createrawtransaction", json!([inputs_json, outputs_json]))
         }
+        Commands::DecodeRawTransaction { hex } => ("decoderawtransaction", json!([hex])),
         Commands::GetBalance => ("getbalance", json!([])),
         Commands::ListUnspent { minconf, maxconf } => ("listunspent", json!([minconf, maxconf])),
+        Commands::GetNewAddress => ("getnewaddress", json!([])),
+        Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::MasternodeList => ("masternodelist", json!([])),
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
@@ -283,8 +309,66 @@ fn print_human_readable(
         Commands::GetBlockCount => {
             println!("Block Height: {}", result.as_u64().unwrap_or(0));
         }
+        Commands::GetBestBlockHash => {
+            println!("Best Block Hash: {}", result.as_str().unwrap_or("N/A"));
+        }
+        Commands::GetBlockHash { .. } => {
+            println!("Block Hash: {}", result.as_str().unwrap_or("N/A"));
+        }
         Commands::GetBalance => {
             println!("Balance: {} TIME", result.as_f64().unwrap_or(0.0));
+        }
+        Commands::GetNewAddress => {
+            println!("Address: {}", result.as_str().unwrap_or("N/A"));
+        }
+        Commands::GetWalletInfo => {
+            println!("Wallet Information:");
+            println!(
+                "  Wallet Name:          {}",
+                result
+                    .get("walletname")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Balance:              {} TIME",
+                result
+                    .get("balance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            );
+            println!(
+                "  Unconfirmed Balance:  {} TIME",
+                result
+                    .get("unconfirmed_balance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            );
+            println!(
+                "  Immature Balance:     {} TIME",
+                result
+                    .get("immature_balance")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            );
+            println!(
+                "  Transaction Count:    {}",
+                result.get("txcount").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            println!(
+                "  Keypool Size:         {}",
+                result
+                    .get("keypoolsize")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+            );
+            println!(
+                "  Pay TX Fee:           {}",
+                result
+                    .get("paytxfee")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+            );
         }
         Commands::ListUnspent { .. } => {
             if let Some(utxos) = result.as_array() {
