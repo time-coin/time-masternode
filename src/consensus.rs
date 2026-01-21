@@ -3270,14 +3270,14 @@ mod fallback_tests {
         let mut avs = Vec::new();
         for i in 0..5 {
             let signing_key = SigningKey::from_bytes(&[i; 32]);
-            avs.push(Masternode {
-                address: format!("mn{}", i),
-                wallet_address: format!("wallet{}", i),
-                collateral: 1000,
-                public_key: signing_key.verifying_key(),
-                tier: MasternodeTier::Bronze,
-                registered_at: 0,
-            });
+            avs.push(Masternode::new_legacy(
+                format!("mn{}", i),
+                format!("wallet{}", i),
+                1000,
+                signing_key.verifying_key(),
+                MasternodeTier::Bronze,
+                0,
+            ));
         }
 
         let txid = [1u8; 32];
@@ -3510,14 +3510,14 @@ mod fallback_tests {
         let avs: Vec<Masternode> = (0..5)
             .map(|i| {
                 let signing_key = SigningKey::from_bytes(&[i; 32]);
-                Masternode {
-                    address: format!("mn{}", i),
-                    wallet_address: format!("wallet{}", i),
-                    collateral: 1_000_000_000,
-                    public_key: signing_key.verifying_key(),
-                    tier: MasternodeTier::Bronze,
-                    registered_at: 0,
-                }
+                Masternode::new_legacy(
+                    format!("mn{}", i),
+                    format!("wallet{}", i),
+                    1_000_000_000,
+                    signing_key.verifying_key(),
+                    MasternodeTier::Bronze,
+                    0,
+                )
             })
             .collect();
 

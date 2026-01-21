@@ -35,11 +35,16 @@ pub enum UtxoError {
 
     #[error("Storage error: {0}")]
     Storage(#[from] crate::storage::StorageError),
+
+    #[error("UTXO is locked as masternode collateral")]
+    LockedAsCollateral,
 }
 
 pub struct UTXOStateManager {
     pub storage: Arc<dyn UtxoStorage>,
     pub utxo_states: DashMap<OutPoint, UTXOState>,
+    /// Track UTXOs locked as masternode collateral
+    pub locked_collaterals: DashMap<OutPoint, LockedCollateral>,
 }
 
 impl Default for UTXOStateManager {
@@ -54,6 +59,7 @@ impl UTXOStateManager {
         Self {
             storage: Arc::new(InMemoryUtxoStorage::new()),
             utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
+            locked_collaterals: DashMap::new(),
         }
     }
 
@@ -62,6 +68,7 @@ impl UTXOStateManager {
         Self {
             storage,
             utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
+            locked_collaterals: DashMap::new(),
         }
     }
 
@@ -120,6 +127,11 @@ impl UTXOStateManager {
 
     /// Mark a UTXO as spent (used when processing blocks)
     pub async fn spend_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
+        // Check if UTXO is locked as collateral
+        if self.is_collateral_locked(outpoint) {
+            return Err(UtxoError::LockedAsCollateral);
+        }
+
         self.storage.remove_utxo(outpoint).await?;
         self.utxo_states.insert(
             outpoint.clone(),
@@ -178,6 +190,11 @@ impl UTXOStateManager {
     /// Atomically lock a UTXO for a pending transaction
     pub fn lock_utxo(&self, outpoint: &OutPoint, txid: Hash256) -> Result<(), UtxoError> {
         use dashmap::mapref::entry::Entry;
+
+        // Check if UTXO is locked as collateral first
+        if self.is_collateral_locked(outpoint) {
+            return Err(UtxoError::LockedAsCollateral);
+        }
 
         match self.utxo_states.entry(outpoint.clone()) {
             Entry::Occupied(mut entry) => match entry.get() {
@@ -382,6 +399,11 @@ impl UTXOStateManager {
 
     #[allow(dead_code)]
     pub fn is_spendable(&self, outpoint: &OutPoint, by_txid: Option<&Hash256>) -> bool {
+        // First check if locked as collateral
+        if self.is_collateral_locked(outpoint) {
+            return false;
+        }
+
         match self.utxo_states.get(outpoint) {
             Some(ref state) => match state.value() {
                 UTXOState::Unspent => true,
@@ -469,6 +491,90 @@ impl UTXOStateManager {
             add_count
         );
         Ok(())
+    }
+
+    // ========== Masternode Collateral Locking Methods ==========
+
+    /// Lock a UTXO as masternode collateral
+    pub fn lock_collateral(
+        &self,
+        outpoint: OutPoint,
+        masternode_address: String,
+        lock_height: u64,
+        amount: u64,
+    ) -> Result<(), UtxoError> {
+        // Check if UTXO exists and is unspent
+        match self.utxo_states.get(&outpoint) {
+            Some(state) => match state.value() {
+                UTXOState::Unspent => {
+                    // Good to lock
+                }
+                _ => return Err(UtxoError::AlreadySpent),
+            },
+            None => return Err(UtxoError::NotFound),
+        }
+
+        // Create locked collateral entry
+        let locked_collateral =
+            LockedCollateral::new(outpoint.clone(), masternode_address, lock_height, amount);
+
+        // Store in locked collaterals map
+        self.locked_collaterals
+            .insert(outpoint.clone(), locked_collateral);
+
+        tracing::info!(
+            "🔒 Locked collateral UTXO {:?} (amount: {})",
+            outpoint,
+            amount
+        );
+        Ok(())
+    }
+
+    /// Unlock a UTXO from masternode collateral
+    pub fn unlock_collateral(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
+        if let Some((_, locked)) = self.locked_collaterals.remove(outpoint) {
+            tracing::info!(
+                "🔓 Unlocked collateral UTXO {:?} (was {} TIME for {})",
+                outpoint,
+                locked.amount,
+                locked.masternode_address
+            );
+            Ok(())
+        } else {
+            Err(UtxoError::NotFound)
+        }
+    }
+
+    /// Check if a UTXO is locked as collateral
+    pub fn is_collateral_locked(&self, outpoint: &OutPoint) -> bool {
+        self.locked_collaterals.contains_key(outpoint)
+    }
+
+    /// Get locked collateral info
+    pub fn get_locked_collateral(&self, outpoint: &OutPoint) -> Option<LockedCollateral> {
+        self.locked_collaterals
+            .get(outpoint)
+            .map(|r| r.value().clone())
+    }
+
+    /// List all locked collaterals
+    pub fn list_locked_collaterals(&self) -> Vec<LockedCollateral> {
+        self.locked_collaterals
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+
+    /// List locked collaterals for a specific masternode
+    pub fn list_collaterals_for_masternode(
+        &self,
+        masternode_address: &str,
+    ) -> Vec<LockedCollateral> {
+        self.locked_collaterals
+            .iter()
+            .filter(|entry| entry.value().masternode_address == masternode_address)
+            .map(|entry| entry.value().clone())
+            .collect()
     }
 }
 
@@ -811,5 +917,174 @@ mod tests {
             Some(UTXOState::Unspent) => {} // Expected
             other => panic!("Expected Unspent state after restore, got {:?}", other),
         }
+    }
+
+    // ========== Phase 1.2: Collateral Locking Tests ==========
+
+    /// Phase 1.2 Test 1: Lock UTXO as collateral
+    #[tokio::test]
+    async fn test_lock_utxo_as_collateral() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(100);
+        let utxo = create_test_utxo(100);
+
+        manager.add_utxo(utxo).await.unwrap();
+
+        // Lock as collateral
+        assert!(manager
+            .lock_collateral(
+                outpoint.clone(),
+                "masternode1".to_string(),
+                1000, // lock_height
+                1000  // amount
+            )
+            .is_ok());
+
+        // Verify it's locked
+        assert!(manager.is_collateral_locked(&outpoint));
+
+        // Get collateral info
+        let locked = manager.get_locked_collateral(&outpoint).unwrap();
+        assert_eq!(locked.masternode_address, "masternode1");
+        assert_eq!(locked.amount, 1000);
+    }
+
+    /// Phase 1.2 Test 2: Cannot spend locked collateral
+    #[tokio::test]
+    async fn test_cannot_spend_locked_collateral() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(101);
+        let utxo = create_test_utxo(101);
+
+        manager.add_utxo(utxo).await.unwrap();
+        manager
+            .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+            .unwrap();
+
+        // Attempt to spend should fail
+        let result = manager.spend_utxo(&outpoint).await;
+        assert!(result.is_err());
+        match result {
+            Err(UtxoError::LockedAsCollateral) => {} // Expected
+            _ => panic!("Expected LockedAsCollateral error"),
+        }
+    }
+
+    /// Phase 1.2 Test 3: Cannot lock collateral for transaction
+    #[tokio::test]
+    async fn test_cannot_lock_collateral_for_tx() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(102);
+        let utxo = create_test_utxo(102);
+
+        manager.add_utxo(utxo).await.unwrap();
+        manager
+            .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+            .unwrap();
+
+        // Attempt to lock for transaction should fail
+        let tx1 = create_test_txid(200);
+        let result = manager.lock_utxo(&outpoint, tx1);
+        assert!(result.is_err());
+        match result {
+            Err(UtxoError::LockedAsCollateral) => {} // Expected
+            _ => panic!("Expected LockedAsCollateral error"),
+        }
+    }
+
+    /// Phase 1.2 Test 4: Unlock collateral
+    #[tokio::test]
+    async fn test_unlock_collateral() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(103);
+        let utxo = create_test_utxo(103);
+
+        manager.add_utxo(utxo).await.unwrap();
+        manager
+            .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+            .unwrap();
+
+        // Unlock
+        assert!(manager.unlock_collateral(&outpoint).is_ok());
+
+        // Verify it's unlocked
+        assert!(!manager.is_collateral_locked(&outpoint));
+
+        // Should be able to spend now
+        assert!(manager.spend_utxo(&outpoint).await.is_ok());
+    }
+
+    /// Phase 1.2 Test 5: List all locked collaterals
+    #[tokio::test]
+    async fn test_list_locked_collaterals() {
+        let manager = UTXOStateManager::new();
+
+        // Lock multiple UTXOs
+        for i in 110..113 {
+            let utxo = create_test_utxo(i);
+            manager.add_utxo(utxo).await.unwrap();
+            manager
+                .lock_collateral(
+                    create_test_outpoint(i),
+                    format!("masternode{}", i),
+                    1000,            // lock_height
+                    1000 * i as u64, // amount
+                )
+                .unwrap();
+        }
+
+        let locked = manager.list_locked_collaterals();
+        assert_eq!(locked.len(), 3);
+    }
+
+    /// Phase 1.2 Test 6: List collaterals for specific masternode
+    #[tokio::test]
+    async fn test_list_collaterals_for_masternode() {
+        let manager = UTXOStateManager::new();
+
+        // Lock UTXOs for different masternodes
+        for i in 120..123 {
+            let utxo = create_test_utxo(i);
+            manager.add_utxo(utxo).await.unwrap();
+            let mn_address = if i == 121 {
+                "masternode_target"
+            } else {
+                "masternode_other"
+            };
+            manager
+                .lock_collateral(
+                    create_test_outpoint(i),
+                    mn_address.to_string(),
+                    1000, // lock_height
+                    1000, // amount
+                )
+                .unwrap();
+        }
+
+        let locked = manager.list_collaterals_for_masternode("masternode_target");
+        assert_eq!(locked.len(), 1);
+        assert_eq!(locked[0].masternode_address, "masternode_target");
+    }
+
+    /// Phase 1.2 Test 7: Collateral locked is not spendable
+    #[tokio::test]
+    async fn test_collateral_is_not_spendable() {
+        let manager = UTXOStateManager::new();
+        let outpoint = create_test_outpoint(130);
+        let utxo = create_test_utxo(130);
+
+        manager.add_utxo(utxo).await.unwrap();
+        manager
+            .lock_collateral(outpoint.clone(), "masternode1".to_string(), 1000, 1000)
+            .unwrap();
+
+        // Should not be spendable
+        assert!(!manager.is_spendable(&outpoint, None));
+
+        // Unlock
+        manager.unlock_collateral(&outpoint).unwrap();
+
+        // Now should be spendable
+        assert!(manager.is_spendable(&outpoint, None));
     }
 }
