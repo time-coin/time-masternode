@@ -230,6 +230,7 @@ mod tests {
             transactions: vec![],
             masternode_rewards: vec![],
             time_attestations: vec![],
+            consensus_participants: vec![],
         }
     }
 

@@ -79,6 +79,10 @@ pub struct Block {
     /// Proof-of-Time: attestations proving masternodes were online
     #[serde(default)]
     pub time_attestations: Vec<TimeAttestation>,
+    /// List of masternodes that participated in consensus (voted) for this block
+    /// Used to determine eligibility for next block's rewards
+    #[serde(default)]
+    pub consensus_participants: Vec<String>,
 }
 
 /// Masternode counts by tier at time of block production
@@ -347,6 +351,7 @@ mod tests {
             transactions: vec![],
             masternode_rewards: vec![],
             time_attestations: vec![],
+            consensus_participants: vec![],
         };
 
         let merkle = calculate_merkle_root(&block.transactions);
@@ -375,6 +380,7 @@ mod tests {
             transactions: vec![tx.clone()],
             masternode_rewards: vec![],
             time_attestations: vec![],
+            consensus_participants: vec![],
         };
 
         let merkle = calculate_merkle_root(&block.transactions);

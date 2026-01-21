@@ -642,6 +642,7 @@ impl TSCDConsensus {
             transactions,
             masternode_rewards,
             time_attestations: vec![],
+            consensus_participants: vec![],
         })
     }
 
@@ -1138,6 +1139,7 @@ mod tests {
             transactions: vec![],
             masternode_rewards: vec![],
             time_attestations: vec![],
+            consensus_participants: vec![],
         };
 
         let block2 = Block {
@@ -1156,6 +1158,7 @@ mod tests {
             transactions: vec![],
             masternode_rewards: vec![],
             time_attestations: vec![],
+            consensus_participants: vec![],
         };
 
         let blocks = vec![(block1.clone(), None), (block2.clone(), None)];

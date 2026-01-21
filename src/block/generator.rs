@@ -138,7 +138,8 @@ impl DeterministicBlockGenerator {
             header,
             transactions: all_txs,
             masternode_rewards,
-            time_attestations: vec![], // Attestations added later
+            time_attestations: vec![],
+            consensus_participants: vec![], // Attestations added later
         }
     }
 

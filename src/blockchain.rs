@@ -1637,6 +1637,8 @@ impl Blockchain {
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
             time_attestations: vec![],
+            // Record masternodes that are receiving rewards - they are the active participants
+            consensus_participants: rewards.iter().map(|(a, _)| a.clone()).collect(),
         };
 
         // Compute attestation root after attestations are set
@@ -1852,7 +1854,10 @@ impl Blockchain {
         match self.get_block(height) {
             Ok(block) => {
                 let block_hash = block.hash();
-                self.consensus.avalanche.prepare_votes.get_voters(block_hash)
+                self.consensus
+                    .avalanche
+                    .prepare_votes
+                    .get_voters(block_hash)
             }
             Err(_) => vec![],
         }

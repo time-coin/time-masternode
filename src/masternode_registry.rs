@@ -485,16 +485,25 @@ impl MasternodeRegistry {
             return all_nodes;
         }
 
-        // Get the previous block to check which masternodes participated in consensus
-        let prev_height = height - 1;
-        
-        // Get voters from previous block's consensus (prepare votes)
-        let voters = blockchain.get_block_consensus_voters(prev_height);
+        // Get masternodes that participated in consensus on recent blocks
+        // This is stored in each block and is deterministic
+        let lookback_blocks = 10.min(height - 1); // Look back up to 10 blocks
+        let mut active_addresses: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
-        if voters.is_empty() {
+        for block_height in (height.saturating_sub(lookback_blocks))..height {
+            if let Ok(block) = blockchain.get_block(block_height) {
+                // Add all masternodes that participated in consensus for this block
+                for addr in &block.consensus_participants {
+                    active_addresses.insert(addr.clone());
+                }
+            }
+        }
+
+        if active_addresses.is_empty() {
             tracing::warn!(
-                "⚠️  No consensus voters found for previous block {}, using all registered masternodes",
-                prev_height
+                "⚠️  No consensus participants found in last {} blocks, using all registered masternodes",
+                lookback_blocks
             );
             all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
             return all_nodes;
@@ -503,31 +512,29 @@ impl MasternodeRegistry {
         // Sort deterministically by address to ensure all nodes agree on ordering
         all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
-        // Filter to only masternodes that voted in the previous block
+        // Filter to only masternodes that participated in recent blocks
         let selected: Vec<MasternodeInfo> = all_nodes
             .into_iter()
             .filter(|mn| {
-                // Include this masternode only if it participated in consensus for the previous block
-                voters.contains(&mn.masternode.address)
+                // Include this masternode only if it participated in recent consensus
+                active_addresses.contains(&mn.masternode.address)
             })
             .collect();
 
         tracing::info!(
-            "💰 Consensus-based selection at height {}: {} eligible masternodes participated in block {} (from {} registered, {} voters)",
+            "💰 Consensus-based selection at height {}: {} eligible masternodes participated in last {} blocks (from {} registered)",
             height,
             selected.len(),
-            prev_height,
-            masternodes.len(),
-            voters.len()
+            lookback_blocks,
+            masternodes.len()
         );
 
         // Debug: log selected nodes for verification
         for (i, mn) in selected.iter().take(5).enumerate() {
             tracing::debug!(
-                "   [{}] {} (voted in block {})",
+                "   [{}] {} (active in recent blocks)",
                 i,
-                mn.masternode.address,
-                prev_height
+                mn.masternode.address
             );
         }
 
