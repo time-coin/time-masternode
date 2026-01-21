@@ -22,31 +22,57 @@ else
     USER_HOME="$HOME"
 fi
 
-# Ask which network to configure
 echo -e "${BLUE}╔════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║   TIME Coin Masternode Configuration Tool     ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════╝${NC}"
 echo ""
-echo "Which network do you want to configure?"
-echo "  1. Mainnet (~/.timecoin/config.toml)"
-echo "  2. Testnet (~/.timecoin/testnet/config.toml)"
-echo ""
-read -p "Enter choice (1 or 2): " network_choice
 
-case "$network_choice" in
-    1)
-        CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
-        NETWORK="mainnet"
-        ;;
-    2)
-        CONFIG_FILE="$USER_HOME/.timecoin/testnet/config.toml"
-        NETWORK="testnet"
-        ;;
-    *)
-        echo -e "${RED}Invalid choice. Exiting.${NC}"
-        exit 1
-        ;;
-esac
+# Check for command-line argument
+if [ -n "$1" ]; then
+    NETWORK_ARG=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    case "$NETWORK_ARG" in
+        mainnet)
+            CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
+            NETWORK="mainnet"
+            ;;
+        testnet)
+            CONFIG_FILE="$USER_HOME/.timecoin/testnet/config.toml"
+            NETWORK="testnet"
+            ;;
+        *)
+            echo -e "${RED}Error: Invalid network '$1'${NC}"
+            echo "Usage: $0 [mainnet|testnet]"
+            echo ""
+            echo "Examples:"
+            echo "  $0 mainnet    # Configure mainnet"
+            echo "  $0 testnet    # Configure testnet"
+            echo "  $0            # Interactive mode"
+            exit 1
+            ;;
+    esac
+else
+    # Interactive mode - ask which network to configure
+    echo "Which network do you want to configure?"
+    echo "  1. Mainnet (~/.timecoin/config.toml)"
+    echo "  2. Testnet (~/.timecoin/testnet/config.toml)"
+    echo ""
+    read -p "Enter choice (1 or 2): " network_choice
+
+    case "$network_choice" in
+        1)
+            CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
+            NETWORK="mainnet"
+            ;;
+        2)
+            CONFIG_FILE="$USER_HOME/.timecoin/testnet/config.toml"
+            NETWORK="testnet"
+            ;;
+        *)
+            echo -e "${RED}Invalid choice. Exiting.${NC}"
+            exit 1
+            ;;
+    esac
+fi
 
 # Check if config file exists
 if [ ! -f "$CONFIG_FILE" ]; then

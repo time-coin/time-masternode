@@ -29,22 +29,26 @@ This directory contains scripts for installing, managing, configuring, and unins
 # Make executable
 chmod +x scripts/configure-masternode.sh
 
-# Run the script
-./scripts/configure-masternode.sh
+# Configure mainnet
+./scripts/configure-masternode.sh mainnet
 
-# Select network when prompted:
-#   1. Mainnet
-#   2. Testnet
+# Configure testnet
+./scripts/configure-masternode.sh testnet
+
+# Interactive mode (prompts for network)
+./scripts/configure-masternode.sh
 ```
 
 **Usage (Windows)**:
 ```cmd
-# Run the script
-scripts\configure-masternode.bat
+# Configure mainnet
+scripts\configure-masternode.bat mainnet
 
-# Select network when prompted:
-#   1. Mainnet
-#   2. Testnet
+# Configure testnet
+scripts\configure-masternode.bat testnet
+
+# Interactive mode (prompts for network)
+scripts\configure-masternode.bat
 ```
 
 **What it configures**:
@@ -176,10 +180,10 @@ After running `install-masternode.sh`, files will be organized as:
 **Step 1: Run Configuration Tool**
 ```bash
 # Linux/macOS
-./scripts/configure-masternode.sh
+./scripts/configure-masternode.sh testnet
 
 # Windows
-scripts\configure-masternode.bat
+scripts\configure-masternode.bat testnet
 ```
 
 **Step 2: Follow Interactive Prompts**

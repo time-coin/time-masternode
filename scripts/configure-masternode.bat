@@ -18,6 +18,34 @@ echo ╔════════════════════════
 echo ║   TIME Coin Masternode Configuration Tool     ║
 echo ╚════════════════════════════════════════════════╝
 echo.
+
+REM Check for command-line argument
+if not "%~1"=="" (
+    set "NETWORK_ARG=%~1"
+    call :tolower NETWORK_ARG
+    
+    if "!NETWORK_ARG!"=="mainnet" (
+        set "CONFIG_FILE=%TIMECOIN_DIR%\config.toml"
+        set "NETWORK=mainnet"
+        goto check_config
+    ) else if "!NETWORK_ARG!"=="testnet" (
+        set "CONFIG_FILE=%TIMECOIN_DIR%\testnet\config.toml"
+        set "NETWORK=testnet"
+        goto check_config
+    ) else (
+        echo [ERROR] Invalid network '%~1'
+        echo Usage: %~nx0 [mainnet^|testnet]
+        echo.
+        echo Examples:
+        echo   %~nx0 mainnet    # Configure mainnet
+        echo   %~nx0 testnet    # Configure testnet
+        echo   %~nx0            # Interactive mode
+        pause
+        exit /b 1
+    )
+)
+
+REM Interactive mode - ask which network to configure
 echo Which network do you want to configure?
 echo   1. Mainnet (%TIMECOIN_DIR%\config.toml)
 echo   2. Testnet (%TIMECOIN_DIR%\testnet\config.toml)
@@ -35,6 +63,8 @@ if "%network_choice%"=="1" (
     pause
     exit /b 1
 )
+
+:check_config
 
 REM Check if config file exists
 if not exist "%CONFIG_FILE%" (
