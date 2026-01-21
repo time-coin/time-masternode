@@ -20,6 +20,10 @@ A high-performance implementation of the TIME Coin Protocol v6 with sub-second i
 - **Stake-Weighted Sampling**: Sybil resistance via collateral-based peer selection
 - **UTXO State Machine**: Advanced state tracking (Unspent → Locked → Sampling → Finalized → Archived)
 - **Masternode Tiers**: Free, Bronze, Silver, Gold tiers with weighted sampling power
+- **🔒 Locked Collateral**: Dash-style masternode collateral with on-chain proof of stake
+  - Prevents accidental spending of collateral
+  - Automatic validation and cleanup
+  - Full backward compatibility with legacy masternodes
 - **Dual Network Support**: Mainnet and Testnet configurations
 - **Real-time RPC API**: JSON-RPC 2.0 interface for wallets and services
 - **P2P Networking**: TCP transport with peer discovery and gossip protocol (TLS support planned)
@@ -132,7 +136,16 @@ Then start:
 ./target/release/time-cli getblockcount
 
 # List masternodes
-./target/release/time-cli listmasternodes
+./target/release/time-cli masternodelist
+
+# Register masternode with locked collateral
+./target/release/time-cli masternoderegister bronze <txid> <vout> <reward_addr> <node_addr>
+
+# List all locked collaterals
+./target/release/time-cli listlockedcollaterals
+
+# Unlock masternode collateral
+./target/release/time-cli masternodeunlock [node_address]
 
 # Get network info
 ./target/release/time-cli getnetworkinfo

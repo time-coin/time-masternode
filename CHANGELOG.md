@@ -5,6 +5,111 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-01-21
+
+### 🔒 Locked Collateral for Masternodes
+
+This release adds Dash-style locked collateral for masternodes, providing on-chain proof of stake and preventing accidental spending of collateral.
+
+### Added
+
+#### Locked Collateral System
+- **UTXO Locking** - Lock specific UTXOs as masternode collateral
+  - Prevents spending while masternode is active
+  - Automatic validation after each block
+  - Thread-safe concurrent operations (DashMap)
+- **Registration RPC** - `masternoderegister` command
+  - Lock collateral atomically during registration
+  - Tier validation (Bronze: 1,000 TIME, Silver: 10,000 TIME, Gold: 100,000 TIME)
+  - 3 block confirmation requirement (~30 minutes)
+- **Deregistration RPC** - `masternodeunlock` command
+  - Unlock collateral and deregister masternode
+  - Network broadcast of unlock events
+- **List Collaterals RPC** - `listlockedcollaterals` command
+  - View all locked collaterals with masternode details
+  - Amount, height, timestamp information
+- **Enhanced Masternode List** - Updated `masternodelist` output
+  - Shows collateral lock status (🔒 Locked or Legacy)
+  - Collateral outpoint display
+
+#### Network Protocol
+- **Collateral Synchronization** - Peer-to-peer collateral state sync
+  - `GetLockedCollaterals` / `LockedCollateralsResponse` messages
+  - Conflict detection for double-locked UTXOs
+  - Validation against UTXO set
+- **Unlock Broadcasts** - `MasternodeUnlock` network message
+  - Real-time propagation of deregistrations
+- **Announcement Updates** - `MasternodeAnnouncementData` includes collateral info
+  - Optional `collateral_outpoint` field
+  - Registered timestamp
+
+#### Consensus Integration
+- **Reward Filtering** - Only masternodes with valid collateral receive rewards
+  - Legacy masternodes (no collateral) still eligible
+  - Automatic filtering in `select_reward_recipients()`
+- **Auto-Cleanup** - Invalid collaterals automatically removed
+  - Runs after each block is added
+  - Deregisters masternodes with spent collateral
+  - Logged warnings for removed masternodes
+
+#### CLI Enhancements
+- **`time-cli masternoderegister`** - Register with locked collateral
+- **`time-cli masternodeunlock`** - Unlock and deregister
+- **`time-cli listlockedcollaterals`** - List all locked collaterals
+- **Updated `time-cli masternodelist`** - Shows collateral status
+
+### Changed
+- **Masternode Structure** - Added optional collateral fields
+  - `collateral_outpoint: Option<OutPoint>`
+  - `locked_at: Option<u64>`
+  - `unlock_height: Option<u64>`
+- **UTXO Manager** - Enhanced with collateral tracking
+  - `locked_collaterals: DashMap<OutPoint, LockedCollateral>`
+  - New methods: `lock_collateral()`, `unlock_collateral()`, `is_collateral_locked()`
+  - Spending prevention for locked collateral
+- **Masternode Registry** - Collateral validation logic
+  - `validate_collateral()` - Pre-registration checks
+  - `check_collateral_validity()` - Post-registration monitoring
+  - `cleanup_invalid_collaterals()` - Automatic deregistration
+
+### Fixed
+- **Double-Lock Prevention** - Cannot lock same UTXO twice
+  - Returns `LockedAsCollateral` error
+  - Added in response to test failures
+
+### Testing
+- **15+ New Tests** - Comprehensive test coverage
+  - 7 UTXO manager tests (edge cases, concurrency)
+  - 8 masternode registry tests (validation, cleanup, legacy compatibility)
+  - All 202 tests passing ✅
+
+### Documentation
+- **MASTERNODE_GUIDE.md** - Complete masternode documentation
+  - Setup instructions for both legacy and locked collateral
+  - Troubleshooting guide
+  - Migration instructions
+  - FAQ section
+- **MIGRATION_GUIDE.md** - Backward compatibility documentation (analysis/ folder)
+  - Legacy vs locked collateral comparison
+  - Step-by-step migration
+  - No forced timeline
+- **Updated README.md** - Added locked collateral to features
+- **Updated CLI_GUIDE.md** - New command documentation
+
+### Backward Compatibility
+- ✅ **Fully backward compatible** - Legacy masternodes work unchanged
+- ✅ **Optional migration** - No forced upgrade timeline
+- ✅ **Equal rewards** - Both types eligible for rewards
+- ✅ **Storage compatible** - `Option<OutPoint>` serializes cleanly
+
+### Security
+- **On-Chain Proof** - Locked collateral provides verifiable proof of stake
+- **Spending Prevention** - Cannot accidentally spend locked UTXO
+- **Automatic Validation** - Invalid collaterals detected and cleaned up
+- **Network Verification** - Peers validate collateral state
+
+---
+
 ## [1.0.0] - 2026-01-02
 
 ### 🎉 Major Release - Production Ready with AI Integration

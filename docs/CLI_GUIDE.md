@@ -162,13 +162,72 @@ Lists unspent transaction outputs.
 ```bash
 time-cli masternodelist
 ```
-Returns list of all masternodes with their status.
+Returns list of all masternodes with their status, tier, and collateral lock status.
+
+**Output includes:**
+- Address
+- Tier (Free, Bronze, Silver, Gold)
+- Active status
+- Uptime
+- Collateral status (🔒 Locked or Legacy)
 
 #### Masternode Status
 ```bash
 time-cli masternodestatus
 ```
 Returns status of this node's masternode (if configured).
+
+#### Register Masternode with Locked Collateral
+```bash
+time-cli masternoderegister <tier> <collateral_txid> <vout> <reward_address> <node_address>
+```
+Registers a new masternode with locked collateral (Dash-style).
+
+**Parameters:**
+- `tier`: Masternode tier (bronze, silver, or gold)
+- `collateral_txid`: Transaction ID containing collateral UTXO (hex)
+- `vout`: Output index of collateral UTXO
+- `reward_address`: Address to receive masternode rewards
+- `node_address`: Node identifier/address
+
+**Collateral Requirements:**
+- Bronze: 1,000 TIME
+- Silver: 10,000 TIME
+- Gold: 100,000 TIME
+
+**Requirements:**
+- UTXO must have 3 block confirmations (~30 minutes)
+- UTXO amount must match tier requirement
+- UTXO must not be already locked
+
+**Example:**
+```bash
+time-cli masternoderegister bronze abc123def456... 0 TIMEyouraddress node1.example.com
+```
+
+#### Unlock Masternode Collateral
+```bash
+time-cli masternodeunlock [node_address]
+```
+Unlocks collateral and deregisters the masternode.
+
+**Parameters:**
+- `node_address` (optional): Specific node to unlock. If omitted, unlocks local masternode.
+
+**Warning:** This deregisters your masternode and stops reward eligibility.
+
+#### List Locked Collaterals
+```bash
+time-cli listlockedcollaterals
+```
+Lists all currently locked collaterals with masternode details.
+
+**Output includes:**
+- Outpoint (txid:vout)
+- Masternode address
+- Amount (TIME)
+- Lock height
+- Lock timestamp
 
 ---
 
