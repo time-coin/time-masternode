@@ -2,7 +2,97 @@
 
 ## Overview
 
-TIME Coin supports tiered masternodes with optional locked collateral (Dash-style). This guide covers setup, operation, and management of masternodes.
+TIME Coin supports tiered masternodes with locked collateral (Dash-style). This guide covers setup, operation, and management of masternodes.
+
+---
+
+## 🚀 Quick Start (5 Steps)
+
+**Want to set up a masternode right now?** Follow these steps:
+
+### 1. Check Balance
+```bash
+time-cli getbalance
+# Need: 1,000 TIME (Bronze), 10,000 (Silver), or 100,000 (Gold)
+```
+
+### 2. Create Collateral UTXO
+```bash
+time-cli sendtoaddress <your_address> 1000.0
+# Sends collateral to yourself, creates lockable UTXO
+```
+
+### 3. Wait 30 Minutes
+```bash
+time-cli listunspent
+# Check confirmations >= 3
+```
+
+### 4. Register Masternode
+```bash
+time-cli masternoderegister \
+  --tier Bronze \
+  --collateral-txid <txid_from_step_2> \
+  --vout 0 \
+  --reward-address <your_address>
+```
+
+### 5. Verify
+```bash
+time-cli getbalance
+# Should show locked collateral
+
+time-cli masternodelist
+# Should show your masternode with 🔒 Locked
+```
+
+**Done!** Your masternode is now active and earning rewards. Read below for details.
+
+---
+
+## 📊 Collateral Lock Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    MASTERNODE SETUP FLOW                        │
+└─────────────────────────────────────────────────────────────────┘
+
+1. PREPARE FUNDS                    2. CREATE UTXO
+   ┌──────────────┐                    ┌──────────────┐
+   │ Total: 1500  │                    │ Total: 1500  │
+   │ Locked: 0    │ ──sendtoaddress──> │ Locked: 0    │
+   │ Avail: 1500  │                    │ Avail: 1500  │
+   └──────────────┘                    └──────────────┘
+                                              │
+                                       Wait 3 blocks
+                                              │
+3. WAIT CONFIRMATIONS                         ▼
+   ┌─────────────────────────┐       ┌──────────────┐
+   │ UTXO Ready              │       │ Confirmations│
+   │ txid: abc123...         │       │     = 3      │
+   │ vout: 0                 │       └──────────────┘
+   │ amount: 1000 TIME       │
+   └─────────────────────────┘
+            │
+            │ masternoderegister
+            ▼
+4. LOCK COLLATERAL                   5. MASTERNODE ACTIVE
+   ┌──────────────┐                    ┌────────────────┐
+   │ Total: 1500  │                    │ Status: Active │
+   │ Locked: 1000 │ ───────────────>   │ Tier: Bronze   │
+   │ Avail: 500   │                    │ 🔒 Locked      │
+   └──────────────┘                    └────────────────┘
+                                              │
+                                       Earning Rewards
+                                              │
+                                              ▼
+6. RECEIVE REWARDS                     7. UNLOCK (OPTIONAL)
+   ┌──────────────┐                    ┌──────────────┐
+   │ Total: 2500  │                    │ Total: 2500  │
+   │ Locked: 1000 │ masternodeunlock   │ Locked: 0    │
+   │ Avail: 1500  │ ───────────────>   │ Avail: 2500  │
+   └──────────────┘                    └──────────────┘
+```
 
 ---
 
@@ -69,39 +159,69 @@ wallet_address = "TIMEyouraddresshere"
 
 **Setup:**
 
-#### Step 1: Prepare Collateral UTXO
+#### Step 1: Check Your Balance
 
-Ensure you have a UTXO with the required amount:
+First, verify you have enough funds:
 ```bash
-# List your UTXOs
-time-cli listunspent
+time-cli getbalance
+```
 
-# Example output:
-# txid: abc123def456...
-# vout: 0
-# amount: 1000.00000000
-# confirmations: 5
+**Output:**
+```
+Wallet Balance:
+  Total:         1500.00000000 TIME
+  Locked:           0.00000000 TIME (collateral)
+  Available:     1500.00000000 TIME (spendable)
 ```
 
 **Requirements:**
 - Bronze: 1,000 TIME
 - Silver: 10,000 TIME
 - Gold: 100,000 TIME
-- Minimum 3 block confirmations (~30 minutes)
 
-#### Step 2: Register with Locked Collateral
+#### Step 2: Create Collateral UTXO
 
+Send the exact collateral amount to yourself:
 ```bash
-time-cli masternoderegister <tier> <txid> <vout> <reward_address> <node_address>
+# Get your address
+time-cli getnewaddress
+
+# Send collateral to yourself
+time-cli sendtoaddress <your_address> 1000.0
+
+# Returns transaction ID
+# abc123def456789...
 ```
 
-**Example:**
+**Why send to yourself?**
+- Creates a distinct UTXO to lock
+- Easier to track and manage
+- Standard practice (Dash-style)
+
+#### Step 3: Wait for Confirmations
+
+The UTXO needs 3 confirmations (~30 minutes):
 ```bash
-time-cli masternoderegister bronze \
-  abc123def456789... \
-  0 \
-  TIMEyourrewardaddress \
-  node1.example.com
+# Check your UTXOs
+time-cli listunspent
+
+# Example output:
+# txid: abc123def456...
+# vout: 0
+# amount: 1000.00000000
+# confirmations: 3  ← Must be 3+
+```
+
+**Note the txid and vout** - you'll need these for registration.
+
+#### Step 4: Register with Locked Collateral
+
+```bash
+time-cli masternoderegister \
+  --tier Bronze \
+  --collateral-txid abc123def456789... \
+  --vout 0 \
+  --reward-address <your_address>
 ```
 
 **Output:**
@@ -119,13 +239,26 @@ Reward Address: TIMEyourrewardaddress
    - Use 'masternodeunlock' to deregister and unlock
 ```
 
-#### Step 3: Verify Registration
+#### Step 5: Verify Registration
 
 ```bash
-# List all masternodes
+# Check your balance (should show locked collateral)
+time-cli getbalance
+```
+
+**Output:**
+```
+Wallet Balance:
+  Total:         1500.00000000 TIME
+  Locked:        1000.00000000 TIME (collateral)
+  Available:      500.00000000 TIME (spendable)
+```
+
+```bash
+# List all masternodes (should show 🔒 Locked)
 time-cli masternodelist
 
-# Check your collateral
+# Check locked collaterals
 time-cli listlockedcollaterals
 ```
 
@@ -146,8 +279,26 @@ time-cli masternodelist
 ### Monitor Rewards
 
 ```bash
-# Check balance
+# Check balance (shows total, locked, available)
 time-cli getbalance
+```
+
+**Output:**
+```
+Wallet Balance:
+  Total:         2500.00000000 TIME
+  Locked:        1000.00000000 TIME (collateral)
+  Available:     1500.00000000 TIME (spendable)
+```
+
+**What you see:**
+- **Total**: All funds in your wallet
+- **Locked**: Collateral locked for masternode(s)
+- **Available**: Spendable funds (includes rewards)
+
+```bash
+# Get detailed wallet info
+time-cli getwalletinfo
 
 # List recent transactions
 time-cli listunspent
