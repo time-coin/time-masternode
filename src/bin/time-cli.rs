@@ -110,6 +110,16 @@ enum Commands {
     /// Get wallet information
     GetWalletInfo,
 
+    /// List addresses with balances (Bitcoin-compatible)
+    ListReceivedByAddress {
+        /// Minimum confirmations (default: 1)
+        #[arg(short, long, default_value = "1")]
+        minconf: u32,
+        /// Include addresses with zero balance
+        #[arg(short = 'z', long)]
+        include_empty: bool,
+    },
+
     /// Get masternode information
     MasternodeList,
 
@@ -247,6 +257,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ListUnspent { minconf, maxconf } => ("listunspent", json!([minconf, maxconf])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
+        Commands::ListReceivedByAddress {
+            minconf,
+            include_empty,
+        } => ("listreceivedbyaddress", json!([minconf, include_empty])),
         Commands::MasternodeList => ("masternodelist", json!([])),
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
         Commands::MasternodeRegister {
@@ -374,6 +388,34 @@ fn print_human_readable(
         }
         Commands::GetNewAddress => {
             println!("Address: {}", result.as_str().unwrap_or("N/A"));
+        }
+        Commands::ListReceivedByAddress { .. } => {
+            if let Some(addresses) = result.as_array() {
+                println!("\nAddresses with Received Funds:");
+                println!("{:<50} {:>15} {:>10}", "Address", "Amount (TIME)", "TXs");
+                println!("{}", "-".repeat(77));
+
+                for addr_info in addresses {
+                    let address = addr_info
+                        .get("address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("N/A");
+                    let amount = addr_info
+                        .get("amount")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+                    let txcount = addr_info
+                        .get("txcount")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
+                    println!("{:<50} {:>15.8} {:>10}", address, amount, txcount);
+                }
+
+                println!("\nTotal Addresses: {}", addresses.len());
+            } else {
+                println!("No addresses found");
+            }
         }
         Commands::GetWalletInfo => {
             println!("Wallet Information:");

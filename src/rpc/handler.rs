@@ -108,6 +108,7 @@ impl RpcHandler {
             "addwhitelist" => self.add_whitelist(&params_array).await,
             "removewhitelist" => self.remove_whitelist(&params_array).await,
             "getblacklist" => self.get_blacklist().await,
+            "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -641,6 +642,66 @@ impl RpcHandler {
             .collect();
 
         Ok(json!(filtered))
+    }
+
+    async fn list_received_by_address(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let minconf = params.first().and_then(|v| v.as_u64()).unwrap_or(1);
+        let include_empty = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let utxos = self.utxo_manager.list_all_utxos().await;
+
+        // Get local masternode's reward address to filter UTXOs
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address);
+
+        // Group UTXOs by address
+        use std::collections::HashMap;
+        let mut address_map: HashMap<String, (u64, usize)> = HashMap::new();
+
+        for utxo in utxos.iter() {
+            // Only show this node's addresses
+            if let Some(ref local_addr) = local_address {
+                if utxo.address != *local_addr {
+                    continue;
+                }
+            } else {
+                // If not a masternode, don't show any addresses
+                continue;
+            }
+
+            // Group by address (count amount and transaction count)
+            let entry = address_map.entry(utxo.address.clone()).or_insert((0, 0));
+            entry.0 += utxo.value;
+            entry.1 += 1;
+        }
+
+        // Convert to JSON array
+        let mut result: Vec<Value> = address_map
+            .iter()
+            .filter(|(_, (amount, _))| include_empty || *amount > 0)
+            .map(|(address, (amount, txcount))| {
+                json!({
+                    "address": address,
+                    "amount": *amount as f64 / 100_000_000.0,
+                    "confirmations": minconf,
+                    "txcount": txcount
+                })
+            })
+            .collect();
+
+        // Sort by amount descending
+        result.sort_by(|a, b| {
+            let amount_a = a.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let amount_b = b.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            amount_b
+                .partial_cmp(&amount_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Ok(json!(result))
     }
 
     async fn masternode_status(&self) -> Result<Value, RpcError> {
