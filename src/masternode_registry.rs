@@ -485,60 +485,17 @@ impl MasternodeRegistry {
             return all_nodes;
         }
 
-        // Get masternodes that participated in consensus on recent blocks
-        // This is stored in each block and is deterministic
-        let lookback_blocks = 10.min(height - 1); // Look back up to 10 blocks
-        let mut active_addresses: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
-
-        for block_height in (height.saturating_sub(lookback_blocks))..height {
-            if let Ok(block) = blockchain.get_block(block_height) {
-                // Add all masternodes that participated in consensus for this block
-                for addr in &block.consensus_participants {
-                    active_addresses.insert(addr.clone());
-                }
-            }
-        }
-
-        if active_addresses.is_empty() {
-            tracing::warn!(
-                "⚠️  No consensus participants found in last {} blocks, using all registered masternodes",
-                lookback_blocks
-            );
-            all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
-            return all_nodes;
-        }
-
-        // Sort deterministically by address to ensure all nodes agree on ordering
+        // Use all registered masternodes
+        // They must be registered (deterministic) and connected (each node validates this)
         all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
-        // Filter to only masternodes that participated in recent blocks
-        let selected: Vec<MasternodeInfo> = all_nodes
-            .into_iter()
-            .filter(|mn| {
-                // Include this masternode only if it participated in recent consensus
-                active_addresses.contains(&mn.masternode.address)
-            })
-            .collect();
-
         tracing::info!(
-            "💰 Consensus-based selection at height {}: {} eligible masternodes participated in last {} blocks (from {} registered)",
+            "💰 Reward distribution at height {}: {} registered masternodes eligible",
             height,
-            selected.len(),
-            lookback_blocks,
-            masternodes.len()
+            all_nodes.len()
         );
 
-        // Debug: log selected nodes for verification
-        for (i, mn) in selected.iter().take(5).enumerate() {
-            tracing::debug!(
-                "   [{}] {} (active in recent blocks)",
-                i,
-                mn.masternode.address
-            );
-        }
-
-        selected
+        all_nodes
     }
 
     /// Count all registered masternodes (not just active ones)
