@@ -72,6 +72,10 @@ pub enum NetworkMessage {
     },
     GetMasternodes,
     MasternodesResponse(Vec<MasternodeAnnouncementData>),
+    /// Request locked collateral data from peer
+    GetLockedCollaterals,
+    /// Response with locked collateral data
+    LockedCollateralsResponse(Vec<LockedCollateralData>),
     Version {
         version: String,
         commit_date: String,
@@ -220,6 +224,15 @@ pub struct MasternodeAnnouncementData {
     pub registered_at: u64,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct LockedCollateralData {
+    pub outpoint: OutPoint,
+    pub masternode_address: String,
+    pub lock_height: u64,
+    pub locked_at: u64,
+    pub amount: u64,
+}
+
 impl NetworkMessage {
     /// Get the message type name as a string (for logging/debugging)
     /// Note: Used in Phase 2 optimizations
@@ -258,6 +271,8 @@ impl NetworkMessage {
             NetworkMessage::MasternodeUnlock { .. } => "MasternodeUnlock",
             NetworkMessage::GetMasternodes => "GetMasternodes",
             NetworkMessage::MasternodesResponse(_) => "MasternodesResponse",
+            NetworkMessage::GetLockedCollaterals => "GetLockedCollaterals",
+            NetworkMessage::LockedCollateralsResponse(_) => "LockedCollateralsResponse",
             NetworkMessage::Version { .. } => "Version",
             NetworkMessage::Ping { .. } => "Ping",
             NetworkMessage::Pong { .. } => "Pong",

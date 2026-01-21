@@ -237,6 +237,13 @@ impl MessageHandler {
                 self.handle_masternodes_response(masternodes.clone(), context)
                     .await
             }
+            NetworkMessage::GetLockedCollaterals => {
+                self.handle_get_locked_collaterals(context).await
+            }
+            NetworkMessage::LockedCollateralsResponse(collaterals) => {
+                self.handle_locked_collaterals_response(collaterals.clone(), context)
+                    .await
+            }
 
             // === Heartbeat Messages ===
             NetworkMessage::HeartbeatBroadcast(heartbeat) => {
@@ -1560,6 +1567,148 @@ impl MessageHandler {
                 "✓ [{}] Registered {} masternode(s) from peer exchange",
                 self.direction, registered
             );
+        }
+
+        Ok(None)
+    }
+
+    /// Handle GetLockedCollaterals request
+    async fn handle_get_locked_collaterals(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📥 [{}] Received GetLockedCollaterals request from {}",
+            self.direction, self.peer_ip
+        );
+
+        // Get all locked collaterals from UTXO manager
+        if let Some(utxo_manager) = &context.utxo_manager {
+            let locked_collaterals = utxo_manager.list_locked_collaterals();
+
+            let collateral_data: Vec<crate::network::message::LockedCollateralData> =
+                locked_collaterals
+                    .into_iter()
+                    .map(|lc| crate::network::message::LockedCollateralData {
+                        outpoint: lc.outpoint,
+                        masternode_address: lc.masternode_address,
+                        lock_height: lc.lock_height,
+                        locked_at: lc.locked_at,
+                        amount: lc.amount,
+                    })
+                    .collect();
+
+            info!(
+                "📤 [{}] Responded with {} locked collateral(s) to {}",
+                self.direction,
+                collateral_data.len(),
+                self.peer_ip
+            );
+
+            Ok(Some(NetworkMessage::LockedCollateralsResponse(
+                collateral_data,
+            )))
+        } else {
+            // No UTXO manager available, return empty list
+            Ok(Some(NetworkMessage::LockedCollateralsResponse(Vec::new())))
+        }
+    }
+
+    /// Handle LockedCollateralsResponse
+    async fn handle_locked_collaterals_response(
+        &self,
+        collaterals: Vec<crate::network::message::LockedCollateralData>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📥 [{}] Received LockedCollateralsResponse from {} with {} collateral(s)",
+            self.direction,
+            self.peer_ip,
+            collaterals.len()
+        );
+
+        if let Some(utxo_manager) = &context.utxo_manager {
+            let mut synced = 0;
+            let mut conflicts = 0;
+            let mut invalid = 0;
+
+            for collateral_data in collaterals {
+                // Verify the UTXO exists in our UTXO set
+                match utxo_manager.get_utxo(&collateral_data.outpoint).await {
+                    Ok(utxo) => {
+                        // Verify amount matches
+                        if utxo.value != collateral_data.amount {
+                            warn!(
+                                "⚠️ [{}] Collateral amount mismatch for {:?}: expected {}, got {}",
+                                self.direction,
+                                collateral_data.outpoint,
+                                collateral_data.amount,
+                                utxo.value
+                            );
+                            invalid += 1;
+                            continue;
+                        }
+
+                        // Check if already locked
+                        if utxo_manager.is_collateral_locked(&collateral_data.outpoint) {
+                            // Already locked - potential conflict or duplicate
+                            let existing =
+                                utxo_manager.get_locked_collateral(&collateral_data.outpoint);
+
+                            if let Some(existing_lock) = existing {
+                                if existing_lock.masternode_address
+                                    != collateral_data.masternode_address
+                                {
+                                    warn!(
+                                        "⚠️ [{}] Collateral conflict for {:?}: locked by {} (peer says {})",
+                                        self.direction,
+                                        collateral_data.outpoint,
+                                        existing_lock.masternode_address,
+                                        collateral_data.masternode_address
+                                    );
+                                    conflicts += 1;
+                                }
+                                // else: same lock, no action needed
+                            }
+                            continue;
+                        }
+
+                        // Lock the collateral
+                        match utxo_manager.lock_collateral(
+                            collateral_data.outpoint.clone(),
+                            collateral_data.masternode_address.clone(),
+                            collateral_data.lock_height,
+                            collateral_data.amount,
+                        ) {
+                            Ok(()) => {
+                                synced += 1;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "⚠️ [{}] Failed to lock collateral {:?}: {:?}",
+                                    self.direction, collateral_data.outpoint, e
+                                );
+                                invalid += 1;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // UTXO doesn't exist in our set
+                        warn!(
+                            "⚠️ [{}] Collateral UTXO {:?} not found in our UTXO set",
+                            self.direction, collateral_data.outpoint
+                        );
+                        invalid += 1;
+                    }
+                }
+            }
+
+            if synced > 0 {
+                info!(
+                    "✓ [{}] Synced {} locked collateral(s) from peer (conflicts: {}, invalid: {})",
+                    self.direction, synced, conflicts, invalid
+                );
+            }
         }
 
         Ok(None)
