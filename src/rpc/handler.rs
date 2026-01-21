@@ -81,6 +81,7 @@ impl RpcHandler {
             "masternodestatus" => self.masternode_status().await,
             "masternoderegister" => self.masternode_register(&params_array).await,
             "masternodeunlock" => self.masternode_unlock(&params_array).await,
+            "listlockedcollaterals" => self.list_locked_collaterals().await,
             "getconsensusinfo" => self.get_consensus_info().await,
             "gettimevotestatus" => self.get_timevote_status().await,
             "validateaddress" => self.validate_address(&params_array).await,
@@ -758,6 +759,18 @@ impl RpcHandler {
         let list: Vec<Value> = masternodes
             .iter()
             .map(|mn| {
+                // Phase 4.1: Check collateral status
+                let (collateral_locked, collateral_outpoint) =
+                    if let Some(ref outpoint) = mn.masternode.collateral_outpoint {
+                        let locked = self.utxo_manager.is_collateral_locked(outpoint);
+                        (
+                            locked,
+                            Some(format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout)),
+                        )
+                    } else {
+                        (false, None)
+                    };
+
                 json!({
                     "address": mn.masternode.address,
                     "wallet_address": mn.masternode.wallet_address,
@@ -768,6 +781,8 @@ impl RpcHandler {
                     "last_heartbeat": mn.last_heartbeat,
                     "uptime_start": mn.uptime_start,
                     "total_uptime": mn.total_uptime,
+                    "collateral_locked": collateral_locked,
+                    "collateral_outpoint": collateral_outpoint,
                 })
             })
             .collect();
@@ -1633,6 +1648,32 @@ impl RpcHandler {
             "masternode_address": node_address,
             "collateral_outpoint": format!("{}:{}", hex::encode(collateral_outpoint.txid), collateral_outpoint.vout),
             "message": "Masternode deregistered and collateral unlocked"
+        }))
+    }
+
+    /// List all locked collaterals
+    /// Returns all currently locked collaterals with masternode details
+    async fn list_locked_collaterals(&self) -> Result<Value, RpcError> {
+        let locked_collaterals = self.utxo_manager.list_locked_collaterals();
+
+        let collaterals: Vec<_> = locked_collaterals
+            .iter()
+            .map(|lc| {
+                json!({
+                    "outpoint": format!("{}:{}", hex::encode(lc.outpoint.txid), lc.outpoint.vout),
+                    "masternode_address": lc.masternode_address,
+                    "amount": lc.amount,
+                    "amount_time": format!("{:.8}", lc.amount as f64 / 100_000_000.0),
+                    "lock_height": lc.lock_height,
+                    "locked_at": lc.locked_at,
+                    "unlock_height": lc.unlock_height,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "count": collaterals.len(),
+            "collaterals": collaterals
         }))
     }
 }

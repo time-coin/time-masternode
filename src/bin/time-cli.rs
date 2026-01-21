@@ -136,6 +136,9 @@ enum Commands {
         node_address: Option<String>,
     },
 
+    /// List all locked collaterals
+    ListLockedCollaterals,
+
     /// Get consensus information
     GetConsensusInfo,
 
@@ -264,6 +267,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 json!([])
             },
         ),
+        Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
@@ -427,27 +431,73 @@ fn print_human_readable(
             }
         }
         Commands::MasternodeList => {
-            if let Some(nodes) = result.as_array() {
-                println!("Masternodes:");
-                println!(
-                    "{:<42} {:<10} {:<8} {:<12}",
-                    "Address", "Tier", "Active", "Uptime"
-                );
-                println!("{}", "-".repeat(80));
-                for node in nodes {
-                    let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("");
-                    let tier = node.get("tier").and_then(|v| v.as_str()).unwrap_or("");
-                    let active = node
-                        .get("is_active")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let uptime = node
-                        .get("total_uptime")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    println!("{:<42} {:<10} {:<8} {:<12}", address, tier, active, uptime);
+            if let Some(obj) = result.as_object() {
+                if let Some(nodes) = obj.get("masternodes").and_then(|v| v.as_array()) {
+                    println!("Masternodes:");
+                    println!(
+                        "{:<42} {:<10} {:<8} {:<12} {:<12}",
+                        "Address", "Tier", "Active", "Uptime", "Collateral"
+                    );
+                    println!("{}", "-".repeat(90));
+                    for node in nodes {
+                        let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                        let tier = node.get("tier").and_then(|v| v.as_str()).unwrap_or("");
+                        let active = node
+                            .get("is_active")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let uptime = node
+                            .get("total_uptime")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let collateral_locked = node
+                            .get("collateral_locked")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        let collateral_status = if collateral_locked {
+                            "🔒 Locked"
+                        } else {
+                            "Legacy"
+                        };
+
+                        println!(
+                            "{:<42} {:<10} {:<8} {:<12} {:<12}",
+                            address, tier, active, uptime, collateral_status
+                        );
+                    }
+                    println!("\nTotal Masternodes: {}", nodes.len());
                 }
-                println!("\nTotal Masternodes: {}", nodes.len());
+            }
+        }
+        Commands::ListLockedCollaterals => {
+            if let Some(obj) = result.as_object() {
+                if let Some(collaterals) = obj.get("collaterals").and_then(|v| v.as_array()) {
+                    println!("Locked Collaterals:");
+                    println!(
+                        "{:<68} {:<42} {:>16} {:>12}",
+                        "Outpoint", "Masternode", "Amount (TIME)", "Height"
+                    );
+                    println!("{}", "-".repeat(145));
+                    for col in collaterals {
+                        let outpoint = col.get("outpoint").and_then(|v| v.as_str()).unwrap_or("");
+                        let mn_addr = col
+                            .get("masternode_address")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let amount = col
+                            .get("amount_time")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("0");
+                        let height = col.get("lock_height").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                        println!(
+                            "{:<68} {:<42} {:>16} {:>12}",
+                            outpoint, mn_addr, amount, height
+                        );
+                    }
+                    println!("\nTotal Locked: {}", collaterals.len());
+                }
             }
         }
         Commands::GetPeerInfo => {
