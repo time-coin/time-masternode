@@ -12,12 +12,71 @@
 # Build
 cargo build --release
 
-# Basic usage
-./target/release/time-cli get-blockchain-info
+# Basic usage (pretty JSON output by default)
+./target/release/time-cli getblockchaininfo
+
+# Compact JSON output (single line)
+./target/release/time-cli --compact getblockchaininfo
+
+# Human-readable output
+./target/release/time-cli --human getblockchaininfo
 
 # With custom RPC URL
-./target/release/time-cli --rpc-url http://192.168.1.100:24101 get-network-info
+./target/release/time-cli --rpc-url http://192.168.1.100:24101 getnetworkinfo
 ```
+
+---
+
+## 📊 Output Formats
+
+TIME CLI supports three output formats:
+
+### 1. Pretty JSON (Default)
+```bash
+time-cli getblockchaininfo
+```
+Returns formatted JSON (like Bitcoin Core):
+```json
+{
+  "chain": "main",
+  "blocks": 1,
+  "consensus": "TimeVote",
+  "instant_finality": true
+}
+```
+
+### 2. Compact JSON
+```bash
+time-cli --compact getblockchaininfo
+```
+Returns single-line JSON for scripting:
+```json
+{"chain":"main","blocks":1,"consensus":"TimeVote","instant_finality":true}
+```
+
+### 3. Human-Readable
+```bash
+time-cli --human getblockchaininfo
+```
+Returns formatted text output:
+```
+Blockchain Information:
+  Chain:            main
+  Blocks:           1
+  Consensus:        TimeVote
+  Instant Finality: true
+```
+
+**Supported for --human flag:**
+- `getblockchaininfo` - Formatted info
+- `getblockcount` - Simple height display
+- `getbalance` - Balance with TIME label
+- `listunspent` - Table format
+- `masternodelist` - Table format
+- `masternodestatus` - Formatted status
+- `getpeerinfo` - Table format
+- `uptime` - Days/hours/minutes/seconds format
+- All other commands default to pretty JSON
 
 ---
 
@@ -27,19 +86,19 @@ cargo build --release
 
 #### Get Blockchain Info
 ```bash
-time-cli get-blockchain-info
+time-cli getblockchaininfo
 ```
 Returns general blockchain information including chain, blocks, consensus type, and finality.
 
 #### Get Block Count
 ```bash
-time-cli get-block-count
+time-cli getblockcount
 ```
 Returns the current block height.
 
 #### Get Block
 ```bash
-time-cli get-block 1
+time-cli getblock 1
 ```
 Returns information about a specific block by height.
 
@@ -49,13 +108,13 @@ Returns information about a specific block by height.
 
 #### Get Network Info
 ```bash
-time-cli get-network-info
+time-cli getnetworkinfo
 ```
 Returns network information including version, protocol, and connections.
 
 #### Get Peer Info
 ```bash
-time-cli get-peer-info
+time-cli getpeerinfo
 ```
 Returns information about connected peers.
 
@@ -65,33 +124,33 @@ Returns information about connected peers.
 
 #### Get UTXO Set Info
 ```bash
-time-cli get-tx-out-set-info
+time-cli gettxoutsetinfo
 ```
 Returns statistics about the UTXO set.
 
 #### Get Transaction
 ```bash
-time-cli get-transaction <txid>
+time-cli gettransaction <txid>
 ```
 Returns information about a specific transaction.
 
 #### Get Raw Transaction
 ```bash
-time-cli get-raw-transaction <txid>
-time-cli get-raw-transaction <txid> --verbose
+time-cli getrawtransaction <txid>
+time-cli getrawtransaction <txid> --verbose
 ```
 Returns raw transaction data.
 
 #### Send Raw Transaction
 ```bash
-time-cli send-raw-transaction <hex>
+time-cli sendrawtransaction <hex>
 ```
 Broadcasts a raw transaction to the network.
 
 #### List Unspent
 ```bash
-time-cli list-unspent
-time-cli list-unspent 6 9999
+time-cli listunspent
+time-cli listunspent 6 9999
 ```
 Lists unspent transaction outputs.
 
@@ -101,13 +160,13 @@ Lists unspent transaction outputs.
 
 #### List Masternodes
 ```bash
-time-cli masternode-list
+time-cli masternodelist
 ```
 Returns list of all masternodes with their status.
 
 #### Masternode Status
 ```bash
-time-cli masternode-status
+time-cli masternodestatus
 ```
 Returns status of this node's masternode (if configured).
 
@@ -117,7 +176,7 @@ Returns status of this node's masternode (if configured).
 
 #### Get Consensus Info
 ```bash
-time-cli get-consensus-info
+time-cli getconsensusinfo
 ```
 Returns information about the TimeVote consensus:
 - Type (TimeVote)
@@ -131,15 +190,28 @@ Returns information about the TimeVote consensus:
 
 #### Get Balance
 ```bash
-time-cli get-balance
+time-cli getbalance
 ```
 Returns wallet balance.
 
+#### Send to Address
+```bash
+time-cli sendtoaddress <address> <amount>
+```
+Send TIME to an address.
+
 #### Validate Address
 ```bash
-time-cli validate-address <address>
+time-cli validateaddress <address>
 ```
 Validates a TIME Coin address.
+
+#### Merge UTXOs
+```bash
+time-cli mergeutxos
+time-cli mergeutxos --min-count 5 --max-count 50
+```
+Merge multiple UTXOs into one to reduce UTXO set size.
 
 ---
 
@@ -163,14 +235,14 @@ Stops the daemon gracefully.
 
 #### Get Mempool Info
 ```bash
-time-cli get-mempool-info
+time-cli getmempoolinfo
 ```
 Returns memory pool statistics.
 
 #### Get Raw Mempool
 ```bash
-time-cli get-raw-mempool
-time-cli get-raw-mempool --verbose
+time-cli getrawmempool
+time-cli getrawmempool --verbose
 ```
 Returns list of transactions in the memory pool.
 
@@ -185,20 +257,33 @@ http://127.0.0.1:24101
 
 ### Custom RPC URL
 ```bash
-time-cli --rpc-url http://node.example.com:24101 get-block-count
+time-cli --rpc-url http://node.example.com:24101 getblockcount
 ```
 
 Or set environment variable:
 ```bash
 export TIME_RPC_URL=http://node.example.com:24101
-time-cli get-block-count
+time-cli getblockcount
+```
+
+### Output Format Options
+
+```bash
+# Pretty JSON (default) - matches Bitcoin Core
+time-cli getbalance
+
+# Compact JSON - single line for scripts
+time-cli --compact getbalance
+
+# Human-readable - formatted text output
+time-cli --human getbalance
 ```
 
 ---
 
 ## 📊 Output Format
 
-All commands return JSON output:
+All commands return JSON output by default (matching Bitcoin Core):
 
 ```json
 {
@@ -208,6 +293,11 @@ All commands return JSON output:
   "instant_finality": true
 }
 ```
+
+**Format Options:**
+- Default: Pretty JSON (formatted, multiple lines)
+- `--compact`: Single-line JSON for scripting
+- `--human`: Human-readable formatted text
 
 ---
 
@@ -220,22 +310,22 @@ time-cli uptime
 
 ### Get consensus status
 ```bash
-time-cli get-consensus-info
+time-cli getconsensusinfo
 ```
 
 ### List all masternodes
 ```bash
-time-cli masternode-list
+time-cli masternodelist
 ```
 
 ### Get blockchain info
 ```bash
-time-cli get-blockchain-info
+time-cli getblockchaininfo
 ```
 
 ### Check network connections
 ```bash
-time-cli get-network-info
+time-cli getnetworkinfo
 ```
 
 ---
@@ -257,11 +347,11 @@ else
 fi
 
 # Get block count
-BLOCKS=$(time-cli get-block-count)
+BLOCKS=$(time-cli getblockcount)
 echo "  Blocks: $BLOCKS"
 
 # Get masternode count
-MN_COUNT=$(time-cli masternode-list | jq '. | length')
+MN_COUNT=$(time-cli masternodelist | jq '. | length')
 echo "  Masternodes: $MN_COUNT"
 ```
 
@@ -279,7 +369,7 @@ def rpc_call(method):
     return json.loads(result.stdout)
 
 # Get blockchain info
-info = rpc_call('get-blockchain-info')
+info = rpc_call('getblockchaininfo')
 print(f"Chain: {info['chain']}")
 print(f"Blocks: {info['blocks']}")
 print(f"Consensus: {info['consensus']}")
@@ -307,16 +397,17 @@ Shows help for a specific command.
 
 | Bitcoin CLI | TIME CLI | Notes |
 |-------------|----------|-------|
-| `bitcoin-cli getblockchaininfo` | `time-cli get-blockchain-info` | Same |
-| `bitcoin-cli getblockcount` | `time-cli get-block-count` | Same |
-| `bitcoin-cli getnetworkinfo` | `time-cli get-network-info` | Same |
-| `bitcoin-cli getpeerinfo` | `time-cli get-peer-info` | Same |
-| `bitcoin-cli gettransaction` | `time-cli get-transaction` | Same |
-| `bitcoin-cli sendrawtransaction` | `time-cli send-raw-transaction` | Same |
-| `bitcoin-cli listunspent` | `time-cli list-unspent` | Same |
-| `bitcoin-cli stop` | `time-cli stop` | Same |
-| N/A | `time-cli get-consensus-info` | TIME-specific |
-| N/A | `time-cli masternode-list` | TIME-specific |
+| `bitcoin-cli getblockchaininfo` | `time-cli getblockchaininfo` | Identical |
+| `bitcoin-cli getblockcount` | `time-cli getblockcount` | Identical |
+| `bitcoin-cli getnetworkinfo` | `time-cli getnetworkinfo` | Identical |
+| `bitcoin-cli getpeerinfo` | `time-cli getpeerinfo` | Identical |
+| `bitcoin-cli gettransaction` | `time-cli gettransaction` | Identical |
+| `bitcoin-cli sendrawtransaction` | `time-cli sendrawtransaction` | Identical |
+| `bitcoin-cli listunspent` | `time-cli listunspent` | Identical |
+| `bitcoin-cli sendtoaddress` | `time-cli sendtoaddress` | Identical |
+| `bitcoin-cli stop` | `time-cli stop` | Identical |
+| N/A | `time-cli getconsensusinfo` | TIME-specific |
+| N/A | `time-cli masternodelist` | TIME-specific |
 
 ---
 
@@ -325,13 +416,13 @@ Shows help for a specific command.
 ### Chaining Commands
 ```bash
 # Get block count and save to file
-time-cli get-block-count > block_height.txt
+time-cli getblockcount > block_height.txt
 
 # Pretty print JSON
-time-cli get-blockchain-info | jq .
+time-cli getblockchaininfo | jq .
 
 # Extract specific field
-time-cli get-consensus-info | jq -r '.masternodes'
+time-cli getconsensusinfo | jq -r '.masternodes'
 ```
 
 ### Monitoring Script
@@ -341,9 +432,9 @@ while true; do
     clear
     echo "=== TIME Coin Node Monitor ==="
     echo "Uptime:      $(time-cli uptime) seconds"
-    echo "Blocks:      $(time-cli get-block-count)"
-    echo "Peers:       $(time-cli get-peer-info | jq 'length')"
-    echo "Masternodes: $(time-cli masternode-list | jq 'length')"
+    echo "Blocks:      $(time-cli getblockcount)"
+    echo "Peers:       $(time-cli getpeerinfo | jq 'length')"
+    echo "Masternodes: $(time-cli masternodelist | jq 'length')"
     sleep 5
 done
 ```
@@ -404,5 +495,5 @@ Error: RPC error -32700: Parse error
 
 ```bash
 cargo build --release
-./target/release/time-cli get-blockchain-info
+./target/release/time-cli getblockchaininfo
 ```

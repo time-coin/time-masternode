@@ -8,13 +8,13 @@ Send TIME to a specified address.
 
 ```bash
 # Syntax
-time-cli send-to-address <address> <amount>
+time-cli sendtoaddress <address> <amount>
 
 # Example: Send 10 TIME to an address
-time-cli send-to-address TIME0abc123def456... 10.0
+time-cli sendtoaddress TIME0abc123def456... 10.0
 
 # Example: Send 0.5 TIME
-time-cli send-to-address TIME0xyz789... 0.5
+time-cli sendtoaddress TIME0xyz789... 0.5
 ```
 
 **Parameters:**
@@ -44,12 +44,12 @@ time-cli send-to-address TIME0xyz789... 0.5
 
 ## Checking Balance
 
-### `get-balance`
+### `getbalance`
 
 Get your wallet's balance.
 
 ```bash
-time-cli get-balance
+time-cli getbalance
 ```
 
 **Returns:**
@@ -62,19 +62,19 @@ time-cli get-balance
 
 ## Listing Unspent Outputs
 
-### `list-unspent`
+### `listunspent`
 
 List all unspent transaction outputs (UTXOs) in your wallet.
 
 ```bash
 # List all UTXOs
-time-cli list-unspent
+time-cli listunspent
 
 # With minimum confirmations
-time-cli list-unspent 1
+time-cli listunspent 1
 
 # With min and max confirmations
-time-cli list-unspent 1 9999999
+time-cli listunspent 1 9999999
 ```
 
 **Returns:**
@@ -92,22 +92,22 @@ time-cli list-unspent 1 9999999
 
 ## Transaction Details
 
-### `get-transaction`
+### `gettransaction`
 
 Get detailed information about a transaction.
 
 ```bash
-time-cli get-transaction <txid>
+time-cli gettransaction <txid>
 ```
 
 ## Address Validation
 
-### `validate-address`
+### `validateaddress`
 
 Validate a TIME Coin address.
 
 ```bash
-time-cli validate-address TIME0abc123...
+time-cli validateaddress TIME0abc123...
 ```
 
 **Returns:**
@@ -125,16 +125,16 @@ Check the status of your node:
 
 ```bash
 # Get blockchain info
-time-cli get-blockchain-info
+time-cli getblockchaininfo
 
 # Get network info
-time-cli get-network-info
+time-cli getnetworkinfo
 
 # Get peer connections
-time-cli get-peer-info
+time-cli getpeerinfo
 
 # Check if node is a masternode
-time-cli masternode-status
+time-cli masternodestatus
 ```
 
 ## Notes

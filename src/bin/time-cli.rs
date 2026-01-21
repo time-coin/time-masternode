@@ -11,11 +11,20 @@ struct Args {
     #[arg(short, long, default_value = "http://127.0.0.1:24101")]
     rpc_url: String,
 
+    /// Output compact JSON (single line)
+    #[arg(long)]
+    compact: bool,
+
+    /// Output human-readable format
+    #[arg(long)]
+    human: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
+#[command(rename_all = "lowercase")]
 enum Commands {
     /// Get blockchain information
     GetBlockchainInfo,
@@ -225,8 +234,172 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(result) = rpc_response.result {
-        println!("{}", serde_json::to_string_pretty(&result)?);
+        if args.human {
+            print_human_readable(&args.command, &result)?;
+        } else if args.compact {
+            println!("{}", serde_json::to_string(&result)?);
+        } else {
+            // Default: pretty JSON (like Bitcoin)
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
     }
 
+    Ok(())
+}
+
+fn print_human_readable(
+    command: &Commands,
+    result: &Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        Commands::GetBlockchainInfo => {
+            println!("Blockchain Information:");
+            println!(
+                "  Chain:            {}",
+                result
+                    .get("chain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Blocks:           {}",
+                result.get("blocks").and_then(|v| v.as_u64()).unwrap_or(0)
+            );
+            println!(
+                "  Consensus:        {}",
+                result
+                    .get("consensus")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            println!(
+                "  Instant Finality: {}",
+                result
+                    .get("instant_finality")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            );
+        }
+        Commands::GetBlockCount => {
+            println!("Block Height: {}", result.as_u64().unwrap_or(0));
+        }
+        Commands::GetBalance => {
+            println!("Balance: {} TIME", result.as_f64().unwrap_or(0.0));
+        }
+        Commands::ListUnspent { .. } => {
+            if let Some(utxos) = result.as_array() {
+                println!("Unspent Transaction Outputs:");
+                println!(
+                    "{:<66} {:>4} {:<42} {:>12}",
+                    "TxID", "Vout", "Address", "Amount"
+                );
+                println!("{}", "-".repeat(130));
+                for utxo in utxos {
+                    let txid = utxo.get("txid").and_then(|v| v.as_str()).unwrap_or("");
+                    let vout = utxo.get("vout").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let address = utxo.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    let amount = utxo.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    println!("{:<66} {:>4} {:<42} {:>12.8}", txid, vout, address, amount);
+                }
+                println!("\nTotal UTXOs: {}", utxos.len());
+            }
+        }
+        Commands::MasternodeList => {
+            if let Some(nodes) = result.as_array() {
+                println!("Masternodes:");
+                println!(
+                    "{:<42} {:<10} {:<8} {:<12}",
+                    "Address", "Tier", "Active", "Uptime"
+                );
+                println!("{}", "-".repeat(80));
+                for node in nodes {
+                    let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    let tier = node.get("tier").and_then(|v| v.as_str()).unwrap_or("");
+                    let active = node
+                        .get("is_active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let uptime = node
+                        .get("total_uptime")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    println!("{:<42} {:<10} {:<8} {:<12}", address, tier, active, uptime);
+                }
+                println!("\nTotal Masternodes: {}", nodes.len());
+            }
+        }
+        Commands::GetPeerInfo => {
+            if let Some(peers) = result.as_array() {
+                println!("Connected Peers:");
+                println!("{:<45} {:<10} {:<10}", "Address", "Version", "Subversion");
+                println!("{}", "-".repeat(70));
+                for peer in peers {
+                    let addr = peer.get("addr").and_then(|v| v.as_str()).unwrap_or("");
+                    let version = peer.get("version").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let subver = peer.get("subver").and_then(|v| v.as_str()).unwrap_or("");
+                    println!("{:<45} {:<10} {:<10}", addr, version, subver);
+                }
+                println!("\nTotal Peers: {}", peers.len());
+            }
+        }
+        Commands::Uptime => {
+            let seconds = result.as_u64().unwrap_or(0);
+            let days = seconds / 86400;
+            let hours = (seconds % 86400) / 3600;
+            let minutes = (seconds % 3600) / 60;
+            let secs = seconds % 60;
+            println!(
+                "Uptime: {} days, {} hours, {} minutes, {} seconds",
+                days, hours, minutes, secs
+            );
+        }
+        Commands::MasternodeStatus => {
+            println!("Masternode Status:");
+            println!(
+                "  Status:         {}",
+                result
+                    .get("status")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("N/A")
+            );
+            if let Some(addr) = result.get("address").and_then(|v| v.as_str()) {
+                println!("  Address:        {}", addr);
+                println!(
+                    "  Reward Address: {}",
+                    result
+                        .get("reward_address")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("N/A")
+                );
+                println!(
+                    "  Tier:           {}",
+                    result.get("tier").and_then(|v| v.as_str()).unwrap_or("N/A")
+                );
+                println!(
+                    "  Total Uptime:   {}",
+                    result
+                        .get("total_uptime")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                );
+                println!(
+                    "  Active:         {}",
+                    result
+                        .get("is_active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                );
+            } else {
+                println!(
+                    "  Message:        {}",
+                    result.get("message").and_then(|v| v.as_str()).unwrap_or("")
+                );
+            }
+        }
+        _ => {
+            // For commands without specific formatting, fall back to pretty JSON
+            println!("{}", serde_json::to_string_pretty(result)?);
+        }
+    }
     Ok(())
 }
