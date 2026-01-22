@@ -1832,29 +1832,21 @@ impl ConsensusEngine {
         self.avalanche.active_rounds.insert(txid, query_round);
 
         // §7.6 Integration: Set initial transaction status to Voting
-        self.transition_to_voting(txid);
-
         // Pre-generate vote requests (before async, so RNG doesn't cross await boundary)
         let vote_request_msg = NetworkMessage::TransactionVoteRequest { txid };
 
-        // DIAGNOSTIC: Check how many validators are actually connected as peers
-        let connected_peer_count =
-            if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
-                // We have broadcast capability, estimate peer count
-                tracing::warn!(
-                    "📡 Broadcasting vote request for TX {:?} to network peers",
-                    hex::encode(txid)
-                );
-                "unknown - check peer connections"
-            } else {
-                tracing::error!("❌ No broadcast callback available - cannot send vote requests!");
-                "0"
-            };
+        // Immediately broadcast vote request to all validators
+        if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
+            tracing::info!(
+                "📡 Broadcasting vote request for TX {:?} to all validators",
+                hex::encode(txid)
+            );
+            callback(vote_request_msg.clone());
+        } else {
+            tracing::error!("❌ No broadcast callback available - cannot send vote requests!");
+        }
 
-        tracing::warn!(
-            "⚠️ If no votes received, validators may not be connected as peers. Connected: {}",
-            connected_peer_count
-        );
+        self.transition_to_voting(txid);
 
         // Spawn consensus round executor as blocking task
         let consensus = self.avalanche.clone();
