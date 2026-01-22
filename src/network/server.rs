@@ -66,7 +66,6 @@ pub struct NetworkServer {
     pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
     pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TSDC voting
-    pub attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
 }
 
@@ -90,7 +89,6 @@ impl NetworkServer {
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
-        attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     ) -> Result<Self, std::io::Error> {
         Self::new_with_blacklist(
             bind_addr,
@@ -105,7 +103,6 @@ impl NetworkServer {
             local_ip,
             vec![],
             vec![],
-            attestation_system,
         )
         .await
     }
@@ -125,7 +122,6 @@ impl NetworkServer {
         local_ip: Option<String>,
         blacklisted_peers: Vec<String>,
         whitelisted_peers: Vec<String>,
-        attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -173,7 +169,6 @@ impl NetworkServer {
                 1000,                     // Max 1000 blocks
                 Duration::from_secs(300), // 5 minute expiration
             )), // Phase 3E.1: Bounded LRU cache
-            attestation_system,
             peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
         })
     }
@@ -294,7 +289,6 @@ impl NetworkServer {
             let peer_reg = self.peer_registry.clone();
             let local_ip = self.local_ip.clone();
             let block_cache = self.block_cache.clone(); // Phase 3E.1: Clone block cache
-            let attestation_sys = self.attestation_system.clone();
             let fork_status = self.peer_fork_status.clone(); // Phase 2: Clone fork status tracker
 
             tokio::spawn(async move {
@@ -317,8 +311,7 @@ impl NetworkServer {
                     conn_mgr,
                     peer_reg,
                     local_ip,
-                    block_cache, // Phase 3E.1: Pass block cache
-                    attestation_sys,
+                    block_cache,    // Phase 3E.1: Pass block cache
                     fork_status,    // Phase 2: Pass fork status tracker
                     is_whitelisted, // Phase 1: Pass whitelist status
                 )
@@ -377,7 +370,6 @@ async fn handle_peer(
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     _local_ip: Option<String>,
     block_cache: Arc<BlockCache>, // Phase 3E.1: Block cache parameter
-    attestation_system: Arc<crate::heartbeat_attestation::HeartbeatAttestationSystem>,
     _peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker (no longer used - periodic resolution handles forks)
     _is_whitelisted: bool, // Phase 1: Whitelist status for relaxed timeouts (used in future enhancements)
 ) -> Result<(), std::io::Error> {
@@ -1122,38 +1114,6 @@ async fn handle_peer(
                                     );
 
                                     // Handle the message through unified handler
-                                    let _ = handler.handle_message(&msg, &context).await;
-                                }
-                                NetworkMessage::HeartbeatBroadcast(_) => {
-                                    // Use unified message handler with full context
-                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
-                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                    let mut context = MessageContext::with_consensus(
-                                        Arc::clone(&blockchain),
-                                        Arc::clone(&peer_registry),
-                                        Arc::clone(&masternode_registry),
-                                        Arc::clone(&consensus),
-                                        Arc::clone(&block_cache),
-                                        broadcast_tx.clone(),
-                                    );
-                                    context.attestation_system = Some(Arc::clone(&attestation_system));
-
-                                    let _ = handler.handle_message(&msg, &context).await;
-                                }
-                                NetworkMessage::HeartbeatAttestation(_) => {
-                                    // Use unified message handler with full context
-                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
-                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
-                                    let mut context = MessageContext::with_consensus(
-                                        Arc::clone(&blockchain),
-                                        Arc::clone(&peer_registry),
-                                        Arc::clone(&masternode_registry),
-                                        Arc::clone(&consensus),
-                                        Arc::clone(&block_cache),
-                                        broadcast_tx.clone(),
-                                    );
-                                    context.attestation_system = Some(Arc::clone(&attestation_system));
-
                                     let _ = handler.handle_message(&msg, &context).await;
                                 }
                                 // Health Check Messages

@@ -6,7 +6,7 @@
 
 use super::server::{RpcError, RpcRequest, RpcResponse};
 use crate::consensus::ConsensusEngine;
-use crate::heartbeat_attestation::HeartbeatAttestationSystem;
+// use crate::heartbeat_attestation::HeartbeatAttestationSystem; // Removed - using TCP connection state
 use crate::masternode_registry::MasternodeRegistry;
 use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
 use crate::utxo_manager::UTXOStateManager;
@@ -22,7 +22,6 @@ pub struct RpcHandler {
     utxo_manager: Arc<UTXOStateManager>,
     registry: Arc<MasternodeRegistry>,
     blockchain: Arc<crate::blockchain::Blockchain>,
-    attestation_system: Arc<HeartbeatAttestationSystem>,
     blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     start_time: SystemTime,
     network: NetworkType,
@@ -36,7 +35,6 @@ impl RpcHandler {
         network: NetworkType,
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
-        attestation_system: Arc<HeartbeatAttestationSystem>,
         blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     ) -> Self {
         Self {
@@ -44,7 +42,6 @@ impl RpcHandler {
             utxo_manager,
             registry,
             blockchain,
-            attestation_system,
             blacklist,
             start_time: SystemTime::now(),
             network,
@@ -91,17 +88,9 @@ impl RpcHandler {
             "getrawmempool" => self.get_raw_mempool().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
             "mergeutxos" => self.merge_utxos(&params_array).await,
-            "getattestationstats" => self.get_attestation_stats().await,
-            "getheartbeathistory" => match params_array.first().and_then(|v| v.as_str()) {
-                Some(address) => {
-                    let limit = params_array.get(1).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-                    self.get_heartbeat_history(address, limit).await
-                }
-                None => Err(RpcError {
-                    code: -32602,
-                    message: "address parameter required".to_string(),
-                }),
-            },
+            // Heartbeat methods removed - using TCP connection state instead
+            // "getattestationstats" => ...
+            // "getheartbeathistory" => ...
             "gettransactionfinality" => self.get_transaction_finality(&params_array).await,
             "waittransactionfinality" => self.wait_transaction_finality(&params_array).await,
             "getwhitelist" => self.get_whitelist().await,
@@ -257,7 +246,7 @@ impl RpcHandler {
                 json!({
                     "addr": mn.masternode.address.clone(),
                     "services": "0000000000000409",
-                    "lastseen": mn.last_heartbeat,
+                    "lastseen": mn.masternode.registered_at,
                     "subver": "/timed:1.0.0/",
                     "inbound": false,
                     "conntime": mn.masternode.registered_at,
@@ -1061,7 +1050,6 @@ impl RpcHandler {
                     "tier": format!("{:?}", mn.masternode.tier),
                     "registered_at": mn.masternode.registered_at,
                     "is_active": mn.is_active,
-                    "last_heartbeat": mn.last_heartbeat,
                     "uptime_start": mn.uptime_start,
                     "total_uptime": mn.total_uptime,
                     "collateral_locked": collateral_locked,
@@ -1364,52 +1352,15 @@ impl RpcHandler {
         }
     }
 
-    async fn get_attestation_stats(&self) -> Result<Value, RpcError> {
-        let stats = self.attestation_system.get_stats().await;
+    // Removed: get_attestation_stats method (heartbeat functionality removed)
+    // async fn get_attestation_stats(&self) -> Result<Value, RpcError> {
+    //     ...
+    // }
 
-        Ok(json!({
-            "total_heartbeats": stats.total_heartbeats,
-            "verified_heartbeats": stats.verified_heartbeats,
-            "pending_heartbeats": stats.pending_heartbeats,
-            "unique_masternodes": stats.unique_masternodes,
-            "total_verified_count": stats.total_verified_count,
-            "verification_rate": if stats.total_heartbeats > 0 {
-                (stats.verified_heartbeats as f64 / stats.total_heartbeats as f64) * 100.0
-            } else {
-                0.0
-            }
-        }))
-    }
-
-    async fn get_heartbeat_history(&self, address: &str, limit: usize) -> Result<Value, RpcError> {
-        let history = self
-            .attestation_system
-            .get_heartbeat_history(address, limit)
-            .await;
-        let verified_count = self
-            .attestation_system
-            .get_verified_heartbeats(address)
-            .await;
-        let latest_seq = self.attestation_system.get_latest_sequence(address).await;
-
-        let heartbeats: Vec<Value> = history.iter().map(|h| {
-            json!({
-                "sequence": h.heartbeat.sequence_number,
-                "timestamp": h.heartbeat.timestamp,
-                "verified": h.is_verified(),
-                "witness_count": h.attestations.len(),
-                "unique_witnesses": h.unique_witnesses(),
-                "witnesses": h.attestations.iter().map(|a| &a.witness_address).collect::<Vec<_>>()
-            })
-        }).collect();
-
-        Ok(json!({
-            "address": address,
-            "total_verified_heartbeats": verified_count,
-            "latest_sequence": latest_seq,
-            "recent_heartbeats": heartbeats
-        }))
-    }
+    // Removed: get_heartbeat_history method (heartbeat functionality removed)
+    // async fn get_heartbeat_history(&self, address: &str, limit: usize) -> Result<Value, RpcError> {
+    //     ...
+    // }
 
     async fn get_transaction_finality(&self, params: &[Value]) -> Result<Value, RpcError> {
         let txid = params

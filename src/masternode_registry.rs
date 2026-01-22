@@ -11,8 +11,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-const HEARTBEAT_INTERVAL_SECS: u64 = 60; // Masternodes must ping every 60 seconds
-const MAX_MISSED_HEARTBEATS: u64 = 5; // Allow 5 missed heartbeats (5 minutes) before marking offline
 const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collateral UTXO (30 minutes at 10 min/block)
 
 #[derive(Debug, thiserror::Error)]
@@ -37,9 +35,8 @@ pub enum RegistryError {
 pub struct MasternodeInfo {
     pub masternode: Masternode,
     pub reward_address: String, // Address to send block rewards
-    pub last_heartbeat: u64,
-    pub uptime_start: u64, // When current uptime period started
-    pub total_uptime: u64, // Total uptime in seconds
+    pub uptime_start: u64,      // When current uptime period started
+    pub total_uptime: u64,      // Total uptime in seconds
     pub is_active: bool,
 }
 
@@ -74,15 +71,9 @@ impl MasternodeRegistry {
                     .unwrap_or(&info.masternode.address)
                     .to_string();
 
-                // If we already have this IP, keep the more recent one
-                if let Some(existing) = nodes.get(&ip_only) {
-                    if info.last_heartbeat > existing.last_heartbeat {
-                        // This one is newer, replace it
-                        let mut updated_info = info;
-                        updated_info.masternode.address = ip_only.clone();
-                        nodes.insert(ip_only, updated_info);
-                    }
-                    // Otherwise keep the existing one
+                // If we already have this IP, keep the existing one
+                if let Some(_existing) = nodes.get(&ip_only) {
+                    // Keep the existing one
                 } else {
                     // New entry
                     let mut updated_info = info;
@@ -118,7 +109,15 @@ impl MasternodeRegistry {
             tracing::info!("📂 Loaded {} masternode(s) from disk", nodes.len());
         }
 
-        let registry = Self {
+        // Heartbeat monitoring removed - using TCP connection state instead
+        // tokio::spawn({
+        //     let registry = registry.clone();
+        //     async move {
+        //         registry.monitor_heartbeats().await;
+        //     }
+        // });
+
+        Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
             db,
@@ -126,17 +125,7 @@ impl MasternodeRegistry {
             block_period_start: Arc::new(RwLock::new(now)),
             peer_manager: Arc::new(RwLock::new(None)),
             broadcast_tx: Arc::new(RwLock::new(None)),
-        };
-
-        // Start heartbeat monitor
-        tokio::spawn({
-            let registry = registry.clone();
-            async move {
-                registry.monitor_heartbeats().await;
-            }
-        });
-
-        registry
+        }
     }
 
     fn now() -> u64 {
@@ -144,59 +133,6 @@ impl MasternodeRegistry {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
-    }
-
-    async fn monitor_heartbeats(&self) {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30)); // Check every 30 seconds instead of 120
-        loop {
-            interval.tick().await;
-
-            let now = Self::now();
-            let mut masternodes = self.masternodes.write().await;
-            let mut to_remove = Vec::new();
-
-            for (address, info) in masternodes.iter_mut() {
-                if info.is_active {
-                    let time_since_heartbeat = now - info.last_heartbeat;
-                    let max_silence = HEARTBEAT_INTERVAL_SECS * MAX_MISSED_HEARTBEATS;
-
-                    if time_since_heartbeat > max_silence {
-                        // Mark as offline
-                        info.is_active = false;
-                        if info.uptime_start > 0 {
-                            info.total_uptime += now - info.uptime_start;
-                        }
-                        warn!(
-                            "⚠️  Masternode {} marked offline (no heartbeat for {}s)",
-                            address, time_since_heartbeat
-                        );
-
-                        // Persist to disk
-                        let key = format!("masternode:{}", address);
-                        if let Ok(value) = bincode::serialize(&info) {
-                            let _ = self.db.insert(key.as_bytes(), value);
-                        }
-                    }
-                } else {
-                    // If offline for more than 24 hours, remove completely
-                    // This is generous to allow network recovery after outages
-                    // Masternodes that reconnect will be re-added automatically
-                    let time_since_heartbeat = now - info.last_heartbeat;
-                    if time_since_heartbeat > 86400 {
-                        // 24 hours
-                        to_remove.push(address.clone());
-                    }
-                }
-            }
-
-            // Remove stale masternodes
-            for address in to_remove {
-                masternodes.remove(&address);
-                let key = format!("masternode:{}", address);
-                let _ = self.db.remove(key.as_bytes());
-                info!("🗑️  Removed stale masternode {} (offline >24hr)", address);
-            }
-        }
     }
 
     pub async fn register(
@@ -237,33 +173,23 @@ impl MasternodeRegistry {
         // Get the count before we do any mutable operations
         let total_masternodes = nodes.len();
 
-        // If already registered, update heartbeat (treat as heartbeat)
+        // If already registered, update status (treat as reconnection)
         if let Some(existing) = nodes.get_mut(&masternode.address) {
-            let time_since_last = now - existing.last_heartbeat;
-
-            // Only update last_heartbeat if should_activate is true (direct connection/heartbeat)
-            // For peer exchange, we don't update heartbeat time
-            if should_activate {
-                existing.last_heartbeat = now;
-            }
-
             if !existing.is_active && should_activate {
                 existing.is_active = true;
                 existing.uptime_start = now;
                 info!(
-                    "✅ Registered masternode {} (total: {}) - Tier: {:?}, Was offline for {}s, now ACTIVE at timestamp {}",
+                    "✅ Registered masternode {} (total: {}) - Tier: {:?}, now ACTIVE at timestamp {}",
                     masternode.address,
                     total_masternodes,
                     masternode.tier,
-                    time_since_last,
                     now
                 );
             } else if should_activate {
                 tracing::debug!(
-                    "♻️  Heartbeat from {} - Tier: {:?}, Last seen: {}s ago, Active at: {}, Now: {}",
+                    "♻️  Connection from {} - Tier: {:?}, Active at: {}, Now: {}",
                     masternode.address,
                     masternode.tier,
-                    time_since_last,
                     existing.uptime_start,
                     now
                 );
@@ -283,7 +209,6 @@ impl MasternodeRegistry {
         let info = MasternodeInfo {
             masternode: masternode.clone(),
             reward_address: reward_address.clone(),
-            last_heartbeat: now,
             uptime_start: now,
             total_uptime: 0,
             is_active: should_activate, // Only mark as active if explicitly requested
@@ -309,35 +234,6 @@ impl MasternodeRegistry {
             now
         );
         Ok(())
-    }
-
-    pub async fn heartbeat(&self, address: &str) -> Result<(), RegistryError> {
-        let now = Self::now();
-        let mut masternodes = self.masternodes.write().await;
-
-        if let Some(info) = masternodes.get_mut(address) {
-            let was_active = info.is_active;
-            info.last_heartbeat = now;
-
-            if !was_active {
-                // Masternode came back online
-                info.is_active = true;
-                info.uptime_start = now;
-                info!("✓ Masternode {} is back online", address);
-            }
-
-            // Persist to disk
-            let key = format!("masternode:{}", address);
-            let value =
-                bincode::serialize(&info).map_err(|e| RegistryError::Storage(e.to_string()))?;
-            self.db
-                .insert(key.as_bytes(), value)
-                .map_err(|e| RegistryError::Storage(e.to_string()))?;
-
-            Ok(())
-        } else {
-            Err(RegistryError::NotFound)
-        }
     }
 
     /// Get masternodes that are currently active (regardless of when they joined this period)
@@ -470,6 +366,7 @@ impl MasternodeRegistry {
     pub async fn get_masternodes_for_rewards(
         &self,
         blockchain: &crate::blockchain::Blockchain,
+        connection_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) -> Vec<MasternodeInfo> {
         const REWARD_SLOTS: usize = 10; // Number of masternodes to reward per block
         const MIN_PARTICIPATION_SECS: u64 = 3600; // 1 hour minimum participation before eligible
@@ -481,13 +378,13 @@ impl MasternodeRegistry {
             .unwrap()
             .as_secs();
 
-        // CRITICAL FIX: Only include ACTIVE masternodes that are still sending heartbeats
-        // Get all active masternodes that have participated for at least 1 hour
+        // CRITICAL: Only include masternodes with active TCP connections
+        // Get all connected masternodes that have participated for at least 1 hour
         let mut all_nodes: Vec<MasternodeInfo> = masternodes
             .values()
             .filter(|mn| {
-                // Must be active (receiving heartbeats)
-                if !mn.is_active {
+                // Must have active TCP connection (gives immediate disconnect notification)
+                if !connection_registry.is_connected(&mn.masternode.address) {
                     return false;
                 }
                 // Must have participated for minimum time
@@ -688,51 +585,6 @@ impl MasternodeRegistry {
         }
     }
 
-    pub async fn broadcast_heartbeat(
-        &self,
-        heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
-    ) {
-        use crate::network::message::NetworkMessage;
-
-        // Use broadcast channel to send to all connected peers
-        if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-            let msg = NetworkMessage::HeartbeatBroadcast(heartbeat.clone());
-            match tx.send(msg) {
-                Ok(receiver_count) => {
-                    if receiver_count > 0 {
-                        tracing::debug!("📡 Broadcast heartbeat to {} peer(s)", receiver_count);
-                    }
-                }
-                Err(_) => {
-                    tracing::trace!("No peers connected to receive heartbeat");
-                }
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub async fn broadcast_attestation(
-        &self,
-        attestation: crate::heartbeat_attestation::WitnessAttestation,
-    ) {
-        use crate::network::message::NetworkMessage;
-
-        if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-            let msg = NetworkMessage::HeartbeatAttestation(attestation);
-            match tx.send(msg) {
-                Ok(0) => {
-                    tracing::debug!("✍️ Attestation created (no peers connected)");
-                }
-                Ok(receivers) => {
-                    tracing::debug!("📡 Broadcast attestation to {} peer(s)", receivers);
-                }
-                Err(_) => {
-                    tracing::debug!("Attestation broadcast skipped (no active connections)");
-                }
-            }
-        }
-    }
-
     /// Broadcast any network message (used by consensus protocols)
     pub async fn broadcast_message(&self, msg: crate::network::message::NetworkMessage) {
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
@@ -748,102 +600,6 @@ impl MasternodeRegistry {
                 }
             }
         }
-    }
-
-    /// Receive and process a heartbeat broadcast from another masternode
-    pub async fn receive_heartbeat_broadcast(
-        &self,
-        heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
-        health_ai: Option<&Arc<crate::ai::MasternodeHealthAI>>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Update the masternode's last_heartbeat timestamp
-        let mn_address = &heartbeat.masternode_address;
-
-        let mut masternodes = self.masternodes.write().await;
-        if let Some(info) = masternodes.get_mut(mn_address) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            info.last_heartbeat = now;
-            info.is_active = true;
-            tracing::debug!("💓 Updated last_heartbeat for masternode {}", mn_address);
-
-            // Record heartbeat in AI (if available)
-            if let Some(ai) = health_ai {
-                if let Err(e) = ai.record_heartbeat(mn_address, now).await {
-                    tracing::warn!("Failed to record AI heartbeat: {}", e);
-                }
-            }
-        } else {
-            // Masternode not in registry - register it from heartbeat
-            // This ensures masternodes are discovered even if we missed their announcement
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            // Use the masternode address as the reward address (best guess from heartbeat)
-            let reward_address = format!("TIME{}", &mn_address.replace('.', ""));
-
-            let info = MasternodeInfo {
-                masternode: crate::types::Masternode::new_legacy(
-                    mn_address.clone(),
-                    reward_address.clone(),
-                    0, // Unknown from heartbeat
-                    heartbeat.masternode_pubkey,
-                    crate::types::MasternodeTier::Free,
-                    now,
-                ),
-                reward_address,
-                last_heartbeat: now,
-                uptime_start: now,
-                total_uptime: 0,
-                is_active: true,
-            };
-
-            let total = masternodes.len() + 1;
-            masternodes.insert(mn_address.clone(), info.clone());
-
-            // Persist to disk
-            let key = format!("masternode:{}", mn_address);
-            if let Ok(value) = bincode::serialize(&info) {
-                let _ = self.db.insert(key.as_bytes(), value);
-            }
-
-            tracing::info!(
-                "✅ Discovered masternode {} from heartbeat (total: {})",
-                mn_address,
-                total
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Receive and process an attestation broadcast
-    pub async fn receive_attestation_broadcast(
-        &self,
-        attestation: crate::heartbeat_attestation::WitnessAttestation,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Update the witness masternode's last_heartbeat
-        let attester = &attestation.witness_address;
-
-        let mut masternodes = self.masternodes.write().await;
-        if let Some(info) = masternodes.get_mut(attester) {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            info.last_heartbeat = now;
-            info.is_active = true;
-            tracing::debug!(
-                "✍️ Updated last_heartbeat for attesting masternode {}",
-                attester
-            );
-        }
-
-        Ok(())
     }
 
     // ========== Phase 2.2: Collateral Validation Methods ==========

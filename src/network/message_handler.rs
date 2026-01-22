@@ -8,7 +8,6 @@ use crate::block::types::calculate_merkle_root;
 use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::consensus::ConsensusEngine;
-use crate::heartbeat_attestation::HeartbeatAttestationSystem;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::NetworkMessage;
@@ -48,7 +47,6 @@ pub struct MessageContext {
     // Extended context for full message handling
     pub utxo_manager: Option<Arc<UTXOStateManager>>,
     pub peer_manager: Option<Arc<PeerManager>>,
-    pub attestation_system: Option<Arc<HeartbeatAttestationSystem>>,
     pub seen_blocks: Option<Arc<DeduplicationFilter>>,
     pub seen_transactions: Option<Arc<DeduplicationFilter>>,
     // Node identity for voting
@@ -71,7 +69,6 @@ impl MessageContext {
             broadcast_tx: None,
             utxo_manager: None,
             peer_manager: None,
-            attestation_system: None,
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address: None,
@@ -96,7 +93,6 @@ impl MessageContext {
             broadcast_tx: Some(broadcast_tx),
             utxo_manager: None,
             peer_manager: None,
-            attestation_system: None,
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address: None,
@@ -243,16 +239,6 @@ impl MessageHandler {
             }
             NetworkMessage::LockedCollateralsResponse(collaterals) => {
                 self.handle_locked_collaterals_response(collaterals.clone(), context)
-                    .await
-            }
-
-            // === Heartbeat Messages ===
-            NetworkMessage::HeartbeatBroadcast(heartbeat) => {
-                self.handle_heartbeat_broadcast(heartbeat.clone(), context)
-                    .await
-            }
-            NetworkMessage::HeartbeatAttestation(attestation) => {
-                self.handle_heartbeat_attestation(attestation.clone(), context)
                     .await
             }
 
@@ -1714,115 +1700,6 @@ impl MessageHandler {
                     self.direction, synced, conflicts, invalid
                 );
             }
-        }
-
-        Ok(None)
-    }
-
-    /// Handle HeartbeatBroadcast
-    async fn handle_heartbeat_broadcast(
-        &self,
-        heartbeat: crate::heartbeat_attestation::SignedHeartbeat,
-        context: &MessageContext,
-    ) -> Result<Option<NetworkMessage>, String> {
-        debug!(
-            "💓 [{}] Received heartbeat from {} (height {})",
-            self.direction, heartbeat.masternode_address, heartbeat.block_height
-        );
-
-        // Check for opportunistic sync
-        let our_height = context.blockchain.get_height();
-        if heartbeat.block_height > our_height {
-            info!(
-                "🔄 [{}] Opportunistic sync: peer {} at height {} (we're at {})",
-                self.direction, heartbeat.masternode_address, heartbeat.block_height, our_height
-            );
-
-            // Request blocks from this peer
-            let start_height = our_height + 1;
-            let request = NetworkMessage::GetBlocks(start_height, heartbeat.block_height);
-
-            if let Err(e) = context
-                .peer_registry
-                .send_to_peer(&heartbeat.masternode_address, request)
-                .await
-            {
-                debug!(
-                    "⚠️ [{}] Failed to request blocks from {}: {}",
-                    self.direction, heartbeat.masternode_address, e
-                );
-            }
-        }
-
-        // Process heartbeat through masternode registry
-        if let Err(e) = context
-            .masternode_registry
-            .receive_heartbeat_broadcast(heartbeat.clone(), None)
-            .await
-        {
-            debug!("⚠️ [{}] Failed to process heartbeat: {}", self.direction, e);
-        }
-
-        // Process through attestation system if available
-        if let Some(attestation_system) = &context.attestation_system {
-            if let Ok(Some(attestation)) = attestation_system
-                .receive_heartbeat(heartbeat.clone())
-                .await
-            {
-                // Broadcast attestation
-                if let Some(broadcast_tx) = &context.broadcast_tx {
-                    let msg = NetworkMessage::HeartbeatAttestation(attestation);
-                    let _ = broadcast_tx.send(msg);
-                }
-            }
-        }
-
-        // Re-broadcast heartbeat to other peers
-        if let Some(broadcast_tx) = &context.broadcast_tx {
-            let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
-            let _ = broadcast_tx.send(msg);
-        }
-
-        Ok(None)
-    }
-
-    /// Handle HeartbeatAttestation
-    async fn handle_heartbeat_attestation(
-        &self,
-        attestation: crate::heartbeat_attestation::WitnessAttestation,
-        context: &MessageContext,
-    ) -> Result<Option<NetworkMessage>, String> {
-        debug!(
-            "📝 [{}] Received heartbeat attestation from {}",
-            self.direction, attestation.witness_address
-        );
-
-        // Add attestation to the attestation system
-        if let Some(attestation_system) = &context.attestation_system {
-            if let Err(e) = attestation_system
-                .add_attestation(attestation.clone())
-                .await
-            {
-                debug!("⚠️ [{}] Failed to add attestation: {}", self.direction, e);
-            }
-        }
-
-        // Process through masternode registry
-        if let Err(e) = context
-            .masternode_registry
-            .receive_attestation_broadcast(attestation.clone())
-            .await
-        {
-            debug!(
-                "⚠️ [{}] Failed to process attestation: {}",
-                self.direction, e
-            );
-        }
-
-        // Re-broadcast to other peers
-        if let Some(broadcast_tx) = &context.broadcast_tx {
-            let msg = NetworkMessage::HeartbeatAttestation(attestation);
-            let _ = broadcast_tx.send(msg);
         }
 
         Ok(None)

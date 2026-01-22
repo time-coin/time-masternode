@@ -12,7 +12,6 @@ pub mod constants;
 pub mod crypto;
 pub mod error;
 pub mod finality_proof;
-pub mod heartbeat_attestation;
 pub mod masternode_authority;
 pub mod masternode_registry;
 pub mod network;
@@ -37,7 +36,6 @@ use chrono::Timelike;
 use clap::Parser;
 use config::Config;
 use consensus::ConsensusEngine;
-use heartbeat_attestation::HeartbeatAttestationSystem;
 use masternode_registry::MasternodeRegistry;
 use network::connection_manager::ConnectionManager;
 use network::message::NetworkMessage;
@@ -338,11 +336,6 @@ async fn main() {
     println!("  ✅ Peer manager initialized");
     println!();
 
-    // Initialize heartbeat attestation system
-    let attestation_system = Arc::new(HeartbeatAttestationSystem::new());
-    println!("  ✅ Heartbeat attestation system initialized");
-    println!();
-
     println!("✓ Ready to process transactions\n");
 
     // Initialize ConsensusEngine with direct reference to masternode registry
@@ -537,17 +530,11 @@ async fn main() {
                 // Mark this as our local masternode
                 registry.set_local_masternode(mn.address.clone()).await;
 
-                // Set up attestation system identity
-                // Generate or load signing key (for now, generate fresh)
+                // Set signing key for consensus engine
                 use ed25519_dalek::SigningKey;
                 use rand::rngs::OsRng;
                 let mut csprng = OsRng;
                 let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
-                attestation_system
-                    .set_local_identity(mn.address.clone(), signing_key.clone())
-                    .await;
-
-                // Set signing key for consensus engine
                 if let Err(e) =
                     consensus_engine.set_identity(mn.address.clone(), signing_key.clone())
                 {
@@ -555,7 +542,6 @@ async fn main() {
                 }
 
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
-                tracing::info!("✓ Heartbeat attestation identity configured");
                 tracing::info!("✓ Consensus engine identity configured");
 
                 // Broadcast masternode announcement to the network so peers discover us
@@ -574,60 +560,28 @@ async fn main() {
             }
         }
 
-        // Start heartbeat task with attestation
-        let registry_clone = registry.clone();
-        let attestation_clone = attestation_system.clone();
-        let blockchain_clone = blockchain.clone();
-        let mn_address = mn.address.clone();
+        // Start peer exchange task (for masternode discovery)
         let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
-        let heartbeat_handle = tokio::spawn(async move {
+        let peer_exchange_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
                 tokio::select! {
                     _ = shutdown_token_clone.cancelled() => {
-                        tracing::debug!("🛑 Heartbeat task shutting down gracefully");
+                        tracing::debug!("🛑 Peer exchange task shutting down gracefully");
                         break;
                     }
                     _ = interval.tick() => {
-                        // Update old-style heartbeat
-                        if let Err(e) = registry_clone.heartbeat(&mn_address).await {
-                            tracing::warn!("❌ Failed to send heartbeat: {}", e);
-                        }
-
-                        // NOTE: Masternode announcements are only sent on initial connection handshake
-                        // (see server.rs handle_inbound_peer). Periodic re-announcements cause rate
-                        // limit violations (1 per 5min limit) and lead to nodes banning each other.
-                        // Discovery happens via GetMasternodes/MasternodesResponse protocol below.
-
                         // Request masternodes from all connected peers for peer exchange
                         tracing::info!("📤 Broadcasting GetMasternodes to all peers");
                         peer_connection_registry_clone
                             .broadcast(NetworkMessage::GetMasternodes)
                             .await;
-
-                        // Create and broadcast attestable heartbeat
-                        let block_height = blockchain_clone.get_height();
-                        match attestation_clone.create_heartbeat(block_height).await {
-                            Ok(heartbeat) => {
-                                tracing::debug!(
-                                    "💓 Created signed heartbeat seq {} at height {}",
-                                    heartbeat.sequence_number,
-                                    heartbeat.block_height
-                                );
-                                // Broadcast directly through peer connections (not registry channel)
-                                let msg = NetworkMessage::HeartbeatBroadcast(heartbeat);
-                                peer_connection_registry_clone.broadcast(msg).await;
-                            }
-                            Err(e) => {
-                                tracing::warn!("❌ Failed to create attestable heartbeat: {}", e);
-                            }
-                        }
                     }
                 }
             }
         });
-        shutdown_manager.register_task(heartbeat_handle);
+        shutdown_manager.register_task(peer_exchange_handle);
     }
 
     // Initialize blockchain and sync from peers in background
@@ -1752,7 +1706,6 @@ async fn main() {
         local_ip.clone(),
         config.network.blacklisted_peers.clone(),
         combined_whitelist,
-        attestation_system.clone(),
     )
     .await
     {
@@ -1794,7 +1747,6 @@ async fn main() {
             let rpc_addr_clone = rpc_addr.clone();
             let rpc_network = network_type;
             let rpc_shutdown_token = shutdown_token.clone();
-            let rpc_attestation = attestation_system.clone();
             let rpc_blacklist = server.blacklist.clone();
 
             let rpc_handle = tokio::spawn(async move {
@@ -1805,7 +1757,6 @@ async fn main() {
                     rpc_network,
                     rpc_registry,
                     rpc_blockchain,
-                    rpc_attestation,
                     rpc_blacklist,
                 )
                 .await
@@ -1834,7 +1785,6 @@ async fn main() {
                 peer_manager.clone(),
                 registry.clone(),
                 blockchain.clone(),
-                attestation_system.clone(),
                 network_type,
                 config.network.max_peers as usize,
                 peer_connection_registry.clone(),

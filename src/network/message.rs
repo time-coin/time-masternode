@@ -103,9 +103,6 @@ pub enum NetworkMessage {
     // Peer exchange
     GetPeers,
     PeersResponse(Vec<String>), // List of peer addresses (IP:port)
-    // Heartbeat attestation
-    HeartbeatBroadcast(crate::heartbeat_attestation::SignedHeartbeat),
-    HeartbeatAttestation(crate::heartbeat_attestation::WitnessAttestation),
     // Fork resolution
     GetBlockHash(u64),
     BlockHashResponse {
@@ -280,8 +277,6 @@ impl NetworkMessage {
             NetworkMessage::PendingTransactionsResponse(_) => "PendingTransactionsResponse",
             NetworkMessage::GetPeers => "GetPeers",
             NetworkMessage::PeersResponse(_) => "PeersResponse",
-            NetworkMessage::HeartbeatBroadcast(_) => "HeartbeatBroadcast",
-            NetworkMessage::HeartbeatAttestation(_) => "HeartbeatAttestation",
             NetworkMessage::GetBlockHash(_) => "GetBlockHash",
             NetworkMessage::BlockHashResponse { .. } => "BlockHashResponse",
             NetworkMessage::ConsensusQuery { .. } => "ConsensusQuery",

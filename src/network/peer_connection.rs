@@ -1646,74 +1646,7 @@ impl PeerConnection {
                 // MessageHandler handles adding to discovered_peers
                 let _ = handler.handle_message(&message, &context).await;
             }
-            NetworkMessage::HeartbeatBroadcast(heartbeat) => {
-                // Use unified message handler with broadcast capability
-                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
-                let (consensus, block_cache, broadcast_tx) =
-                    peer_registry.get_tsdc_resources().await;
-
-                let mut context = MessageContext::minimal(
-                    Arc::clone(blockchain),
-                    Arc::clone(peer_registry),
-                    Arc::clone(masternode_registry),
-                );
-                context.consensus = consensus;
-                context.block_cache = block_cache;
-                context.broadcast_tx = broadcast_tx;
-
-                let _ = handler.handle_message(&message, &context).await;
-
-                // Check for opportunistic sync - peer has higher block height
-                let our_height = blockchain.get_height();
-                if heartbeat.block_height > our_height {
-                    // Throttle opportunistic sync: only request once per 60 seconds
-                    // ✅ REFACTORED: Opportunistic sync removed - causes request storms
-                    // Sync coordinator in blockchain.rs periodic task handles all sync now
-                    // See: analysis/REFACTORING_ROADMAP.md - Phase 3, Step 3.2 (COMPLETED)
-                    //
-                    // Leaving throttle check in place for potential future use
-                    let _should_sync = {
-                        let last_sync = self.last_opportunistic_sync.read().await;
-                        match *last_sync {
-                            None => true,
-                            Some(last_time) => last_time.elapsed() > Duration::from_secs(60),
-                        }
-                    };
-
-                    // Opportunistic sync DISABLED - periodic sync handles this better
-                    // The periodic compare_chain_with_peers() task already:
-                    // - Queries all peers for consensus
-                    // - Uses sync_coordinator for throttling
-                    // - Handles fork resolution properly
-                    //
-                    // This prevents the sync storm issue where we'd fire 5-10 sync
-                    // requests for a single ChainTipResponse
-                    debug!(
-                        "📊 [{:?}] Peer {} at height {} (we're at {}) - periodic sync will handle if needed",
-                        self.direction,
-                        heartbeat.masternode_address,
-                        heartbeat.block_height,
-                        our_height
-                    );
-                }
-            }
-            NetworkMessage::HeartbeatAttestation(_) => {
-                // Use unified message handler
-                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
-                let (consensus, block_cache, broadcast_tx) =
-                    peer_registry.get_tsdc_resources().await;
-
-                let mut context = MessageContext::minimal(
-                    Arc::clone(blockchain),
-                    Arc::clone(peer_registry),
-                    Arc::clone(masternode_registry),
-                );
-                context.consensus = consensus;
-                context.block_cache = block_cache;
-                context.broadcast_tx = broadcast_tx;
-
-                let _ = handler.handle_message(&message, &context).await;
-            }
+            // Heartbeat messages removed - using TCP connection state instead
             NetworkMessage::GetBlockRange { .. } => {
                 // Use unified message handler
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);

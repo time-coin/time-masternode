@@ -359,72 +359,16 @@ impl TSCDConsensus {
             }
         };
 
-        // Filter to only recently active masternodes (received heartbeat within window)
-        // This ensures we don't wait for offline/disconnected nodes
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-
-        // CRITICAL FIX: ALWAYS disable heartbeat filtering during catchup to ensure
-        // all nodes use the SAME masternode list. The heartbeat filter creates
-        // non-deterministic leader selection because different nodes receive heartbeats
-        // at different times, causing disagreement on who the leader is.
-        //
-        // During normal block production (not catchup), strict filtering is fine.
-        // But during catchup, determinism is MORE important than liveness filtering.
-        let heartbeat_window = u64::MAX; // Always disable filtering for catchup
-
-        // Build network health context for AI (if available)
-        let network_health = crate::ai::NetworkHealth::default(); // TODO: Get from network optimizer
-
+        // CRITICAL: Use TCP connection state to determine active masternodes.
+        // This gives immediate disconnect notifications and ensures all nodes
+        // see the same connection state for deterministic leader selection.
         let masternodes: Vec<_> = all_masternodes
             .clone()
             .into_iter()
-            .filter(|mn| {
-                let time_since_heartbeat = now.saturating_sub(mn.last_heartbeat);
-
-                // Use AI adaptive timeout if available and enabled
-                let timeout_secs = if let Some(ref health_ai) = self.health_ai {
-                    // AI recommends adaptive timeout
-                    let prediction = tokio::task::block_in_place(|| {
-                        tokio::runtime::Handle::current().block_on(health_ai.recommend_timeout(
-                            &mn.masternode.address,
-                            &network_health,
-                            target_height,
-                        ))
-                    });
-
-                    if prediction.confidence > 0.5 {
-                        tracing::debug!(
-                            "🧠 [AI Timeout] {} → {}s (confidence: {:.1}%, reason: {})",
-                            mn.masternode.address,
-                            prediction.recommended_timeout_secs,
-                            prediction.confidence * 100.0,
-                            prediction.reason
-                        );
-                        prediction.recommended_timeout_secs
-                    } else {
-                        heartbeat_window
-                    }
-                } else {
-                    heartbeat_window
-                };
-
-                let passes = time_since_heartbeat < timeout_secs;
-                if !passes {
-                    tracing::debug!(
-                        "Filtering out {} - heartbeat {}s ago (timeout: {}s)",
-                        mn.masternode.address,
-                        time_since_heartbeat,
-                        timeout_secs
-                    );
-                }
-                passes
-            })
+            .filter(|mn| mn.is_active)
             .collect();
 
-        // With heartbeat filtering disabled for catchup, all nodes should have the same list
+        // With TCP connection-based filtering, all nodes should have the same list
         let mut masternodes = masternodes;
 
         if masternodes.is_empty() {

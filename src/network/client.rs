@@ -13,7 +13,7 @@
 
 use crate::ai::adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionConfig};
 use crate::blockchain::Blockchain;
-use crate::heartbeat_attestation::HeartbeatAttestationSystem;
+// use crate::heartbeat_attestation::HeartbeatAttestationSystem; // Removed - using TCP connection state
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::peer_connection::{PeerConnection, PeerStateManager};
@@ -28,7 +28,6 @@ pub struct NetworkClient {
     peer_manager: Arc<PeerManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
-    attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_connection_registry: Arc<PeerConnectionRegistry>,
     peer_state: Arc<PeerStateManager>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
@@ -47,7 +46,6 @@ impl NetworkClient {
         peer_manager: Arc<PeerManager>,
         masternode_registry: Arc<MasternodeRegistry>,
         blockchain: Arc<Blockchain>,
-        attestation_system: Arc<HeartbeatAttestationSystem>,
         network_type: NetworkType,
         max_peers: usize,
         peer_connection_registry: Arc<PeerConnectionRegistry>,
@@ -65,7 +63,6 @@ impl NetworkClient {
             peer_manager,
             masternode_registry,
             blockchain,
-            attestation_system,
             peer_connection_registry,
             peer_state,
             connection_manager,
@@ -82,7 +79,6 @@ impl NetworkClient {
         let peer_manager = self.peer_manager.clone();
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
-        let attestation_system = self.attestation_system.clone();
         let peer_registry = self.peer_connection_registry.clone();
         let _peer_state = self.peer_state.clone();
         let connection_manager = self.connection_manager.clone();
@@ -161,7 +157,6 @@ impl NetworkClient {
                 let conn_mgr = connection_manager.clone();
                 let mn_reg = masternode_registry.clone();
                 let bc = blockchain.clone();
-                let attest = attestation_system.clone();
                 let peer_mgr = peer_manager.clone();
                 let peer_reg = peer_registry.clone();
                 let local_ip_clone = local_ip.clone();
@@ -175,7 +170,6 @@ impl NetworkClient {
                         conn_mgr,
                         mn_reg,
                         bc,
-                        attest,
                         peer_mgr,
                         peer_reg,
                         true, // is_masternode flag
@@ -288,7 +282,6 @@ impl NetworkClient {
                     let conn_mgr = connection_manager.clone();
                     let mn_reg = masternode_registry.clone();
                     let bc = blockchain.clone();
-                    let attest = attestation_system.clone();
                     let peer_mgr = peer_manager.clone();
                     let peer_reg = peer_registry.clone();
                     let local_ip_clone = local_ip.clone();
@@ -302,7 +295,6 @@ impl NetworkClient {
                             conn_mgr,
                             mn_reg,
                             bc,
-                            attest,
                             peer_mgr,
                             peer_reg,
                             is_registered_masternode, // treat registered masternodes as whitelisted
@@ -386,7 +378,6 @@ impl NetworkClient {
                             connection_manager.clone(),
                             masternode_registry.clone(),
                             blockchain.clone(),
-                            attestation_system.clone(),
                             peer_manager.clone(),
                             peer_registry.clone(),
                             true,
@@ -472,7 +463,6 @@ impl NetworkClient {
                             connection_manager.clone(),
                             masternode_registry.clone(),
                             blockchain.clone(),
-                            attestation_system.clone(),
                             peer_manager.clone(),
                             peer_registry.clone(),
                             false,
@@ -521,7 +511,6 @@ fn spawn_connection_task(
     connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
-    attestation_system: Arc<HeartbeatAttestationSystem>,
     peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
     is_masternode: bool,
@@ -556,7 +545,6 @@ fn spawn_connection_task(
                 connection_manager.clone(),
                 masternode_registry.clone(),
                 blockchain.clone(),
-                attestation_system.clone(),
                 peer_manager.clone(),
                 peer_registry.clone(),
                 local_ip.clone(),
@@ -668,7 +656,6 @@ async fn maintain_peer_connection(
     connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
-    _attestation_system: Arc<HeartbeatAttestationSystem>,
     _peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
     _local_ip: Option<String>,

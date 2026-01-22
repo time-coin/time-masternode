@@ -1563,11 +1563,16 @@ impl Blockchain {
 
         // Use blockchain-based masternode eligibility for rewards (consensus-safe)
         // This ensures all nodes agree on which masternodes get rewards, preventing forks
-        // Only masternodes that participated in recent blocks are eligible
-        let masternodes = self
-            .masternode_registry
-            .get_masternodes_for_rewards(self)
-            .await;
+        // Only masternodes with active TCP connections are eligible
+        let peer_registry = self.peer_registry.read().await;
+        let masternodes = if let Some(ref registry) = *peer_registry {
+            self.masternode_registry
+                .get_masternodes_for_rewards(self, registry)
+                .await
+        } else {
+            tracing::warn!("⚠️  No peer registry available for masternode rewards");
+            vec![]
+        };
 
         tracing::info!(
             "💰 Block {}: distributing rewards to {} active masternodes",
