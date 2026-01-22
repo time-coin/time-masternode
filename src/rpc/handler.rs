@@ -325,7 +325,8 @@ impl RpcHandler {
                     "value": output.value as f64 / 100_000_000.0,
                     "n": i,
                     "scriptPubKey": {
-                        "hex": hex::encode(&output.script_pubkey)
+                        "hex": hex::encode(&output.script_pubkey),
+                        "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
                     }
                 })).collect::<Vec<_>>(),
                 "confirmations": 0,
@@ -334,14 +335,57 @@ impl RpcHandler {
             }));
         }
 
+        // Search blockchain for the transaction
+        let current_height = self.blockchain.get_height();
+        
+        // Search last 1000 blocks (should cover recent transactions)
+        let start_height = current_height.saturating_sub(1000);
+        
+        for height in (start_height..=current_height).rev() {
+            if let Ok(block) = self.blockchain.get_block_by_height(height).await {
+                for tx in &block.transactions {
+                    if tx.txid() == txid_array {
+                        let confirmations = current_height - height + 1;
+                        return Ok(json!({
+                            "txid": hex::encode(txid_array),
+                            "version": tx.version,
+                            "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
+                            "locktime": tx.lock_time,
+                            "vin": tx.inputs.iter().map(|input| json!({
+                                "txid": hex::encode(input.previous_output.txid),
+                                "vout": input.previous_output.vout,
+                                "sequence": input.sequence,
+                                "scriptSig": {
+                                    "hex": hex::encode(&input.script_sig)
+                                }
+                            })).collect::<Vec<_>>(),
+                            "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
+                                "value": output.value as f64 / 100_000_000.0,
+                                "n": i,
+                                "scriptPubKey": {
+                                    "hex": hex::encode(&output.script_pubkey),
+                                    "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
+                                }
+                            })).collect::<Vec<_>>(),
+                            "confirmations": confirmations,
+                            "time": tx.timestamp,
+                            "blocktime": block.header.timestamp,
+                            "blockhash": hex::encode(block.hash()),
+                            "height": height
+                        }));
+                    }
+                }
+            }
+        }
+
         Err(RpcError {
             code: -5,
-            message: "No information available about transaction".to_string(),
+            message: "No information available about transaction (searched last 1000 blocks)".to_string(),
         })
     }
 
     async fn get_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let _txid_str = params
+        let txid_str = params
             .first()
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
@@ -352,9 +396,56 @@ impl RpcHandler {
         let verbose = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
 
         if verbose {
+            // Return verbose JSON format
             self.get_transaction(params).await
         } else {
-            Ok(json!("raw_transaction_hex_placeholder"))
+            // Return raw hex-encoded transaction
+            let txid = hex::decode(txid_str).map_err(|_| RpcError {
+                code: -8,
+                message: "Invalid txid format".to_string(),
+            })?;
+
+            if txid.len() != 32 {
+                return Err(RpcError {
+                    code: -8,
+                    message: "Invalid txid length".to_string(),
+                });
+            }
+
+            let mut txid_array = [0u8; 32];
+            txid_array.copy_from_slice(&txid);
+
+            // Check mempool first
+            if let Some(tx) = self.mempool.read().await.get(&txid_array) {
+                let tx_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
+                    code: -8,
+                    message: "Failed to serialize transaction".to_string(),
+                })?;
+                return Ok(json!(hex::encode(tx_bytes)));
+            }
+
+            // Search blockchain
+            let current_height = self.blockchain.get_height();
+            let start_height = current_height.saturating_sub(1000);
+            
+            for height in (start_height..=current_height).rev() {
+                if let Ok(block) = self.blockchain.get_block_by_height(height).await {
+                    for tx in &block.transactions {
+                        if tx.txid() == txid_array {
+                            let tx_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
+                                code: -8,
+                                message: "Failed to serialize transaction".to_string(),
+                            })?;
+                            return Ok(json!(hex::encode(tx_bytes)));
+                        }
+                    }
+                }
+            }
+
+            Err(RpcError {
+                code: -5,
+                message: "Transaction not found".to_string(),
+            })
         }
     }
 
