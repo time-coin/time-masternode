@@ -286,6 +286,12 @@ async fn main() {
 
     let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
 
+    // Initialize UTXO states from storage
+    tracing::info!("🔧 Initializing UTXO state manager from storage...");
+    if let Err(e) = utxo_mgr.initialize_states().await {
+        eprintln!("⚠️ Warning: Failed to initialize UTXO states: {}", e);
+    }
+
     // Initialize peer manager
     let peer_db = match sled::Config::new()
         .path(format!("{}/peers", db_dir))

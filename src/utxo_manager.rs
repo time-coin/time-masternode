@@ -72,6 +72,25 @@ impl UTXOStateManager {
         }
     }
 
+    /// Initialize UTXO states from storage (call after creating with new_with_storage)
+    /// This ensures in-memory state map is synchronized with persistent storage
+    pub async fn initialize_states(&self) -> Result<usize, UtxoError> {
+        let utxos = self.storage.list_utxos().await;
+        let count = utxos.len();
+        
+        tracing::info!("🔄 Initializing UTXO states for {} UTXOs from storage", count);
+        
+        for utxo in utxos {
+            // Only initialize if not already in state map
+            if !self.utxo_states.contains_key(&utxo.outpoint) {
+                self.utxo_states.insert(utxo.outpoint, UTXOState::Unspent);
+            }
+        }
+        
+        tracing::info!("✅ UTXO state initialization complete: {} entries", self.utxo_states.len());
+        Ok(count)
+    }
+
     fn current_timestamp() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
