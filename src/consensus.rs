@@ -1771,19 +1771,27 @@ impl ConsensusEngine {
         // BYPASS: Auto-finalize for single-node or low-validator scenarios
         // In production with <3 active validators, skip consensus and finalize immediately
         // This handles development/testing and bootstrap scenarios
-        if validators_for_consensus.len() < 3 {
-            tracing::warn!(
-                "⚡ Auto-finalizing TX {:?} - insufficient validators ({} < 3) for consensus",
-                hex::encode(txid),
-                validators_for_consensus.len()
-            );
+        //
+        // ALSO: If TIMECOIN_DEV_MODE=1 is set, auto-finalize regardless of validator count
+        let dev_mode = std::env::var("TIMECOIN_DEV_MODE").unwrap_or_default() == "1";
+
+        if validators_for_consensus.len() < 3 || dev_mode {
+            if dev_mode {
+                tracing::warn!(
+                    "⚡ DEV MODE: Auto-finalizing TX {:?} (TIMECOIN_DEV_MODE=1)",
+                    hex::encode(txid)
+                );
+            } else {
+                tracing::warn!(
+                    "⚡ Auto-finalizing TX {:?} - insufficient validators ({} < 3) for consensus",
+                    hex::encode(txid),
+                    validators_for_consensus.len()
+                );
+            }
 
             // Move directly to finalized pool
             if let Some(_finalized_tx) = self.tx_pool.finalize_transaction(txid) {
-                tracing::info!(
-                    "✅ TX {:?} auto-finalized (insufficient validators)",
-                    hex::encode(txid)
-                );
+                tracing::info!("✅ TX {:?} auto-finalized", hex::encode(txid));
             }
 
             // Record finalization
@@ -1823,6 +1831,25 @@ impl ConsensusEngine {
 
         // Pre-generate vote requests (before async, so RNG doesn't cross await boundary)
         let vote_request_msg = NetworkMessage::TransactionVoteRequest { txid };
+
+        // DIAGNOSTIC: Check how many validators are actually connected as peers
+        let connected_peer_count =
+            if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
+                // We have broadcast capability, estimate peer count
+                tracing::warn!(
+                    "📡 Broadcasting vote request for TX {:?} to network peers",
+                    hex::encode(txid)
+                );
+                "unknown - check peer connections"
+            } else {
+                tracing::error!("❌ No broadcast callback available - cannot send vote requests!");
+                "0"
+            };
+
+        tracing::warn!(
+            "⚠️ If no votes received, validators may not be connected as peers. Connected: {}",
+            connected_peer_count
+        );
 
         // Spawn consensus round executor as blocking task
         let consensus = self.avalanche.clone();
