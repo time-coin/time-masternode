@@ -980,6 +980,9 @@ async fn main() {
             // Sort deterministically by address for consistent leader election across all nodes
             sort_masternodes_canonical(&mut masternodes);
 
+            // Sync masternodes to consensus engine for transaction processing
+            block_consensus_engine.update_masternodes(masternodes.clone());
+
             // Calculate time-based values for block production
             let genesis_timestamp = block_blockchain.genesis_timestamp();
             let now_timestamp = chrono::Utc::now().timestamp();
