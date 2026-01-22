@@ -1546,13 +1546,15 @@ async fn main() {
                             || time_since_expected >= 300;
 
                         if should_catchup {
+                            let registered_count = status_registry.total_count().await;
                             tracing::warn!(
                                 "📊 ═══════════════════════════════════════════════════════════════",
                             );
                             tracing::warn!(
-                                "📊 NODE STATUS | Height: {} | Active Masternodes: {} | ⚠️ {} BLOCKS BEHIND",
+                                "📊 NODE STATUS | Height: {} | Masternodes: {} active / {} registered | ⚠️ {} BLOCKS BEHIND",
                                 height,
                                 mn_count,
+                                registered_count,
                                 blocks_behind
                             );
                             tracing::warn!(
@@ -1602,13 +1604,15 @@ async fn main() {
                                 }
                             }
                         } else {
+                            let registered_count = status_registry.total_count().await;
                             tracing::warn!(
                                 "📊 ═══════════════════════════════════════════════════════════════",
                             );
                             tracing::warn!(
-                                "📊 NODE STATUS | Height: {} | Active Masternodes: {} | ✅ ON TRACK",
+                                "📊 NODE STATUS | Height: {} | Masternodes: {} active / {} registered | ✅ ON TRACK",
                                 height,
-                                mn_count
+                                mn_count,
+                                registered_count
                             );
                             tracing::warn!(
                                 "📊 ═══════════════════════════════════════════════════════════════",

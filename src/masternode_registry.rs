@@ -19,6 +19,7 @@ const MIN_PEER_REPORTS: usize = 3; // Masternode must be seen by at least 3 peer
 const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
 const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
 const MIN_PARTICIPATION_SECS: u64 = 600; // 10 minutes minimum participation (prevents reward gaming)
+const AUTO_REMOVE_AFTER_SECS: u64 = 3600; // Auto-remove masternodes with no peer reports for 1 hour
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -933,12 +934,63 @@ impl MasternodeRegistry {
             }
         }
 
-        if status_changes > 0 || total_active > 0 {
-            tracing::info!(
-                "🧹 Cleanup: {} status changes, {} total active masternodes",
-                status_changes,
-                total_active
-            );
+        // Auto-remove masternodes with no peer reports for extended period
+        let mut to_remove = Vec::new();
+        for (address, info) in masternodes.iter() {
+            if info.peer_reports.is_empty() {
+                // Check when last seen
+                let last_seen = info.uptime_start;
+                let time_since_last_seen = now.saturating_sub(last_seen);
+
+                if time_since_last_seen > AUTO_REMOVE_AFTER_SECS {
+                    warn!(
+                        "🗑️  Scheduling auto-removal of masternode {} (inactive for {} minutes)",
+                        address,
+                        time_since_last_seen / 60
+                    );
+                    to_remove.push(address.clone());
+                }
+            }
+        }
+
+        // Remove dead masternodes and broadcast unlock messages
+        for address in &to_remove {
+            if let Some(info) = masternodes.remove(address) {
+                // Remove from disk
+                let key = format!("masternode:{}", address);
+                let _ = self.db.remove(key.as_bytes());
+
+                info!("🗑️  Removed masternode {} from registry", address);
+
+                // Broadcast unlock if has collateral
+                if let Some(collateral_outpoint) = info.masternode.collateral_outpoint {
+                    let unlock_msg = crate::network::message::NetworkMessage::MasternodeUnlock {
+                        address: address.clone(),
+                        collateral_outpoint,
+                        timestamp: now,
+                    };
+                    drop(masternodes); // Release lock before async operation
+                    self.broadcast_message(unlock_msg).await;
+                    masternodes = self.masternodes.write().await; // Re-acquire
+                }
+            }
+        }
+
+        if status_changes > 0 || total_active > 0 || !to_remove.is_empty() {
+            if !to_remove.is_empty() {
+                tracing::info!(
+                    "🧹 Cleanup: {} status changes, {} removed, {} total active masternodes",
+                    status_changes,
+                    to_remove.len(),
+                    total_active
+                );
+            } else {
+                tracing::info!(
+                    "🧹 Cleanup: {} status changes, {} total active masternodes",
+                    status_changes,
+                    total_active
+                );
+            }
         }
     }
 }
