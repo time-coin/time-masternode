@@ -78,16 +78,17 @@ impl AvalancheHandler {
 
     /// Initialize timevote with current validators
     pub async fn initialize_validators(&self) {
-        let validators = self
-            .masternode_registry
-            .list_active()
-            .await
-            .into_iter()
-            .map(|mn| crate::consensus::ValidatorInfo {
-                address: mn.masternode.address,
-                weight: mn.masternode.tier.sampling_weight(),
-            })
-            .collect();
+        let validators = Arc::new(
+            self.masternode_registry
+                .list_active()
+                .await
+                .into_iter()
+                .map(|mn| crate::consensus::ValidatorInfo {
+                    address: mn.masternode.address,
+                    weight: mn.masternode.tier.sampling_weight(),
+                })
+                .collect::<Vec<_>>(),
+        );
 
         self.consensus.update_validators(validators);
         tracing::info!("🏔️ timevote consensus initialized with validators");

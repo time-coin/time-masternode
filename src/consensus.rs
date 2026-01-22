@@ -616,7 +616,8 @@ pub struct AvalancheConsensus {
     finalized_txs: DashMap<Hash256, (Preference, Instant)>,
 
     /// Validator list with weight info for stake-weighted sampling
-    validators: Arc<RwLock<Vec<ValidatorInfo>>>,
+    /// Using RwLock with Arc<Vec> to minimize cloning
+    validators: RwLock<Arc<Vec<ValidatorInfo>>>,
 
     /// AVS (Active Validator Set) snapshots per slot for finality vote verification
     /// slot_index -> AVSSnapshot
@@ -680,7 +681,7 @@ impl AvalancheConsensus {
             tx_state: DashMap::new(),
             active_rounds: DashMap::new(),
             finalized_txs: DashMap::new(),
-            validators: Arc::new(RwLock::new(Vec::new())),
+            validators: RwLock::new(Arc::new(Vec::new())),
             avs_snapshots: DashMap::new(),
             vfp_votes: DashMap::new(),
             prepare_votes: Arc::new(PrepareVoteAccumulator::new()),
@@ -697,14 +698,15 @@ impl AvalancheConsensus {
     }
 
     /// Update the list of active validators with their weights
-    pub fn update_validators(&self, validators: Vec<ValidatorInfo>) {
+    /// Uses Arc to avoid cloning the entire list
+    pub fn update_validators(&self, validators: Arc<Vec<ValidatorInfo>>) {
         let mut v = self.validators.write();
         *v = validators;
     }
 
-    /// Get current validators
-    pub fn get_validators(&self) -> Vec<ValidatorInfo> {
-        self.validators.read().clone()
+    /// Get current validators (returns Arc to avoid cloning)
+    pub fn get_validators(&self) -> Arc<Vec<ValidatorInfo>> {
+        Arc::clone(&self.validators.read())
     }
 
     /// Cleanup finalized transactions and associated state older than retention period
@@ -1308,14 +1310,16 @@ impl ConsensusEngine {
         &self,
         masternodes: &[crate::masternode_registry::MasternodeInfo],
     ) {
-        let validators: Vec<ValidatorInfo> = masternodes
-            .iter()
-            .filter(|mn| mn.is_active)
-            .map(|mn| ValidatorInfo {
-                address: mn.masternode.address.clone(),
-                weight: mn.masternode.tier.sampling_weight(),
-            })
-            .collect();
+        let validators: Arc<Vec<ValidatorInfo>> = Arc::new(
+            masternodes
+                .iter()
+                .filter(|mn| mn.is_active)
+                .map(|mn| ValidatorInfo {
+                    address: mn.masternode.address.clone(),
+                    weight: mn.masternode.tier.sampling_weight(),
+                })
+                .collect(),
+        );
 
         let count = validators.len();
         self.avalanche.update_validators(validators);
