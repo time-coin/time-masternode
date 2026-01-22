@@ -381,47 +381,69 @@ impl RpcHandler {
         // Fallback: Search blockchain for the transaction
         let current_height = self.blockchain.get_height();
         
+        tracing::debug!("Searching blockchain for transaction {} (height: 0-{})", hex::encode(&txid_array), current_height);
+        
+        let mut blocks_searched = 0;
+        let mut blocks_failed = 0;
+        
         // Search entire blockchain from newest to oldest
         for height in (0..=current_height).rev() {
-            if let Ok(block) = self.blockchain.get_block_by_height(height).await {
-                for tx in &block.transactions {
-                    if tx.txid() == txid_array {
-                        let confirmations = current_height - height + 1;
-                        return Ok(json!({
-                            "txid": hex::encode(txid_array),
-                            "version": tx.version,
-                            "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
-                            "locktime": tx.lock_time,
-                            "vin": tx.inputs.iter().map(|input| json!({
-                                "txid": hex::encode(input.previous_output.txid),
-                                "vout": input.previous_output.vout,
-                                "sequence": input.sequence,
-                                "scriptSig": {
-                                    "hex": hex::encode(&input.script_sig)
-                                }
-                            })).collect::<Vec<_>>(),
-                            "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
-                                "value": output.value as f64 / 100_000_000.0,
-                                "n": i,
-                                "scriptPubKey": {
-                                    "hex": hex::encode(&output.script_pubkey),
-                                    "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
-                                }
-                            })).collect::<Vec<_>>(),
-                            "confirmations": confirmations,
-                            "time": tx.timestamp,
-                            "blocktime": block.header.timestamp,
-                            "blockhash": hex::encode(block.hash()),
-                            "height": height
-                        }));
+            match self.blockchain.get_block_by_height(height).await {
+                Ok(block) => {
+                    blocks_searched += 1;
+                    for tx in &block.transactions {
+                        if tx.txid() == txid_array {
+                            tracing::info!("Found transaction {} in block {} (searched {} blocks)", hex::encode(&txid_array), height, blocks_searched);
+                            let confirmations = current_height - height + 1;
+                            return Ok(json!({
+                                "txid": hex::encode(txid_array),
+                                "version": tx.version,
+                                "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
+                                "locktime": tx.lock_time,
+                                "vin": tx.inputs.iter().map(|input| json!({
+                                    "txid": hex::encode(input.previous_output.txid),
+                                    "vout": input.previous_output.vout,
+                                    "sequence": input.sequence,
+                                    "scriptSig": {
+                                        "hex": hex::encode(&input.script_sig)
+                                    }
+                                })).collect::<Vec<_>>(),
+                                "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
+                                    "value": output.value as f64 / 100_000_000.0,
+                                    "n": i,
+                                    "scriptPubKey": {
+                                        "hex": hex::encode(&output.script_pubkey),
+                                        "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
+                                    }
+                                })).collect::<Vec<_>>(),
+                                "confirmations": confirmations,
+                                "time": tx.timestamp,
+                                "blocktime": block.header.timestamp,
+                                "blockhash": hex::encode(block.hash()),
+                                "height": height
+                            }));
+                        }
+                    }
+                }
+                Err(e) => {
+                    blocks_failed += 1;
+                    if blocks_failed < 5 {  // Only log first few failures
+                        tracing::warn!("Failed to get block {} during tx search: {}", height, e);
                     }
                 }
             }
         }
 
+        tracing::warn!(
+            "Transaction {} not found after searching {} blocks ({} failed)",
+            hex::encode(&txid_array),
+            blocks_searched,
+            blocks_failed
+        );
+
         Err(RpcError {
             code: -5,
-            message: "No information available about transaction (searched entire blockchain)".to_string(),
+            message: format!("No information available about transaction (searched {} blocks, {} failed)", blocks_searched, blocks_failed),
         })
     }
 
