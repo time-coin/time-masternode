@@ -19,7 +19,6 @@ use crate::state_notifier::StateNotifier;
 use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
-use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use ed25519_dalek::Verifier;
 use parking_lot::RwLock;
@@ -1227,8 +1226,8 @@ pub struct AvalancheMetrics {
 
 #[allow(dead_code)]
 pub struct ConsensusEngine {
-    // Lock-free reads using ArcSwap (changes are infrequent)
-    masternodes: ArcSwap<Vec<Masternode>>,
+    // Reference to the masternode registry (single source of truth)
+    masternode_registry: Arc<MasternodeRegistry>,
     // Set once at startup - use OnceLock
     identity: OnceLock<NodeIdentity>,
     pub utxo_manager: Arc<UTXOStateManager>,
@@ -1241,13 +1240,16 @@ pub struct ConsensusEngine {
 }
 
 impl ConsensusEngine {
-    pub fn new(masternodes: Vec<Masternode>, utxo_manager: Arc<UTXOStateManager>) -> Self {
+    pub fn new(
+        masternode_registry: Arc<MasternodeRegistry>,
+        utxo_manager: Arc<UTXOStateManager>,
+    ) -> Self {
         let avalanche_config = AvalancheConfig::default();
         let avalanche = AvalancheConsensus::new(avalanche_config)
             .expect("Failed to initialize TimeVote consensus");
 
         Self {
-            masternodes: ArcSwap::from_pointee(masternodes),
+            masternode_registry,
             identity: OnceLock::new(),
             utxo_manager,
             tx_pool: Arc::new(TransactionPool::new()),
@@ -1265,11 +1267,12 @@ impl ConsensusEngine {
         let avalanche = AvalancheConsensus::new(avalanche_config)
             .expect("Failed to initialize TimeVote consensus");
 
-        // Create UTXO manager with in-memory storage
+        // Create UTXO manager and masternode registry with in-memory storage
         let utxo_manager = Arc::new(UTXOStateManager::new());
+        let masternode_registry = Arc::new(MasternodeRegistry::new());
 
         Self {
-            masternodes: ArcSwap::from_pointee(Vec::new()),
+            masternode_registry,
             identity: OnceLock::new(),
             utxo_manager,
             tx_pool: Arc::new(TransactionPool::new()),
@@ -1297,10 +1300,6 @@ impl ConsensusEngine {
                 signing_key,
             })
             .map_err(|_| "Identity already set".to_string())
-    }
-
-    pub fn update_masternodes(&self, masternodes: Vec<Masternode>) {
-        self.masternodes.store(Arc::new(masternodes));
     }
 
     /// Sync timevote validators from a list of masternodes
@@ -1384,16 +1383,18 @@ impl ConsensusEngine {
     // MASTERNODE HELPERS
     // ========================================================================
 
-    // Lock-free read of masternodes
-    fn get_masternodes(&self) -> arc_swap::Guard<Arc<Vec<Masternode>>> {
-        self.masternodes.load()
+    // Lock-free read of masternodes from registry
+    fn get_masternodes(&self) -> Vec<Masternode> {
+        // Get active masternodes from the registry (single source of truth)
+        let active = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
+        });
+        active.iter().map(|info| info.masternode.clone()).collect()
     }
 
     fn is_masternode(&self, address: &str) -> bool {
-        self.masternodes
-            .load()
-            .iter()
-            .any(|mn| mn.address == address)
+        let masternodes = self.get_masternodes();
+        masternodes.iter().any(|mn| mn.address == address)
     }
 
     #[allow(dead_code)]
@@ -2010,7 +2011,7 @@ impl ConsensusEngine {
 
     #[allow(dead_code)]
     pub fn get_active_masternodes(&self) -> Vec<Masternode> {
-        self.get_masternodes().iter().cloned().collect()
+        self.get_masternodes()
     }
 
     /// Submit a transaction to the consensus engine (called from RPC)

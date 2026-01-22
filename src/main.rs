@@ -337,8 +337,8 @@ async fn main() {
 
     println!("✓ Ready to process transactions\n");
 
-    // Initialize ConsensusEngine
-    let mut consensus_engine = ConsensusEngine::new(vec![], utxo_mgr.clone());
+    // Initialize ConsensusEngine with direct reference to masternode registry
+    let mut consensus_engine = ConsensusEngine::new(Arc::clone(&registry), utxo_mgr.clone());
 
     // Enable AI validation using the same db as block storage
     consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
@@ -979,9 +979,6 @@ async fn main() {
                 eligible.iter().map(|(mn, _)| mn.clone()).collect();
             // Sort deterministically by address for consistent leader election across all nodes
             sort_masternodes_canonical(&mut masternodes);
-
-            // Sync masternodes to consensus engine for transaction processing
-            block_consensus_engine.update_masternodes(masternodes.clone());
 
             // Calculate time-based values for block production
             let genesis_timestamp = block_blockchain.genesis_timestamp();
