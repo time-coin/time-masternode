@@ -481,10 +481,16 @@ impl MasternodeRegistry {
             .unwrap()
             .as_secs();
 
-        // Get all registered masternodes that have participated for at least 1 hour
+        // CRITICAL FIX: Only include ACTIVE masternodes that are still sending heartbeats
+        // Get all active masternodes that have participated for at least 1 hour
         let mut all_nodes: Vec<MasternodeInfo> = masternodes
             .values()
             .filter(|mn| {
+                // Must be active (receiving heartbeats)
+                if !mn.is_active {
+                    return false;
+                }
+                // Must have participated for minimum time
                 let participation_time = now.saturating_sub(mn.masternode.registered_at);
                 participation_time >= MIN_PARTICIPATION_SECS
             })
