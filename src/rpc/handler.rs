@@ -338,10 +338,8 @@ impl RpcHandler {
         // Search blockchain for the transaction
         let current_height = self.blockchain.get_height();
         
-        // Search last 1000 blocks (should cover recent transactions)
-        let start_height = current_height.saturating_sub(1000);
-        
-        for height in (start_height..=current_height).rev() {
+        // Search entire blockchain from newest to oldest
+        for height in (0..=current_height).rev() {
             if let Ok(block) = self.blockchain.get_block_by_height(height).await {
                 for tx in &block.transactions {
                     if tx.txid() == txid_array {
@@ -380,7 +378,7 @@ impl RpcHandler {
 
         Err(RpcError {
             code: -5,
-            message: "No information available about transaction (searched last 1000 blocks)".to_string(),
+            message: "No information available about transaction (searched entire blockchain)".to_string(),
         })
     }
 
@@ -426,9 +424,8 @@ impl RpcHandler {
 
             // Search blockchain
             let current_height = self.blockchain.get_height();
-            let start_height = current_height.saturating_sub(1000);
             
-            for height in (start_height..=current_height).rev() {
+            for height in (0..=current_height).rev() {
                 if let Ok(block) = self.blockchain.get_block_by_height(height).await {
                     for tx in &block.transactions {
                         if tx.txid() == txid_array {
