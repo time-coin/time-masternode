@@ -1284,6 +1284,19 @@ async fn handle_peer(
                                     // Handle via response system - handled by request/response pattern
                                     peer_registry.handle_response(&ip_str, msg).await;
                                 }
+                                NetworkMessage::MasternodeStatusGossip { .. } => {
+                                    // Handle gossip via unified message handler
+                                    let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+
+                                    if let Err(e) = handler.handle_message(&msg, &context).await {
+                                        tracing::warn!("[Inbound] Error handling gossip from {}: {}", peer.addr, e);
+                                    }
+                                }
                                 _ => {}
                             }
                         } else {
