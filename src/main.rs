@@ -27,6 +27,7 @@ pub mod transaction_pool;
 pub mod transaction_priority;
 pub mod transaction_selection;
 pub mod tsdc;
+pub mod tx_index;
 pub mod types;
 pub mod utxo_manager;
 pub mod wallet;
@@ -388,13 +389,43 @@ async fn main() {
     let tsdc_consensus = Arc::new(tsdc_consensus);
 
     // Initialize blockchain
-    let blockchain = Arc::new(Blockchain::new(
+    let mut blockchain = Blockchain::new(
         block_storage,
         consensus_engine.clone(),
         registry.clone(),
         utxo_mgr.clone(),
         network_type,
-    ));
+    );
+
+    // Initialize transaction index for O(1) lookups
+    tracing::info!("🔧 Initializing transaction index...");
+    let tx_index_path = format!("{}/txindex", db_dir);
+    let tx_index = match tx_index::TransactionIndex::new(&tx_index_path) {
+        Ok(idx) => {
+            let tx_index_arc = Arc::new(idx);
+            blockchain.set_tx_index(tx_index_arc.clone());
+            Some(tx_index_arc)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to initialize transaction index: {}", e);
+            tracing::warn!("Transaction lookups will use slower blockchain scan");
+            None
+        }
+    };
+
+    let blockchain = Arc::new(blockchain);
+
+    // Build transaction index if it exists and is empty
+    if let Some(ref idx) = tx_index {
+        if idx.is_empty() && blockchain.get_height() > 0 {
+            tracing::info!("📊 Building transaction index from blockchain...");
+            if let Err(e) = blockchain.build_tx_index().await {
+                tracing::warn!("Failed to build transaction index: {}", e);
+            }
+        } else {
+            tracing::info!("✅ Transaction index ready: {} transactions indexed", idx.len());
+        }
+    }
 
     println!("✓ Blockchain initialized");
     println!();

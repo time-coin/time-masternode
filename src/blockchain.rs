@@ -219,6 +219,8 @@ pub struct Blockchain {
     validator: BlockValidator,
     /// AI-powered consensus health monitoring
     consensus_health: Arc<ConsensusHealthMonitor>,
+    /// Transaction index for O(1) transaction lookups
+    pub tx_index: Option<Arc<crate::tx_index::TransactionIndex>>,
 }
 
 impl Blockchain {
@@ -287,7 +289,55 @@ impl Blockchain {
             block_cache,
             validator,
             consensus_health,
+            tx_index: None, // Initialize without txindex, call build_tx_index() separately
         }
+    }
+
+    /// Set transaction index (called from main.rs after blockchain init)
+    pub fn set_tx_index(&mut self, tx_index: Arc<crate::tx_index::TransactionIndex>) {
+        self.tx_index = Some(tx_index);
+    }
+
+    /// Build or rebuild transaction index from blockchain
+    pub async fn build_tx_index(&self) -> Result<(), String> {
+        let tx_index = self.tx_index.as_ref().ok_or("Transaction index not initialized")?;
+        
+        let current_height = self.get_height();
+        let index_len = tx_index.len();
+        
+        tracing::info!("🔍 Building transaction index...");
+        tracing::info!("   Current blockchain height: {}", current_height);
+        tracing::info!("   Current index size: {} transactions", index_len);
+        
+        let mut indexed_count = 0;
+        let start = std::time::Instant::now();
+        
+        // Index all blocks
+        for height in 0..=current_height {
+            if let Ok(block) = self.get_block_by_height(height).await {
+                for (tx_index_in_block, tx) in block.transactions.iter().enumerate() {
+                    let txid = tx.txid();
+                    tx_index.add_transaction(&txid, height, tx_index_in_block)?;
+                    indexed_count += 1;
+                }
+            }
+            
+            // Progress updates every 100 blocks
+            if height % 100 == 0 && height > 0 {
+                tracing::info!("   Indexed {} blocks, {} transactions...", height, indexed_count);
+            }
+        }
+        
+        tx_index.flush()?;
+        
+        let elapsed = start.elapsed();
+        tracing::info!(
+            "✅ Transaction index built: {} transactions in {:.2}s",
+            indexed_count,
+            elapsed.as_secs_f64()
+        );
+        
+        Ok(())
     }
 
     /// Set peer manager for block requests
@@ -1827,6 +1877,16 @@ impl Blockchain {
             block.transactions.len(),
             block_work
         );
+
+        // Update transaction index if enabled
+        if let Some(tx_index) = &self.tx_index {
+            for (tx_index_in_block, tx) in block.transactions.iter().enumerate() {
+                let txid = tx.txid();
+                if let Err(e) = tx_index.add_transaction(&txid, block.header.height, tx_index_in_block) {
+                    tracing::warn!("Failed to update txindex for block {}: {}", block.header.height, e);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -5223,6 +5283,7 @@ impl Clone for Blockchain {
             block_cache: self.block_cache.clone(),
             validator: BlockValidator::new(self.network_type),
             consensus_health: self.consensus_health.clone(),
+            tx_index: self.tx_index.clone(),
         }
     }
 }

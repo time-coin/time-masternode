@@ -109,6 +109,7 @@ impl RpcHandler {
             "removewhitelist" => self.remove_whitelist(&params_array).await,
             "getblacklist" => self.get_blacklist().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
+            "reindextransactions" => self.reindex_transactions().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -335,7 +336,48 @@ impl RpcHandler {
             }));
         }
 
-        // Search blockchain for the transaction
+        // Use transaction index for O(1) lookup if available
+        if let Some(ref tx_index) = self.blockchain.tx_index {
+            if let Some(location) = tx_index.get_location(&txid_array) {
+                // Found in index - direct lookup
+                if let Ok(block) = self.blockchain.get_block_by_height(location.block_height).await {
+                    if let Some(tx) = block.transactions.get(location.tx_index) {
+                        let current_height = self.blockchain.get_height();
+                        let confirmations = current_height - location.block_height + 1;
+                        
+                        return Ok(json!({
+                            "txid": hex::encode(txid_array),
+                            "version": tx.version,
+                            "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
+                            "locktime": tx.lock_time,
+                            "vin": tx.inputs.iter().map(|input| json!({
+                                "txid": hex::encode(input.previous_output.txid),
+                                "vout": input.previous_output.vout,
+                                "sequence": input.sequence,
+                                "scriptSig": {
+                                    "hex": hex::encode(&input.script_sig)
+                                }
+                            })).collect::<Vec<_>>(),
+                            "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
+                                "value": output.value as f64 / 100_000_000.0,
+                                "n": i,
+                                "scriptPubKey": {
+                                    "hex": hex::encode(&output.script_pubkey),
+                                    "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
+                                }
+                            })).collect::<Vec<_>>(),
+                            "confirmations": confirmations,
+                            "time": tx.timestamp,
+                            "blocktime": block.header.timestamp,
+                            "blockhash": hex::encode(block.hash()),
+                            "height": location.block_height
+                        }));
+                    }
+                }
+            }
+        }
+
+        // Fallback: Search blockchain for the transaction
         let current_height = self.blockchain.get_height();
         
         // Search entire blockchain from newest to oldest
@@ -422,7 +464,23 @@ impl RpcHandler {
                 return Ok(json!(hex::encode(tx_bytes)));
             }
 
-            // Search blockchain
+            // Use transaction index for O(1) lookup if available
+            if let Some(ref tx_index) = self.blockchain.tx_index {
+                if let Some(location) = tx_index.get_location(&txid_array) {
+                    // Found in index - direct lookup
+                    if let Ok(block) = self.blockchain.get_block_by_height(location.block_height).await {
+                        if let Some(tx) = block.transactions.get(location.tx_index) {
+                            let tx_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
+                                code: -8,
+                                message: "Failed to serialize transaction".to_string(),
+                            })?;
+                            return Ok(json!(hex::encode(tx_bytes)));
+                        }
+                    }
+                }
+            }
+
+            // Fallback: Search blockchain
             let current_height = self.blockchain.get_height();
             
             for height in (0..=current_height).rev() {
@@ -1886,6 +1944,34 @@ impl RpcHandler {
         Ok(json!({
             "count": collaterals.len(),
             "collaterals": collaterals
+        }))
+    }
+
+    async fn reindex_transactions(&self) -> Result<Value, RpcError> {
+        // Check if transaction index is enabled
+        if self.blockchain.tx_index.is_none() {
+            return Err(RpcError {
+                code: -1,
+                message: "Transaction index not enabled".to_string(),
+            });
+        }
+
+        // Trigger reindex in background (don't block RPC response)
+        let blockchain = self.blockchain.clone();
+        tokio::spawn(async move {
+            match blockchain.build_tx_index().await {
+                Ok(()) => {
+                    tracing::info!("✅ Transaction reindex completed successfully");
+                }
+                Err(e) => {
+                    tracing::error!("❌ Transaction reindex failed: {}", e);
+                }
+            }
+        });
+
+        Ok(json!({
+            "message": "Transaction reindex started",
+            "status": "running"
         }))
     }
 }

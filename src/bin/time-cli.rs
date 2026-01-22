@@ -249,6 +249,10 @@ enum Commands {
     /// [Utility] Get daemon uptime
     #[command(display_order = 802)]
     Uptime,
+
+    /// [Utility] Rebuild transaction index
+    #[command(display_order = 803)]
+    ReindexTransactions,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -341,6 +345,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
         Commands::Uptime => ("uptime", json!([])),
+        Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
