@@ -935,9 +935,20 @@ impl RpcHandler {
         // Sort by value descending (use largest UTXOs first for efficiency)
         utxos.sort_by(|a, b| b.value.cmp(&a.value));
 
-        // Calculate required fee (0.1% of amount to match validation requirements)
-        let fee = amount_units / 1000; // 0.1% fee rate (matches consensus.rs:1251)
-        let fee = fee.max(1_000); // Minimum 0.00001 TIME fee
+        // Estimate UTXOs needed and calculate fee (0.1% of total input value)
+        let mut estimated_input = 0u64;
+        let mut temp_fee = 1_000u64; // Start with minimum
+        
+        // Find UTXOs needed (including fee)
+        for utxo in &utxos {
+            estimated_input += utxo.value;
+            temp_fee = (estimated_input / 1000).max(1_000);
+            if estimated_input >= amount_units + temp_fee {
+                break;
+            }
+        }
+        
+        let fee = temp_fee;
 
         // Find sufficient UTXOs
         let mut selected_utxos = Vec::new();

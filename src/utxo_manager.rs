@@ -77,17 +77,23 @@ impl UTXOStateManager {
     pub async fn initialize_states(&self) -> Result<usize, UtxoError> {
         let utxos = self.storage.list_utxos().await;
         let count = utxos.len();
-        
-        tracing::info!("🔄 Initializing UTXO states for {} UTXOs from storage", count);
-        
+
+        tracing::info!(
+            "🔄 Initializing UTXO states for {} UTXOs from storage",
+            count
+        );
+
         for utxo in utxos {
             // Only initialize if not already in state map
             if !self.utxo_states.contains_key(&utxo.outpoint) {
                 self.utxo_states.insert(utxo.outpoint, UTXOState::Unspent);
             }
         }
-        
-        tracing::info!("✅ UTXO state initialization complete: {} entries", self.utxo_states.len());
+
+        tracing::info!(
+            "✅ UTXO state initialization complete: {} entries",
+            self.utxo_states.len()
+        );
         Ok(count)
     }
 

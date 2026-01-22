@@ -1475,14 +1475,15 @@ impl ConsensusEngine {
             ));
         }
 
-        // Also check proportional fee (0.1% of transaction amount)
+        // Also check proportional fee (0.1% of transaction input value)
+        // Fee is based on inputs (economic value moved) not outputs (which include change)
         let fee_rate = 1000; // 0.1% = 1/1000
-        let min_proportional_fee = output_sum / fee_rate;
+        let min_proportional_fee = input_sum / fee_rate;
 
         if actual_fee < min_proportional_fee {
             return Err(format!(
                 "Insufficient fee: {} satoshis < {} satoshis required (0.1% of {})",
-                actual_fee, min_proportional_fee, output_sum
+                actual_fee, min_proportional_fee, input_sum
             ));
         }
 
