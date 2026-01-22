@@ -917,22 +917,23 @@ impl RpcHandler {
         // Get UTXOs for this wallet
         let all_utxos = self.utxo_manager.list_all_utxos().await;
 
-        // Get local masternode's reward address
-        let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .ok_or_else(|| RpcError {
-                code: -4,
-                message: "Node is not configured as a masternode".to_string(),
-            })?
-            .reward_address;
-
-        // Filter to only this node's UTXOs
-        let utxos: Vec<_> = all_utxos
+        // Filter to only spendable UTXOs (not locked as collateral)
+        let mut utxos: Vec<_> = all_utxos
             .into_iter()
-            .filter(|u| u.address == local_address)
+            .filter(|u| !self.utxo_manager.is_collateral_locked(&u.outpoint))
             .collect();
+
+        if utxos.is_empty() {
+            return Err(RpcError {
+                code: -6,
+                message:
+                    "No spendable UTXOs available (check if all funds are locked as collateral)"
+                        .to_string(),
+            });
+        }
+
+        // Sort by value descending (use largest UTXOs first for efficiency)
+        utxos.sort_by(|a, b| b.value.cmp(&a.value));
 
         // Calculate required fee (0.1% of amount to match validation requirements)
         let fee = amount_units / 1000; // 0.1% fee rate (matches consensus.rs:1251)
@@ -977,9 +978,15 @@ impl RpcHandler {
         // Add change output if necessary
         let change = total_input - amount_units - fee;
         if change > 0 {
+            // Send change back to the first input address
+            let change_address = selected_utxos
+                .first()
+                .map(|u| u.address.as_bytes().to_vec())
+                .unwrap_or_default();
+
             outputs.push(TxOutput {
                 value: change,
-                script_pubkey: vec![], // TODO: Get wallet's own address
+                script_pubkey: change_address,
             });
         }
 
