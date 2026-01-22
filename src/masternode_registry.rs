@@ -18,7 +18,7 @@ const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collat
 const MIN_PEER_REPORTS: usize = 3; // Masternode must be seen by at least 3 peers to be active
 const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
 const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
-const MIN_PARTICIPATION_SECS: u64 = 300; // 5 minutes minimum participation (reduced from 1 hour for faster bootstrap)
+const MIN_PARTICIPATION_SECS: u64 = 600; // 10 minutes minimum participation (prevents reward gaming)
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
