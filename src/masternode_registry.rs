@@ -797,14 +797,28 @@ impl MasternodeRegistry {
     ) {
         let local_addr = self.local_masternode_address.read().await.clone();
         if local_addr.is_none() {
+            tracing::debug!("📡 Gossip: Skipping - not a masternode");
             return; // Not a masternode
         }
 
         let reporter = local_addr.unwrap();
         let connected_peers = peer_registry.get_connected_peers().await;
 
+        tracing::info!(
+            "📡 Gossip: Checking visibility - we have {} connected peers, reporter: {}",
+            connected_peers.len(),
+            reporter
+        );
+
         // Find which masternodes we're connected to
         let masternodes = self.masternodes.read().await;
+
+        tracing::info!(
+            "📡 Gossip: Registry has {} total masternodes: {:?}",
+            masternodes.len(),
+            masternodes.keys().collect::<Vec<_>>()
+        );
+
         let visible: Vec<String> = masternodes
             .keys()
             .filter(|addr| connected_peers.contains(addr))
@@ -814,6 +828,10 @@ impl MasternodeRegistry {
         drop(masternodes);
 
         if visible.is_empty() {
+            tracing::warn!(
+                "📡 Gossip: No visible masternodes (connected_peers: {}, but none are in registry)",
+                connected_peers.len()
+            );
             return;
         }
 
@@ -826,7 +844,11 @@ impl MasternodeRegistry {
 
         self.broadcast_message(msg).await;
 
-        tracing::debug!("📡 Gossip: Reporting {} visible masternodes", visible.len());
+        tracing::info!(
+            "📡 Gossip: Broadcasting visibility of {} masternodes: {:?}",
+            visible.len(),
+            visible
+        );
     }
 
     /// Process received gossip - update peer_reports for each masternode
@@ -838,16 +860,19 @@ impl MasternodeRegistry {
     ) {
         let masternodes = self.masternodes.read().await;
 
-        for mn_addr in visible_masternodes {
-            if let Some(info) = masternodes.get(&mn_addr) {
+        let mut updated_count = 0;
+        for mn_addr in &visible_masternodes {
+            if let Some(info) = masternodes.get(mn_addr) {
                 info.peer_reports.insert(reporter.clone(), timestamp);
+                updated_count += 1;
             }
         }
 
-        tracing::debug!(
-            "📥 Gossip from {}: {} masternodes visible",
+        tracing::info!(
+            "📥 Gossip from {}: reports seeing {} masternodes (updated {} in registry)",
             reporter,
-            masternodes.len()
+            visible_masternodes.len(),
+            updated_count
         );
     }
 
@@ -861,6 +886,7 @@ impl MasternodeRegistry {
                 registry.cleanup_stale_reports().await;
             }
         });
+        tracing::info!("✓ Gossip cleanup task started (runs every 60s)");
     }
 
     /// Remove stale peer reports and update is_active status
@@ -868,10 +894,24 @@ impl MasternodeRegistry {
         let now = Self::now();
         let mut masternodes = self.masternodes.write().await;
 
+        let mut status_changes = 0;
+        let mut total_active = 0;
+
         for (addr, info) in masternodes.iter_mut() {
             // Remove expired reports
+            let before_count = info.peer_reports.len();
             info.peer_reports
                 .retain(|_, timestamp| now.saturating_sub(*timestamp) < REPORT_EXPIRY_SECS);
+            let after_count = info.peer_reports.len();
+
+            if before_count != after_count {
+                tracing::debug!(
+                    "Masternode {}: expired {} reports, {} remain",
+                    addr,
+                    before_count - after_count,
+                    after_count
+                );
+            }
 
             // Update is_active based on number of recent reports
             let report_count = info.peer_reports.len();
@@ -879,6 +919,7 @@ impl MasternodeRegistry {
             info.is_active = report_count >= MIN_PEER_REPORTS;
 
             if was_active != info.is_active {
+                status_changes += 1;
                 tracing::info!(
                     "Masternode {} status changed: {} ({} peer reports)",
                     addr,
@@ -886,6 +927,18 @@ impl MasternodeRegistry {
                     report_count
                 );
             }
+
+            if info.is_active {
+                total_active += 1;
+            }
+        }
+
+        if status_changes > 0 || total_active > 0 {
+            tracing::info!(
+                "🧹 Cleanup: {} status changes, {} total active masternodes",
+                status_changes,
+                total_active
+            );
         }
     }
 }
