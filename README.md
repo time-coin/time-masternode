@@ -1,11 +1,14 @@
 # TIME Coin Protocol Node
+## This is the Masternode Repository
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 ![Protocol](https://img.shields.io/badge/protocol-v6-green.svg)
 ![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
 
-A high-performance implementation of the TIME Coin Protocol v6 with sub-second instant finality via Avalanche consensus, Verifiable Finality Proofs (VFP), deterministic block checkpointing, and integrated AI optimization systems.
+TIME Coin is a next generation crypto currency built by AI and uses AI to learn, and improve connectivity.
+
+TIME Coin implements the TIME Coin Protocol v6 which uses sub-second instant finality via Avalanche consensus, Verifiable Finality Proofs (VFP), deterministic block checkpointing, and integrated AI optimization systems.
 
 ## 🚀 Features
 

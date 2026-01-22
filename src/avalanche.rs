@@ -58,7 +58,7 @@ impl AvalancheHandler {
         masternode_registry: Arc<MasternodeRegistry>,
     ) -> Result<(Self, mpsc::UnboundedReceiver<FinalityEvent>), AvalancheError> {
         let consensus = Arc::new(
-            AvalancheConsensus::new(config)
+            AvalancheConsensus::new(config, masternode_registry.clone())
                 .map_err(|e| AvalancheError::ConsensusError(e.to_string()))?,
         );
 
@@ -78,19 +78,7 @@ impl AvalancheHandler {
 
     /// Initialize timevote with current validators
     pub async fn initialize_validators(&self) {
-        let validators = Arc::new(
-            self.masternode_registry
-                .list_active()
-                .await
-                .into_iter()
-                .map(|mn| crate::consensus::ValidatorInfo {
-                    address: mn.masternode.address,
-                    weight: mn.masternode.tier.sampling_weight(),
-                })
-                .collect::<Vec<_>>(),
-        );
-
-        self.consensus.update_validators(validators);
+        // Validators now come from masternode_registry - no need to build/store list
         tracing::info!("🏔️ timevote consensus initialized with validators");
     }
 

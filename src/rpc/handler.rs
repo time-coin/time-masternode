@@ -341,11 +341,15 @@ impl RpcHandler {
         if let Some(ref tx_index) = self.blockchain.tx_index {
             if let Some(location) = tx_index.get_location(&txid_array) {
                 // Found in index - direct lookup
-                if let Ok(block) = self.blockchain.get_block_by_height(location.block_height).await {
+                if let Ok(block) = self
+                    .blockchain
+                    .get_block_by_height(location.block_height)
+                    .await
+                {
                     if let Some(tx) = block.transactions.get(location.tx_index) {
                         let current_height = self.blockchain.get_height();
                         let confirmations = current_height - location.block_height + 1;
-                        
+
                         return Ok(json!({
                             "txid": hex::encode(txid_array),
                             "version": tx.version,
@@ -380,12 +384,16 @@ impl RpcHandler {
 
         // Fallback: Search blockchain for the transaction
         let current_height = self.blockchain.get_height();
-        
-        tracing::debug!("Searching blockchain for transaction {} (height: 0-{})", hex::encode(&txid_array), current_height);
-        
+
+        tracing::debug!(
+            "Searching blockchain for transaction {} (height: 0-{})",
+            hex::encode(txid_array),
+            current_height
+        );
+
         let mut blocks_searched = 0;
         let mut blocks_failed = 0;
-        
+
         // Search entire blockchain from newest to oldest
         for height in (0..=current_height).rev() {
             match self.blockchain.get_block_by_height(height).await {
@@ -393,7 +401,12 @@ impl RpcHandler {
                     blocks_searched += 1;
                     for tx in &block.transactions {
                         if tx.txid() == txid_array {
-                            tracing::info!("Found transaction {} in block {} (searched {} blocks)", hex::encode(&txid_array), height, blocks_searched);
+                            tracing::info!(
+                                "Found transaction {} in block {} (searched {} blocks)",
+                                hex::encode(txid_array),
+                                height,
+                                blocks_searched
+                            );
                             let confirmations = current_height - height + 1;
                             return Ok(json!({
                                 "txid": hex::encode(txid_array),
@@ -427,7 +440,8 @@ impl RpcHandler {
                 }
                 Err(e) => {
                     blocks_failed += 1;
-                    if blocks_failed < 5 {  // Only log first few failures
+                    if blocks_failed < 5 {
+                        // Only log first few failures
                         tracing::warn!("Failed to get block {} during tx search: {}", height, e);
                     }
                 }
@@ -436,14 +450,17 @@ impl RpcHandler {
 
         tracing::warn!(
             "Transaction {} not found after searching {} blocks ({} failed)",
-            hex::encode(&txid_array),
+            hex::encode(txid_array),
             blocks_searched,
             blocks_failed
         );
 
         Err(RpcError {
             code: -5,
-            message: format!("No information available about transaction (searched {} blocks, {} failed)", blocks_searched, blocks_failed),
+            message: format!(
+                "No information available about transaction (searched {} blocks, {} failed)",
+                blocks_searched, blocks_failed
+            ),
         })
     }
 
@@ -491,7 +508,11 @@ impl RpcHandler {
             if let Some(ref tx_index) = self.blockchain.tx_index {
                 if let Some(location) = tx_index.get_location(&txid_array) {
                     // Found in index - direct lookup
-                    if let Ok(block) = self.blockchain.get_block_by_height(location.block_height).await {
+                    if let Ok(block) = self
+                        .blockchain
+                        .get_block_by_height(location.block_height)
+                        .await
+                    {
                         if let Some(tx) = block.transactions.get(location.tx_index) {
                             let tx_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
                                 code: -8,
@@ -505,7 +526,7 @@ impl RpcHandler {
 
             // Fallback: Search blockchain
             let current_height = self.blockchain.get_height();
-            
+
             for height in (0..=current_height).rev() {
                 if let Ok(block) = self.blockchain.get_block_by_height(height).await {
                     for tx in &block.transactions {
@@ -1107,7 +1128,7 @@ impl RpcHandler {
         // Estimate UTXOs needed and calculate fee (0.1% of total input value)
         let mut estimated_input = 0u64;
         let mut temp_fee = 1_000u64; // Start with minimum
-        
+
         // Find UTXOs needed (including fee)
         for utxo in &utxos {
             estimated_input += utxo.value;
@@ -1116,7 +1137,7 @@ impl RpcHandler {
                 break;
             }
         }
-        
+
         let fee = temp_fee;
 
         // Find sufficient UTXOs
@@ -1186,20 +1207,20 @@ impl RpcHandler {
                 // CRITICAL: Wait for instant finality before returning txid
                 // This ensures the transaction is confirmed by masternodes
                 let txid_hex = hex::encode(txid);
-                
+
                 tracing::info!("⏳ Waiting for transaction {} to finalize...", txid_hex);
-                
+
                 // Wait up to 30 seconds for finality
                 let timeout = Duration::from_secs(30);
                 let start = tokio::time::Instant::now();
-                
+
                 loop {
                     // Check if transaction is finalized
                     if self.consensus.tx_pool.is_finalized(&txid) {
                         tracing::info!("✅ Transaction {} finalized", txid_hex);
                         return Ok(json!(txid_hex));
                     }
-                    
+
                     // Check if transaction was rejected
                     if let Some(reason) = self.consensus.tx_pool.get_rejection_reason(&txid) {
                         tracing::warn!("❌ Transaction {} rejected: {}", txid_hex, reason);
@@ -1208,7 +1229,7 @@ impl RpcHandler {
                             message: format!("Transaction rejected during finality: {}", reason),
                         });
                     }
-                    
+
                     // Check timeout
                     if start.elapsed() > timeout {
                         tracing::warn!("⏰ Transaction {} finality timeout", txid_hex);
@@ -1217,7 +1238,7 @@ impl RpcHandler {
                             message: "Transaction finality timeout (30s) - transaction may still finalize later".to_string(),
                         });
                     }
-                    
+
                     // Wait a bit before checking again
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }

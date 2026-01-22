@@ -14,6 +14,7 @@ use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::peer_manager::PeerManager;
+use crate::types::{OutPoint, UTXOState}; // Add explicit imports
 use crate::utxo_manager::UTXOStateManager;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -258,6 +259,10 @@ impl MessageHandler {
             // === UTXO Messages ===
             NetworkMessage::UTXOStateQuery(outpoints) => {
                 self.handle_utxo_state_query(outpoints.clone(), context)
+                    .await
+            }
+            NetworkMessage::UTXOStateUpdate { outpoint, state } => {
+                self.handle_utxo_state_update(outpoint.clone(), state.clone(), context)
                     .await
             }
             NetworkMessage::GetUTXOStateHash => self.handle_get_utxo_state_hash(context).await,
@@ -2740,6 +2745,53 @@ impl MessageHandler {
         }
 
         Ok(())
+    }
+
+    /// Handle UTXOStateUpdate - CRITICAL for instant finality
+    /// When a node locks a UTXO for a transaction, it broadcasts the lock.
+    /// All other nodes MUST respect this lock to prevent double-spends.
+    async fn handle_utxo_state_update(
+        &self,
+        outpoint: OutPoint,
+        state: UTXOState,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        tracing::debug!(
+            "🔒 [{}] Received UTXO state update for {:?} -> {:?}",
+            self.direction,
+            outpoint,
+            state
+        );
+
+        // Apply the state update from remote node
+        if let Some(consensus) = &context.consensus {
+            consensus
+                .utxo_manager
+                .update_state(&outpoint, state.clone());
+
+            // Log important state changes
+            match state {
+                UTXOState::Locked { txid, .. } => {
+                    tracing::info!(
+                        "🔒 [{}] Locked UTXO {:?} for TX {:?}",
+                        self.direction,
+                        outpoint,
+                        hex::encode(txid)
+                    );
+                }
+                UTXOState::SpentPending { txid, .. } | UTXOState::SpentFinalized { txid, .. } => {
+                    tracing::info!(
+                        "💸 [{}] Marked UTXO {:?} as spent by TX {:?}",
+                        self.direction,
+                        outpoint,
+                        hex::encode(txid)
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        Ok(None)
     }
 }
 

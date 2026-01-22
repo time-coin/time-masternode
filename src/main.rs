@@ -423,7 +423,10 @@ async fn main() {
                 tracing::warn!("Failed to build transaction index: {}", e);
             }
         } else {
-            tracing::info!("✅ Transaction index ready: {} transactions indexed", idx.len());
+            tracing::info!(
+                "✅ Transaction index ready: {} transactions indexed",
+                idx.len()
+            );
         }
     }
 
@@ -1007,10 +1010,6 @@ async fn main() {
                 // Use only active masternodes during normal operation
                 block_registry.get_eligible_for_rewards().await
             };
-
-            // Sync validators for timevote consensus (CRITICAL for block consensus to work)
-            let active_masternodes = block_registry.list_active().await;
-            block_consensus_engine.sync_validators_from_masternodes(&active_masternodes);
 
             let mut masternodes: Vec<Masternode> =
                 eligible.iter().map(|(mn, _)| mn.clone()).collect();

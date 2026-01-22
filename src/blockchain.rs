@@ -300,18 +300,21 @@ impl Blockchain {
 
     /// Build or rebuild transaction index from blockchain
     pub async fn build_tx_index(&self) -> Result<(), String> {
-        let tx_index = self.tx_index.as_ref().ok_or("Transaction index not initialized")?;
-        
+        let tx_index = self
+            .tx_index
+            .as_ref()
+            .ok_or("Transaction index not initialized")?;
+
         let current_height = self.get_height();
         let index_len = tx_index.len();
-        
+
         tracing::info!("🔍 Building transaction index...");
         tracing::info!("   Current blockchain height: {}", current_height);
         tracing::info!("   Current index size: {} transactions", index_len);
-        
+
         let mut indexed_count = 0;
         let start = std::time::Instant::now();
-        
+
         // Index all blocks
         for height in 0..=current_height {
             match self.get_block_by_height(height).await {
@@ -319,7 +322,12 @@ impl Blockchain {
                     for (tx_index_in_block, tx) in block.transactions.iter().enumerate() {
                         let txid = tx.txid();
                         if let Err(e) = tx_index.add_transaction(&txid, height, tx_index_in_block) {
-                            tracing::error!("Failed to index tx {} in block {}: {}", hex::encode(txid), height, e);
+                            tracing::error!(
+                                "Failed to index tx {} in block {}: {}",
+                                hex::encode(txid),
+                                height,
+                                e
+                            );
                             return Err(format!("Failed to index transaction: {}", e));
                         }
                         indexed_count += 1;
@@ -330,22 +338,26 @@ impl Blockchain {
                     return Err(format!("Failed to get block {}: {}", height, e));
                 }
             }
-            
+
             // Progress updates every 100 blocks
             if height % 100 == 0 && height > 0 {
-                tracing::info!("   Indexed {} blocks, {} transactions...", height, indexed_count);
+                tracing::info!(
+                    "   Indexed {} blocks, {} transactions...",
+                    height,
+                    indexed_count
+                );
             }
         }
-        
+
         tx_index.flush()?;
-        
+
         let elapsed = start.elapsed();
         tracing::info!(
             "✅ Transaction index built: {} transactions in {:.2}s",
             indexed_count,
             elapsed.as_secs_f64()
         );
-        
+
         Ok(())
     }
 
@@ -1900,8 +1912,14 @@ impl Blockchain {
         if let Some(tx_index) = &self.tx_index {
             for (tx_index_in_block, tx) in block.transactions.iter().enumerate() {
                 let txid = tx.txid();
-                if let Err(e) = tx_index.add_transaction(&txid, block.header.height, tx_index_in_block) {
-                    tracing::warn!("Failed to update txindex for block {}: {}", block.header.height, e);
+                if let Err(e) =
+                    tx_index.add_transaction(&txid, block.header.height, tx_index_in_block)
+                {
+                    tracing::warn!(
+                        "Failed to update txindex for block {}: {}",
+                        block.header.height,
+                        e
+                    );
                 }
             }
         }

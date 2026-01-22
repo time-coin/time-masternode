@@ -1157,24 +1157,30 @@ async fn handle_peer(
                                     check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
                                     check_rate_limit!("vote");
 
-                                    // Peer is requesting our vote on a transaction
-                                    tracing::debug!("📥 Vote request from {} for TX {:?}", peer.addr, hex::encode(txid));
+                                    // PRIORITY: Spawn immediately for instant finality
+                                    let txid_val = *txid;
+                                    let peer_addr_str = peer.addr.to_string();
+                                    let ip_str_clone = ip_str.clone();
+                                    let consensus_clone = Arc::clone(&consensus);
+                                    let peer_registry_clone = Arc::clone(&peer_registry);
 
-                                    // Get our preference (Accept/Reject) for this transaction
-                                    let preference = if consensus.tx_pool.is_pending(txid) || consensus.tx_pool.get_pending(txid).is_some() {
-                                        // We have this transaction pending/finalized
-                                        "Accept".to_string()
-                                    } else {
-                                        // We don't have this transaction
-                                        "Reject".to_string()
-                                    };
+                                    tokio::spawn(async move {
+                                        tracing::debug!("📥 Vote request from {} for TX {:?}", peer_addr_str, hex::encode(txid_val));
 
-                                    // Send our vote
-                                    let vote_response = NetworkMessage::TransactionVoteResponse {
-                                        txid: *txid,
-                                        preference,
-                                    };
-                                    let _ = peer_registry.send_to_peer(&ip_str, vote_response).await;
+                                        // Get our preference (Accept/Reject) for this transaction
+                                        let preference = if consensus_clone.tx_pool.is_pending(&txid_val) || consensus_clone.tx_pool.get_pending(&txid_val).is_some() {
+                                            "Accept".to_string()
+                                        } else {
+                                            "Reject".to_string()
+                                        };
+
+                                        // Send our vote immediately
+                                        let vote_response = NetworkMessage::TransactionVoteResponse {
+                                            txid: txid_val,
+                                            preference,
+                                        };
+                                        let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
+                                    });
                                 }
                                 NetworkMessage::TransactionVoteResponse { txid, preference } => {
                                     check_message_size!(MAX_VOTE_SIZE, "VoteResponse");
