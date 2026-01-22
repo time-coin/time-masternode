@@ -4,6 +4,7 @@
 
 use crate::types::{Masternode, MasternodeTier};
 use crate::NetworkType;
+use dashmap::DashMap;
 use sled::Db;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -12,6 +13,11 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collateral UTXO (30 minutes at 10 min/block)
+
+// Gossip-based status tracking constants
+const MIN_PEER_REPORTS: usize = 3; // Masternode must be seen by at least 3 peers to be active
+const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
+const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -38,6 +44,12 @@ pub struct MasternodeInfo {
     pub uptime_start: u64,      // When current uptime period started
     pub total_uptime: u64,      // Total uptime in seconds
     pub is_active: bool,
+
+    /// Gossip-based status tracking (not serialized to disk)
+    /// Maps peer_address -> last_seen_timestamp
+    /// A masternode is active if seen by MIN_PEER_REPORTS different peers recently
+    #[serde(skip)]
+    pub peer_reports: Arc<DashMap<String, u64>>,
 }
 
 pub struct MasternodeRegistry {
@@ -75,9 +87,10 @@ impl MasternodeRegistry {
                 if let Some(_existing) = nodes.get(&ip_only) {
                     // Keep the existing one
                 } else {
-                    // New entry
+                    // New entry - initialize peer_reports
                     let mut updated_info = info;
                     updated_info.masternode.address = ip_only.clone();
+                    updated_info.peer_reports = Arc::new(DashMap::new());
                     nodes.insert(ip_only, updated_info);
                 }
             }
@@ -212,6 +225,7 @@ impl MasternodeRegistry {
             uptime_start: now,
             total_uptime: 0,
             is_active: should_activate, // Only mark as active if explicitly requested
+            peer_reports: Arc::new(DashMap::new()),
         };
 
         // Persist to disk
@@ -366,7 +380,6 @@ impl MasternodeRegistry {
     pub async fn get_masternodes_for_rewards(
         &self,
         blockchain: &crate::blockchain::Blockchain,
-        connection_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) -> Vec<MasternodeInfo> {
         const REWARD_SLOTS: usize = 10; // Number of masternodes to reward per block
         const MIN_PARTICIPATION_SECS: u64 = 3600; // 1 hour minimum participation before eligible
@@ -378,13 +391,12 @@ impl MasternodeRegistry {
             .unwrap()
             .as_secs();
 
-        // CRITICAL: Only include masternodes with active TCP connections
-        // Get all connected masternodes that have participated for at least 1 hour
+        // Use gossip consensus instead of direct connection check
         let mut all_nodes: Vec<MasternodeInfo> = masternodes
             .values()
             .filter(|mn| {
-                // Must have active TCP connection (gives immediate disconnect notification)
-                if !connection_registry.is_connected(&mn.masternode.address) {
+                // Must be active based on gossip consensus (seen by multiple peers)
+                if !mn.is_active {
                     return false;
                 }
                 // Must have participated for minimum time
@@ -741,6 +753,123 @@ impl MasternodeRegistry {
         }
 
         count
+    }
+
+    // ========== Gossip-based Status Tracking Methods ==========
+
+    /// Start gossip broadcast task - runs every 30 seconds
+    pub fn start_gossip_broadcaster(
+        &self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(GOSSIP_INTERVAL_SECS));
+            loop {
+                interval.tick().await;
+                registry.broadcast_status_gossip(&peer_registry).await;
+            }
+        });
+    }
+
+    /// Broadcast which masternodes we can see
+    async fn broadcast_status_gossip(
+        &self,
+        peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
+    ) {
+        let local_addr = self.local_masternode_address.read().await.clone();
+        if local_addr.is_none() {
+            return; // Not a masternode
+        }
+
+        let reporter = local_addr.unwrap();
+        let connected_peers = peer_registry.get_connected_peers().await;
+
+        // Find which masternodes we're connected to
+        let masternodes = self.masternodes.read().await;
+        let visible: Vec<String> = masternodes
+            .keys()
+            .filter(|addr| connected_peers.contains(addr))
+            .cloned()
+            .collect();
+
+        drop(masternodes);
+
+        if visible.is_empty() {
+            return;
+        }
+
+        let now = Self::now();
+        let msg = crate::network::message::NetworkMessage::MasternodeStatusGossip {
+            reporter: reporter.clone(),
+            visible_masternodes: visible.clone(),
+            timestamp: now,
+        };
+
+        self.broadcast_message(msg).await;
+
+        tracing::debug!("📡 Gossip: Reporting {} visible masternodes", visible.len());
+    }
+
+    /// Process received gossip - update peer_reports for each masternode
+    pub async fn process_status_gossip(
+        &self,
+        reporter: String,
+        visible_masternodes: Vec<String>,
+        timestamp: u64,
+    ) {
+        let masternodes = self.masternodes.read().await;
+
+        for mn_addr in visible_masternodes {
+            if let Some(info) = masternodes.get(&mn_addr) {
+                info.peer_reports.insert(reporter.clone(), timestamp);
+            }
+        }
+
+        tracing::debug!(
+            "📥 Gossip from {}: {} masternodes visible",
+            reporter,
+            masternodes.len()
+        );
+    }
+
+    /// Start cleanup task - runs every 60 seconds
+    pub fn start_report_cleanup(&self) {
+        let registry = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                registry.cleanup_stale_reports().await;
+            }
+        });
+    }
+
+    /// Remove stale peer reports and update is_active status
+    async fn cleanup_stale_reports(&self) {
+        let now = Self::now();
+        let mut masternodes = self.masternodes.write().await;
+
+        for (addr, info) in masternodes.iter_mut() {
+            // Remove expired reports
+            info.peer_reports
+                .retain(|_, timestamp| now.saturating_sub(*timestamp) < REPORT_EXPIRY_SECS);
+
+            // Update is_active based on number of recent reports
+            let report_count = info.peer_reports.len();
+            let was_active = info.is_active;
+            info.is_active = report_count >= MIN_PEER_REPORTS;
+
+            if was_active != info.is_active {
+                tracing::info!(
+                    "Masternode {} status changed: {} ({} peer reports)",
+                    addr,
+                    if info.is_active { "ACTIVE" } else { "INACTIVE" },
+                    report_count
+                );
+            }
+        }
     }
 }
 

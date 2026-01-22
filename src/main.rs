@@ -1718,6 +1718,11 @@ async fn main() {
                 .set_broadcast_channel(server.tx_notifier.clone())
                 .await;
 
+            // Start gossip-based masternode status tracking
+            registry.start_gossip_broadcaster(peer_connection_registry.clone());
+            registry.start_report_cleanup();
+            tracing::info!("✓ Gossip-based masternode status tracking started");
+
             // Share TSDC resources with peer connection registry for outbound connections
             peer_connection_registry
                 .set_tsdc_resources(

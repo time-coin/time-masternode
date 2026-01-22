@@ -312,6 +312,23 @@ impl MessageHandler {
                 self.handle_fallback_vote(vote.clone(), context).await
             }
 
+            // === Gossip-based Status Tracking ===
+            NetworkMessage::MasternodeStatusGossip {
+                reporter,
+                visible_masternodes,
+                timestamp,
+            } => {
+                context
+                    .masternode_registry
+                    .process_status_gossip(
+                        reporter.clone(),
+                        visible_masternodes.clone(),
+                        *timestamp,
+                    )
+                    .await;
+                Ok(None)
+            }
+
             // === Fork Alert ===
             NetworkMessage::ForkAlert {
                 your_height,

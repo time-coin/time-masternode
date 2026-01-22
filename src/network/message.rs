@@ -193,6 +193,12 @@ pub enum NetworkMessage {
     FallbackVote {
         vote: crate::types::FallbackVote,
     },
+    /// Gossip-based masternode status tracking
+    MasternodeStatusGossip {
+        reporter: String,                 // Who is reporting
+        visible_masternodes: Vec<String>, // List of masternode IPs they can see
+        timestamp: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -299,6 +305,7 @@ impl NetworkMessage {
             NetworkMessage::LivenessAlert { .. } => "LivenessAlert",
             NetworkMessage::FinalityProposal { .. } => "FinalityProposal",
             NetworkMessage::FallbackVote { .. } => "FallbackVote",
+            NetworkMessage::MasternodeStatusGossip { .. } => "MasternodeStatusGossip",
         }
     }
 
