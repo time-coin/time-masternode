@@ -18,6 +18,7 @@ const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collat
 const MIN_PEER_REPORTS: usize = 3; // Masternode must be seen by at least 3 peers to be active
 const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
 const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
+const MIN_PARTICIPATION_SECS: u64 = 300; // 5 minutes minimum participation (reduced from 1 hour for faster bootstrap)
 
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -392,23 +393,39 @@ impl MasternodeRegistry {
             .as_secs();
 
         // Use gossip consensus instead of direct connection check
+        // BOOTSTRAP MODE: If no peer reports exist yet, accept all registered masternodes
+        // This allows the network to start producing blocks while gossip propagates
         let mut all_nodes: Vec<MasternodeInfo> = masternodes
             .values()
             .filter(|mn| {
-                // Must be active based on gossip consensus (seen by multiple peers)
-                if !mn.is_active {
+                // Check participation time first
+                let participation_time = now.saturating_sub(mn.masternode.registered_at);
+                if participation_time < MIN_PARTICIPATION_SECS {
                     return false;
                 }
-                // Must have participated for minimum time
-                let participation_time = now.saturating_sub(mn.masternode.registered_at);
-                participation_time >= MIN_PARTICIPATION_SECS
+
+                // BOOTSTRAP: If gossip hasn't populated yet (no peer reports anywhere),
+                // accept all masternodes to allow initial block production
+                let total_reports: usize = masternodes.values().map(|m| m.peer_reports.len()).sum();
+
+                if total_reports == 0 {
+                    tracing::debug!(
+                        "Bootstrap mode: accepting masternode {} (no gossip reports yet)",
+                        mn.masternode.address
+                    );
+                    return true;
+                }
+
+                // Normal mode: must be active based on gossip consensus
+                mn.is_active
             })
             .cloned()
             .collect();
 
         if all_nodes.is_empty() {
             tracing::warn!(
-                "⚠️  No masternodes with 1+ hour participation for rewards at height {}",
+                "⚠️  No masternodes with {}+ minute participation for rewards at height {}",
+                MIN_PARTICIPATION_SECS / 60,
                 height
             );
             return vec![];
