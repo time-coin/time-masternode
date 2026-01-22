@@ -110,6 +110,7 @@ impl RpcHandler {
             "getblacklist" => self.get_blacklist().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
+            "gettxindexstatus" => self.get_tx_index_status().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -1959,6 +1960,7 @@ impl RpcHandler {
         // Trigger reindex in background (don't block RPC response)
         let blockchain = self.blockchain.clone();
         tokio::spawn(async move {
+            tracing::info!("🔄 Starting transaction reindex...");
             match blockchain.build_tx_index().await {
                 Ok(()) => {
                     tracing::info!("✅ Transaction reindex completed successfully");
@@ -1973,5 +1975,25 @@ impl RpcHandler {
             "message": "Transaction reindex started",
             "status": "running"
         }))
+    }
+
+    async fn get_tx_index_status(&self) -> Result<Value, RpcError> {
+        if let Some((tx_count, height)) = self.blockchain.get_tx_index_stats() {
+            Ok(json!({
+                "enabled": true,
+                "transactions_indexed": tx_count,
+                "blockchain_height": height,
+                "percent_indexed": if height > 0 {
+                    (tx_count as f64 / (height as f64 * 10.0)) * 100.0  // Estimate ~10 txs/block
+                } else {
+                    0.0
+                }
+            }))
+        } else {
+            Ok(json!({
+                "enabled": false,
+                "message": "Transaction index not initialized"
+            }))
+        }
     }
 }

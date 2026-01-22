@@ -314,11 +314,20 @@ impl Blockchain {
         
         // Index all blocks
         for height in 0..=current_height {
-            if let Ok(block) = self.get_block_by_height(height).await {
-                for (tx_index_in_block, tx) in block.transactions.iter().enumerate() {
-                    let txid = tx.txid();
-                    tx_index.add_transaction(&txid, height, tx_index_in_block)?;
-                    indexed_count += 1;
+            match self.get_block_by_height(height).await {
+                Ok(block) => {
+                    for (tx_index_in_block, tx) in block.transactions.iter().enumerate() {
+                        let txid = tx.txid();
+                        if let Err(e) = tx_index.add_transaction(&txid, height, tx_index_in_block) {
+                            tracing::error!("Failed to index tx {} in block {}: {}", hex::encode(txid), height, e);
+                            return Err(format!("Failed to index transaction: {}", e));
+                        }
+                        indexed_count += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to get block {} during indexing: {}", height, e);
+                    return Err(format!("Failed to get block {}: {}", height, e));
                 }
             }
             
@@ -338,6 +347,15 @@ impl Blockchain {
         );
         
         Ok(())
+    }
+
+    /// Get transaction index statistics
+    pub fn get_tx_index_stats(&self) -> Option<(usize, u64)> {
+        self.tx_index.as_ref().map(|idx| {
+            let tx_count = idx.len();
+            let height = self.get_height();
+            (tx_count, height)
+        })
     }
 
     /// Set peer manager for block requests
