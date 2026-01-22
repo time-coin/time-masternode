@@ -26,91 +26,67 @@ struct Args {
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "lowercase")]
 enum Commands {
-    /// Get blockchain information
+    // ============================================================
+    // BLOCKCHAIN COMMANDS
+    // ============================================================
+    /// [Blockchain] Get blockchain information
+    #[command(display_order = 100)]
     GetBlockchainInfo,
 
-    /// Get information about a specific block
+    /// [Blockchain] Get information about a specific block
+    #[command(display_order = 101)]
     GetBlock {
         /// Block height or hash
         height: u64,
     },
 
-    /// Get the current block count
+    /// [Blockchain] Get the current block count
+    #[command(display_order = 102)]
     GetBlockCount,
 
-    /// Get the hash of the best (tip) block
+    /// [Blockchain] Get the hash of the best (tip) block
+    #[command(display_order = 103)]
     GetBestBlockHash,
 
-    /// Get block hash at a given height
+    /// [Blockchain] Get block hash at a given height
+    #[command(display_order = 104)]
     GetBlockHash {
         /// Block height
         height: u64,
     },
 
-    /// Get network information
-    GetNetworkInfo,
-
-    /// Get peer information
-    GetPeerInfo,
-
-    /// Get information about the UTXO set
+    /// [Blockchain] Get information about the UTXO set
+    #[command(display_order = 105)]
     GetTxOutSetInfo,
 
-    /// Get information about a transaction
-    GetTransaction {
-        /// Transaction ID (hex)
-        txid: String,
-    },
+    // ============================================================
+    // NETWORK COMMANDS
+    // ============================================================
+    /// [Network] Get network information
+    #[command(display_order = 200)]
+    GetNetworkInfo,
 
-    /// Get raw transaction data
-    GetRawTransaction {
-        /// Transaction ID (hex)
-        txid: String,
-        /// Verbose output
-        #[arg(short, long)]
-        verbose: bool,
-    },
+    /// [Network] Get peer information
+    #[command(display_order = 201)]
+    GetPeerInfo,
 
-    /// Send a raw transaction
-    SendRawTransaction {
-        /// Hex-encoded transaction
-        hex: String,
-    },
-
-    /// Create a new transaction
-    CreateRawTransaction {
-        /// JSON array of inputs
-        inputs: String,
-        /// JSON object of outputs
-        outputs: String,
-    },
-
-    /// Decode a raw transaction
-    DecodeRawTransaction {
-        /// Hex-encoded transaction
-        hex: String,
-    },
-
-    /// Get wallet balance
+    // ============================================================
+    // WALLET COMMANDS
+    // ============================================================
+    /// [Wallet] Get wallet balance
+    #[command(display_order = 300)]
     GetBalance,
 
-    /// List unspent transaction outputs
-    ListUnspent {
-        /// Minimum confirmations
-        #[arg(default_value = "1")]
-        minconf: u32,
-        /// Maximum confirmations
-        #[arg(default_value = "9999999")]
-        maxconf: u32,
-    },
-
-    /// Get a new receiving address
-    GetNewAddress,
-
-    /// Get wallet information
+    /// [Wallet] Get wallet information
+    #[command(display_order = 301)]
     GetWalletInfo,
 
-    /// List addresses with balances (Bitcoin-compatible)
+    /// [Wallet] Get a new receiving address
+    #[command(display_order = 302)]
+    GetNewAddress,
+
+    /// [Wallet] List addresses with balances
+    #[command(display_order = 303)]
     ListReceivedByAddress {
         /// Minimum confirmations (default: 1)
         #[arg(short, long, default_value = "1")]
@@ -120,13 +96,96 @@ enum Commands {
         include_empty: bool,
     },
 
-    /// Get masternode information
+    /// [Wallet] List unspent transaction outputs
+    #[command(display_order = 304)]
+    ListUnspent {
+        /// Minimum confirmations
+        #[arg(default_value = "1")]
+        minconf: u32,
+        /// Maximum confirmations
+        #[arg(default_value = "9999999")]
+        maxconf: u32,
+    },
+
+    /// [Wallet] Send TIME to an address
+    #[command(display_order = 305)]
+    SendToAddress {
+        /// Recipient address
+        address: String,
+        /// Amount to send (in TIME)
+        amount: f64,
+    },
+
+    /// [Wallet] Merge UTXOs to reduce UTXO set size
+    #[command(display_order = 306)]
+    MergeUtxos {
+        /// Minimum number of UTXOs required to merge (default: 2)
+        #[arg(short, long, default_value = "2")]
+        min_count: usize,
+        /// Maximum number of UTXOs to merge in one transaction (default: 100)
+        #[arg(short = 'x', long, default_value = "100")]
+        max_count: usize,
+        /// Address to merge UTXOs for (optional, uses default wallet if not specified)
+        #[arg(short, long)]
+        address: Option<String>,
+    },
+
+    // ============================================================
+    // TRANSACTION COMMANDS
+    // ============================================================
+    /// [Transaction] Get information about a transaction
+    #[command(display_order = 400)]
+    GetTransaction {
+        /// Transaction ID (hex)
+        txid: String,
+    },
+
+    /// [Transaction] Get raw transaction data
+    #[command(display_order = 401)]
+    GetRawTransaction {
+        /// Transaction ID (hex)
+        txid: String,
+        /// Verbose output
+        #[arg(short, long)]
+        verbose: bool,
+    },
+
+    /// [Transaction] Create a new transaction
+    #[command(display_order = 402)]
+    CreateRawTransaction {
+        /// JSON array of inputs
+        inputs: String,
+        /// JSON object of outputs
+        outputs: String,
+    },
+
+    /// [Transaction] Decode a raw transaction
+    #[command(display_order = 403)]
+    DecodeRawTransaction {
+        /// Hex-encoded transaction
+        hex: String,
+    },
+
+    /// [Transaction] Send a raw transaction
+    #[command(display_order = 404)]
+    SendRawTransaction {
+        /// Hex-encoded transaction
+        hex: String,
+    },
+
+    // ============================================================
+    // MASTERNODE COMMANDS
+    // ============================================================
+    /// [Masternode] Get masternode information
+    #[command(display_order = 500)]
     MasternodeList,
 
-    /// Get masternode status
+    /// [Masternode] Get masternode status
+    #[command(display_order = 501)]
     MasternodeStatus,
 
-    /// Register a new masternode with locked collateral
+    /// [Masternode] Register a new masternode with locked collateral
+    #[command(display_order = 502)]
     MasternodeRegister {
         /// Masternode tier (bronze, silver, gold)
         tier: String,
@@ -140,60 +199,56 @@ enum Commands {
         node_address: String,
     },
 
-    /// Unlock masternode collateral and deregister
+    /// [Masternode] Unlock masternode collateral and deregister
+    #[command(display_order = 503)]
     MasternodeUnlock {
         /// Node address (optional, uses local if not provided)
         node_address: Option<String>,
     },
 
-    /// List all locked collaterals
+    /// [Masternode] List all locked collaterals
+    #[command(display_order = 504)]
     ListLockedCollaterals,
 
-    /// Get consensus information
-    GetConsensusInfo,
-
-    /// Validate an address
-    ValidateAddress {
-        /// Address to validate
-        address: String,
-    },
-
-    /// Stop the daemon
-    Stop,
-
-    /// Get daemon uptime
-    Uptime,
-
-    /// Get memory pool information
+    // ============================================================
+    // MEMPOOL COMMANDS
+    // ============================================================
+    /// [Mempool] Get memory pool information
+    #[command(display_order = 600)]
     GetMempoolInfo,
 
-    /// Get raw memory pool
+    /// [Mempool] Get raw memory pool
+    #[command(display_order = 601)]
     GetRawMempool {
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
     },
 
-    /// Send TIME to an address
-    SendToAddress {
-        /// Recipient address
+    // ============================================================
+    // CONSENSUS COMMANDS
+    // ============================================================
+    /// [Consensus] Get consensus information
+    #[command(display_order = 700)]
+    GetConsensusInfo,
+
+    // ============================================================
+    // UTILITY COMMANDS
+    // ============================================================
+    /// [Utility] Validate an address
+    #[command(display_order = 800)]
+    ValidateAddress {
+        /// Address to validate
         address: String,
-        /// Amount to send (in TIME)
-        amount: f64,
     },
 
-    /// Merge UTXOs to reduce UTXO set size
-    MergeUtxos {
-        /// Minimum number of UTXOs required to merge (default: 2)
-        #[arg(short, long, default_value = "2")]
-        min_count: usize,
-        /// Maximum number of UTXOs to merge in one transaction (default: 100)
-        #[arg(short = 'x', long, default_value = "100")]
-        max_count: usize,
-        /// Address to merge UTXOs for (optional, uses default wallet if not specified)
-        #[arg(short, long)]
-        address: Option<String>,
-    },
+    /// [Utility] Stop the daemon
+    #[command(display_order = 801)]
+    Stop,
+
+    /// [Utility] Get daemon uptime
+    #[command(display_order = 802)]
+    Uptime,
 }
 
 #[derive(Serialize, Deserialize)]

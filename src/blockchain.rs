@@ -2409,12 +2409,12 @@ impl Blockchain {
         // but unlocked collateral are warned but still allowed to participate.
         let eligible_masternodes: Vec<MasternodeInfo> = masternodes
             .iter()
-            .filter_map(|mn| {
+            .map(|mn| {
                 // Legacy masternodes (no collateral_outpoint) are always eligible
                 if mn.masternode.collateral_outpoint.is_none() {
-                    return Some(mn.clone());
+                    return mn.clone();
                 }
-                
+
                 // New masternodes should have locked collateral, but we allow participation
                 // even if collateral isn't locked to prevent network stalls
                 if let Some(collateral_outpoint) = &mn.masternode.collateral_outpoint {
@@ -2426,8 +2426,8 @@ impl Blockchain {
                         );
                     }
                 }
-                
-                Some(mn.clone())
+
+                mn.clone()
             })
             .collect();
 
