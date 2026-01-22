@@ -12,11 +12,12 @@ use crate::network::message::{NetworkMessage, Subscription, UTXOStateChange};
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 use crate::network::peer_connection::PeerStateManager;
 use crate::network::rate_limiter::RateLimiter;
-use crate::types::OutPoint;
+use crate::types::{OutPoint, UTXOState};
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::IpAddr;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
@@ -591,6 +592,25 @@ async fn handle_peer(
                             }
 
                             match &msg {
+                                // PRIORITY: UTXO locks MUST be processed immediately, even during block sync
+                                // This prevents double-spend race conditions
+                                NetworkMessage::UTXOStateUpdate { outpoint, state } => {
+                                    tracing::debug!("🔒 PRIORITY: Received UTXO lock update from {}", peer.addr);
+                                    consensus.utxo_manager.update_state(outpoint, state.clone());
+
+                                    // Log important locks
+                                    if let UTXOState::Locked { txid, .. } = state {
+                                        tracing::info!(
+                                            "🔒 Applied UTXO lock from peer {} for TX {:?}",
+                                            peer.addr,
+                                            hex::encode(txid)
+                                        );
+                                    }
+
+                                    // Gossip lock to other peers immediately
+                                    let _ = broadcast_tx.send(msg.clone());
+                                }
+
                                 NetworkMessage::Ack { message_type } => {
                                     tracing::debug!("✅ Received ACK for {} from {}", message_type, peer.addr);
                                     // ACKs are informational, no action needed
@@ -1157,6 +1177,9 @@ async fn handle_peer(
                                     check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
                                     check_rate_limit!("vote");
 
+                                    // PRIORITY: Increment counter to pause block production
+                                    consensus.avalanche.active_vote_requests.fetch_add(1, Ordering::SeqCst);
+
                                     // PRIORITY: Spawn immediately for instant finality
                                     let txid_val = *txid;
                                     let peer_addr_str = peer.addr.to_string();
@@ -1165,7 +1188,7 @@ async fn handle_peer(
                                     let peer_registry_clone = Arc::clone(&peer_registry);
 
                                     tokio::spawn(async move {
-                                        tracing::debug!("📥 Vote request from {} for TX {:?}", peer_addr_str, hex::encode(txid_val));
+                                        tracing::info!("🗳️  PRIORITY: Vote request from {} for TX {:?} - block production paused", peer_addr_str, hex::encode(txid_val));
 
                                         // Get our preference (Accept/Reject) for this transaction
                                         let preference = if consensus_clone.tx_pool.is_pending(&txid_val) || consensus_clone.tx_pool.get_pending(&txid_val).is_some() {
@@ -1180,6 +1203,10 @@ async fn handle_peer(
                                             preference,
                                         };
                                         let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
+
+                                        // Decrement counter to resume block production
+                                        consensus_clone.avalanche.active_vote_requests.fetch_sub(1, Ordering::SeqCst);
+                                        tracing::debug!("✅ Vote response sent for TX {:?} - block production can resume", hex::encode(txid_val));
                                     });
                                 }
                                 NetworkMessage::TransactionVoteResponse { txid, preference } => {

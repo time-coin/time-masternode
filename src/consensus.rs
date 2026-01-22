@@ -648,6 +648,10 @@ pub struct AvalancheConsensus {
     /// proposal_hash -> Vec<FallbackVote> (accumulate votes from AVS members)
     fallback_votes: DashMap<Hash256, Vec<FallbackVote>>,
 
+    /// PRIORITY: Track active vote requests to pause block production
+    /// This ensures instant finality is never blocked by block production
+    pub active_vote_requests: Arc<AtomicUsize>,
+
     /// §7.6 Liveness Fallback: Proposal to transaction mapping
     /// proposal_hash -> txid (track which proposal is for which transaction)
     proposal_to_tx: DashMap<Hash256, Hash256>,
@@ -694,6 +698,7 @@ impl AvalancheConsensus {
             fallback_votes: DashMap::new(),
             proposal_to_tx: DashMap::new(),
             fallback_rounds: DashMap::new(),
+            active_vote_requests: Arc::new(AtomicUsize::new(0)),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
         })
