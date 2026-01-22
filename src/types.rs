@@ -5,9 +5,13 @@
 use ed25519_dalek::{Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 pub type Hash256 = [u8; 32];
 pub type Signature = [u8; 64];
+
+// Import ValidatorInfo from consensus for AVSSnapshot
+pub use crate::consensus::ValidatorInfo;
 
 // Constants
 pub const SATOSHIS_PER_TIME: u64 = 100_000_000; // 1 TIME = 10^8 satoshis
@@ -478,37 +482,71 @@ impl VerifiableFinality {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AVSSnapshot {
     pub slot_index: u64,
+    /// Reference to validator set (shared via Arc to avoid cloning addresses)
+    #[serde(skip)]
+    pub validators_ref: Option<Arc<Vec<ValidatorInfo>>>,
+    /// Only used for serialization/deserialization
     pub validators: Vec<(String, u64)>, // (mn_id, weight)
     pub total_weight: u64,
     pub timestamp: u64,
 }
 
 impl AVSSnapshot {
-    /// Create a new AVS snapshot
-    pub fn new(slot_index: u64, validators: Vec<(String, u64)>) -> Self {
-        let total_weight = validators.iter().map(|(_, w)| w).sum();
+    /// Create a new AVS snapshot with shared validator reference
+    pub fn new_with_ref(slot_index: u64, validators: Arc<Vec<ValidatorInfo>>) -> Self {
+        let total_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         Self {
             slot_index,
+            validators_ref: Some(Arc::clone(&validators)),
+            validators: Vec::new(), // Empty for runtime use
+            total_weight,
+            timestamp,
+        }
+    }
+
+    /// Create a new AVS snapshot (legacy method for serialization)
+    pub fn new(slot_index: u64, validators: Vec<(String, u64)>) -> Self {
+        let total_weight = validators.iter().map(|(_, w)| w).sum();
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            slot_index,
+            validators_ref: None,
             validators,
             total_weight,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            timestamp,
         }
     }
 
     /// Check if a validator is in this snapshot
     pub fn contains_validator(&self, mn_id: &str) -> bool {
-        self.validators.iter().any(|(id, _)| id == mn_id)
+        if let Some(ref validators) = self.validators_ref {
+            validators.iter().any(|v| v.address == mn_id)
+        } else {
+            self.validators.iter().any(|(id, _)| id == mn_id)
+        }
     }
 
     /// Get validator weight if present
     pub fn get_validator_weight(&self, mn_id: &str) -> Option<u64> {
-        self.validators
-            .iter()
-            .find(|(id, _)| id == mn_id)
-            .map(|(_, w)| *w)
+        if let Some(ref validators) = self.validators_ref {
+            validators
+                .iter()
+                .find(|v| v.address == mn_id)
+                .map(|v| v.weight as u64)
+        } else {
+            self.validators
+                .iter()
+                .find(|(id, _)| id == mn_id)
+                .map(|(_, w)| *w)
+        }
     }
 
     /// Calculate voting threshold (67% of total weight)

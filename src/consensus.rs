@@ -1019,13 +1019,9 @@ impl AvalancheConsensus {
     /// Create an AVS snapshot for the current slot
     /// Captures the active validator set with their weights for finality vote verification
     pub fn create_avs_snapshot(&self, slot_index: u64) -> AVSSnapshot {
-        let validators = self.validators.read();
-        let snapshot_validators = validators
-            .iter()
-            .map(|v| (v.address.clone(), v.weight as u64))
-            .collect();
+        let validators = Arc::clone(&self.validators.read());
+        let snapshot = AVSSnapshot::new_with_ref(slot_index, validators);
 
-        let snapshot = AVSSnapshot::new(slot_index, snapshot_validators);
         self.avs_snapshots.insert(slot_index, snapshot.clone());
 
         // Cleanup old snapshots (retain 100 slots per protocol §8.4)
