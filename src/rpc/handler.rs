@@ -1182,7 +1182,46 @@ impl RpcHandler {
 
         // Broadcast transaction to consensus engine
         match self.consensus.process_transaction(tx).await {
-            Ok(_) => Ok(json!(hex::encode(txid))),
+            Ok(_) => {
+                // CRITICAL: Wait for instant finality before returning txid
+                // This ensures the transaction is confirmed by masternodes
+                let txid_hex = hex::encode(txid);
+                
+                tracing::info!("⏳ Waiting for transaction {} to finalize...", txid_hex);
+                
+                // Wait up to 30 seconds for finality
+                let timeout = Duration::from_secs(30);
+                let start = tokio::time::Instant::now();
+                
+                loop {
+                    // Check if transaction is finalized
+                    if self.consensus.tx_pool.is_finalized(&txid) {
+                        tracing::info!("✅ Transaction {} finalized", txid_hex);
+                        return Ok(json!(txid_hex));
+                    }
+                    
+                    // Check if transaction was rejected
+                    if let Some(reason) = self.consensus.tx_pool.get_rejection_reason(&txid) {
+                        tracing::warn!("❌ Transaction {} rejected: {}", txid_hex, reason);
+                        return Err(RpcError {
+                            code: -26,
+                            message: format!("Transaction rejected during finality: {}", reason),
+                        });
+                    }
+                    
+                    // Check timeout
+                    if start.elapsed() > timeout {
+                        tracing::warn!("⏰ Transaction {} finality timeout", txid_hex);
+                        return Err(RpcError {
+                            code: -26,
+                            message: "Transaction finality timeout (30s) - transaction may still finalize later".to_string(),
+                        });
+                    }
+                    
+                    // Wait a bit before checking again
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
             Err(e) => Err(RpcError {
                 code: -26,
                 message: format!("Transaction rejected: {}", e),
