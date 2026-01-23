@@ -6,6 +6,32 @@ use serde_json::{json, Value};
 #[derive(Parser, Debug)]
 #[command(name = "time-cli")]
 #[command(about = "TIME Coin CLI - Bitcoin-like RPC client", long_about = None)]
+#[command(after_help = "\
+COMMAND CATEGORIES:
+  Blockchain Commands (100-199):
+    getblockchaininfo, getblock, getblockcount, getbestblockhash, getblockhash, gettxoutsetinfo
+
+  Network Commands (200-299):
+    getnetworkinfo, getpeerinfo
+
+  Wallet Commands (300-399):
+    getbalance, getwalletinfo, getnewaddress, listreceivedbyaddress, listunspent, sendtoaddress, mergeutxos
+
+  Transaction Commands (400-499):
+    gettransaction, getrawtransaction, createrawtransaction, decoderawtransaction, sendrawtransaction
+
+  Masternode Commands (500-599):
+    masternodelist, masternodestatus, masternoderegister, masternodeunlock, listlockedcollaterals
+
+  Mempool Commands (600-699):
+    getmempoolinfo, getrawmempool
+
+  Consensus Commands (700-799):
+    getconsensusinfo
+
+  Utility Commands (800-899):
+    validateaddress, stop, uptime, reindextransactions
+")]
 struct Args {
     /// RPC server address
     #[arg(short, long, default_value = "http://127.0.0.1:24101")]
