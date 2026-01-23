@@ -608,12 +608,58 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(footer, area);
 }
 
+async fn detect_network() -> String {
+    let client = Client::new();
+
+    // Try both ports and check which network they're running
+    for (url, expected_network) in [
+        ("http://127.0.0.1:24101", "testnet"),
+        ("http://127.0.0.1:24001", "mainnet"),
+    ] {
+        if let Ok(response) = client
+            .post(url)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getblockchaininfo",
+                "params": []
+            }))
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if response.status().is_success() {
+                // Parse the response to verify the network type
+                if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
+                    if let Some(result) = rpc_response.get("result") {
+                        if let Some(chain) = result.get("chain").and_then(|c| c.as_str()) {
+                            // Verify the chain matches what we expect for this port
+                            if chain.to_lowercase() == expected_network {
+                                return url.to_string();
+                            }
+                        } else {
+                            // If no chain field, assume it's correct for this port
+                            return url.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Default to testnet if neither responds
+    "http://127.0.0.1:24101".to_string()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Parse command line arguments
-    let rpc_url = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "http://127.0.0.1:24101".to_string());
+    // Parse command line arguments or auto-detect network
+    let rpc_url = if let Some(url) = std::env::args().nth(1) {
+        url
+    } else {
+        // Auto-detect network type by checking which port responds
+        detect_network().await
+    };
 
     // Setup terminal
     enable_raw_mode()?;
