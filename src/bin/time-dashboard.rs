@@ -23,7 +23,7 @@ use std::{
 struct BlockchainInfo {
     chain: String,
     blocks: u64,
-    best_blockhash: String,
+    bestblockhash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -365,7 +365,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             ]),
             Line::from(vec![
                 Span::raw("Best Block Hash: "),
-                Span::styled(&bc.best_blockhash[..16], Style::default().fg(Color::Gray)),
+                Span::styled(&bc.bestblockhash[..16], Style::default().fg(Color::Gray)),
                 Span::raw("..."),
             ]),
         ];
