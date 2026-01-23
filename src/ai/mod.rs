@@ -1,7 +1,9 @@
 pub mod adaptive_reconnection;
 pub mod anomaly_detector;
+pub mod attack_detector;
 pub mod consensus_health;
 pub mod fork_resolver;
+pub mod metrics_dashboard;
 pub mod network_optimizer;
 pub mod peer_selector;
 pub mod predictive_sync;
@@ -11,10 +13,14 @@ pub mod transaction_validator;
 
 pub use adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionAdvice, ReconnectionPriority};
 pub use anomaly_detector::AnomalyDetector;
+pub use attack_detector::{
+    AttackDetector, AttackPattern, AttackSeverity, AttackType, MitigationAction,
+};
 pub use consensus_health::{
     ConsensusHealthMonitor, ConsensusMetrics, HealthPrediction as ConsensusHealthPrediction,
 };
 pub use fork_resolver::ForkResolver;
+pub use metrics_dashboard::AIMetricsDashboard;
 pub use network_optimizer::NetworkOptimizer;
 pub use peer_selector::AIPeerSelector;
 pub use predictive_sync::PredictiveSync;
