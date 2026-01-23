@@ -613,8 +613,10 @@ impl ForkResolver {
         let mut history = self.fork_history.write().await;
         history.push(event);
 
+        // Use more efficient drain approach instead of remove(0)
         if history.len() > MAX_FORK_HISTORY {
-            history.remove(0);
+            let excess = history.len() - MAX_FORK_HISTORY;
+            history.drain(0..excess);
         }
 
         if let Ok(encoded) = bincode::serialize(&*history) {

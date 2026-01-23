@@ -90,18 +90,21 @@ impl ForkResolutionState {
             return false;
         }
 
-        let mut sorted = self.blocks_received.clone();
-        sorted.sort_by_key(|b| b.header.height);
+        // Collect and sort heights once (avoid cloning entire blocks)
+        let mut heights: Vec<u64> = self
+            .blocks_received
+            .iter()
+            .map(|b| b.header.height)
+            .collect();
+        heights.sort_unstable();
 
         // Check continuity
-        let is_continuous = sorted
-            .windows(2)
-            .all(|w| w[1].header.height == w[0].header.height + 1);
+        let is_continuous = heights.windows(2).all(|w| w[1] == w[0] + 1);
 
         // Check reaches target
-        let reaches_target = sorted
+        let reaches_target = heights
             .last()
-            .map(|b| b.header.height >= self.target_height)
+            .map(|h| *h >= self.target_height)
             .unwrap_or(false);
 
         is_continuous && reaches_target
@@ -116,14 +119,19 @@ impl ForkResolutionState {
             return vec![(start, self.target_height)];
         }
 
-        let mut sorted = self.blocks_received.clone();
-        sorted.sort_by_key(|b| b.header.height);
+        // Collect and sort heights once (avoid cloning entire blocks)
+        let mut heights: Vec<u64> = self
+            .blocks_received
+            .iter()
+            .map(|b| b.header.height)
+            .collect();
+        heights.sort_unstable();
 
         let mut ranges = Vec::new();
 
         // Find gaps in sequence
         // If we have blocks, check if we need the common ancestor block
-        let first_block_height = sorted[0].header.height;
+        let first_block_height = heights[0];
         let mut expected = if self.common_ancestor.is_some() && first_block_height <= start + 1 {
             // If first received block is at common_ancestor+1 or lower, we've validated the ancestor
             first_block_height.max(start + 1)
@@ -132,12 +140,12 @@ impl ForkResolutionState {
             start
         };
 
-        for block in &sorted {
-            if block.header.height > expected {
+        for &height in &heights {
+            if height > expected {
                 // Gap found
-                ranges.push((expected, block.header.height - 1));
+                ranges.push((expected, height - 1));
             }
-            expected = block.header.height + 1;
+            expected = height + 1;
         }
 
         // Check if we need blocks after last received
