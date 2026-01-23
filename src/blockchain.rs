@@ -1240,57 +1240,112 @@ impl Blockchain {
             peer_height
         );
 
-        // Binary search to find common ancestor
-        let mut low = 0u64;
-        let mut high = our_height.min(peer_height);
+        // Use iterative backward search instead of binary search
+        // This is more reliable when network responses are unreliable
+        let search_start = our_height.min(peer_height);
         let mut common_ancestor = 0u64;
 
-        while low <= high {
-            let mid = (low + high) / 2;
-
+        // Search backward from current height to find matching block
+        for height in (0..=search_start).rev() {
             // Get our block hash at this height
-            let _our_hash = match self.get_block_hash(mid) {
+            let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,
-                Err(_) => break,
+                Err(_) => {
+                    tracing::warn!("⚠️ Failed to get our hash at height {}", height);
+                    continue;
+                }
             };
 
-            // Request peer's block hash at this height
-            let req = NetworkMessage::GetBlockHash(mid);
-            registry
-                .send_to_peer(peer_ip, req)
-                .await
-                .map_err(|e| format!("Failed to request block hash: {}", e))?;
+            // Request peer's block hash at this height via request/response system
+            let req = NetworkMessage::GetBlockHash(height);
 
-            // Wait for response with timeout
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            // Create channel for response
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            registry.register_response_handler(peer_ip, tx).await;
 
-            // Check if we got a response via peer registry
-            // For now, assume blocks up to genesis match and use conservative rollback
-            if mid == 0 || mid < our_height.saturating_sub(50) {
-                common_ancestor = mid;
-                low = mid + 1;
-            } else {
-                high = mid.saturating_sub(1);
+            // Send request
+            if let Err(e) = registry.send_to_peer(peer_ip, req).await {
+                tracing::warn!("⚠️ Failed to send GetBlockHash to {}: {}", peer_ip, e);
+                // Move to next height
+                continue;
             }
 
-            // Safety limit: don't search too deep
-            if high == 0 || high.saturating_sub(low) < 5 {
+            // Wait for response with timeout
+            let peer_hash_opt =
+                match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+                    Ok(Ok(NetworkMessage::BlockHashResponse {
+                        height: resp_height,
+                        hash,
+                    })) => {
+                        if resp_height == height {
+                            hash
+                        } else {
+                            tracing::warn!(
+                                "⚠️ Got hash for wrong height {} (expected {})",
+                                resp_height,
+                                height
+                            );
+                            None
+                        }
+                    }
+                    Ok(Ok(_)) => {
+                        tracing::warn!("⚠️ Got unexpected response type");
+                        None
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!("⚠️ Response channel closed for height {}", height);
+                        None
+                    }
+                    Err(_) => {
+                        tracing::debug!("⏱️ Timeout waiting for hash at height {}", height);
+                        None
+                    }
+                };
+
+            if let Some(peer_hash) = peer_hash_opt {
+                if our_hash == peer_hash {
+                    // Found common ancestor!
+                    common_ancestor = height;
+                    tracing::info!(
+                        "✅ Found common ancestor at height {} (hash: {})",
+                        height,
+                        hex::encode(&our_hash[..8])
+                    );
+                    break;
+                } else {
+                    tracing::debug!(
+                        "🔀 Fork at height {}: our {} vs peer {}",
+                        height,
+                        hex::encode(&our_hash[..8]),
+                        hex::encode(&peer_hash[..8])
+                    );
+                }
+            }
+
+            // Don't search too deep
+            if height == 0 || height < our_height.saturating_sub(100) {
+                common_ancestor = height;
+                tracing::warn!(
+                    "⚠️ Stopped search at height {} (may not be true common ancestor)",
+                    height
+                );
                 break;
             }
         }
 
-        // Conservative approach: roll back at least 10 blocks to ensure we find it
-        let rollback_to = our_height.saturating_sub(10).max(common_ancestor);
+        if common_ancestor == 0 && our_height > 0 {
+            tracing::warn!("⚠️ Could not find common ancestor via hash comparison, using genesis");
+        }
 
         tracing::warn!(
             "🔄 Rolling back from height {} to {} to find common ancestor",
             our_height,
-            rollback_to
+            common_ancestor
         );
 
-        self.rollback_to_height(rollback_to).await?;
+        self.rollback_to_height(common_ancestor).await?;
 
-        Ok(rollback_to)
+        Ok(common_ancestor)
     }
 
     /// Phase 3 Step 3: Spawn sync coordinator background task

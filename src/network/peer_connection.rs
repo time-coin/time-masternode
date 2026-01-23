@@ -246,7 +246,8 @@ pub struct MessageLoopConfig {
     pub blockchain: Option<Arc<Blockchain>>,
 
     /// Optional: Broadcast receiver for forwarding gossip and other broadcasts
-    pub broadcast_rx: Option<tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>>,
+    pub broadcast_rx:
+        Option<tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>>,
 }
 
 impl MessageLoopConfig {
@@ -2411,7 +2412,7 @@ impl PeerConnection {
                     if let Ok(msg) = result {
                         // Forward broadcast to this peer
                         if let Err(e) = self.send_message(&msg).await {
-                            warn!("⚠️ [{:?}] Failed to forward broadcast to {}: {}", 
+                            warn!("⚠️ [{:?}] Failed to forward broadcast to {}: {}",
                                   self.direction, self.peer_ip, e);
                         }
                     }
