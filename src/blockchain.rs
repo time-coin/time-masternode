@@ -1791,6 +1791,12 @@ impl Blockchain {
 
     /// Add a block to the chain
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
+        // Calculate block hash early for finality tracking
+        let block_hash = block.hash();
+
+        // Start tracking finality time for this block
+        self.consensus.record_block_received(block_hash);
+
         // CRITICAL: Verify block integrity before adding
         // Check 1: Non-genesis blocks must have non-zero previous_hash
         if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
@@ -1867,7 +1873,7 @@ impl Blockchain {
         }
 
         // Checkpoint validation: verify block hash matches checkpoint if this is a checkpoint height
-        let block_hash = block.hash();
+        // (block_hash already calculated at function start for finality tracking)
         self.validate_checkpoint(block.header.height, &block_hash)?;
 
         // CRITICAL: Validate block rewards (prevent double-counting bug)
@@ -1966,6 +1972,9 @@ impl Blockchain {
                 }
             }
         }
+
+        // Mark block as finalized (TimeVote instant finality achieved)
+        self.consensus.record_block_finalized(block_hash);
 
         Ok(())
     }
