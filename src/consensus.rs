@@ -1233,6 +1233,8 @@ pub struct AvalancheMetrics {
 // CONSENSUS ENGINE
 // ============================================================================
 
+type FinalityTimeTracker = Arc<DashMap<[u8; 32], (Instant, Option<Instant>)>>;
+
 #[allow(dead_code)]
 pub struct ConsensusEngine {
     // Reference to the masternode registry (single source of truth)
@@ -1246,6 +1248,11 @@ pub struct ConsensusEngine {
     pub avalanche: Arc<AvalancheConsensus>,
     pub finality_proof_mgr: Arc<FinalityProofManager>,
     pub ai_validator: Option<Arc<crate::ai::AITransactionValidator>>,
+
+    /// Track finality times: block_hash -> (received_at, finalized_at)
+    finality_times: FinalityTimeTracker,
+    /// Rolling average of last 20 finality times (in milliseconds)
+    avg_finality_ms: Arc<parking_lot::RwLock<Vec<f64>>>,
 }
 
 impl ConsensusEngine {
@@ -1267,6 +1274,8 @@ impl ConsensusEngine {
             avalanche: Arc::new(avalanche),
             finality_proof_mgr: Arc::new(FinalityProofManager::new(1)), // chain_id = 1 for mainnet
             ai_validator: None,
+            finality_times: Arc::new(DashMap::new()),
+            avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
 
@@ -1292,12 +1301,55 @@ impl ConsensusEngine {
             avalanche: Arc::new(avalanche),
             finality_proof_mgr: Arc::new(FinalityProofManager::new(1)),
             ai_validator: None,
+            finality_times: Arc::new(DashMap::new()),
+            avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
 
     pub fn enable_ai_validation(&mut self, db: Arc<sled::Db>) {
         self.ai_validator = Some(Arc::new(crate::ai::AITransactionValidator::new(db)));
         tracing::info!("🤖 AI transaction validation enabled");
+    }
+
+    /// Record when a block is received (start of finality tracking)
+    pub fn record_block_received(&self, block_hash: [u8; 32]) {
+        self.finality_times
+            .insert(block_hash, (Instant::now(), None));
+    }
+
+    /// Record when a block achieves finality and update average
+    pub fn record_block_finalized(&self, block_hash: [u8; 32]) {
+        if let Some(mut entry) = self.finality_times.get_mut(&block_hash) {
+            let now = Instant::now();
+            let (received_at, finalized_at) = entry.value_mut();
+            *finalized_at = Some(now);
+
+            // Calculate finality time in milliseconds
+            let finality_ms = now.duration_since(*received_at).as_secs_f64() * 1000.0;
+
+            // Update rolling average (keep last 20 measurements)
+            let mut avg = self.avg_finality_ms.write();
+            avg.push(finality_ms);
+            if avg.len() > 20 {
+                avg.remove(0);
+            }
+
+            tracing::debug!(
+                "📊 Block {} finalized in {:.2}ms",
+                hex::encode(block_hash),
+                finality_ms
+            );
+        }
+    }
+
+    /// Get average finality time in milliseconds
+    pub fn get_avg_finality_time_ms(&self) -> u64 {
+        let avg = self.avg_finality_ms.read();
+        if avg.is_empty() {
+            return 750; // Default value if no measurements yet
+        }
+        let sum: f64 = avg.iter().sum();
+        (sum / avg.len() as f64) as u64
     }
 
     pub fn set_identity(

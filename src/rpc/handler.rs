@@ -126,6 +126,9 @@ impl RpcHandler {
         let height = self.blockchain.get_height();
         let best_hash = self.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
 
+        // Get real average finality time from consensus engine
+        let avg_finality_ms = self.consensus.get_avg_finality_time_ms();
+
         Ok(json!({
             "chain": chain,
             "blocks": height,
@@ -139,7 +142,7 @@ impl RpcHandler {
             "consensus": "timevote + TSDC",
             "finality_mechanism": "timevote consensus",
             "instant_finality": true,
-            "average_finality_time_ms": 750,
+            "average_finality_time_ms": avg_finality_ms,
             "block_time_seconds": 600
         }))
     }
