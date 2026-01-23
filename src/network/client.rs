@@ -697,9 +697,15 @@ async fn maintain_peer_connection(
 
     // Run the message loop which handles ping/pong and routes other messages
     // Use the new unified message loop with builder pattern
-    let config = crate::network::peer_connection::MessageLoopConfig::new(peer_registry.clone())
+    let mut config = crate::network::peer_connection::MessageLoopConfig::new(peer_registry.clone())
         .with_masternode_registry(masternode_registry.clone())
         .with_blockchain(blockchain.clone());
+
+    // Subscribe to broadcast channel if available
+    if let (_, _, Some(broadcast_tx)) = peer_registry.get_tsdc_resources().await {
+        let broadcast_rx = broadcast_tx.subscribe();
+        config = config.with_broadcast_rx(broadcast_rx);
+    }
 
     let result = peer_conn.run_message_loop_unified(config).await;
 

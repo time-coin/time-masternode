@@ -244,6 +244,9 @@ pub struct MessageLoopConfig {
 
     /// Optional: Blockchain for block synchronization and validation
     pub blockchain: Option<Arc<Blockchain>>,
+
+    /// Optional: Broadcast receiver for forwarding gossip and other broadcasts
+    pub broadcast_rx: Option<tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>>,
 }
 
 impl MessageLoopConfig {
@@ -255,6 +258,7 @@ impl MessageLoopConfig {
             peer_registry,
             masternode_registry: None,
             blockchain: None,
+            broadcast_rx: None,
         }
     }
 
@@ -270,6 +274,15 @@ impl MessageLoopConfig {
     /// Add blockchain (builder pattern)
     pub fn with_blockchain(mut self, blockchain: Arc<Blockchain>) -> Self {
         self.blockchain = Some(blockchain);
+        self
+    }
+
+    /// Add broadcast receiver (builder pattern)
+    pub fn with_broadcast_rx(
+        mut self,
+        rx: tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>,
+    ) -> Self {
+        self.broadcast_rx = Some(rx);
         self
     }
 }
@@ -2306,7 +2319,7 @@ impl PeerConnection {
     /// ```
     pub async fn run_message_loop_unified(
         mut self,
-        config: MessageLoopConfig,
+        mut config: MessageLoopConfig,
     ) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
         let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
@@ -2356,6 +2369,9 @@ impl PeerConnection {
             return Err(e);
         }
 
+        // Extract broadcast_rx before the loop to avoid borrow checker issues
+        let mut broadcast_rx = config.broadcast_rx.take();
+
         // Main message loop
         loop {
             tokio::select! {
@@ -2379,6 +2395,24 @@ impl PeerConnection {
                         Err(e) => {
                             error!("❌ [{:?}] Error reading from {}: {}", self.direction, self.peer_ip, e);
                             break;
+                        }
+                    }
+                }
+
+                // Forward broadcast messages to peer
+                result = async {
+                    if let Some(ref mut rx) = broadcast_rx {
+                        rx.recv().await
+                    } else {
+                        // If no broadcast receiver, never resolve
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Ok(msg) = result {
+                        // Forward broadcast to this peer
+                        if let Err(e) = self.send_message(&msg).await {
+                            warn!("⚠️ [{:?}] Failed to forward broadcast to {}: {}", 
+                                  self.direction, self.peer_ip, e);
                         }
                     }
                 }
