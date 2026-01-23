@@ -12,48 +12,48 @@ use serde_json::{json, Value};
 {usage-heading} {usage}
 
 Commands:
-\tBlockchain
-\t  getblockchaininfo      Get blockchain information
-\t  getblock               Get information about a specific block
-\t  getblockcount          Get the current block count
-\t  getbestblockhash       Get the hash of the best (tip) block
-\t  getblockhash           Get block hash at a given height
-\t  gettxoutsetinfo        Get information about the UTXO set
-\tNetwork
-\t  getnetworkinfo         Get network information
-\t  getpeerinfo            Get peer information
-\tWallet
-\t  getbalance             Get wallet balance
-\t  getwalletinfo          Get wallet information
-\t  getnewaddress          Get a new receiving address
-\t  listreceivedbyaddress  List addresses with balances
-\t  listunspent            List unspent transaction outputs
-\t  sendtoaddress          Send TIME to an address
-\t  mergeutxos             Merge UTXOs to reduce UTXO set size
-\tTransaction
-\t  gettransaction         Get information about a transaction
-\t  getrawtransaction      Get raw transaction data
-\t  createrawtransaction   Create a new transaction
-\t  decoderawtransaction   Decode a raw transaction
-\t  sendrawtransaction     Send a raw transaction
-\tMasternode
-\t  masternodelist         Get masternode information
-\t  masternodestatus       Get masternode status
-\t  masternoderegister     Register a new masternode with locked collateral
-\t  masternodeunlock       Unlock masternode collateral and deregister
-\t  listlockedcollaterals  List all locked collaterals
-\tMempool
-\t  getmempoolinfo         Get memory pool information
-\t  getrawmempool          Get raw memory pool
-\tConsensus
-\t  getconsensusinfo       Get consensus information
-\tUtility
-\t  validateaddress        Validate an address
-\t  stop                   Stop the daemon
-\t  uptime                 Get daemon uptime
-\t  reindextransactions    Rebuild transaction index
-\t
-\t  help                   Print this message or the help of the given subcommand(s)
+  Blockchain
+    getblockchaininfo      Get blockchain information
+    getblock               Get information about a specific block
+    getblockcount          Get the current block count
+    getbestblockhash       Get the hash of the best (tip) block
+    getblockhash           Get block hash at a given height
+    gettxoutsetinfo        Get information about the UTXO set
+  Network
+    getnetworkinfo         Get network information
+    getpeerinfo            Get peer information
+  Wallet
+    getbalance             Get wallet balance
+    getwalletinfo          Get wallet information
+    getnewaddress          Get a new receiving address
+    listreceivedbyaddress  List addresses with balances
+    listunspent            List unspent transaction outputs
+    sendtoaddress          Send TIME to an address
+    mergeutxos             Merge UTXOs to reduce UTXO set size
+  Transaction
+    gettransaction         Get information about a transaction
+    getrawtransaction      Get raw transaction data
+    createrawtransaction   Create a new transaction
+    decoderawtransaction   Decode a raw transaction
+    sendrawtransaction     Send a raw transaction
+  Masternode
+    masternodelist         Get masternode information
+    masternodestatus       Get masternode status
+    masternoderegister     Register a new masternode with locked collateral
+    masternodeunlock       Unlock masternode collateral and deregister
+    listlockedcollaterals  List all locked collaterals
+  Mempool
+    getmempoolinfo         Get memory pool information
+    getrawmempool          Get raw memory pool
+  Consensus
+    getconsensusinfo       Get consensus information
+  Utility
+    validateaddress        Validate an address
+    stop                   Stop the daemon
+    uptime                 Get daemon uptime
+    reindextransactions    Rebuild transaction index
+  
+    help                   Print this message or the help of the given subcommand(s)
 
 {options}{after-help}
 ")]
