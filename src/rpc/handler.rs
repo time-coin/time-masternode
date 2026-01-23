@@ -6,7 +6,6 @@
 
 use super::server::{RpcError, RpcRequest, RpcResponse};
 use crate::consensus::ConsensusEngine;
-// use crate::heartbeat_attestation::HeartbeatAttestationSystem; // Removed - using TCP connection state
 use crate::masternode_registry::MasternodeRegistry;
 use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
 use crate::utxo_manager::UTXOStateManager;
@@ -88,9 +87,6 @@ impl RpcHandler {
             "getrawmempool" => self.get_raw_mempool().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
             "mergeutxos" => self.merge_utxos(&params_array).await,
-            // Heartbeat methods removed - using TCP connection state instead
-            // "getattestationstats" => ...
-            // "getheartbeathistory" => ...
             "gettransactionfinality" => self.get_transaction_finality(&params_array).await,
             "waittransactionfinality" => self.wait_transaction_finality(&params_array).await,
             "getwhitelist" => self.get_whitelist().await,
@@ -1354,11 +1350,6 @@ impl RpcHandler {
 
     // Removed: get_attestation_stats method (heartbeat functionality removed)
     // async fn get_attestation_stats(&self) -> Result<Value, RpcError> {
-    //     ...
-    // }
-
-    // Removed: get_heartbeat_history method (heartbeat functionality removed)
-    // async fn get_heartbeat_history(&self, address: &str, limit: usize) -> Result<Value, RpcError> {
     //     ...
     // }
 

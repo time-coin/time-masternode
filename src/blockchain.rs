@@ -35,7 +35,7 @@ const MAX_REORG_DEPTH: u64 = constants::blockchain::MAX_REORG_DEPTH;
 const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
 // P2P sync configuration (Phase 3 Step 4: Extended timeouts for masternodes)
-const PEER_SYNC_TIMEOUT_SECS: u64 = 60; // Short timeout to allow heartbeats (1 min)
+const PEER_SYNC_TIMEOUT_SECS: u64 = 60; // Short timeout for responsive sync (1 min)
 const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
 const MASTERNODE_SYNC_TIMEOUT_SECS: u64 = 600; // 10 minutes for masternode sync
 const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 30; // Check sync every 30 seconds (reduced from 60s for faster fork detection)

@@ -124,14 +124,6 @@ impl MasternodeRegistry {
             tracing::info!("📂 Loaded {} masternode(s) from disk", nodes.len());
         }
 
-        // Heartbeat monitoring removed - using TCP connection state instead
-        // tokio::spawn({
-        //     let registry = registry.clone();
-        //     async move {
-        //         registry.monitor_heartbeats().await;
-        //     }
-        // });
-
         Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),

@@ -42,6 +42,12 @@ pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
 
 /// Proof-of-Time attestation included in blocks
 /// This proves a masternode was online and witnessed by peers
+///
+/// DEPRECATED: Heartbeat system removed - using TCP connection state instead.
+/// This struct remains for backwards compatibility but time_attestations field
+/// in Block is always empty. Will be removed in next protocol version.
+#[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
+#[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TimeAttestation {
     /// The masternode address being attested
@@ -59,6 +65,10 @@ pub struct TimeAttestation {
 }
 
 /// A witness record proving another node saw the heartbeat
+///
+/// DEPRECATED: Part of removed heartbeat system. Will be removed in protocol v2.
+#[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
+#[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WitnessRecord {
     /// Address of the witnessing masternode
@@ -71,6 +81,7 @@ pub struct WitnessRecord {
     pub signature: String,
 }
 
+#[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
@@ -152,6 +163,7 @@ impl Block {
     }
 
     /// Compute the merkle root of time attestations
+    #[allow(deprecated)]
     pub fn compute_attestation_root(&self) -> Hash256 {
         let hashes: Vec<Hash256> = self
             .time_attestations
@@ -220,6 +232,7 @@ impl Block {
     }
 
     /// Check if a specific masternode has an attestation in this block
+    #[allow(deprecated)]
     pub fn has_attestation_for(&self, address: &str) -> bool {
         self.time_attestations
             .iter()
@@ -227,6 +240,7 @@ impl Block {
     }
 }
 
+#[allow(deprecated)]
 impl TimeAttestation {
     /// Minimum witnesses required for a valid attestation
     pub const MIN_WITNESSES: usize = 2;

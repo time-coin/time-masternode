@@ -13,7 +13,6 @@
 
 use crate::ai::adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionConfig};
 use crate::blockchain::Blockchain;
-// use crate::heartbeat_attestation::HeartbeatAttestationSystem; // Removed - using TCP connection state
 use crate::masternode_registry::MasternodeRegistry;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::peer_connection::{PeerConnection, PeerStateManager};

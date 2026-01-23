@@ -2,7 +2,6 @@ pub mod adaptive_reconnection;
 pub mod anomaly_detector;
 pub mod consensus_health;
 pub mod fork_resolver;
-pub mod masternode_health;
 pub mod network_optimizer;
 pub mod peer_selector;
 pub mod predictive_sync;
@@ -16,7 +15,6 @@ pub use consensus_health::{
     ConsensusHealthMonitor, ConsensusMetrics, HealthPrediction as ConsensusHealthPrediction,
 };
 pub use fork_resolver::ForkResolver;
-pub use masternode_health::{HealthPrediction, MasternodeHealthAI, NetworkHealth};
 pub use network_optimizer::NetworkOptimizer;
 pub use peer_selector::AIPeerSelector;
 pub use predictive_sync::PredictiveSync;

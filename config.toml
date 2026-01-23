@@ -139,11 +139,6 @@ enabled = false
 failure_prediction = true
 strategy_optimization = true
 
-[ai.masternode_health]
-# AI masternode health monitoring with adaptive timeouts (NEW - SOLVES HEARTBEAT ISSUE)
-enabled = true
-adaptive_timeouts = true
-
 [ai.sync_recovery]
 # AI sync failure recovery (experimental)
 enabled = false

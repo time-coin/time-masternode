@@ -13,7 +13,6 @@
 
 use super::handler::RpcHandler;
 use crate::consensus::ConsensusEngine;
-// use crate::heartbeat_attestation::HeartbeatAttestationSystem; // Removed - using TCP connection state
 use crate::masternode_registry::MasternodeRegistry;
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;

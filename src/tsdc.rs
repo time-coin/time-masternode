@@ -191,8 +191,6 @@ pub struct TSCDConsensus {
     config: TSCDConfig,
     /// Reference to masternode registry (masternodes ARE validators)
     masternode_registry: Option<Arc<crate::masternode_registry::MasternodeRegistry>>,
-    /// AI-powered masternode health monitoring
-    health_ai: Option<Arc<crate::ai::MasternodeHealthAI>>,
     /// Mapping from slot number to block state
     slot_states: Arc<RwLock<HashMap<u64, SlotState>>>,
     /// Current chain head (highest finalized block)
@@ -214,7 +212,6 @@ impl TSCDConsensus {
         Self {
             config,
             masternode_registry: None,
-            health_ai: None,
             slot_states: Arc::new(RwLock::new(HashMap::new())),
             chain_head: Arc::new(RwLock::new(None)),
             finalized_height: Arc::new(AtomicU64::new(0)),
@@ -232,7 +229,6 @@ impl TSCDConsensus {
         Self {
             config,
             masternode_registry: Some(registry),
-            health_ai: None,
             slot_states: Arc::new(RwLock::new(HashMap::new())),
             chain_head: Arc::new(RwLock::new(None)),
             finalized_height: Arc::new(AtomicU64::new(0)),
@@ -248,11 +244,6 @@ impl TSCDConsensus {
         registry: Arc<crate::masternode_registry::MasternodeRegistry>,
     ) {
         self.masternode_registry = Some(registry);
-    }
-
-    /// Set the AI health monitor
-    pub fn set_health_ai(&mut self, health_ai: Arc<crate::ai::MasternodeHealthAI>) {
-        self.health_ai = Some(health_ai);
     }
 
     /// Set this node's validator identity
