@@ -1260,7 +1260,7 @@ mod tests {
 
         // Add UTXOs
         for i in 60..70 {
-            let outpoint = create_test_outpoint(i);
+            let _outpoint = create_test_outpoint(i);
             let utxo = create_test_utxo(i);
             manager.add_utxo(utxo).await.unwrap();
         }

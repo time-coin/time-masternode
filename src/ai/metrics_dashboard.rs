@@ -382,8 +382,10 @@ mod tests {
 
         // Add improving metrics
         for i in 0..10 {
-            let mut metrics = AIMetricsDashboard::default();
-            metrics.overall_ai_health = 0.5 + (i as f64 * 0.05);
+            let metrics = AIMetricsDashboard {
+                overall_ai_health: 0.5 + (i as f64 * 0.05),
+                ..Default::default()
+            };
             collector.record_metrics(metrics);
         }
 

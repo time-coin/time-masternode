@@ -1275,7 +1275,9 @@ impl ConsensusEngine {
     pub fn new_test(avalanche_config: AvalancheConfig) -> Self {
         // Create UTXO manager and masternode registry with in-memory storage
         let utxo_manager = Arc::new(UTXOStateManager::new());
-        let masternode_registry = Arc::new(MasternodeRegistry::new());
+        let db = Arc::new(sled::Config::new().temporary(true).open().unwrap());
+        let masternode_registry =
+            Arc::new(MasternodeRegistry::new(db, crate::NetworkType::Testnet));
 
         let avalanche = AvalancheConsensus::new(avalanche_config, masternode_registry.clone())
             .expect("Failed to initialize TimeVote consensus");
@@ -3140,6 +3142,12 @@ impl ConsensusEngine {
 }
 
 #[cfg(test)]
+fn create_test_registry() -> Arc<MasternodeRegistry> {
+    let db = Arc::new(sled::Config::new().temporary(true).open().unwrap());
+    Arc::new(MasternodeRegistry::new(db, crate::NetworkType::Testnet))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -3150,7 +3158,7 @@ mod tests {
     #[test]
     fn test_timevote_init() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let av = AvalancheConsensus::new(config, registry).unwrap();
         assert_eq!(av.get_validators().len(), 0);
     }
@@ -3158,7 +3166,7 @@ mod tests {
     #[test]
     fn test_validator_management() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let av = AvalancheConsensus::new(config, registry).unwrap();
 
         // Validators now come from masternode registry, so this test
@@ -3170,7 +3178,7 @@ mod tests {
     #[test]
     fn test_initiate_consensus() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let av = AvalancheConsensus::new(config, registry).unwrap();
         let txid = test_txid(1);
 
@@ -3186,7 +3194,7 @@ mod tests {
     #[test]
     fn test_vote_submission() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let av = AvalancheConsensus::new(config, registry).unwrap();
         let txid = test_txid(1);
 
@@ -3236,7 +3244,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_invalid_config() {
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
 
         let config = AvalancheConfig {
             sample_size: 0,
@@ -3397,7 +3405,7 @@ mod fallback_tests {
     #[test]
     fn test_fallback_tracking_lifecycle() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let consensus = AvalancheConsensus::new(config, registry).unwrap();
         let txid = [99u8; 32];
 
@@ -3478,7 +3486,7 @@ mod fallback_tests {
     #[test]
     fn test_proposal_tx_mapping_operations() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let consensus = AvalancheConsensus::new(config, registry).unwrap();
 
         let txid = [100u8; 32];
@@ -3506,7 +3514,7 @@ mod fallback_tests {
     #[test]
     fn test_liveness_alerts_accumulation() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let consensus = AvalancheConsensus::new(config, registry).unwrap();
 
         let txid = [101u8; 32];
@@ -3530,7 +3538,7 @@ mod fallback_tests {
     #[test]
     fn test_fallback_votes_accumulation() {
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let consensus = AvalancheConsensus::new(config, registry).unwrap();
 
         let proposal_hash = [202u8; 32];
@@ -3557,7 +3565,7 @@ mod fallback_tests {
         use std::thread;
 
         let config = AvalancheConfig::default();
-        let registry = Arc::new(MasternodeRegistry::new());
+        let registry = create_test_registry();
         let consensus = Arc::new(AvalancheConsensus::new(config, registry).unwrap());
 
         let handles: Vec<_> = (0..10)

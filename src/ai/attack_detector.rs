@@ -51,7 +51,7 @@ pub enum MitigationAction {
 
 #[derive(Debug, Clone)]
 struct PeerBehavior {
-    addr: String,
+    _addr: String,
     connect_count: u32,
     disconnect_count: u32,
     invalid_messages: u32,
@@ -63,7 +63,7 @@ struct PeerBehavior {
 
 #[derive(Debug, Clone)]
 struct TransactionTracker {
-    txid: String,
+    _txid: String,
     first_seen: u64,
     seen_count: u32,
     conflicting_versions: u32,
@@ -75,7 +75,7 @@ pub struct AttackDetector {
     peer_behaviors: Arc<RwLock<HashMap<String, PeerBehavior>>>,
     transaction_history: Arc<RwLock<HashMap<String, TransactionTracker>>>,
     detected_attacks: Arc<RwLock<Vec<AttackPattern>>>,
-    time_window: Duration,
+    _time_window: Duration,
 }
 
 impl AttackDetector {
@@ -85,7 +85,7 @@ impl AttackDetector {
             peer_behaviors: Arc::new(RwLock::new(HashMap::new())),
             transaction_history: Arc::new(RwLock::new(HashMap::new())),
             detected_attacks: Arc::new(RwLock::new(Vec::new())),
-            time_window: Duration::from_secs(300), // 5 minute window
+            _time_window: Duration::from_secs(300), // 5 minute window
         })
     }
 
@@ -98,7 +98,7 @@ impl AttackDetector {
 
         let mut behaviors = self.peer_behaviors.write();
         let behavior = behaviors.entry(addr.to_string()).or_insert(PeerBehavior {
-            addr: addr.to_string(),
+            _addr: addr.to_string(),
             connect_count: 0,
             disconnect_count: 0,
             invalid_messages: 0,
@@ -194,7 +194,7 @@ impl AttackDetector {
         let tracker = history
             .entry(txid.to_string())
             .or_insert(TransactionTracker {
-                txid: txid.to_string(),
+                _txid: txid.to_string(),
                 first_seen: now,
                 seen_count: 0,
                 conflicting_versions: 0,
