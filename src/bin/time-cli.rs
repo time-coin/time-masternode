@@ -6,31 +6,56 @@ use serde_json::{json, Value};
 #[derive(Parser, Debug)]
 #[command(name = "time-cli")]
 #[command(about = "TIME Coin CLI - Bitcoin-like RPC client", long_about = None)]
-#[command(after_help = "\
-COMMAND CATEGORIES:
-  Blockchain Commands (100-199):
-    getblockchaininfo, getblock, getblockcount, getbestblockhash, getblockhash, gettxoutsetinfo
+#[command(help_template = "\
+{before-help}{name} - {about}
 
-  Network Commands (200-299):
-    getnetworkinfo, getpeerinfo
+{usage-heading} {usage}
 
-  Wallet Commands (300-399):
-    getbalance, getwalletinfo, getnewaddress, listreceivedbyaddress, listunspent, sendtoaddress, mergeutxos
+Commands:
+\tBlockchain
+\t  getblockchaininfo      Get blockchain information
+\t  getblock               Get information about a specific block
+\t  getblockcount          Get the current block count
+\t  getbestblockhash       Get the hash of the best (tip) block
+\t  getblockhash           Get block hash at a given height
+\t  gettxoutsetinfo        Get information about the UTXO set
+\tNetwork
+\t  getnetworkinfo         Get network information
+\t  getpeerinfo            Get peer information
+\tWallet
+\t  getbalance             Get wallet balance
+\t  getwalletinfo          Get wallet information
+\t  getnewaddress          Get a new receiving address
+\t  listreceivedbyaddress  List addresses with balances
+\t  listunspent            List unspent transaction outputs
+\t  sendtoaddress          Send TIME to an address
+\t  mergeutxos             Merge UTXOs to reduce UTXO set size
+\tTransaction
+\t  gettransaction         Get information about a transaction
+\t  getrawtransaction      Get raw transaction data
+\t  createrawtransaction   Create a new transaction
+\t  decoderawtransaction   Decode a raw transaction
+\t  sendrawtransaction     Send a raw transaction
+\tMasternode
+\t  masternodelist         Get masternode information
+\t  masternodestatus       Get masternode status
+\t  masternoderegister     Register a new masternode with locked collateral
+\t  masternodeunlock       Unlock masternode collateral and deregister
+\t  listlockedcollaterals  List all locked collaterals
+\tMempool
+\t  getmempoolinfo         Get memory pool information
+\t  getrawmempool          Get raw memory pool
+\tConsensus
+\t  getconsensusinfo       Get consensus information
+\tUtility
+\t  validateaddress        Validate an address
+\t  stop                   Stop the daemon
+\t  uptime                 Get daemon uptime
+\t  reindextransactions    Rebuild transaction index
+\t
+\t  help                   Print this message or the help of the given subcommand(s)
 
-  Transaction Commands (400-499):
-    gettransaction, getrawtransaction, createrawtransaction, decoderawtransaction, sendrawtransaction
-
-  Masternode Commands (500-599):
-    masternodelist, masternodestatus, masternoderegister, masternodeunlock, listlockedcollaterals
-
-  Mempool Commands (600-699):
-    getmempoolinfo, getrawmempool
-
-  Consensus Commands (700-799):
-    getconsensusinfo
-
-  Utility Commands (800-899):
-    validateaddress, stop, uptime, reindextransactions
+{options}{after-help}
 ")]
 struct Args {
     /// RPC server address
@@ -55,64 +80,64 @@ enum Commands {
     // ============================================================
     // BLOCKCHAIN COMMANDS
     // ============================================================
-    /// [Blockchain] Get blockchain information
-    #[command(display_order = 100)]
+    /// Get blockchain information
+    #[command(next_help_heading = "Blockchain")]
     GetBlockchainInfo,
 
-    /// [Blockchain] Get information about a specific block
-    #[command(display_order = 101)]
+    /// Get information about a specific block
+    #[command(next_help_heading = "Blockchain")]
     GetBlock {
         /// Block height or hash
         height: u64,
     },
 
-    /// [Blockchain] Get the current block count
-    #[command(display_order = 102)]
+    /// Get the current block count
+    #[command(next_help_heading = "Blockchain")]
     GetBlockCount,
 
-    /// [Blockchain] Get the hash of the best (tip) block
-    #[command(display_order = 103)]
+    /// Get the hash of the best (tip) block
+    #[command(next_help_heading = "Blockchain")]
     GetBestBlockHash,
 
-    /// [Blockchain] Get block hash at a given height
-    #[command(display_order = 104)]
+    /// Get block hash at a given height
+    #[command(next_help_heading = "Blockchain")]
     GetBlockHash {
         /// Block height
         height: u64,
     },
 
-    /// [Blockchain] Get information about the UTXO set
-    #[command(display_order = 105)]
+    /// Get information about the UTXO set
+    #[command(next_help_heading = "Blockchain")]
     GetTxOutSetInfo,
 
     // ============================================================
     // NETWORK COMMANDS
     // ============================================================
-    /// [Network] Get network information
-    #[command(display_order = 200)]
+    /// Get network information
+    #[command(next_help_heading = "Network")]
     GetNetworkInfo,
 
-    /// [Network] Get peer information
-    #[command(display_order = 201)]
+    /// Get peer information
+    #[command(next_help_heading = "Network")]
     GetPeerInfo,
 
     // ============================================================
     // WALLET COMMANDS
     // ============================================================
-    /// [Wallet] Get wallet balance
-    #[command(display_order = 300)]
+    /// Get wallet balance
+    #[command(next_help_heading = "Wallet")]
     GetBalance,
 
-    /// [Wallet] Get wallet information
-    #[command(display_order = 301)]
+    /// Get wallet information
+    #[command(next_help_heading = "Wallet")]
     GetWalletInfo,
 
-    /// [Wallet] Get a new receiving address
-    #[command(display_order = 302)]
+    /// Get a new receiving address
+    #[command(next_help_heading = "Wallet")]
     GetNewAddress,
 
-    /// [Wallet] List addresses with balances
-    #[command(display_order = 303)]
+    /// List addresses with balances
+    #[command(next_help_heading = "Wallet")]
     ListReceivedByAddress {
         /// Minimum confirmations (default: 1)
         #[arg(short, long, default_value = "1")]
@@ -122,8 +147,8 @@ enum Commands {
         include_empty: bool,
     },
 
-    /// [Wallet] List unspent transaction outputs
-    #[command(display_order = 304)]
+    /// List unspent transaction outputs
+    #[command(next_help_heading = "Wallet")]
     ListUnspent {
         /// Minimum confirmations
         #[arg(default_value = "1")]
@@ -133,8 +158,8 @@ enum Commands {
         maxconf: u32,
     },
 
-    /// [Wallet] Send TIME to an address
-    #[command(display_order = 305)]
+    /// Send TIME to an address
+    #[command(next_help_heading = "Wallet")]
     SendToAddress {
         /// Recipient address
         address: String,
@@ -142,8 +167,8 @@ enum Commands {
         amount: f64,
     },
 
-    /// [Wallet] Merge UTXOs to reduce UTXO set size
-    #[command(display_order = 306)]
+    /// Merge UTXOs to reduce UTXO set size
+    #[command(next_help_heading = "Wallet")]
     MergeUtxos {
         /// Minimum number of UTXOs required to merge (default: 2)
         #[arg(short, long, default_value = "2")]
@@ -159,15 +184,15 @@ enum Commands {
     // ============================================================
     // TRANSACTION COMMANDS
     // ============================================================
-    /// [Transaction] Get information about a transaction
-    #[command(display_order = 400)]
+    /// Get information about a transaction
+    #[command(next_help_heading = "Transaction")]
     GetTransaction {
         /// Transaction ID (hex)
         txid: String,
     },
 
-    /// [Transaction] Get raw transaction data
-    #[command(display_order = 401)]
+    /// Get raw transaction data
+    #[command(next_help_heading = "Transaction")]
     GetRawTransaction {
         /// Transaction ID (hex)
         txid: String,
@@ -176,8 +201,8 @@ enum Commands {
         verbose: bool,
     },
 
-    /// [Transaction] Create a new transaction
-    #[command(display_order = 402)]
+    /// Create a new transaction
+    #[command(next_help_heading = "Transaction")]
     CreateRawTransaction {
         /// JSON array of inputs
         inputs: String,
@@ -185,15 +210,15 @@ enum Commands {
         outputs: String,
     },
 
-    /// [Transaction] Decode a raw transaction
-    #[command(display_order = 403)]
+    /// Decode a raw transaction
+    #[command(next_help_heading = "Transaction")]
     DecodeRawTransaction {
         /// Hex-encoded transaction
         hex: String,
     },
 
-    /// [Transaction] Send a raw transaction
-    #[command(display_order = 404)]
+    /// Send a raw transaction
+    #[command(next_help_heading = "Transaction")]
     SendRawTransaction {
         /// Hex-encoded transaction
         hex: String,
@@ -202,16 +227,16 @@ enum Commands {
     // ============================================================
     // MASTERNODE COMMANDS
     // ============================================================
-    /// [Masternode] Get masternode information
-    #[command(display_order = 500)]
+    /// Get masternode information
+    #[command(next_help_heading = "Masternode")]
     MasternodeList,
 
-    /// [Masternode] Get masternode status
-    #[command(display_order = 501)]
+    /// Get masternode status
+    #[command(next_help_heading = "Masternode")]
     MasternodeStatus,
 
-    /// [Masternode] Register a new masternode with locked collateral
-    #[command(display_order = 502)]
+    /// Register a new masternode with locked collateral
+    #[command(next_help_heading = "Masternode")]
     MasternodeRegister {
         /// Masternode tier (bronze, silver, gold)
         tier: String,
@@ -225,26 +250,26 @@ enum Commands {
         node_address: String,
     },
 
-    /// [Masternode] Unlock masternode collateral and deregister
-    #[command(display_order = 503)]
+    /// Unlock masternode collateral and deregister
+    #[command(next_help_heading = "Masternode")]
     MasternodeUnlock {
         /// Node address (optional, uses local if not provided)
         node_address: Option<String>,
     },
 
-    /// [Masternode] List all locked collaterals
-    #[command(display_order = 504)]
+    /// List all locked collaterals
+    #[command(next_help_heading = "Masternode")]
     ListLockedCollaterals,
 
     // ============================================================
     // MEMPOOL COMMANDS
     // ============================================================
-    /// [Mempool] Get memory pool information
-    #[command(display_order = 600)]
+    /// Get memory pool information
+    #[command(next_help_heading = "Mempool")]
     GetMempoolInfo,
 
-    /// [Mempool] Get raw memory pool
-    #[command(display_order = 601)]
+    /// Get raw memory pool
+    #[command(next_help_heading = "Mempool")]
     GetRawMempool {
         /// Verbose output
         #[arg(short, long)]
@@ -254,30 +279,30 @@ enum Commands {
     // ============================================================
     // CONSENSUS COMMANDS
     // ============================================================
-    /// [Consensus] Get consensus information
-    #[command(display_order = 700)]
+    /// Get consensus information
+    #[command(next_help_heading = "Consensus")]
     GetConsensusInfo,
 
     // ============================================================
     // UTILITY COMMANDS
     // ============================================================
-    /// [Utility] Validate an address
-    #[command(display_order = 800)]
+    /// Validate an address
+    #[command(next_help_heading = "Utility")]
     ValidateAddress {
         /// Address to validate
         address: String,
     },
 
-    /// [Utility] Stop the daemon
-    #[command(display_order = 801)]
+    /// Stop the daemon
+    #[command(next_help_heading = "Utility")]
     Stop,
 
-    /// [Utility] Get daemon uptime
-    #[command(display_order = 802)]
+    /// Get daemon uptime
+    #[command(next_help_heading = "Utility")]
     Uptime,
 
-    /// [Utility] Rebuild transaction index
-    #[command(display_order = 803)]
+    /// Rebuild transaction index
+    #[command(next_help_heading = "Utility")]
     ReindexTransactions,
 }
 
