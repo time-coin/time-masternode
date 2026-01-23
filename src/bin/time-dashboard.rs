@@ -20,10 +20,22 @@ use std::{
     time::{Duration, Instant},
 };
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct BlockchainInfo {
     chain: String,
     blocks: u64,
+    headers: u64,
     bestblockhash: String,
+    difficulty: f64,
+    mediantime: i64,
+    verificationprogress: f64,
+    chainwork: String,
+    pruned: bool,
+    consensus: String,
+    finality_mechanism: String,
+    instant_finality: bool,
+    average_finality_time_ms: u64,
+    block_time_seconds: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -349,7 +361,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(10), // Blockchain info
+            Constraint::Length(14), // Blockchain info (expanded)
             Constraint::Length(10), // Wallet info
             Constraint::Min(0),     // Consensus info
         ])
@@ -370,6 +382,36 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 Span::raw("Best Block Hash: "),
                 Span::styled(&bc.bestblockhash[..16], Style::default().fg(Color::Gray)),
                 Span::raw("..."),
+            ]),
+            Line::from(vec![
+                Span::raw("Consensus: "),
+                Span::styled(&bc.consensus, Style::default().fg(Color::Magenta)),
+            ]),
+            Line::from(vec![
+                Span::raw("Finality: "),
+                Span::styled(
+                    if bc.instant_finality {
+                        "Instant"
+                    } else {
+                        "Delayed"
+                    },
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(format!(" (avg {}ms)", bc.average_finality_time_ms)),
+            ]),
+            Line::from(vec![
+                Span::raw("Block Time: "),
+                Span::styled(
+                    format!("{}s", bc.block_time_seconds),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Verification Progress: "),
+                Span::styled(
+                    format!("{:.1}%", bc.verificationprogress * 100.0),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
         ];
 
