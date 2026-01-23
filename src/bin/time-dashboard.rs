@@ -27,7 +27,7 @@ struct BlockchainInfo {
     headers: u64,
     bestblockhash: String,
     difficulty: f64,
-    mediantime: i64,
+    mediantime: u64,
     verificationprogress: f64,
     chainwork: String,
     pruned: bool,
