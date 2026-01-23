@@ -215,14 +215,14 @@ impl App {
         #[derive(Serialize)]
         struct RpcRequest {
             jsonrpc: String,
-            id: u32,
+            id: String,
             method: String,
             params: Vec<serde_json::Value>,
         }
 
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
-            id: 1,
+            id: "1".to_string(),
             method: method.to_string(),
             params,
         };
@@ -254,7 +254,10 @@ impl App {
         serde_json::from_value(result.clone()).map_err(|e| {
             eprintln!("DEBUG: Failed to parse {} result", method);
             eprintln!("DEBUG: Error: {}", e);
-            eprintln!("DEBUG: Result: {}", result);
+            eprintln!(
+                "DEBUG: Result JSON: {}",
+                serde_json::to_string_pretty(result).unwrap_or_else(|_| result.to_string())
+            );
             format!("Failed to deserialize {}: {}", method, e).into()
         })
     }
