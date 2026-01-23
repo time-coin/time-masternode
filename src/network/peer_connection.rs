@@ -1856,6 +1856,26 @@ impl PeerConnection {
                     self.direction, self.peer_ip
                 );
             }
+            NetworkMessage::MasternodeStatusGossip {
+                reporter,
+                visible_masternodes,
+                timestamp,
+            } => {
+                // Process gossip message
+                info!(
+                    "📥 [{:?}] Received gossip from {}: {} masternodes visible",
+                    self.direction,
+                    self.peer_ip,
+                    visible_masternodes.len()
+                );
+                masternode_registry
+                    .process_status_gossip(
+                        reporter.clone(),
+                        visible_masternodes.clone(),
+                        *timestamp,
+                    )
+                    .await;
+            }
             _ => {
                 debug!(
                     "📨 [{:?}] Received message from {} (type: {})",
