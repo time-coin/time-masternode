@@ -29,7 +29,12 @@ struct BlockchainInfo {
 #[derive(Debug, Deserialize)]
 struct WalletInfo {
     balance: f64,
-    address: String,
+    #[serde(default)]
+    locked: f64,
+    #[serde(default)]
+    available: f64,
+    #[serde(default)]
+    txcount: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,12 +56,16 @@ struct PeerInfo {
 #[derive(Debug, Deserialize)]
 struct MasternodeStatus {
     status: String,
+    #[serde(default)]
     tier: String,
+    #[serde(default)]
     address: String,
     #[serde(default)]
-    active: bool,
+    reward_address: String,
     #[serde(default)]
-    collateral: f64,
+    is_active: bool,
+    #[serde(default)]
+    total_uptime: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,47 +135,57 @@ impl App {
         self.error_message = None;
 
         // Fetch blockchain info
-        if let Ok(info) = self
+        match self
             .rpc_call::<BlockchainInfo>("getblockchaininfo", &[])
             .await
         {
-            self.data.blockchain = Some(info);
+            Ok(info) => self.data.blockchain = Some(info),
+            Err(e) => {
+                self.error_message = Some(format!("getblockchaininfo: {}", e));
+                return;
+            }
         }
 
         // Fetch wallet info
-        if let Ok(info) = self.rpc_call::<WalletInfo>("getwalletinfo", &[]).await {
-            self.data.wallet = Some(info);
+        match self.rpc_call::<WalletInfo>("getwalletinfo", &[]).await {
+            Ok(info) => self.data.wallet = Some(info),
+            Err(e) => self.error_message = Some(format!("getwalletinfo: {}", e)),
         }
 
         // Fetch network info
-        if let Ok(info) = self.rpc_call::<NetworkInfo>("getnetworkinfo", &[]).await {
-            self.data.network = Some(info);
+        match self.rpc_call::<NetworkInfo>("getnetworkinfo", &[]).await {
+            Ok(info) => self.data.network = Some(info),
+            Err(e) => self.error_message = Some(format!("getnetworkinfo: {}", e)),
         }
 
         // Fetch peer info
-        if let Ok(peers) = self.rpc_call::<Vec<PeerInfo>>("getpeerinfo", &[]).await {
-            self.data.peers = peers;
+        match self.rpc_call::<Vec<PeerInfo>>("getpeerinfo", &[]).await {
+            Ok(peers) => self.data.peers = peers,
+            Err(e) => self.error_message = Some(format!("getpeerinfo: {}", e)),
         }
 
         // Fetch masternode status
-        if let Ok(status) = self
+        match self
             .rpc_call::<MasternodeStatus>("masternodestatus", &[])
             .await
         {
-            self.data.masternode = Some(status);
+            Ok(status) => self.data.masternode = Some(status),
+            Err(e) => self.error_message = Some(format!("masternodestatus: {}", e)),
         }
 
         // Fetch consensus info
-        if let Ok(info) = self
+        match self
             .rpc_call::<ConsensusInfo>("getconsensusinfo", &[])
             .await
         {
-            self.data.consensus = Some(info);
+            Ok(info) => self.data.consensus = Some(info),
+            Err(e) => self.error_message = Some(format!("getconsensusinfo: {}", e)),
         }
 
         // Fetch mempool info
-        if let Ok(info) = self.rpc_call::<MempoolInfo>("getmempoolinfo", &[]).await {
-            self.data.mempool = Some(info);
+        match self.rpc_call::<MempoolInfo>("getmempoolinfo", &[]).await {
+            Ok(info) => self.data.mempool = Some(info),
+            Err(e) => self.error_message = Some(format!("getmempoolinfo: {}", e)),
         }
 
         self.data.last_update = Utc::now();
@@ -328,7 +347,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(10), // Blockchain info
-            Constraint::Length(8),  // Wallet info
+            Constraint::Length(10), // Wallet info
             Constraint::Min(0),     // Consensus info
         ])
         .split(area);
@@ -361,7 +380,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(wallet) = &app.data.wallet {
         let info = vec![
             Line::from(vec![
-                Span::raw("Balance: "),
+                Span::raw("Total Balance: "),
                 Span::styled(
                     format!("{:.8} TIME", wallet.balance),
                     Style::default()
@@ -370,8 +389,25 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 ),
             ]),
             Line::from(vec![
-                Span::raw("Address: "),
-                Span::styled(&wallet.address, Style::default().fg(Color::Cyan)),
+                Span::raw("Available: "),
+                Span::styled(
+                    format!("{:.8} TIME", wallet.available),
+                    Style::default().fg(Color::Green),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Locked: "),
+                Span::styled(
+                    format!("{:.8} TIME", wallet.locked),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("UTXOs: "),
+                Span::styled(
+                    format!("{}", wallet.txcount),
+                    Style::default().fg(Color::Cyan),
+                ),
             ]),
         ];
 
@@ -487,7 +523,14 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
     if let Some(mn) = &app.data.masternode {
-        let status_color = if mn.active { Color::Green } else { Color::Red };
+        let status_color = if mn.is_active {
+            Color::Green
+        } else {
+            Color::Red
+        };
+
+        let uptime_hours = mn.total_uptime / 3600;
+        let uptime_days = uptime_hours / 24;
 
         let info = vec![
             Line::from(vec![
@@ -509,20 +552,24 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 ),
             ]),
             Line::from(vec![
-                Span::raw("Address: "),
+                Span::raw("Node Address: "),
                 Span::styled(&mn.address, Style::default().fg(Color::Yellow)),
+            ]),
+            Line::from(vec![
+                Span::raw("Reward Address: "),
+                Span::styled(&mn.reward_address, Style::default().fg(Color::Yellow)),
             ]),
             Line::from(vec![
                 Span::raw("Active: "),
                 Span::styled(
-                    if mn.active { "Yes" } else { "No" },
+                    if mn.is_active { "Yes" } else { "No" },
                     Style::default().fg(status_color),
                 ),
             ]),
             Line::from(vec![
-                Span::raw("Collateral: "),
+                Span::raw("Uptime: "),
                 Span::styled(
-                    format!("{:.8} TIME", mn.collateral),
+                    format!("{} days, {} hours", uptime_days, uptime_hours % 24),
                     Style::default().fg(Color::Green),
                 ),
             ]),
