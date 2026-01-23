@@ -1173,35 +1173,23 @@ impl Blockchain {
             // Try to detect and resolve deeper fork by finding common ancestor
             match self.find_and_resolve_fork(peer_ip, registry).await {
                 Ok(common_ancestor) => {
-                    tracing::info!(
-                        "✅ Found common ancestor at height {}, attempting re-sync from {}",
+                    tracing::warn!(
+                        "✅ Found common ancestor at height {}, but peer {} may be on wrong chain",
                         common_ancestor,
                         peer_ip
                     );
 
-                    // Now re-request blocks from common ancestor + 1
-                    let req = NetworkMessage::GetBlocks(common_ancestor + 1, time_expected);
-                    registry
-                        .send_to_peer(peer_ip, req)
-                        .await
-                        .map_err(|e| format!("Failed to request blocks after rollback: {}", e))?;
+                    tracing::warn!(
+                        "⏸️  Not re-syncing from same peer - letting sync coordinator pick best chain"
+                    );
 
-                    // Wait for blocks again
-                    let retry_start = std::time::Instant::now();
-                    while retry_start.elapsed() < timeout {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        let now_height = self.current_height.load(Ordering::Acquire);
-
-                        if now_height >= time_expected {
-                            tracing::info!("✅ Fork resolved! Synced to height {}", now_height);
-                            // Mark sync as complete
-                            self.sync_coordinator.complete_sync(peer_ip).await;
-                            return Ok(());
-                        }
-                    }
+                    // DON'T re-sync from the same peer that caused the fork!
+                    // Instead, mark this sync as failed and let the sync coordinator
+                    // request blocks from OTHER peers (who may have the correct chain)
+                    self.sync_coordinator.complete_sync(peer_ip).await;
 
                     Err(format!(
-                        "Timeout after rollback to common ancestor {}",
+                        "Fork resolved by rolling back to {}, but need to sync from different peer",
                         common_ancestor
                     ))
                 }
