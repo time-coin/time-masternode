@@ -6,15 +6,15 @@
 ![Protocol](https://img.shields.io/badge/protocol-v6-green.svg)
 ![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
 
-TIME Coin is a next generation crypto currency built by AI and uses AI to learn, and improve connectivity.
+TIME Coin is a next generation crypto currency built from the ground up in Rust by AI and is the first Crypto Currency powered by AI.
 
-TIME Coin implements the TIME Coin Protocol v6 which uses sub-second instant finality via Avalanche consensus, Verifiable Finality Proofs (VFP), deterministic block checkpointing, and integrated AI optimization systems.
+TIME Coin implements the TIME Coin Protocol v6 which uses sub-second instant finality via TimeVote Protocol, TimeProof (verifiable finality), TimeLock checkpointing, and integrated AI optimization systems.
 
 ## 🚀 Features
 
-- **Instant Finality**: <1 second transaction confirmation via Avalanche Snowball consensus
-- **Verifiable Finality Proofs**: Objective proof of transaction finality usable by all nodes and light clients
-- **Deterministic Checkpointing**: 10-minute blocks with TSDC (Time-Scheduled Deterministic Consensus)
+- **Instant Finality**: <1 second transaction confirmation via TimeVote Protocol (stake-weighted voting)
+- **TimeProof**: Objective proof of transaction finality usable by all nodes and light clients
+- **TimeLock Checkpointing**: 10-minute deterministic archival blocks via VRF sortition
 - **AI-Powered Peer Selection**: Machine learning-based peer scoring for optimal sync performance
   - Learns peer reliability from historical performance
   - Persistent knowledge across restarts
@@ -54,8 +54,8 @@ TIME Coin implements the TIME Coin Protocol v6 which uses sub-second instant fin
 
 ## 🚀 Features
 
-- **Instant Finality**: <1 second transaction confirmation via Avalanche Snowball consensus
-- **Deterministic Checkpointing**: 10-minute blocks with TSDC (Time-Scheduled Deterministic Consensus)
+- **Instant Finality**: <1 second transaction confirmation via TimeVote Protocol
+- **TimeLock Checkpointing**: 10-minute deterministic archival blocks via VRF sortition
 - **Leaderless Consensus**: No BFT voting rounds or global committees
 - **Stake-Weighted Sampling**: Sybil resistance via collateral-based peer selection
 - **UTXO State Machine**: Advanced state tracking (Unspent → Locked → Sampling → Finalized → Archived)
@@ -230,16 +230,16 @@ timecoin/
 │   ├── lib.rs               # Library exports
 │   ├── config.rs            # Configuration management
 │   ├── types.rs             # Core types (Block, Transaction, UTXO, etc.)
-│   ├── consensus.rs         # Avalanche Snowball + TSDC consensus
-│   ├── avalanche.rs         # Avalanche protocol implementation
-│   ├── tsdc.rs              # Time-Scheduled Deterministic Consensus
+│   ├── consensus.rs         # TimeVote Protocol + TimeLock consensus
+│   ├── avalanche.rs         # TimeVote protocol implementation
+│   ├── tsdc.rs              # TimeLock deterministic checkpointing
 │   ├── blockchain.rs        # Blockchain storage and validation
 │   ├── storage.rs           # Sled database abstraction layer
 │   ├── utxo_manager.rs      # UTXO state machine
 │   ├── transaction_pool.rs  # Mempool management
 │   ├── masternode_registry.rs # Masternode tracking
 │   ├── heartbeat_attestation.rs # Uptime verification
-│   ├── finality_proof.rs    # VFP (Verifiable Finality Proofs)
+│   ├── finality_proof.rs    # TimeProof (Verifiable Finality)
 │   ├── wallet.rs            # Wallet functionality
 │   ├── address.rs           # Address encoding/decoding
 │   ├── peer_manager.rs      # High-level peer management
@@ -375,10 +375,10 @@ Transactions achieve finality during the Sampling phase via Avalanche Snowball, 
 ### Consensus Mechanism
 
 **Two-Layer Design:**
-1. **Avalanche Layer (Real-Time)**: Transactions finalize in <1 second via stake-weighted peer sampling with Snowball protocol
-2. **TSDC Layer (Deterministic)**: Blocks created every 10 minutes via VRF-based leader selection
+1. **TimeVote Protocol (Real-Time)**: Transactions finalize in <1 second via stake-weighted voting with progressive TimeProof assembly
+2. **TimeLock Layer (Deterministic)**: Archival blocks every 10 minutes (600s) via VRF-based sortition
 
-No global committees, no voting rounds, no BFT stalls.
+Leaderless consensus with TimeGuard fallback for bounded recovery. No global committees, no BFT voting rounds.
 
 ### Masternode Tiers
 
@@ -451,9 +451,9 @@ finality_timeout = 3000  # milliseconds
 
 #### Core Implementation
 - ✅ BLAKE3 hashing, Ed25519 signing, ECVRF sortition
-- ✅ Avalanche Snowball consensus
-- ✅ TSDC (Time-Scheduled Deterministic Consensus)
-- ✅ Verifiable Finality Proofs (VFP)
+- ✅ TimeVote Protocol (stake-weighted consensus)
+- ✅ TimeLock (deterministic checkpointing every 600s)
+- ✅ TimeProof (verifiable finality proofs)
 - ✅ UTXO state machine with archival
 - ✅ Masternode registry with tiered system
 - ✅ **Locked Collateral System (Dash-style)** - NEW in v1.1.0
