@@ -987,7 +987,106 @@ impl PeerConnection {
         Ok(())
     }
 
+    /// Unified message handler that delegates to MessageHandler
+    /// This replaces the old handle_message_with_* functions
+    async fn handle_message_unified(
+        &self,
+        line: &str,
+        config: &MessageLoopConfig,
+    ) -> Result<(), String> {
+        let line = line.trim();
+        if line.is_empty() {
+            return Ok(());
+        }
+
+        // Parse message
+        let message: NetworkMessage =
+            serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
+
+        // Handle connection-level messages that need special state management
+        match &message {
+            NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                let our_height = config.blockchain.as_ref().map(|bc| bc.get_height());
+                return self
+                    .handle_ping(*nonce, *timestamp, *height, our_height)
+                    .await;
+            }
+            NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height,
+            } => {
+                return self.handle_pong(*nonce, *timestamp, *height).await;
+            }
+            NetworkMessage::Handshake { .. }
+            | NetworkMessage::Ack { .. }
+            | NetworkMessage::Version { .. } => {
+                // Connection-level messages - not handled by MessageHandler
+                debug!(
+                    "📨 [{:?}] Received connection-level message from {}",
+                    self.direction, self.peer_ip
+                );
+                return Ok(());
+            }
+            _ => {
+                // All other messages go through MessageHandler
+            }
+        }
+
+        // Build context for MessageHandler
+        let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+
+        // Create context with available components
+        let context = if let Some(ref blockchain) = config.blockchain {
+            let masternode_registry = config
+                .masternode_registry
+                .as_ref()
+                .expect("Masternode registry required when blockchain is provided");
+            MessageContext::minimal(
+                Arc::clone(blockchain),
+                Arc::clone(&config.peer_registry),
+                Arc::clone(masternode_registry),
+            )
+        } else if let Some(ref _masternode_registry) = config.masternode_registry {
+            // This case should not happen in practice - we always have blockchain when we have masternode_registry
+            return Err("Cannot create context without blockchain".to_string());
+        } else {
+            return Err("Cannot create context without masternode registry".to_string());
+        };
+
+        // Delegate to MessageHandler
+        match handler.handle_message(&message, &context).await {
+            Ok(Some(response)) => {
+                // Send response if MessageHandler returned one
+                if let Err(e) = self.send_message(&response).await {
+                    warn!(
+                        "⚠️ [{:?}] Failed to send response to {}: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+                Ok(())
+            }
+            Ok(None) => {
+                // Message handled successfully, no response needed
+                Ok(())
+            }
+            Err(e) => {
+                debug!(
+                    "⚠️ [{:?}] MessageHandler error for {} (may be normal): {}",
+                    self.direction, self.peer_ip, e
+                );
+                Ok(()) // Don't propagate handler errors as connection errors
+            }
+        }
+    }
+
     /// Handle a single message with blockchain access for block sync
+    /// DEPRECATED: Use handle_message_unified instead
+    #[allow(dead_code)]
     async fn handle_message_with_blockchain(
         &self,
         line: &str,
@@ -1727,6 +1826,8 @@ impl PeerConnection {
     }
 
     /// Handle a single message with masternode registry for registration
+    /// DEPRECATED: Use handle_message_unified instead
+    #[allow(dead_code)]
     async fn handle_message_with_masternode_registry(
         &self,
         line: &str,
@@ -1922,6 +2023,8 @@ impl PeerConnection {
     }
 
     /// Handle a single message with peer registry for master node discovery
+    /// DEPRECATED: Use handle_message_unified instead
+    #[allow(dead_code)]
     async fn handle_message_with_registry(
         &self,
         line: &str,
@@ -2264,29 +2367,8 @@ impl PeerConnection {
                             break;
                         }
                         Ok(_) => {
-                            // Handle message based on available components
-                            let handle_result = if let Some(ref blockchain) = config.blockchain {
-                                // When blockchain is available, we need masternode registry
-                                let masternode_registry = config.masternode_registry.as_ref()
-                                    .expect("Masternode registry required when blockchain is provided");
-
-                                self.handle_message_with_blockchain(
-                                    &buffer,
-                                    &config.peer_registry,
-                                    masternode_registry,
-                                    blockchain,
-                                ).await
-                            } else if let Some(ref masternode_registry) = config.masternode_registry {
-                                // Masternode registry only
-                                self.handle_message_with_masternode_registry(
-                                    &buffer,
-                                    &config.peer_registry,
-                                    masternode_registry,
-                                ).await
-                            } else {
-                                // Basic setup: peer registry only
-                                self.handle_message_with_registry(&buffer, &config.peer_registry).await
-                            };
+                            // Use unified message handler
+                            let handle_result = self.handle_message_unified(&buffer, &config).await;
 
                             if let Err(e) = handle_result {
                                 warn!("⚠️ [{:?}] Error handling message from {}: {}",
