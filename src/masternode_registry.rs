@@ -618,17 +618,19 @@ impl MasternodeRegistry {
     /// Broadcast any network message (used by consensus protocols)
     pub async fn broadcast_message(&self, msg: crate::network::message::NetworkMessage) {
         if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-            match tx.send(msg) {
+            match tx.send(msg.clone()) {
                 Ok(0) => {
-                    tracing::debug!("📡 Message created (no peers connected)");
+                    tracing::warn!("📡 Gossip broadcast: no peers connected to receive message");
                 }
                 Ok(receivers) => {
-                    tracing::debug!("📡 Broadcast message to {} peer(s)", receivers);
+                    tracing::info!("📡 Gossip broadcast sent to {} peer(s)", receivers);
                 }
-                Err(_) => {
-                    tracing::debug!("Message broadcast skipped (no active connections)");
+                Err(e) => {
+                    tracing::warn!("📡 Gossip broadcast failed: {:?}", e);
                 }
             }
+        } else {
+            tracing::warn!("📡 Gossip broadcast skipped: broadcast channel not initialized");
         }
     }
 
