@@ -240,7 +240,16 @@ impl App {
             .send()
             .await?;
 
-        let rpc_response: RpcResponse<T> = response.json().await?;
+        // Get raw response text first for debugging
+        let response_text = response.text().await?;
+
+        // Try to parse as RPC response
+        let rpc_response: RpcResponse<T> = serde_json::from_str(&response_text).map_err(|e| {
+            format!(
+                "RPC error: Failed to parse response for {}: {} - Response: {}",
+                method, e, response_text
+            )
+        })?;
 
         if let Some(error) = rpc_response.error {
             return Err(format!("RPC error: {}", error).into());
