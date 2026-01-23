@@ -374,9 +374,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(14), // Blockchain info (expanded)
-            Constraint::Length(10), // Wallet info
-            Constraint::Min(0),     // Consensus info
+            Constraint::Length(11), // Blockchain info
+            Constraint::Length(8),  // Wallet info
+            Constraint::Length(8),  // Consensus info
         ])
         .split(area);
 
@@ -392,7 +392,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(format!("{}", bc.blocks), Style::default().fg(Color::Green)),
             ]),
             Line::from(vec![
-                Span::raw("Best Block Hash: "),
+                Span::raw("Best Block: "),
                 Span::styled(&bc.bestblockhash[..16], Style::default().fg(Color::Gray)),
                 Span::raw("..."),
             ]),
@@ -410,21 +410,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                     },
                     Style::default().fg(Color::Green),
                 ),
-                Span::raw(format!(" (avg {}ms)", bc.average_finality_time_ms)),
-            ]),
-            Line::from(vec![
-                Span::raw("Block Time: "),
-                Span::styled(
-                    format!("{}s", bc.block_time_seconds),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Verification Progress: "),
-                Span::styled(
-                    format!("{:.1}%", bc.verificationprogress * 100.0),
-                    Style::default().fg(Color::Cyan),
-                ),
+                Span::raw(format!(" ({}ms)", bc.average_finality_time_ms)),
             ]),
         ];
 
@@ -438,7 +424,7 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(wallet) = &app.data.wallet {
         let info = vec![
             Line::from(vec![
-                Span::raw("Total Balance: "),
+                Span::raw("Balance: "),
                 Span::styled(
                     format!("{:.8} TIME", wallet.balance),
                     Style::default()
@@ -458,13 +444,6 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(
                     format!("{:.8} TIME", wallet.locked),
                     Style::default().fg(Color::Yellow),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("UTXOs: "),
-                Span::styled(
-                    format!("{}", wallet.txcount),
-                    Style::default().fg(Color::Cyan),
                 ),
             ]),
         ];
