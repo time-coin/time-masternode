@@ -175,6 +175,8 @@ See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup 
 
 ## 💻 CLI Usage
 
+### Command Line Interface (time-cli)
+
 ```bash
 # Get blockchain info
 ./target/release/time-cli getblockchaininfo
@@ -213,6 +215,26 @@ See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup 
 # Check uptime
 ./target/release/time-cli uptime
 ```
+
+### Masternode Dashboard (time-dashboard)
+
+An interactive terminal UI for real-time masternode monitoring:
+
+```bash
+# Launch dashboard (connects to local RPC by default)
+./target/release/time-dashboard
+
+# Connect to remote node
+./target/release/time-dashboard http://192.168.1.100:24101
+```
+
+**Dashboard Features:**
+- 📊 **Overview Tab**: Blockchain status, wallet balance, consensus info
+- 🌐 **Network Tab**: Connected peers with ping times and direction
+- 🖥️ **Masternode Tab**: Tier, status, collateral, and address
+- 💾 **Mempool Tab**: Transaction count and memory usage
+- ⚡ **Auto-refresh**: Updates every 2 seconds
+- ⌨️ **Navigation**: Tab/Arrow keys to switch, 'r' to refresh, 'q' to quit
 
 See **[docs/CLI_GUIDE.md](docs/CLI_GUIDE.md)** for complete command reference.
 

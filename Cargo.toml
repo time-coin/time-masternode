@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "time-cli"
 path = "src/bin/time-cli.rs"
 
+[[bin]]
+name = "time-dashboard"
+path = "src/bin/time-dashboard.rs"
+
 [dependencies]
 tokio = { version = "1.38", features = [
     "rt-multi-thread",
@@ -69,6 +73,10 @@ rayon = "1.8"                                       # Data parallelism
 parking_lot = "0.12"                                # Faster locks than std
 arc-swap = "1.7"                                    # Lock-free atomic pointer swapping
 scopeguard = "1.2"                                  # RAII guards for cleanup
+
+# TUI dashboard dependencies
+ratatui = "0.26"                                    # Terminal UI framework
+crossterm = "0.27"                                  # Terminal control
 
 [dev-dependencies]
 tempfile = "3.8"
