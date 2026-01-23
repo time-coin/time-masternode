@@ -70,16 +70,19 @@ struct MasternodeStatus {
 
 #[derive(Debug, Deserialize)]
 struct ConsensusInfo {
-    #[serde(default)]
-    finalized_height: u64,
+    protocol: String,
     #[serde(default)]
     active_validators: usize,
+    #[serde(default)]
+    instant_finality: bool,
+    #[serde(default)]
+    average_finality_time_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
 struct MempoolInfo {
     size: usize,
-    bytes: u64,
+    bytes: usize,
 }
 
 struct DashboardData {
@@ -421,17 +424,36 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     if let Some(consensus) = &app.data.consensus {
         let info = vec![
             Line::from(vec![
-                Span::raw("Finalized Height: "),
-                Span::styled(
-                    format!("{}", consensus.finalized_height),
-                    Style::default().fg(Color::Green),
-                ),
+                Span::raw("Protocol: "),
+                Span::styled(&consensus.protocol, Style::default().fg(Color::Cyan)),
             ]),
             Line::from(vec![
                 Span::raw("Active Validators: "),
                 Span::styled(
                     format!("{}", consensus.active_validators),
                     Style::default().fg(Color::Yellow),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Instant Finality: "),
+                Span::styled(
+                    if consensus.instant_finality {
+                        "Yes"
+                    } else {
+                        "No"
+                    },
+                    Style::default().fg(if consensus.instant_finality {
+                        Color::Green
+                    } else {
+                        Color::Red
+                    }),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("Avg Finality: "),
+                Span::styled(
+                    format!("{}ms", consensus.average_finality_time_ms),
+                    Style::default().fg(Color::Green),
                 ),
             ]),
         ];
