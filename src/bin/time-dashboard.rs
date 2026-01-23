@@ -151,7 +151,7 @@ impl App {
 
         // Fetch blockchain info
         match self
-            .rpc_call::<BlockchainInfo>("getblockchaininfo", &[])
+            .rpc_call::<BlockchainInfo>("getblockchaininfo", vec![])
             .await
         {
             Ok(info) => self.data.blockchain = Some(info),
@@ -162,26 +162,26 @@ impl App {
         }
 
         // Fetch wallet info
-        match self.rpc_call::<WalletInfo>("getwalletinfo", &[]).await {
+        match self.rpc_call::<WalletInfo>("getwalletinfo", vec![]).await {
             Ok(info) => self.data.wallet = Some(info),
             Err(e) => self.error_message = Some(format!("getwalletinfo: {}", e)),
         }
 
         // Fetch network info
-        match self.rpc_call::<NetworkInfo>("getnetworkinfo", &[]).await {
+        match self.rpc_call::<NetworkInfo>("getnetworkinfo", vec![]).await {
             Ok(info) => self.data.network = Some(info),
             Err(e) => self.error_message = Some(format!("getnetworkinfo: {}", e)),
         }
 
         // Fetch peer info
-        match self.rpc_call::<Vec<PeerInfo>>("getpeerinfo", &[]).await {
+        match self.rpc_call::<Vec<PeerInfo>>("getpeerinfo", vec![]).await {
             Ok(peers) => self.data.peers = peers,
             Err(e) => self.error_message = Some(format!("getpeerinfo: {}", e)),
         }
 
         // Fetch masternode status
         match self
-            .rpc_call::<MasternodeStatus>("masternodestatus", &[])
+            .rpc_call::<MasternodeStatus>("masternodestatus", vec![])
             .await
         {
             Ok(status) => self.data.masternode = Some(status),
@@ -190,7 +190,7 @@ impl App {
 
         // Fetch consensus info
         match self
-            .rpc_call::<ConsensusInfo>("getconsensusinfo", &[])
+            .rpc_call::<ConsensusInfo>("getconsensusinfo", vec![])
             .await
         {
             Ok(info) => self.data.consensus = Some(info),
@@ -198,7 +198,7 @@ impl App {
         }
 
         // Fetch mempool info
-        match self.rpc_call::<MempoolInfo>("getmempoolinfo", &[]).await {
+        match self.rpc_call::<MempoolInfo>("getmempoolinfo", vec![]).await {
             Ok(info) => self.data.mempool = Some(info),
             Err(e) => self.error_message = Some(format!("getmempoolinfo: {}", e)),
         }
@@ -210,14 +210,14 @@ impl App {
     async fn rpc_call<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
-        params: &[serde_json::Value],
+        params: Vec<serde_json::Value>,
     ) -> Result<T, Box<dyn Error>> {
         #[derive(Serialize)]
-        struct RpcRequest<'a> {
-            jsonrpc: &'a str,
+        struct RpcRequest {
+            jsonrpc: String,
             id: u32,
-            method: &'a str,
-            params: &'a [serde_json::Value],
+            method: String,
+            params: Vec<serde_json::Value>,
         }
 
         #[derive(Deserialize)]
@@ -227,9 +227,9 @@ impl App {
         }
 
         let request = RpcRequest {
-            jsonrpc: "2.0",
+            jsonrpc: "2.0".to_string(),
             id: 1,
-            method,
+            method: method.to_string(),
             params,
         };
 
