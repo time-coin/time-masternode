@@ -220,12 +220,6 @@ impl App {
             params: Vec<serde_json::Value>,
         }
 
-        #[derive(Deserialize)]
-        struct RpcResponse<T> {
-            result: Option<T>,
-            error: Option<serde_json::Value>,
-        }
-
         let request = RpcRequest {
             jsonrpc: "2.0".to_string(),
             id: 1,
@@ -243,22 +237,26 @@ impl App {
         // Get raw response text first for debugging
         let response_text = response.text().await?;
 
-        // Try to parse as RPC response
-        let rpc_response: RpcResponse<T> = serde_json::from_str(&response_text).map_err(|e| {
-            // Log the full error for debugging
-            eprintln!("DEBUG: Failed to parse {} response", method);
-            eprintln!("DEBUG: Error: {}", e);
-            eprintln!("DEBUG: Response text: {}", response_text);
-            format!("RPC error: Failed to parse response for {}: {}", method, e)
-        })?;
+        // First parse as generic Value to check for errors
+        let rpc_value: serde_json::Value = serde_json::from_str(&response_text)?;
 
-        if let Some(error) = rpc_response.error {
-            return Err(format!("RPC error: {}", error).into());
+        // Check for RPC error
+        if let Some(error) = rpc_value.get("error") {
+            if !error.is_null() {
+                return Err(format!("RPC error: {}", error).into());
+            }
         }
 
-        rpc_response
-            .result
-            .ok_or_else(|| "No result in response".into())
+        // Extract result field
+        let result = rpc_value.get("result").ok_or("No result in RPC response")?;
+
+        // Deserialize the result into our target type
+        serde_json::from_value(result.clone()).map_err(|e| {
+            eprintln!("DEBUG: Failed to parse {} result", method);
+            eprintln!("DEBUG: Error: {}", e);
+            eprintln!("DEBUG: Result: {}", result);
+            format!("Failed to deserialize {}: {}", method, e).into()
+        })
     }
 
     fn next_tab(&mut self) {
