@@ -23,7 +23,7 @@ pub struct PingState {
     last_pong_received: Option<Instant>,
     pending_pings: Vec<(u64, Instant)>, // (nonce, sent_time)
     missed_pongs: u32,
-    pub last_rtt_ms: Option<f64>, // Latest round-trip time in milliseconds
+    pub last_rtt_ms: Option<f64>, // Latest one-way latency in milliseconds (RTT/2)
 }
 
 // Circuit breaker limits for fork resolution
@@ -156,13 +156,13 @@ impl PingState {
         let now = Instant::now();
         self.last_pong_received = Some(now);
 
-        // Find and remove the matching ping, calculating RTT
+        // Find and remove the matching ping, calculating one-way latency
         if let Some(pos) = self.pending_pings.iter().position(|(n, _)| *n == nonce) {
             let (_nonce, sent_time) = self.pending_pings.remove(pos);
 
-            // Calculate round-trip time in milliseconds
+            // Calculate round-trip time and divide by 2 for one-way latency
             let rtt = now.duration_since(sent_time);
-            self.last_rtt_ms = Some(rtt.as_secs_f64() * 1000.0);
+            self.last_rtt_ms = Some(rtt.as_secs_f64() * 1000.0 / 2.0);
 
             self.missed_pongs = 0; // Reset counter on successful pong
             true

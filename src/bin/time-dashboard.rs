@@ -375,9 +375,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(11), // Blockchain info
-            Constraint::Length(8),  // Wallet info
-            Constraint::Length(8),  // Consensus info
+            Constraint::Length(8), // Blockchain info
+            Constraint::Length(7), // Wallet info
+            Constraint::Length(8), // Consensus info
         ])
         .split(area);
 
@@ -400,18 +400,6 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::raw("Consensus: "),
                 Span::styled(&bc.consensus, Style::default().fg(Color::Magenta)),
-            ]),
-            Line::from(vec![
-                Span::raw("Finality: "),
-                Span::styled(
-                    if bc.instant_finality {
-                        "Instant"
-                    } else {
-                        "Delayed"
-                    },
-                    Style::default().fg(Color::Green),
-                ),
-                Span::raw(format!(" ({}ms)", bc.average_finality_time_ms)),
             ]),
         ];
 
