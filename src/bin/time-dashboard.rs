@@ -48,6 +48,7 @@ struct WalletInfo {
     #[serde(default)]
     available: f64,
     #[serde(default)]
+    #[allow(dead_code)]
     txcount: usize,
 }
 

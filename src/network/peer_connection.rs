@@ -18,11 +18,12 @@ use crate::network::message_handler::{ConnectionDirection, MessageContext, Messa
 
 /// State for tracking ping/pong health
 #[derive(Debug)]
-struct PingState {
+pub struct PingState {
     last_ping_sent: Option<Instant>,
     last_pong_received: Option<Instant>,
     pending_pings: Vec<(u64, Instant)>, // (nonce, sent_time)
     missed_pongs: u32,
+    pub last_rtt_ms: Option<f64>, // Latest round-trip time in milliseconds
 }
 
 // Circuit breaker limits for fork resolution
@@ -123,6 +124,7 @@ impl PingState {
             last_pong_received: None,
             pending_pings: Vec::new(),
             missed_pongs: 0,
+            last_rtt_ms: None,
         }
     }
 
@@ -151,11 +153,17 @@ impl PingState {
     }
 
     fn record_pong_received(&mut self, nonce: u64) -> bool {
-        self.last_pong_received = Some(Instant::now());
+        let now = Instant::now();
+        self.last_pong_received = Some(now);
 
-        // Find and remove the matching ping
+        // Find and remove the matching ping, calculating RTT
         if let Some(pos) = self.pending_pings.iter().position(|(n, _)| *n == nonce) {
-            self.pending_pings.remove(pos);
+            let (_nonce, sent_time) = self.pending_pings.remove(pos);
+
+            // Calculate round-trip time in milliseconds
+            let rtt = now.duration_since(sent_time);
+            self.last_rtt_ms = Some(rtt.as_secs_f64() * 1000.0);
+
             self.missed_pongs = 0; // Reset counter on successful pong
             true
         } else {
@@ -408,6 +416,12 @@ impl PeerConnection {
     /// Get peer's reported blockchain height
     pub async fn get_peer_height(&self) -> Option<u64> {
         *self.peer_height.read().await
+    }
+
+    /// Get the latest ping RTT in seconds (for RPC)
+    pub async fn get_ping_rtt(&self) -> Option<f64> {
+        let state = self.ping_state.read().await;
+        state.last_rtt_ms.map(|ms| ms / 1000.0) // Convert ms to seconds
     }
 
     /// Get a clone of the shared writer for registration in peer registry
@@ -2477,10 +2491,17 @@ pub struct PeerConnectionState {
 
     /// Missed ping count
     pub missed_pings: Arc<RwLock<u32>>,
+
+    /// Ping state for RTT tracking
+    pub ping_state: Arc<RwLock<PingState>>,
 }
 
 impl PeerConnectionState {
-    fn new(ip: String, tx: mpsc::UnboundedSender<NetworkMessage>) -> Self {
+    fn new(
+        ip: String,
+        tx: mpsc::UnboundedSender<NetworkMessage>,
+        ping_state: Arc<RwLock<PingState>>,
+    ) -> Self {
         let now = std::time::Instant::now();
         Self {
             ip,
@@ -2488,6 +2509,7 @@ impl PeerConnectionState {
             connected_at: now,
             last_activity: Arc::new(RwLock::new(now)),
             missed_pings: Arc::new(RwLock::new(0)),
+            ping_state,
         }
     }
 
@@ -2510,6 +2532,12 @@ impl PeerConnectionState {
         std::time::Instant::now().duration_since(*last)
     }
 
+    /// Get the latest ping RTT in seconds
+    pub async fn get_ping_rtt(&self) -> Option<f64> {
+        let state = self.ping_state.read().await;
+        state.last_rtt_ms.map(|ms| ms / 1000.0) // Convert ms to seconds
+    }
+
     fn send(&self, message: NetworkMessage) -> Result<(), String> {
         self.tx
             .send(message)
@@ -2529,6 +2557,7 @@ impl PeerStateManager {
         &self,
         ip: String,
         tx: mpsc::UnboundedSender<NetworkMessage>,
+        ping_state: Arc<RwLock<PingState>>,
     ) -> Result<bool, String> {
         let mut conns = self.connections.write().await;
 
@@ -2536,7 +2565,7 @@ impl PeerStateManager {
             return Ok(false);
         }
 
-        let conn = PeerConnectionState::new(ip.clone(), tx);
+        let conn = PeerConnectionState::new(ip.clone(), tx, ping_state);
         conns.insert(ip, conn);
         Ok(true)
     }
