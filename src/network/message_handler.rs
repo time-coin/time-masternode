@@ -2133,6 +2133,21 @@ impl MessageHandler {
                             "🔄 [{}] Fork with {} - immediate resolution check initiated",
                             self.direction, self.peer_ip
                         );
+
+                        // Collect all fork blocks for resolution
+                        let fork_blocks = blocks.to_vec();
+                        let peer_ip = self.peer_ip.clone();
+                        let blockchain = context.blockchain.clone();
+
+                        // Trigger fork resolution in background
+                        tokio::spawn(async move {
+                            if let Err(e) = blockchain.handle_fork(fork_blocks, peer_ip).await {
+                                warn!("Fork resolution failed: {}", e);
+                            }
+                        });
+
+                        // Stop processing remaining blocks - let fork resolution handle it
+                        break;
                     }
                 }
                 Err(e) => {
