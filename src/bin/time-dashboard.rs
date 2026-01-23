@@ -19,6 +19,8 @@ use std::{
     io,
     time::{Duration, Instant},
 };
+
+const DASHBOARD_VERSION: &str = "1.0.0";
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct BlockchainInfo {
@@ -322,7 +324,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 
     let header = Paragraph::new(vec![Line::from(vec![
         Span::styled(
-            "TIME Coin Masternode Dashboard",
+            format!("TIME Coin Masternode Dashboard v{}", DASHBOARD_VERSION),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
