@@ -51,7 +51,6 @@
 
 **Key Features:**
 - **TimeVote Protocol:** Continuous voting consensus with stake-weighted validator voting
-- **Snowflake/Snowball:** Low-latency finality primitives
 - **Progressive TimeProof Assembly:** Signed votes accumulate to form verifiable proof
 - **Unified Finality:** Single finality state (67% weight threshold)
 - **Instant Finality:** Transactions finalized in ~750ms average
@@ -75,7 +74,7 @@ pub struct ConsensusEngine {
 }
 
 pub struct TimeVoteConsensus {
-    tx_state: DashMap<Hash256, Arc<RwLock<Snowball>>>,      // Per-TX state
+    tx_state: DashMap<Hash256, Arc<RwLock<VotingState>>>,      // Per-TX state
     active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>, // Vote tracking
     finalized_txs: DashMap<Hash256, Preference>,             // Finalized set
 }
@@ -293,6 +292,8 @@ ShutdownManager::cancel()
             ▼
         Process exits cleanly
 ```
+
+**Note:** Tasks reference "Avalanche consensus" for historical reasons - this is the TimeVote Protocol implementation.
 
 ---
 

@@ -6,7 +6,6 @@ pub mod client;
 pub mod connection_manager;
 pub mod connection_state;
 pub mod dedup_filter;
-pub mod fee_prediction;
 pub mod fork_resolver;
 pub mod message;
 pub mod message_handler;

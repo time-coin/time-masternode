@@ -286,7 +286,7 @@ TimeProof validation:
 - RFC 8446: TLS v1.3
 - BIP 350: bech32m
 - BLAKE3: https://blake3.io
-- Avalanche consensus: https://arxiv.org/abs/1906.08936
+- TimeVote Protocol: Stake-weighted voting consensus (inspired by Avalanche research)
 - Sled embedded database: https://github.com/spacejam/sled
 
 ---

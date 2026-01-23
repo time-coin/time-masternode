@@ -7,8 +7,8 @@ Comprehensive documentation for the TIME Coin Protocol.
 ### 📘 Protocol Specification
 - **[TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)** - Complete protocol specification
   - Core architecture and components
-  - UTXO state machine (6-state lifecycle)
-  - Instant finality and Avalanche consensus
+  - UTXO state machine (Unspent → Locked → Voting → Finalized → Archived)
+  - TimeVote Protocol for instant finality
   - Masternode system and tiers
   - Heartbeat attestation
   - Block production and rewards

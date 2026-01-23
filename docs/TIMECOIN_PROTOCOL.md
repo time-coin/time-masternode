@@ -166,7 +166,7 @@ Only one txid per outpoint may be Finalized.
 
 ## 7. TimeVote Protocol Finality
 
-TIME Coin uses stake-weighted Snowball-style repeated voting. The protocol is defined on **conflict sets** (double spends), while non-conflicting transactions converge trivially.
+TIME Coin uses stake-weighted repeated voting with progressive proof accumulation. The protocol is defined on **conflict sets** (double spends), while non-conflicting transactions converge trivially.
 
 ### 7.1 Parameters
 - `k`: sample size (default 20)
@@ -271,7 +271,7 @@ When `X` reaches `Finalized`, the node MUST:
 > **Wallet UX:** Wallets MAY show "Confirming (X% votes)" during `Voting` state for optimistic UX, but MUST clearly indicate that only `Finalized` represents cryptographic finality with TimeProof.
 ### 7.6 TimeGuard Protocol
 
-Avalanche's probabilistic consensus can stall under adversarial conditions or network partitions. This section defines a **deterministic fallback mechanism** that guarantees bounded recovery time while preserving the leaderless nature of normal operation.
+The TimeVote Protocol's probabilistic voting can stall under adversarial conditions or network partitions. This section defines a **deterministic fallback mechanism** that guarantees bounded recovery time while preserving the leaderless nature of normal operation.
 
 #### 7.6.1 Stall Detection
 
@@ -386,7 +386,7 @@ If proposal receives `≥ Q_finality` total weight in `Approve` votes (same thre
 1. Set `status[X] = Finalized` (if decision = Accept) or `Rejected` (if decision = Reject)
 2. Assemble TimeProof (§8) using the collected `FallbackVote` signatures
 3. Mark conflicting transactions as `Rejected`
-4. Resume normal Avalanche operation for other transactions
+4. Resume normal TimeVote operation for other transactions
 
 **Step 6: Timeout and Retry**
 If no decision after `FALLBACK_ROUND_TIMEOUT` (default: 10 seconds):
@@ -460,7 +460,7 @@ Voting → (Stall detected) → FallbackResolution ─────→ Finalized 
 **Comparison to Pure BFT:**
 - Avoids view change storms (deterministic leader selection)
 - No multi-phase commit complexity (single propose → vote → finalize)
-- Fallback is rare (only after Avalanche stalls)
+- Fallback is rare (only after TimeVote stalls)
 - Normal operation remains leaderless and fast (<1s)
 
 #### 7.6.9 Implementation Requirements
@@ -663,7 +663,7 @@ pub enum NetworkMessage {
     // Tx propagation
     TxBroadcast { tx: Transaction },
 
-    // Avalanche polling (batched)
+    // TimeVote polling (batched)
     SampleQuery {
         chain_id: u32,
         request_id: u64,
@@ -676,8 +676,8 @@ pub enum NetworkMessage {
         responses: Vec<TxVoteBundle>,
     },
 
-    // Finality proof gossip
-    VfpGossip { txid: Hash256, TimeProof: TimeProof },
+    // TimeProof gossip
+    TimeProofGossip { txid: Hash256, TimeProof: TimeProof },
 
     // Blocks
     BlockBroadcast { block: Block },
@@ -752,10 +752,9 @@ If honest weight dominates and the network is connected, honest transactions can
 ## 14. Configuration Defaults
 
 - `BLOCK_INTERVAL = 600s`
-- `AVALANCHE_K = 20`
-- `AVALANCHE_ALPHA = 14`
-- `AVALANCHE_BETA_LOCAL = 20`
-- `Q_FINALITY = 0.67 * total_AVS_weight(slot_index)`
+- `TIMEVOTE_K = 20` (sample size)
+- `TIMEVOTE_ALPHA = 14` (quorum threshold)
+- `Q_FINALITY = 0.67 * total_AVS_weight(slot_index)` (finality threshold)
 - `HEARTBEAT_PERIOD = 60s`
 - `HEARTBEAT_TTL = 180s`
 - `WITNESS_MIN = 3`
@@ -1132,7 +1131,7 @@ server 3.pool.ntp.org iburst
 
 ### 21.1 Light Client Model
 Clients that cannot run full validation (e.g., mobile wallets) MAY:
-- Verify transactions against **TimeProof** (§8) rather than replaying Snowball
+- Verify transactions against **TimeProof** (§8) rather than replaying TimeVote consensus
 - Query trusted peers for AVS snapshots (§8.4)
 - Verify TimeProof signatures against AVS snapshot at transaction's `slot_index`
 
@@ -1497,7 +1496,7 @@ test_vectors:
       signature: "..."
       verification: true
 
-  vfp_threshold:
+  timeproof_threshold:
     - avs_size: 10
       avs_weight: 100
       q_finality: 67

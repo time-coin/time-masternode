@@ -367,13 +367,13 @@ Time to finality: ~1-2 seconds (accumulate to threshold)
 
 ## Recommendation
 
-**Implement this unified model.**
+**✅ IMPLEMENTED (January 2026)**
 
-The two-tier system (LocallyAccepted vs GloballyFinalized) is a legacy of adapting Avalanche to blockchain. TimeCoin should have:
+The two-tier system (LocallyAccepted vs GloballyFinalized) was eliminated and replaced with the unified TimeVote Protocol. TimeCoin now has:
 
-✅ **One finality**  
-✅ **One proof**  
-✅ **One definition**  
+✅ **One finality (Finalized state)**  
+✅ **One proof (TimeProof)**  
+✅ **One definition (67% weight threshold)**  
 
 This makes the protocol simpler, faster, and more secure.
 

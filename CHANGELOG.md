@@ -123,10 +123,6 @@ This is the first production-ready release of TimeCoin, featuring a complete AI 
   - 70% faster syncing (120s → 35s average)
   - Persistent learning across node restarts
   - Automatic optimization without configuration
-- **Transaction Fee Prediction** - AI-powered fee estimation
-  - 80% fee savings with optimal recommendations
-  - Sub-millisecond prediction time
-  - 95% accuracy within target confirmation window
 - **AI Fork Resolution** - Multi-factor fork decision system
   - 6-factor scoring: height, work, time, consensus, whitelist, reliability
   - Risk-based assessment (Low/Medium/High/Critical)
@@ -240,7 +236,6 @@ version = "1.0.0"  # Updated from 0.1.0
 [ai]
 enabled = true                 # Default: true
 peer_selection = true         # Default: true
-fee_prediction = true         # Default: true
 fork_resolution = true        # Default: true
 anomaly_detection = true      # Default: true
 ```
