@@ -245,10 +245,11 @@ impl App {
 
         // Try to parse as RPC response
         let rpc_response: RpcResponse<T> = serde_json::from_str(&response_text).map_err(|e| {
-            format!(
-                "RPC error: Failed to parse response for {}: {} - Response: {}",
-                method, e, response_text
-            )
+            // Log the full error for debugging
+            eprintln!("DEBUG: Failed to parse {} response", method);
+            eprintln!("DEBUG: Error: {}", e);
+            eprintln!("DEBUG: Response text: {}", response_text);
+            format!("RPC error: Failed to parse response for {}: {}", method, e)
         })?;
 
         if let Some(error) = rpc_response.error {
