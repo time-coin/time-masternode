@@ -1692,10 +1692,34 @@ impl PeerConnection {
                 }
             }
             _ => {
-                debug!(
-                    "📨 [{:?}] Received other message from {}",
-                    self.direction, self.peer_ip
-                );
+                // Check if it's a gossip message
+                if matches!(message, NetworkMessage::MasternodeStatusGossip { .. }) {
+                    if let NetworkMessage::MasternodeStatusGossip {
+                        reporter,
+                        visible_masternodes,
+                        timestamp,
+                    } = &message
+                    {
+                        info!(
+                            "📥 [{:?}] Received gossip from {}: {} masternodes visible",
+                            self.direction,
+                            self.peer_ip,
+                            visible_masternodes.len()
+                        );
+                        masternode_registry
+                            .process_status_gossip(
+                                reporter.clone(),
+                                visible_masternodes.clone(),
+                                *timestamp,
+                            )
+                            .await;
+                    }
+                } else {
+                    debug!(
+                        "📨 [{:?}] Received other message from {}",
+                        self.direction, self.peer_ip
+                    );
+                }
             }
         }
 
