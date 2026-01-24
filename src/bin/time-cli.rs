@@ -150,6 +150,9 @@ enum Commands {
     /// List unspent transaction outputs
     #[command(next_help_heading = "Wallet")]
     ListUnspent {
+        /// Number of UTXOs to display (default: 10, use 0 for all)
+        #[arg(short = 'n', long, default_value = "10")]
+        limit: usize,
         /// Minimum confirmations
         #[arg(default_value = "1")]
         minconf: u32,
@@ -364,7 +367,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::DecodeRawTransaction { hex } => ("decoderawtransaction", json!([hex])),
         Commands::GetBalance => ("getbalance", json!([])),
-        Commands::ListUnspent { minconf, maxconf } => ("listunspent", json!([minconf, maxconf])),
+        Commands::ListUnspent { limit, minconf, maxconf } => ("listunspent", json!([minconf, maxconf, null, limit])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::ListReceivedByAddress {
@@ -588,9 +591,9 @@ fn print_human_readable(
                     .unwrap_or(0.0)
             );
         }
-        Commands::ListUnspent { .. } => {
+        Commands::ListUnspent { limit, .. } => {
             if let Some(utxos) = result.as_array() {
-                println!("Unspent Transaction Outputs:");
+                println!("Unspent Transaction Outputs (sorted by amount, descending):");
                 println!(
                     "{:<66} {:>4} {:<42} {:>12}",
                     "TxID", "Vout", "Address", "Amount"
@@ -603,7 +606,12 @@ fn print_human_readable(
                     let amount = utxo.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     println!("{:<66} {:>4} {:<42} {:>12.8}", txid, vout, address, amount);
                 }
-                println!("\nTotal UTXOs: {}", utxos.len());
+                let total_count_msg = if *limit == 0 {
+                    format!("Total UTXOs: {} (all)", utxos.len())
+                } else {
+                    format!("Showing: {} (use -n 0 to show all)", utxos.len())
+                };
+                println!("\n{}", total_count_msg);
             }
         }
         Commands::MasternodeList => {

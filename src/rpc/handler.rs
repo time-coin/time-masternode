@@ -784,6 +784,7 @@ impl RpcHandler {
         let _min_conf = params.first().and_then(|v| v.as_u64()).unwrap_or(1);
         let _max_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(9999999);
         let addresses = params.get(2).and_then(|v| v.as_array());
+        let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
         let utxos = self.utxo_manager.list_all_utxos().await;
 
@@ -794,7 +795,7 @@ impl RpcHandler {
             .await
             .map(|mn| mn.reward_address);
 
-        let filtered: Vec<Value> = utxos
+        let mut filtered: Vec<Value> = utxos
             .iter()
             .filter(|u| {
                 // First filter by local wallet address (only show this node's UTXOs)
@@ -828,7 +829,21 @@ impl RpcHandler {
             })
             .collect();
 
-        Ok(json!(filtered))
+        // Sort by amount descending (largest first)
+        filtered.sort_by(|a, b| {
+            let amount_a = a.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let amount_b = b.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            amount_b.partial_cmp(&amount_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Apply limit (0 means no limit)
+        let result = if limit > 0 && filtered.len() > limit {
+            filtered.into_iter().take(limit).collect()
+        } else {
+            filtered
+        };
+
+        Ok(json!(result))
     }
 
     async fn list_received_by_address(&self, params: &[Value]) -> Result<Value, RpcError> {
