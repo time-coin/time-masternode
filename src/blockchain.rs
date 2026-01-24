@@ -2017,10 +2017,7 @@ impl Blockchain {
         match self.get_block(height) {
             Ok(block) => {
                 let block_hash = block.hash();
-                self.consensus
-                    .avalanche
-                    .prepare_votes
-                    .get_voters(block_hash)
+                self.consensus.timevote.prepare_votes.get_voters(block_hash)
             }
             Err(_) => vec![],
         }

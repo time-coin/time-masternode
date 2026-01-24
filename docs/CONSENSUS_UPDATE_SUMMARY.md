@@ -63,9 +63,9 @@ pub enum TransactionStatus {
 
 #### src/consensus.rs
 
-**Added to Snowball struct:**
+**Updated voting state struct:**
 ```rust
-pub struct Snowball {
+pub struct VotingState {
     // ... existing fields ...
     
     // Progressive TimeProof assembly
@@ -77,7 +77,7 @@ pub struct Snowball {
 
 **New methods:**
 ```rust
-impl Snowball {
+impl VotingState {
     /// Add a finality vote and update accumulated weight
     pub fn add_vote(&mut self, vote: FinalityVote, weight: u64) -> bool;
     
@@ -165,23 +165,23 @@ while status == Voting {
     
     for vote in votes {
         if verify_signature(vote) {
-            snowball.add_vote(vote, voter_weight);
+            voting_state.add_vote(vote, voter_weight);
         }
     }
     
     // Check finality after each round
-    if snowball.has_finality_threshold() {
+    if voting_state.has_finality_threshold() {
         status = Finalized;
-        timeproof = snowball.accumulated_votes;
+        timeproof = voting_state.accumulated_votes;
         broadcast_timeproof(timeproof);
         break;
     }
     
     // Update confidence for conflict resolution
     if valid_count >= alpha {
-        snowball.confidence += 1;
+        voting_state.confidence += 1;
     } else {
-        snowball.confidence = 0;
+        voting_state.confidence = 0;
     }
 }
 ```
@@ -220,7 +220,7 @@ pub struct FinalityVote {
 - ✅ **All code updated** and compiles successfully
 
 ### Testing Requirements
-- [ ] Unit tests for Snowball voting logic
+- [ ] Unit tests for TimeVote consensus logic
 - [ ] Integration tests for TimeProof assembly
 - [ ] Network simulation for finality timing
 - [ ] Conflict resolution tests

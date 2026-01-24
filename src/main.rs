@@ -1,6 +1,5 @@
 pub mod address;
 pub mod ai;
-pub mod avalanche;
 pub mod block;
 pub mod block_cache;
 pub mod blockchain;
@@ -22,6 +21,7 @@ pub mod shutdown;
 pub mod state_notifier;
 pub mod storage;
 pub mod time_sync;
+pub mod timevote;
 pub mod transaction_pool;
 pub mod transaction_priority;
 pub mod transaction_selection;
@@ -1208,7 +1208,7 @@ async fn main() {
             // PRIORITY: Yield to transaction votes if any are active
             // This gives instant finality priority without blocking
             let active_votes = block_consensus_engine
-                .avalanche
+                .timevote
                 .active_vote_requests
                 .load(Ordering::SeqCst);
             if active_votes > 0 {
@@ -1278,7 +1278,7 @@ async fn main() {
                         };
 
                         // Record our prepare vote in consensus engine
-                        block_consensus_engine.avalanche.accumulate_prepare_vote(
+                        block_consensus_engine.timevote.accumulate_prepare_vote(
                             block_hash,
                             our_addr.clone(),
                             our_weight,
@@ -1376,10 +1376,10 @@ async fn main() {
 
                         // Log consensus progress periodically (normal mode or if peers not responding)
                         let prepare_weight = block_consensus_engine
-                            .avalanche
+                            .timevote
                             .get_prepare_weight(block_hash);
                         let precommit_weight = block_consensus_engine
-                            .avalanche
+                            .timevote
                             .get_precommit_weight(block_hash);
 
                         if consensus_start.elapsed().as_secs() % 5 == 0
@@ -1408,7 +1408,7 @@ async fn main() {
                             // 2. There are very few validators (network bootstrap/recovery)
                             // This prevents network stall when peers are slow/offline
                             let validator_count =
-                                block_consensus_engine.avalanche.get_validators().len();
+                                block_consensus_engine.timevote.get_validators().len();
                             let should_fallback = prepare_weight > 0
                                 || validator_count <= 2
                                 || (validator_count > 0 && prepare_weight == 0);
@@ -1444,7 +1444,7 @@ async fn main() {
 
                             // Clear consensus state for this block
                             block_consensus_engine
-                                .avalanche
+                                .timevote
                                 .cleanup_block_votes(block_hash);
                             break;
                         }

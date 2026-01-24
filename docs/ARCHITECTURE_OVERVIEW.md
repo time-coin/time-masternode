@@ -282,8 +282,8 @@ ShutdownManager::cancel()
     └─→ All spawned tasks receive signal
             │
             ├─→ Heartbeat task exits
-            ├─→ Avalanche consensus exits
-            ├─→ TSDC block production exits
+            ├─→ TimeVote consensus exits
+            ├─→ TimeLock block production exits
             ├─→ Network loop exits
             │
             ▼
@@ -293,7 +293,7 @@ ShutdownManager::cancel()
         Process exits cleanly
 ```
 
-**Note:** Tasks reference "Avalanche consensus" for historical reasons - this is the TimeVote Protocol implementation.
+**Note:** Internal code may reference "Avalanche" for historical reasons - this refers to the TimeVote Protocol implementation.
 
 ---
 
@@ -416,7 +416,7 @@ Application (no lock)
     │   ├─ TransactionPool.pending_bytes
     │
     └─→ RwLock operations (reader-friendly)
-        ├─ Snowball state (many readers during voting)
+        ├─ Voting state (many readers during consensus)
         ├─ QueryRound votes (collector updates)
 ```
 

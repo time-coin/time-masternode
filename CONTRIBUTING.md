@@ -47,9 +47,9 @@ See [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md) for detailed ne
 
 When modifying consensus or UTXO logic:
 
-- Avalanche consensus must achieve finality in <1 second
-- TSDC block production every 10 minutes (configurable)
-- UTXO state machine: Unspent → Locked → Sampling → Finalized → Archived
+- TimeVote consensus must achieve finality in <1 second
+- TimeLock block production every 10 minutes (configurable)
+- UTXO state machine: Unspent → Locked → Voting → Finalized → Archived
 - All state transitions must be atomic (no partial updates)
 
 ### Commit Messages

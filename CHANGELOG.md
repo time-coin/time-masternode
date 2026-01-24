@@ -163,7 +163,7 @@ This is the first production-ready release of TimeCoin, featuring a complete AI 
 #### Version Numbers
 - **Node version**: 0.1.0 → 1.0.0
 - **RPC version**: 10000 → 100000
-- **Protocol**: V6 (Avalanche + TSDC + VFP)
+- **Protocol**: V6.1 (TimeVote + TimeLock + TimeProof + TimeGuard)
 
 #### Fork Resolution
 - Replaced simple "longest chain wins" with multi-factor scoring
@@ -263,10 +263,10 @@ anomaly_detection = true      # Default: true
 ## [0.1.0] - 2025-12-23
 
 ### Initial Development Release
-- Avalanche Snowball consensus implementation
-- TSDC (Time-Scheduled Deterministic Consensus)
-- Verifiable Finality Proofs (VFP)
-- Masternode system with 3 tiers
+- TimeVote consensus implementation (stake-weighted voting)
+- TimeLock block production (deterministic 10-minute blocks)
+- TimeProof (verifiable finality proofs)
+- Masternode system with 4 tiers (Free/Bronze/Silver/Gold)
 - UTXO state machine
 - P2P networking
 - RPC API

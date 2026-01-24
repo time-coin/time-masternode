@@ -257,9 +257,9 @@ timecoin/
 │   ├── lib.rs               # Library exports
 │   ├── config.rs            # Configuration management
 │   ├── types.rs             # Core types (Block, Transaction, UTXO, etc.)
-│   ├── consensus.rs         # TimeVote Protocol + TimeLock consensus
+│   ├── consensus.rs         # TimeVote + TimeLock consensus
 │   ├── avalanche.rs         # TimeVote protocol implementation
-│   ├── tsdc.rs              # TimeLock deterministic checkpointing
+│   ├── tsdc.rs              # TimeLock block production
 │   ├── blockchain.rs        # Blockchain storage and validation
 │   ├── storage.rs           # Sled database abstraction layer
 │   ├── utxo_manager.rs      # UTXO state machine

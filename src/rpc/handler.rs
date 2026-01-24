@@ -139,7 +139,7 @@ impl RpcHandler {
             "verificationprogress": 1.0,
             "chainwork": format!("{:064x}", height),
             "pruned": false,
-            "consensus": "TimeVote + TSDC",
+            "consensus": "TimeVote + TimeLock",
             "finality_mechanism": "TimeVote consensus",
             "instant_finality": true,
             "average_finality_time_ms": avg_finality_ms,
@@ -1005,14 +1005,14 @@ impl RpcHandler {
 
         // TimeVote consensus parameters
         let timevote_config = json!({
-            "protocol": "TimeVote + TSDC",
+            "protocol": "TimeVote + TimeLock",
             "timevote": {
                 "sample_size": 20,
                 "finality_confidence": 15,
                 "query_timeout_ms": 2000,
                 "description": "Instant transaction finality via random validator sampling"
             },
-            "tsdc": {
+            "timelock": {
                 "block_time_seconds": 600,
                 "leader_selection": "Verifiable Random Function (VRF)",
                 "description": "Deterministic 10-minute block production"
@@ -1047,7 +1047,7 @@ impl RpcHandler {
                 "validator_sampling": "random k-of-n",
                 "description": "TimeVote consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
             },
-            "note": "Transactions finalized by TimeVote in seconds, blocks produced every 10 minutes by TSDC"
+            "note": "Transactions finalized by TimeVote in seconds, blocks produced every 10 minutes by TimeLock"
         }))
     }
 

@@ -645,7 +645,7 @@ impl MessageHandler {
         };
 
         consensus
-            .avalanche
+            .timevote
             .generate_prepare_vote(block_hash, &validator_id, validator_weight);
         info!(
             "✅ [{}] Generated prepare vote for block {} at height {}",
@@ -716,11 +716,11 @@ impl MessageHandler {
         // For now, we accept the vote; in production, verify the signature
 
         consensus
-            .avalanche
+            .timevote
             .accumulate_prepare_vote(block_hash, voter_id.clone(), voter_weight);
 
         // Check if prepare consensus reached (>50% majority timevote)
-        if consensus.avalanche.check_prepare_consensus(block_hash) {
+        if consensus.timevote.check_prepare_consensus(block_hash) {
             info!(
                 "✅ [{}] Prepare consensus reached for block {}",
                 self.direction,
@@ -737,11 +737,9 @@ impl MessageHandler {
                 None => 1u64,
             };
 
-            consensus.avalanche.generate_precommit_vote(
-                block_hash,
-                &validator_id,
-                validator_weight,
-            );
+            consensus
+                .timevote
+                .generate_precommit_vote(block_hash, &validator_id, validator_weight);
             info!(
                 "✅ [{}] Generated precommit vote for block {}",
                 self.direction,
@@ -804,11 +802,11 @@ impl MessageHandler {
         // In production, verify Ed25519 signature here
 
         consensus
-            .avalanche
+            .timevote
             .accumulate_precommit_vote(block_hash, voter_id.clone(), voter_weight);
 
         // Check if precommit consensus reached (>50% majority timevote)
-        if consensus.avalanche.check_precommit_consensus(block_hash) {
+        if consensus.timevote.check_precommit_consensus(block_hash) {
             info!(
                 "✅ [{}] Precommit consensus reached for block {}",
                 self.direction,
@@ -833,7 +831,7 @@ impl MessageHandler {
                     // 2. Add get_precommit_signatures(block_hash) method to retrieve them
                     // 3. Create FinalityProof with collected signatures:
                     //    ```rust
-                    //    let signatures = consensus.avalanche.get_precommit_signatures(block_hash)?;
+                    //    let signatures = consensus.timevote.get_precommit_signatures(block_hash)?;
                     //    let finality_proof = FinalityProof {
                     //        block_hash,
                     //        height: block.header.height,
@@ -994,7 +992,7 @@ impl MessageHandler {
 
         // Accumulate the vote for VFP assembly
         if let Some(consensus) = &context.consensus {
-            if let Err(e) = consensus.avalanche.accumulate_finality_vote(vote) {
+            if let Err(e) = consensus.timevote.accumulate_finality_vote(vote) {
                 warn!(
                     "[{}] Failed to accumulate finality vote: {}",
                     self.direction, e

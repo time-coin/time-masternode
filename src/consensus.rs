@@ -3,7 +3,7 @@
 //! This module implements the TimeVote consensus protocol for instant transaction finality.
 //! Key components:
 //! - TimeVote: Unified consensus with progressive finality proof assembly
-//! - Snowflake/Snowball: Low-latency consensus primitives adapted for signed vote collection
+//! - TimeVote Protocol: Low-latency stake-weighted voting consensus primitives adapted for signed vote collection
 //! - Transaction validation and UTXO management
 //! - Stake-weighted validator sampling and vote accumulation
 //!
@@ -201,7 +201,7 @@ impl NodeIdentity {
 /// TimeVote consensus errors
 #[derive(Error, Debug)]
 #[allow(dead_code)]
-pub enum AvalancheError {
+pub enum TimeVoteError {
     #[error("Transaction not found")]
     TransactionNotFound,
 
@@ -223,7 +223,7 @@ pub enum AvalancheError {
 
 /// Configuration for TimeVote consensus
 #[derive(Debug, Clone)]
-pub struct AvalancheConfig {
+pub struct TimeVoteConfig {
     /// Number of validators to query per round (k parameter)
     pub sample_size: usize,
     /// Quorum size - minimum votes needed to consider a round (alpha parameter)
@@ -240,7 +240,7 @@ pub struct AvalancheConfig {
     pub max_rounds: usize,
 }
 
-impl Default for AvalancheConfig {
+impl Default for TimeVoteConfig {
     fn default() -> Self {
         Self {
             sample_size: 20,         // Query 20 validators per round (k)
@@ -364,10 +364,10 @@ impl Snowflake {
     }
 }
 
-/// Snowball protocol state - Progressive TimeProof assembly with vote accumulation
+/// TimeVote protocol state - Progressive TimeProof assembly with vote accumulation
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct Snowball {
+pub struct VotingState {
     pub snowflake: Snowflake,
     pub last_finalized: Option<Preference>,
     /// Accumulated finality votes for TimeProof assembly
@@ -378,7 +378,7 @@ pub struct Snowball {
     pub required_weight: u64,
 }
 
-impl Snowball {
+impl VotingState {
     pub fn new(initial_preference: Preference, validators: &[ValidatorInfo]) -> Self {
         Self {
             snowflake: Snowflake::new(initial_preference, validators),
@@ -603,14 +603,14 @@ impl PrecommitVoteAccumulator {
 }
 
 /// Core TimeVote consensus engine - Progressive finality with vote accumulation
-pub struct AvalancheConsensus {
-    config: AvalancheConfig,
+pub struct TimeVoteConsensus {
+    config: TimeVoteConfig,
 
     /// Reference to masternode registry (single source of truth for validators)
     masternode_registry: Arc<MasternodeRegistry>,
 
     /// Transaction state tracking (txid -> Snowball)
-    tx_state: DashMap<Hash256, Arc<RwLock<Snowball>>>,
+    tx_state: DashMap<Hash256, Arc<RwLock<VotingState>>>,
 
     /// Active query rounds
     active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>,
@@ -665,19 +665,19 @@ pub struct AvalancheConsensus {
     txs_finalized: AtomicUsize,
 }
 
-impl AvalancheConsensus {
+impl TimeVoteConsensus {
     pub fn new(
-        config: AvalancheConfig,
+        config: TimeVoteConfig,
         masternode_registry: Arc<MasternodeRegistry>,
-    ) -> Result<Self, AvalancheError> {
+    ) -> Result<Self, TimeVoteError> {
         // Validate config
         if config.sample_size == 0 {
-            return Err(AvalancheError::ConfigError(
+            return Err(TimeVoteError::ConfigError(
                 "sample_size must be > 0".to_string(),
             ));
         }
         if config.finality_confidence == 0 {
-            return Err(AvalancheError::ConfigError(
+            return Err(TimeVoteError::ConfigError(
                 "finality_confidence must be > 0".to_string(),
             ));
         }
@@ -832,7 +832,10 @@ impl AvalancheConsensus {
         let validators = self.get_validators();
         self.tx_state.insert(
             txid,
-            Arc::new(RwLock::new(Snowball::new(initial_preference, &validators))),
+            Arc::new(RwLock::new(VotingState::new(
+                initial_preference,
+                &validators,
+            ))),
         );
 
         true
@@ -865,31 +868,33 @@ impl AvalancheConsensus {
 
             // Update validator suspicion scores in snowball
             if let Some(state) = self.tx_state.get(&txid) {
-                let mut snowball = state.value().write();
-                snowball.snowflake.update_suspicion(&voter_id, preference);
+                let mut voting_state = state.value().write();
+                voting_state
+                    .snowflake
+                    .update_suspicion(&voter_id, preference);
             }
         }
     }
 
     /// Execute a single query round for a transaction
-    pub async fn execute_query_round(&self, txid: Hash256) -> Result<(), AvalancheError> {
+    pub async fn execute_query_round(&self, txid: Hash256) -> Result<(), TimeVoteError> {
         // Get or create transaction state
         let tx_state = self
             .tx_state
             .get(&txid)
-            .ok_or(AvalancheError::TransactionNotFound)?;
+            .ok_or(TimeVoteError::TransactionNotFound)?;
 
         let validators = self.get_validators();
         if validators.is_empty() {
-            return Err(AvalancheError::QueryFailed(
+            return Err(TimeVoteError::QueryFailed(
                 "No validators available".to_string(),
             ));
         }
 
         // Get current k from snowball (dynamic sample size)
         let current_k = {
-            let snowball = tx_state.value().read();
-            snowball.snowflake.k
+            let voting_state = tx_state.value().read();
+            voting_state.snowflake.k
         };
 
         // Sample validators based on current k
@@ -969,7 +974,7 @@ impl AvalancheConsensus {
     }
 
     /// Run consensus to completion for a transaction
-    pub async fn run_consensus(&self, txid: Hash256) -> Result<Preference, AvalancheError> {
+    pub async fn run_consensus(&self, txid: Hash256) -> Result<Preference, TimeVoteError> {
         // Check if already finalized
         if let Some(pref) = self.finalized_txs.get(&txid) {
             return Ok(pref.value().0);
@@ -989,7 +994,7 @@ impl AvalancheConsensus {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
 
-        Err(AvalancheError::InsufficientConfidence {
+        Err(TimeVoteError::InsufficientConfidence {
             got: self
                 .tx_state
                 .get(&txid)
@@ -1210,8 +1215,8 @@ impl AvalancheConsensus {
     }
 
     /// Get metrics
-    pub fn get_metrics(&self) -> AvalancheMetrics {
-        AvalancheMetrics {
+    pub fn get_metrics(&self) -> TimeVoteMetrics {
+        TimeVoteMetrics {
             rounds_executed: self.rounds_executed.load(Ordering::Relaxed),
             txs_finalized: self.txs_finalized.load(Ordering::Relaxed),
             active_rounds: self.active_rounds.len(),
@@ -1222,7 +1227,7 @@ impl AvalancheConsensus {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct AvalancheMetrics {
+pub struct TimeVoteMetrics {
     pub rounds_executed: usize,
     pub txs_finalized: usize,
     pub active_rounds: usize,
@@ -1245,7 +1250,7 @@ pub struct ConsensusEngine {
     pub tx_pool: Arc<TransactionPool>,
     pub broadcast_callback: BroadcastCallback,
     pub state_notifier: Arc<StateNotifier>,
-    pub avalanche: Arc<AvalancheConsensus>,
+    pub timevote: Arc<TimeVoteConsensus>,
     pub finality_proof_mgr: Arc<FinalityProofManager>,
     pub ai_validator: Option<Arc<crate::ai::AITransactionValidator>>,
 
@@ -1260,8 +1265,8 @@ impl ConsensusEngine {
         masternode_registry: Arc<MasternodeRegistry>,
         utxo_manager: Arc<UTXOStateManager>,
     ) -> Self {
-        let avalanche_config = AvalancheConfig::default();
-        let avalanche = AvalancheConsensus::new(avalanche_config, masternode_registry.clone())
+        let timevote_config = TimeVoteConfig::default();
+        let timevote = TimeVoteConsensus::new(timevote_config, masternode_registry.clone())
             .expect("Failed to initialize TimeVote consensus");
 
         Self {
@@ -1271,7 +1276,7 @@ impl ConsensusEngine {
             tx_pool: Arc::new(TransactionPool::new()),
             broadcast_callback: Arc::new(TokioRwLock::new(None)),
             state_notifier: Arc::new(StateNotifier::new()),
-            avalanche: Arc::new(avalanche),
+            timevote: Arc::new(timevote),
             finality_proof_mgr: Arc::new(FinalityProofManager::new(1)), // chain_id = 1 for mainnet
             ai_validator: None,
             finality_times: Arc::new(DashMap::new()),
@@ -1281,14 +1286,14 @@ impl ConsensusEngine {
 
     /// Create a test instance without UTXO manager (for unit tests)
     #[cfg(test)]
-    pub fn new_test(avalanche_config: AvalancheConfig) -> Self {
+    pub fn new_test(timevote_config: TimeVoteConfig) -> Self {
         // Create UTXO manager and masternode registry with in-memory storage
         let utxo_manager = Arc::new(UTXOStateManager::new());
         let db = Arc::new(sled::Config::new().temporary(true).open().unwrap());
         let masternode_registry =
             Arc::new(MasternodeRegistry::new(db, crate::NetworkType::Testnet));
 
-        let avalanche = AvalancheConsensus::new(avalanche_config, masternode_registry.clone())
+        let timevote = TimeVoteConsensus::new(timevote_config, masternode_registry.clone())
             .expect("Failed to initialize TimeVote consensus");
 
         Self {
@@ -1298,7 +1303,7 @@ impl ConsensusEngine {
             tx_pool: Arc::new(TransactionPool::new()),
             broadcast_callback: Arc::new(TokioRwLock::new(None)),
             state_notifier: Arc::new(StateNotifier::new()),
-            avalanche: Arc::new(avalanche),
+            timevote: Arc::new(timevote),
             finality_proof_mgr: Arc::new(FinalityProofManager::new(1)),
             ai_validator: None,
             finality_times: Arc::new(DashMap::new()),
@@ -1816,7 +1821,7 @@ impl ConsensusEngine {
         // ===== timevote CONSENSUS INTEGRATION =====
         // Start timevote Snowball consensus for this transaction
         // Use validators from consensus engine (which queries masternode registry)
-        let validators_for_consensus = self.avalanche.get_validators();
+        let validators_for_consensus = self.timevote.get_validators();
 
         tracing::warn!(
             "🔄 Starting TimeVote consensus for TX {:?} with {} validators: {:?}",
@@ -1855,12 +1860,12 @@ impl ConsensusEngine {
             }
 
             // Record finalization
-            self.avalanche
+            self.timevote
                 .finalized_txs
                 .insert(txid, (Preference::Accept, Instant::now()));
 
             // Update status to Finalized
-            self.avalanche.tx_status.insert(
+            self.timevote.tx_status.insert(
                 txid,
                 TransactionStatus::Finalized {
                     finalized_at: chrono::Utc::now().timestamp_millis(),
@@ -1872,11 +1877,11 @@ impl ConsensusEngine {
         }
 
         // Initiate consensus with Snowball
-        let tx_state = Arc::new(RwLock::new(Snowball::new(
+        let tx_state = Arc::new(RwLock::new(VotingState::new(
             Preference::Accept,
             &validators_for_consensus,
         )));
-        self.avalanche.tx_state.insert(txid, tx_state);
+        self.timevote.tx_state.insert(txid, tx_state);
 
         // Create initial QueryRound for vote tracking
         let query_round = Arc::new(RwLock::new(QueryRound::new(
@@ -1884,7 +1889,7 @@ impl ConsensusEngine {
             txid,
             validators_for_consensus.as_ref().clone(),
         )));
-        self.avalanche.active_rounds.insert(txid, query_round);
+        self.timevote.active_rounds.insert(txid, query_round);
 
         // §7.6 Integration: Set initial transaction status to Voting
         // Pre-generate vote requests (before async, so RNG doesn't cross await boundary)
@@ -1908,12 +1913,12 @@ impl ConsensusEngine {
         self.transition_to_voting(txid);
 
         // Spawn consensus round executor as blocking task
-        let consensus = self.avalanche.clone();
+        let consensus = self.timevote.clone();
         let _utxo_mgr = self.utxo_manager.clone();
         let tx_pool = self.tx_pool.clone();
         let broadcast_callback = self.broadcast_callback.clone();
         let _masternodes_for_voting = masternodes.clone();
-        let tx_status_map = self.avalanche.tx_status.clone(); // §7.6: Track status for fallback
+        let tx_status_map = self.timevote.tx_status.clone(); // §7.6: Track status for fallback
 
         // PRIORITY: Spawn with high priority for instant finality
         tokio::spawn(async move {
@@ -1989,11 +1994,11 @@ impl ConsensusEngine {
 
                         // Update Snowball state with vote result
                         if let Some(tx_state) = consensus.tx_state.get(&txid) {
-                            let mut snowball = tx_state.value().write();
-                            let old_pref = snowball.snowflake.preference;
+                            let mut voting_state = tx_state.value().write();
+                            let old_pref = voting_state.snowflake.preference;
 
                             // Update preference and confidence based on votes
-                            snowball.update(
+                            voting_state.update(
                                 vote_preference,
                                 consensus.config.finality_confidence as u32,
                             );
@@ -2005,7 +2010,7 @@ impl ConsensusEngine {
                                 old_pref,
                                 vote_preference,
                                 vote_count,
-                                snowball.snowflake.confidence
+                                voting_state.snowflake.confidence
                             );
 
                             // Generate and broadcast finality votes if we have valid responses
@@ -2160,7 +2165,7 @@ impl ConsensusEngine {
     /// Cleanup old finalized transactions from TimeVote consensus
     /// Prevents unbounded memory growth by removing old finalized state
     pub fn cleanup_old_finalized(&self, retention_secs: u64) -> usize {
-        self.avalanche.cleanup_old_finalized(retention_secs)
+        self.timevote.cleanup_old_finalized(retention_secs)
     }
 
     // ========================================================================
@@ -2170,14 +2175,14 @@ impl ConsensusEngine {
     /// Start monitoring a transaction for stall detection (§7.6.1)
     /// Call this when a transaction enters Voting state
     pub fn start_stall_timer(&self, txid: Hash256) {
-        self.avalanche.stall_timers.insert(txid, Instant::now());
+        self.timevote.stall_timers.insert(txid, Instant::now());
         tracing::debug!("Started stall timer for transaction {}", hex::encode(txid));
     }
 
     /// Check if a transaction has exceeded the stall timeout (§7.6.1)
     /// Returns true if transaction has been in Voting for > STALL_TIMEOUT
     pub fn check_stall_timeout(&self, txid: &Hash256) -> bool {
-        if let Some(entry) = self.avalanche.stall_timers.get(txid) {
+        if let Some(entry) = self.timevote.stall_timers.get(txid) {
             let elapsed = entry.value().elapsed();
             elapsed > STALL_TIMEOUT
         } else {
@@ -2188,17 +2193,17 @@ impl ConsensusEngine {
     /// Stop monitoring a transaction (remove stall timer)
     /// Call when transaction reaches terminal state
     pub fn stop_stall_timer(&self, txid: &Hash256) {
-        self.avalanche.stall_timers.remove(txid);
+        self.timevote.stall_timers.remove(txid);
     }
 
     /// Set transaction status (§7.3 state machine)
     pub fn set_tx_status(&self, txid: Hash256, status: TransactionStatus) {
-        self.avalanche.tx_status.insert(txid, status);
+        self.timevote.tx_status.insert(txid, status);
     }
 
     /// Get transaction status
     pub fn get_tx_status(&self, txid: &Hash256) -> Option<TransactionStatus> {
-        self.avalanche.tx_status.get(txid).map(|r| r.clone())
+        self.timevote.tx_status.get(txid).map(|r| r.clone())
     }
 
     /// Transition transaction to Voting state (§7.3)
@@ -2223,8 +2228,8 @@ impl ConsensusEngine {
         self.stop_stall_timer(&txid);
 
         // §7.6 Week 5-6 Part 4: Clean up fallback tracking
-        self.avalanche.fallback_rounds.remove(&txid);
-        self.avalanche.liveness_alerts.remove(&txid);
+        self.timevote.fallback_rounds.remove(&txid);
+        self.timevote.liveness_alerts.remove(&txid);
 
         tracing::info!(
             "Transaction {} → Finalized (weight: {})",
@@ -2246,7 +2251,7 @@ impl ConsensusEngine {
         // §7.6 Week 5-6 Part 4: Initialize fallback round tracking
         // Start with slot_index 0, round_count 0
         let current_slot = (chrono::Utc::now().timestamp() as u64) / 600; // 10-minute slots
-        self.avalanche
+        self.timevote
             .fallback_rounds
             .insert(txid, (current_slot, 0, Instant::now()));
 
@@ -2268,15 +2273,15 @@ impl ConsensusEngine {
         self.stop_stall_timer(&txid);
 
         // §7.6 Week 5-6 Part 4: Clean up fallback tracking
-        self.avalanche.fallback_rounds.remove(&txid);
-        self.avalanche.liveness_alerts.remove(&txid);
+        self.timevote.fallback_rounds.remove(&txid);
+        self.timevote.liveness_alerts.remove(&txid);
 
         tracing::info!("Transaction {} → Rejected: {}", hex::encode(txid), reason);
     }
 
     /// Get all transactions in a specific status
     pub fn get_transactions_by_status(&self, target_status: &TransactionStatus) -> Vec<Hash256> {
-        self.avalanche
+        self.timevote
             .tx_status
             .iter()
             .filter_map(|entry| {
@@ -2292,7 +2297,7 @@ impl ConsensusEngine {
 
     /// Get all stalled transactions (in Voting for > STALL_TIMEOUT)
     pub fn get_stalled_transactions(&self) -> Vec<Hash256> {
-        self.avalanche
+        self.timevote
             .stall_timers
             .iter()
             .filter_map(|entry| {
@@ -2308,7 +2313,7 @@ impl ConsensusEngine {
 
     /// Get memory usage statistics from consensus engine
     pub fn memory_stats(&self) -> ConsensusMemoryStats {
-        self.avalanche.memory_stats()
+        self.timevote.memory_stats()
     }
 
     // ========================================================================
@@ -2326,7 +2331,7 @@ impl ConsensusEngine {
         let txid = alert.txid;
 
         // Add alert to tracker
-        self.avalanche
+        self.timevote
             .liveness_alerts
             .entry(txid)
             .or_default()
@@ -2334,7 +2339,7 @@ impl ConsensusEngine {
 
         // Count unique reporters (collect into Vec to avoid lifetime issues)
         let alerts_vec: Vec<String> = self
-            .avalanche
+            .timevote
             .liveness_alerts
             .get(&txid)
             .map(|alerts| alerts.iter().map(|a| a.reporter_mn_id.clone()).collect())
@@ -2351,7 +2356,7 @@ impl ConsensusEngine {
 
     /// Get count of unique alert reporters for a transaction
     pub fn get_alert_count(&self, txid: &Hash256) -> usize {
-        self.avalanche
+        self.timevote
             .liveness_alerts
             .get(txid)
             .map(|alerts| {
@@ -2373,14 +2378,14 @@ impl ConsensusEngine {
         let proposal_hash = vote.proposal_hash;
 
         // Add vote to tracker
-        self.avalanche
+        self.timevote
             .fallback_votes
             .entry(proposal_hash)
             .or_default()
             .push(vote);
 
         // Calculate weighted totals
-        let votes = self.avalanche.fallback_votes.get(&proposal_hash).unwrap();
+        let votes = self.timevote.fallback_votes.get(&proposal_hash).unwrap();
         let mut approve_weight = 0u64;
         let mut reject_weight = 0u64;
 
@@ -2406,7 +2411,7 @@ impl ConsensusEngine {
 
     /// Get current vote status for a proposal (for logging/debugging)
     pub fn get_vote_status(&self, proposal_hash: &Hash256) -> Option<(u64, u64, usize)> {
-        self.avalanche
+        self.timevote
             .fallback_votes
             .get(proposal_hash)
             .map(|votes| {
@@ -2426,12 +2431,12 @@ impl ConsensusEngine {
 
     /// Register a proposal for a transaction (tracking proposal_hash -> txid)
     pub fn register_proposal(&self, proposal_hash: Hash256, txid: Hash256) {
-        self.avalanche.proposal_to_tx.insert(proposal_hash, txid);
+        self.timevote.proposal_to_tx.insert(proposal_hash, txid);
     }
 
     /// Get transaction ID for a proposal hash
     pub fn get_proposal_txid(&self, proposal_hash: &Hash256) -> Option<Hash256> {
-        self.avalanche.proposal_to_tx.get(proposal_hash).map(|v| *v)
+        self.timevote.proposal_to_tx.get(proposal_hash).map(|v| *v)
     }
 
     /// Finalize transaction based on fallback vote result (§7.6.4)
@@ -2544,7 +2549,7 @@ impl ConsensusEngine {
 
         // Collect timed-out transactions
         let timed_out: Vec<(Hash256, u64, u32, Instant)> = self
-            .avalanche
+            .timevote
             .fallback_rounds
             .iter()
             .filter_map(|entry| {
@@ -2579,7 +2584,7 @@ impl ConsensusEngine {
                 );
 
                 // Remove from fallback tracking
-                self.avalanche.fallback_rounds.remove(&txid);
+                self.timevote.fallback_rounds.remove(&txid);
                 retried_count += 1;
             } else {
                 // Retry with new leader (increment slot_index)
@@ -2596,7 +2601,7 @@ impl ConsensusEngine {
                 );
 
                 // Update fallback round tracker
-                self.avalanche
+                self.timevote
                     .fallback_rounds
                     .insert(txid, (new_slot_index, new_round_count, Instant::now()));
 
@@ -2752,7 +2757,7 @@ impl ConsensusEngine {
 
         // Get current transaction state
         let tx_status = self
-            .avalanche
+            .timevote
             .tx_status
             .get(&txid)
             .ok_or_else(|| format!("Transaction {} not found", hex::encode(txid)))?;
@@ -3024,7 +3029,7 @@ impl ConsensusEngine {
     pub fn resume_sampling_after_fallback(&self, txid: Hash256) -> Result<(), String> {
         // Check current status
         let current_status = self
-            .avalanche
+            .timevote
             .tx_status
             .get(&txid)
             .ok_or_else(|| format!("Transaction {} not found", hex::encode(txid)))?;
@@ -3208,17 +3213,17 @@ mod tests {
 
     #[test]
     fn test_timevote_init() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let av = AvalancheConsensus::new(config, registry).unwrap();
+        let av = TimeVoteConsensus::new(config, registry).unwrap();
         assert_eq!(av.get_validators().len(), 0);
     }
 
     #[test]
     fn test_validator_management() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let av = AvalancheConsensus::new(config, registry).unwrap();
+        let av = TimeVoteConsensus::new(config, registry).unwrap();
 
         // Validators now come from masternode registry, so this test
         // just verifies that get_validators() works
@@ -3228,9 +3233,9 @@ mod tests {
 
     #[test]
     fn test_initiate_consensus() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let av = AvalancheConsensus::new(config, registry).unwrap();
+        let av = TimeVoteConsensus::new(config, registry).unwrap();
         let txid = test_txid(1);
 
         assert!(av.initiate_consensus(txid, Preference::Accept));
@@ -3244,9 +3249,9 @@ mod tests {
 
     #[test]
     fn test_vote_submission() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let av = AvalancheConsensus::new(config, registry).unwrap();
+        let av = TimeVoteConsensus::new(config, registry).unwrap();
         let txid = test_txid(1);
 
         av.initiate_consensus(txid, Preference::Accept);
@@ -3297,17 +3302,17 @@ mod tests {
     async fn test_invalid_config() {
         let registry = create_test_registry();
 
-        let config = AvalancheConfig {
+        let config = TimeVoteConfig {
             sample_size: 0,
             ..Default::default()
         };
-        assert!(AvalancheConsensus::new(config, registry.clone()).is_err());
+        assert!(TimeVoteConsensus::new(config, registry.clone()).is_err());
 
-        let config = AvalancheConfig {
+        let config = TimeVoteConfig {
             finality_confidence: 0,
             ..Default::default()
         };
-        assert!(AvalancheConsensus::new(config, registry).is_err());
+        assert!(TimeVoteConsensus::new(config, registry).is_err());
     }
 }
 
@@ -3455,9 +3460,9 @@ mod fallback_tests {
     /// Test that fallback round tracking is initialized and cleaned up properly
     #[test]
     fn test_fallback_tracking_lifecycle() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let consensus = AvalancheConsensus::new(config, registry).unwrap();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
         let txid = [99u8; 32];
 
         // Initially no tracking
@@ -3536,9 +3541,9 @@ mod fallback_tests {
     /// Test proposal-to-transaction mapping operations
     #[test]
     fn test_proposal_tx_mapping_operations() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let consensus = AvalancheConsensus::new(config, registry).unwrap();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
 
         let txid = [100u8; 32];
         let proposal_hash = [200u8; 32];
@@ -3564,9 +3569,9 @@ mod fallback_tests {
     /// Test liveness alerts accumulation structure
     #[test]
     fn test_liveness_alerts_accumulation() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let consensus = AvalancheConsensus::new(config, registry).unwrap();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
 
         let txid = [101u8; 32];
 
@@ -3588,9 +3593,9 @@ mod fallback_tests {
     /// Test fallback votes accumulation structure
     #[test]
     fn test_fallback_votes_accumulation() {
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let consensus = AvalancheConsensus::new(config, registry).unwrap();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
 
         let proposal_hash = [202u8; 32];
 
@@ -3615,9 +3620,9 @@ mod fallback_tests {
         use std::sync::Arc;
         use std::thread;
 
-        let config = AvalancheConfig::default();
+        let config = TimeVoteConfig::default();
         let registry = create_test_registry();
-        let consensus = Arc::new(AvalancheConsensus::new(config, registry).unwrap());
+        let consensus = Arc::new(TimeVoteConsensus::new(config, registry).unwrap());
 
         let handles: Vec<_> = (0..10)
             .map(|i| {
@@ -3674,3 +3679,4 @@ mod fallback_tests {
         assert_eq!(leader2, leader3);
     }
 }
+

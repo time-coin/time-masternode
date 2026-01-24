@@ -1138,7 +1138,7 @@ async fn handle_peer(
                                     check_rate_limit!("vote");
 
                                     // PRIORITY: Increment counter to pause block production
-                                    consensus.avalanche.active_vote_requests.fetch_add(1, Ordering::SeqCst);
+                                    consensus.timevote.active_vote_requests.fetch_add(1, Ordering::SeqCst);
 
                                     // PRIORITY: Spawn immediately for instant finality
                                     let txid_val = *txid;
@@ -1165,7 +1165,7 @@ async fn handle_peer(
                                         let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
 
                                         // Decrement counter to resume block production
-                                        consensus_clone.avalanche.active_vote_requests.fetch_sub(1, Ordering::SeqCst);
+                                        consensus_clone.timevote.active_vote_requests.fetch_sub(1, Ordering::SeqCst);
                                         tracing::debug!("✅ Vote response sent for TX {:?} - block production can resume", hex::encode(txid_val));
                                     });
                                 }
@@ -1190,8 +1190,8 @@ async fn handle_peer(
                                     };
 
                                     // Submit vote to timevote consensus
-                                    // The consensus engine will update Snowball state
-                                    consensus.avalanche.submit_vote(*txid, peer.addr.clone(), pref);
+                                    // The consensus engine will update voting state
+                                    consensus.timevote.submit_vote(*txid, peer.addr.clone(), pref);
 
                                     tracing::debug!("✅ Vote recorded for TX {:?}", hex::encode(txid));
                                 }
@@ -1203,7 +1203,7 @@ async fn handle_peer(
                                     tracing::debug!("📥 Finality vote from {} for TX {:?}", peer.addr, hex::encode(vote.txid));
 
                                     // Accumulate the finality vote in consensus
-                                    if let Err(e) = consensus.avalanche.accumulate_finality_vote(vote.clone()) {
+                                    if let Err(e) = consensus.timevote.accumulate_finality_vote(vote.clone()) {
                                         tracing::warn!("Failed to accumulate finality vote from {}: {}", peer.addr, e);
                                     } else {
                                         tracing::debug!("✅ Finality vote recorded from {}", peer.addr);
