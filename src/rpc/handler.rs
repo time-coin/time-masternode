@@ -100,6 +100,7 @@ impl RpcHandler {
             "listlockedutxos" => self.list_locked_utxos().await,
             "unlockutxo" => self.unlock_utxo(&params_array).await,
             "unlockorphanedutxos" => self.unlock_orphaned_utxos().await,
+            "forceunlockall" => self.force_unlock_all().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -2108,33 +2109,47 @@ impl RpcHandler {
 
     /// List all currently locked UTXOs with details
     async fn list_locked_utxos(&self) -> Result<Value, RpcError> {
-        let utxos = self.utxo_manager.list_all_utxos().await;
         let now = chrono::Utc::now().timestamp();
 
-        let locked: Vec<Value> = utxos
-            .iter()
-            .filter_map(|u| {
-                if let Some(crate::types::UTXOState::Locked { txid, locked_at }) =
-                    self.utxo_manager.get_state(&u.outpoint)
-                {
-                    let age_seconds = now - locked_at;
-                    let expired = age_seconds > 600; // 10 minutes
+        // Get locked UTXOs directly from the state map
+        let locked_list = self.utxo_manager.get_locked_utxos();
 
-                    Some(json!({
-                        "txid": hex::encode(u.outpoint.txid),
-                        "vout": u.outpoint.vout,
-                        "address": u.address,
-                        "amount": u.value as f64 / 100_000_000.0,
-                        "locked_by_tx": hex::encode(txid),
-                        "locked_at": locked_at,
-                        "age_seconds": age_seconds,
-                        "expired": expired
-                    }))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let mut locked: Vec<Value> = Vec::new();
+
+        for (outpoint, txid, locked_at) in locked_list {
+            // Try to get UTXO details from storage
+            if let Ok(utxo) = self.utxo_manager.get_utxo(&outpoint).await {
+                let age_seconds = now - locked_at;
+                let expired = age_seconds > 600; // 10 minutes
+
+                locked.push(json!({
+                    "txid": hex::encode(outpoint.txid),
+                    "vout": outpoint.vout,
+                    "address": utxo.address,
+                    "amount": utxo.value as f64 / 100_000_000.0,
+                    "locked_by_tx": hex::encode(txid),
+                    "locked_at": locked_at,
+                    "age_seconds": age_seconds,
+                    "expired": expired
+                }));
+            } else {
+                // UTXO not in storage but has a lock state - orphaned state
+                let age_seconds = now - locked_at;
+                let expired = age_seconds > 600;
+
+                locked.push(json!({
+                    "txid": hex::encode(outpoint.txid),
+                    "vout": outpoint.vout,
+                    "address": "Unknown (orphaned state)",
+                    "amount": 0.0,
+                    "locked_by_tx": hex::encode(txid),
+                    "locked_at": locked_at,
+                    "age_seconds": age_seconds,
+                    "expired": expired,
+                    "orphaned": true
+                }));
+            }
+        }
 
         Ok(json!({
             "locked_count": locked.len(),
@@ -2224,7 +2239,7 @@ impl RpcHandler {
                     let in_mempool = self.mempool.read().await.contains_key(&txid);
 
                     // Check if it's in consensus pool (pending or finalized)
-                    let in_pool = self.consensus.tx_pool.is_pending(&txid) 
+                    let in_pool = self.consensus.tx_pool.is_pending(&txid)
                         || self.consensus.tx_pool.is_finalized(&txid);
 
                     in_mempool || in_pool
@@ -2257,6 +2272,29 @@ impl RpcHandler {
             "unlocked": unlocked_count,
             "orphaned_utxos": orphaned,
             "message": format!("Unlocked {} orphaned UTXOs", unlocked_count)
+        }))
+    }
+
+    /// Force unlock ALL locked UTXOs (nuclear option for recovery)
+    /// This resets all UTXOs to Unspent state
+    async fn force_unlock_all(&self) -> Result<Value, RpcError> {
+        let all_utxos = self.utxo_manager.list_all_utxos().await;
+        let mut unlocked_count = 0;
+
+        for utxo in all_utxos {
+            if self.utxo_manager.force_unlock(&utxo.outpoint) {
+                unlocked_count += 1;
+            }
+        }
+
+        tracing::warn!(
+            "⚠️  Force unlocked {} UTXOs to Unspent state",
+            unlocked_count
+        );
+
+        Ok(json!({
+            "unlocked": unlocked_count,
+            "message": format!("Force unlocked all {} UTXOs", unlocked_count)
         }))
     }
 }

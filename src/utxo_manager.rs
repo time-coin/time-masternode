@@ -398,6 +398,17 @@ impl UTXOStateManager {
         self.utxo_states.insert(outpoint.clone(), state);
     }
 
+    /// Force reset a UTXO to Unspent state (for recovery from stuck locks)
+    pub fn force_unlock(&self, outpoint: &OutPoint) -> bool {
+        if self.utxo_states.contains_key(outpoint) {
+            self.utxo_states
+                .insert(outpoint.clone(), UTXOState::Unspent);
+            true
+        } else {
+            false
+        }
+    }
+
     #[allow(dead_code)]
     pub async fn get_finalized_transactions(&self) -> Vec<Transaction> {
         Vec::new()

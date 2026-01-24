@@ -328,6 +328,10 @@ enum Commands {
     /// Scan and unlock orphaned UTXOs (locked by non-existent transactions)
     #[command(next_help_heading = "Utility")]
     UnlockOrphanedUTXOs,
+
+    /// Force unlock ALL UTXOs (nuclear option - use only for recovery)
+    #[command(next_help_heading = "Utility")]
+    ForceUnlockAll,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -429,6 +433,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
         Commands::UnlockUTXO { txid, vout } => ("unlockutxo", json!([txid, vout])),
         Commands::UnlockOrphanedUTXOs => ("unlockorphanedutxos", json!([])),
+        Commands::ForceUnlockAll => ("forceunlockall", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
@@ -846,6 +851,18 @@ fn print_human_readable(
                 }
             } else {
                 println!("ℹ No orphaned locks found");
+            }
+        }
+        Commands::ForceUnlockAll => {
+            let unlocked = result.get("unlocked").and_then(|v| v.as_u64()).unwrap_or(0);
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+
+            println!("⚠️  {}", message);
+            if unlocked > 0 {
+                println!("   All {} UTXOs have been reset to Unspent state", unlocked);
             }
         }
         Commands::MasternodeStatus => {
