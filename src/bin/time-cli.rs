@@ -307,6 +307,10 @@ enum Commands {
     /// Rebuild transaction index
     #[command(next_help_heading = "Utility")]
     ReindexTransactions,
+
+    /// Cleanup expired UTXO locks (older than 10 minutes)
+    #[command(next_help_heading = "Utility")]
+    CleanupLockedUTXOs,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -404,6 +408,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stop => ("stop", json!([])),
         Commands::Uptime => ("uptime", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
+        Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
@@ -712,6 +717,19 @@ fn print_human_readable(
                 "Uptime: {} days, {} hours, {} minutes, {} seconds",
                 days, hours, minutes, secs
             );
+        }
+        Commands::CleanupLockedUTXOs => {
+            let cleaned = result.get("cleaned").and_then(|v| v.as_u64()).unwrap_or(0);
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+            println!("{}", message);
+            if cleaned > 0 {
+                println!("✓ Successfully cleaned {} expired lock(s)", cleaned);
+            } else {
+                println!("ℹ No expired locks found");
+            }
         }
         Commands::MasternodeStatus => {
             println!("Masternode Status:");

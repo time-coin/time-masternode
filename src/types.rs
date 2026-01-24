@@ -97,6 +97,63 @@ pub enum UTXOState {
     },
 }
 
+impl std::fmt::Display for UTXOState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UTXOState::Unspent => write!(f, "Unspent"),
+            UTXOState::Locked { txid, locked_at } => {
+                write!(
+                    f,
+                    "Locked (txid: {}, locked_at: {})",
+                    hex::encode(txid),
+                    locked_at
+                )
+            }
+            UTXOState::SpentPending {
+                txid,
+                votes,
+                total_nodes,
+                spent_at,
+            } => {
+                write!(
+                    f,
+                    "SpentPending (txid: {}, votes: {}/{}, spent_at: {})",
+                    hex::encode(txid),
+                    votes,
+                    total_nodes,
+                    spent_at
+                )
+            }
+            UTXOState::SpentFinalized {
+                txid,
+                finalized_at,
+                votes,
+            } => {
+                write!(
+                    f,
+                    "SpentFinalized (txid: {}, finalized_at: {}, votes: {})",
+                    hex::encode(txid),
+                    finalized_at,
+                    votes
+                )
+            }
+            UTXOState::Confirmed {
+                txid,
+                block_height,
+                confirmed_at,
+            } => {
+                write!(
+                    f,
+                    "Confirmed (txid: {}, block_height: {}, confirmed_at: {})",
+                    hex::encode(txid),
+                    block_height,
+                    confirmed_at
+                )
+            }
+        }
+    }
+}
+
 // ============================================================================
 // TRANSACTION STATUS - Per Protocol §7.3 and §7.6
 // ============================================================================

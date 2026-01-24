@@ -96,6 +96,7 @@ impl RpcHandler {
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
             "gettxindexstatus" => self.get_tx_index_status().await,
+            "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -2048,5 +2049,16 @@ impl RpcHandler {
                 "message": "Transaction index not initialized"
             }))
         }
+    }
+
+    /// Cleanup expired UTXO locks (older than 10 minutes)
+    /// Returns the number of locks cleaned up
+    async fn cleanup_locked_utxos(&self) -> Result<Value, RpcError> {
+        let cleaned = self.utxo_manager.cleanup_expired_locks();
+
+        Ok(json!({
+            "cleaned": cleaned,
+            "message": format!("Cleaned {} expired UTXO locks", cleaned)
+        }))
     }
 }

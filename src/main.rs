@@ -1628,6 +1628,7 @@ async fn main() {
     // Spawn consensus cleanup task to prevent memory leaks
     // Cleans up finalized transactions older than 1 hour
     let cleanup_consensus = consensus_engine.clone();
+    let cleanup_utxo = utxo_mgr.clone();
     let cleanup_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(600)); // Every 10 minutes
         loop {
@@ -1648,6 +1649,12 @@ async fn main() {
 
             // Clean up transaction pool rejected transactions (older than 1 hour)
             cleanup_consensus.tx_pool.cleanup_rejected(3600);
+
+            // Clean up expired UTXO locks (older than 10 minutes)
+            let cleaned_locks = cleanup_utxo.cleanup_expired_locks();
+            if cleaned_locks > 0 {
+                tracing::info!("🧹 Cleaned {} expired UTXO locks", cleaned_locks);
+            }
 
             tracing::debug!("🧹 Memory cleanup completed");
         }

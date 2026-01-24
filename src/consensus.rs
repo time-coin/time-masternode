@@ -1482,7 +1482,7 @@ impl ConsensusEngine {
             match self.utxo_manager.get_state(&input.previous_output) {
                 Some(UTXOState::Unspent) => {}
                 Some(state) => {
-                    return Err(format!("UTXO not unspent: {:?}", state));
+                    return Err(format!("UTXO not unspent: {}", state));
                 }
                 None => {
                     return Err("UTXO not found".to_string());
@@ -1734,7 +1734,11 @@ impl ConsensusEngine {
         let txid = tx.txid();
 
         // Step 1: Atomically lock and validate
-        self.lock_and_validate_transaction(&tx).await?;
+        if let Err(e) = self.lock_and_validate_transaction(&tx).await {
+            // If lock_and_validate fails, UTXOs may be locked - unlock them
+            self.unlock_transaction_inputs(&tx, &txid).await;
+            return Err(e);
+        }
 
         // Step 2: Broadcast transaction to network FIRST
         // This ensures validators receive the TX before vote requests
@@ -1743,9 +1747,33 @@ impl ConsensusEngine {
 
         // Step 3: Process transaction through consensus locally (this adds to pool)
         // AND broadcasts vote request - validators will have received TX by now
-        self.process_transaction(tx).await?;
+        if let Err(e) = self.process_transaction(tx.clone()).await {
+            // If processing fails, unlock the inputs
+            self.unlock_transaction_inputs(&tx, &txid).await;
+            return Err(e);
+        }
 
         Ok(txid)
+    }
+
+    /// Helper to unlock transaction inputs
+    async fn unlock_transaction_inputs(&self, tx: &Transaction, txid: &Hash256) {
+        for input in &tx.inputs {
+            // Only unlock if it's still locked by this transaction
+            if let Some(UTXOState::Locked {
+                txid: locked_txid, ..
+            }) = self.utxo_manager.get_state(&input.previous_output)
+            {
+                if locked_txid == *txid {
+                    self.utxo_manager
+                        .update_state(&input.previous_output, UTXOState::Unspent);
+                    tracing::debug!(
+                        "Unlocked UTXO {:?} after transaction failure",
+                        input.previous_output
+                    );
+                }
+            }
+        }
     }
 
     pub async fn process_transaction(&self, tx: Transaction) -> Result<(), String> {
@@ -3679,4 +3707,3 @@ mod fallback_tests {
         assert_eq!(leader2, leader3);
     }
 }
-
