@@ -17,7 +17,7 @@ use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::atomic::Ordering;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
@@ -1137,10 +1137,7 @@ async fn handle_peer(
                                     check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
                                     check_rate_limit!("vote");
 
-                                    // PRIORITY: Increment counter to pause block production
-                                    consensus.timevote.active_vote_requests.fetch_add(1, Ordering::SeqCst);
-
-                                    // PRIORITY: Spawn immediately for instant finality
+                                    // Spawn vote processing (non-blocking - runs concurrently with block production)
                                     let txid_val = *txid;
                                     let peer_addr_str = peer.addr.to_string();
                                     let ip_str_clone = ip_str.clone();
@@ -1148,7 +1145,7 @@ async fn handle_peer(
                                     let peer_registry_clone = Arc::clone(&peer_registry);
 
                                     tokio::spawn(async move {
-                                        tracing::info!("🗳️  PRIORITY: Vote request from {} for TX {:?} - block production paused", peer_addr_str, hex::encode(txid_val));
+                                        tracing::debug!("🗳️  Vote request from {} for TX {:?}", peer_addr_str, hex::encode(txid_val));
 
                                         // Get our preference (Accept/Reject) for this transaction
                                         let preference = if consensus_clone.tx_pool.is_pending(&txid_val) || consensus_clone.tx_pool.get_pending(&txid_val).is_some() {
@@ -1164,9 +1161,7 @@ async fn handle_peer(
                                         };
                                         let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
 
-                                        // Decrement counter to resume block production
-                                        consensus_clone.timevote.active_vote_requests.fetch_sub(1, Ordering::SeqCst);
-                                        tracing::debug!("✅ Vote response sent for TX {:?} - block production can resume", hex::encode(txid_val));
+                                        tracing::debug!("✅ Vote response sent for TX {:?}", hex::encode(txid_val));
                                     });
                                 }
                                 NetworkMessage::TransactionVoteResponse { txid, preference } => {

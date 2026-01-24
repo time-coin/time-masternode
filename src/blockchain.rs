@@ -1642,6 +1642,11 @@ impl Blockchain {
 
         // Get finalized transactions from consensus layer
         let finalized_txs = self.consensus.get_finalized_transactions_for_block();
+        tracing::info!(
+            "🔍 Block {}: Including {} finalized transactions",
+            next_height,
+            finalized_txs.len()
+        );
 
         // Calculate fees from current transactions (will be added to NEXT block)
         let current_block_fees = self.consensus.tx_pool.get_total_fees();

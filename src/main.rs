@@ -48,7 +48,7 @@ use rpc::server::RpcServer;
 use shutdown::ShutdownManager;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
 use tsdc::TSCDConsensus;
@@ -1202,22 +1202,6 @@ async fn main() {
                     "⚠️ Only {} peer(s) connected - waiting for more peers before producing",
                     connected_peers.len()
                 );
-                continue;
-            }
-
-            // PRIORITY: Yield to transaction votes if any are active
-            // This gives instant finality priority without blocking
-            let active_votes = block_consensus_engine
-                .timevote
-                .active_vote_requests
-                .load(Ordering::SeqCst);
-            if active_votes > 0 {
-                tracing::debug!(
-                    "🗳️  {} votes active - yielding to instant finality",
-                    active_votes
-                );
-                tokio::task::yield_now().await;
-                tokio::time::sleep(Duration::from_millis(50)).await;
                 continue;
             }
 

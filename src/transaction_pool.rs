@@ -142,6 +142,11 @@ impl TransactionPool {
             self.finalized.insert(txid, entry.clone());
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+            tracing::info!(
+                "📦 TxPool: Finalized TX {:?}, pool now has {} finalized",
+                hex::encode(txid),
+                self.finalized.len()
+            );
             tx
         })
     }
@@ -174,7 +179,12 @@ impl TransactionPool {
 
     /// Clear finalized transactions (after block inclusion)
     pub fn clear_finalized(&self) {
+        let count = self.finalized.len();
         self.finalized.clear();
+        tracing::info!(
+            "🧹 TxPool: Cleared {} finalized transactions after block inclusion",
+            count
+        );
     }
 
     /// Get pending transaction count (O(1))
