@@ -1410,7 +1410,16 @@ async fn handle_peer(
     // Cleanup: mark inbound connection as disconnected in BOTH managers
     connection_manager.mark_inbound_disconnected(&ip_str);
     peer_registry.unregister_peer(&ip_str).await;
-    tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
+
+    // Mark masternode as inactive if this was a masternode connection
+    if let Err(e) = masternode_registry
+        .mark_inactive_on_disconnect(&ip_str)
+        .await
+    {
+        tracing::debug!("Note: {} is not a registered masternode ({})", ip_str, e);
+    }
+
+    tracing::info!("🔌 Peer {} disconnected", peer.addr);
 
     Ok(())
 }

@@ -1618,9 +1618,9 @@ impl Blockchain {
             masternodes.len()
         );
 
-        // Debug: Log each masternode receiving rewards
+        // Log each masternode receiving rewards to diagnose inconsistent counts
         for mn in &masternodes {
-            tracing::debug!(
+            tracing::info!(
                 "   → Masternode {} (tier: {:?}, weight: {})",
                 mn.masternode.address,
                 mn.masternode.tier,
