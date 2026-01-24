@@ -367,7 +367,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::DecodeRawTransaction { hex } => ("decoderawtransaction", json!([hex])),
         Commands::GetBalance => ("getbalance", json!([])),
-        Commands::ListUnspent { limit, minconf, maxconf } => ("listunspent", json!([minconf, maxconf, null, limit])),
+        Commands::ListUnspent {
+            limit,
+            minconf,
+            maxconf,
+        } => ("listunspent", json!([minconf, maxconf, null, limit])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
         Commands::ListReceivedByAddress {

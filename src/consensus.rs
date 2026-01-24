@@ -1725,7 +1725,6 @@ impl ConsensusEngine {
     /// 3. Broadcast to network
     /// 4. Collect votes from masternodes
     /// 5. Finalize (2/3 quorum) or reject
-    #[allow(dead_code)]
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
         let txid = tx.txid();
 

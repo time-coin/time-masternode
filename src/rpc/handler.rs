@@ -833,7 +833,9 @@ impl RpcHandler {
         filtered.sort_by(|a, b| {
             let amount_a = a.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
             let amount_b = b.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            amount_b.partial_cmp(&amount_a).unwrap_or(std::cmp::Ordering::Equal)
+            amount_b
+                .partial_cmp(&amount_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Apply limit (0 means no limit)
@@ -1212,8 +1214,8 @@ impl RpcHandler {
 
         let txid = tx.txid();
 
-        // Broadcast transaction to consensus engine
-        match self.consensus.process_transaction(tx).await {
+        // Submit transaction to consensus engine (broadcasts to network)
+        match self.consensus.submit_transaction(tx).await {
             Ok(_) => {
                 // CRITICAL: Wait for instant finality before returning txid
                 // This ensures the transaction is confirmed by masternodes
