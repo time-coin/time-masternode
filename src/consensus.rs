@@ -1460,6 +1460,16 @@ impl ConsensusEngine {
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
+        self.validate_transaction_with_locks(tx, Hash256::default())
+            .await
+    }
+
+    /// Validate transaction, allowing UTXOs locked by the specified txid
+    async fn validate_transaction_with_locks(
+        &self,
+        tx: &Transaction,
+        our_txid: Hash256,
+    ) -> Result<(), String> {
         // 0. AI-powered validation first (if enabled)
         if let Some(ai_validator) = &self.ai_validator {
             ai_validator.validate_with_ai(tx).await?;
@@ -1477,10 +1487,13 @@ impl ConsensusEngine {
             ));
         }
 
-        // 2. Check inputs exist and are unspent
+        // 2. Check inputs exist and are unspent (or locked by us)
         for input in &tx.inputs {
             match self.utxo_manager.get_state(&input.previous_output) {
                 Some(UTXOState::Unspent) => {}
+                Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {
+                    // OK - locked by this transaction
+                }
                 Some(state) => {
                     return Err(format!("UTXO not unspent: {}", state));
                 }
@@ -1695,8 +1708,15 @@ impl ConsensusEngine {
                 .map_err(|e| format!("UTXO double-spend prevented: {}", e))?;
         }
 
-        // Now validate knowing inputs are locked and won't change
-        self.validate_transaction(tx).await?;
+        // Now validate knowing inputs are locked (pass txid so validation knows these locks are ours)
+        if let Err(e) = self.validate_transaction_with_locks(tx, txid).await {
+            // Validation failed - unlock everything
+            for input in &tx.inputs {
+                self.utxo_manager
+                    .update_state(&input.previous_output, UTXOState::Unspent);
+            }
+            return Err(e);
+        }
 
         // Notify clients of locks
         for input in &tx.inputs {
