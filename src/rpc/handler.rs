@@ -97,6 +97,9 @@ impl RpcHandler {
             "reindextransactions" => self.reindex_transactions().await,
             "gettxindexstatus" => self.get_tx_index_status().await,
             "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
+            "listlockedutxos" => self.list_locked_utxos().await,
+            "unlockutxo" => self.unlock_utxo(&params_array).await,
+            "unlockorphanedutxos" => self.unlock_orphaned_utxos().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -2100,6 +2103,160 @@ impl RpcHandler {
         Ok(json!({
             "cleaned": cleaned,
             "message": format!("Cleaned {} expired UTXO locks", cleaned)
+        }))
+    }
+
+    /// List all currently locked UTXOs with details
+    async fn list_locked_utxos(&self) -> Result<Value, RpcError> {
+        let utxos = self.utxo_manager.list_all_utxos().await;
+        let now = chrono::Utc::now().timestamp();
+
+        let locked: Vec<Value> = utxos
+            .iter()
+            .filter_map(|u| {
+                if let Some(crate::types::UTXOState::Locked { txid, locked_at }) =
+                    self.utxo_manager.get_state(&u.outpoint)
+                {
+                    let age_seconds = now - locked_at;
+                    let expired = age_seconds > 600; // 10 minutes
+
+                    Some(json!({
+                        "txid": hex::encode(u.outpoint.txid),
+                        "vout": u.outpoint.vout,
+                        "address": u.address,
+                        "amount": u.value as f64 / 100_000_000.0,
+                        "locked_by_tx": hex::encode(txid),
+                        "locked_at": locked_at,
+                        "age_seconds": age_seconds,
+                        "expired": expired
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        Ok(json!({
+            "locked_count": locked.len(),
+            "locked_utxos": locked
+        }))
+    }
+
+    /// Manually unlock a specific UTXO by txid and vout
+    /// Parameters: [txid, vout]
+    async fn unlock_utxo(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected txid".to_string(),
+            })?;
+
+        let vout = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected vout".to_string(),
+            })? as u32;
+
+        let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+            code: -8,
+            message: "Invalid txid format".to_string(),
+        })?;
+
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -8,
+                message: "Invalid txid length".to_string(),
+            });
+        }
+
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+
+        let outpoint = crate::types::OutPoint { txid, vout };
+
+        // Check current state
+        match self.utxo_manager.get_state(&outpoint) {
+            Some(crate::types::UTXOState::Locked {
+                txid: lock_txid,
+                locked_at,
+            }) => {
+                // Unlock it
+                self.utxo_manager
+                    .update_state(&outpoint, crate::types::UTXOState::Unspent);
+
+                Ok(json!({
+                    "unlocked": true,
+                    "txid": txid_str,
+                    "vout": vout,
+                    "was_locked_by": hex::encode(lock_txid),
+                    "was_locked_at": locked_at,
+                    "message": "UTXO unlocked successfully"
+                }))
+            }
+            Some(state) => Err(RpcError {
+                code: -8,
+                message: format!("UTXO is not locked, current state: {}", state),
+            }),
+            None => Err(RpcError {
+                code: -8,
+                message: "UTXO not found".to_string(),
+            }),
+        }
+    }
+
+    /// Scan for orphaned locks (where the locking transaction doesn't exist) and unlock them
+    async fn unlock_orphaned_utxos(&self) -> Result<Value, RpcError> {
+        let utxos = self.utxo_manager.list_all_utxos().await;
+        let mut unlocked_count = 0;
+        let mut orphaned = Vec::new();
+
+        for utxo in utxos {
+            if let Some(crate::types::UTXOState::Locked { txid, locked_at }) =
+                self.utxo_manager.get_state(&utxo.outpoint)
+            {
+                // Check if the locking transaction exists in mempool or blockchain
+                let tx_exists = {
+                    // Check mempool
+                    let in_mempool = self.mempool.read().await.contains_key(&txid);
+
+                    // Check if it's in consensus pool (pending or finalized)
+                    let in_pool = self.consensus.tx_pool.is_pending(&txid) 
+                        || self.consensus.tx_pool.is_finalized(&txid);
+
+                    in_mempool || in_pool
+                };
+
+                if !tx_exists {
+                    // Transaction doesn't exist - this is an orphaned lock
+                    tracing::info!(
+                        "Unlocking orphaned UTXO {:?} (locked by non-existent tx {})",
+                        utxo.outpoint,
+                        hex::encode(txid)
+                    );
+
+                    self.utxo_manager
+                        .update_state(&utxo.outpoint, crate::types::UTXOState::Unspent);
+                    unlocked_count += 1;
+
+                    orphaned.push(json!({
+                        "txid": hex::encode(utxo.outpoint.txid),
+                        "vout": utxo.outpoint.vout,
+                        "amount": utxo.value as f64 / 100_000_000.0,
+                        "locked_by_missing_tx": hex::encode(txid),
+                        "locked_at": locked_at
+                    }));
+                }
+            }
+        }
+
+        Ok(json!({
+            "unlocked": unlocked_count,
+            "orphaned_utxos": orphaned,
+            "message": format!("Unlocked {} orphaned UTXOs", unlocked_count)
         }))
     }
 }

@@ -311,6 +311,23 @@ enum Commands {
     /// Cleanup expired UTXO locks (older than 10 minutes)
     #[command(next_help_heading = "Utility")]
     CleanupLockedUTXOs,
+
+    /// List all currently locked UTXOs
+    #[command(next_help_heading = "Utility")]
+    ListLockedUTXOs,
+
+    /// Manually unlock a specific UTXO (txid vout)
+    #[command(next_help_heading = "Utility")]
+    UnlockUTXO {
+        /// Transaction ID
+        txid: String,
+        /// Output index
+        vout: u32,
+    },
+
+    /// Scan and unlock orphaned UTXOs (locked by non-existent transactions)
+    #[command(next_help_heading = "Utility")]
+    UnlockOrphanedUTXOs,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -409,6 +426,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Uptime => ("uptime", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
+        Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
+        Commands::UnlockUTXO { txid, vout } => ("unlockutxo", json!([txid, vout])),
+        Commands::UnlockOrphanedUTXOs => ("unlockorphanedutxos", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
@@ -729,6 +749,103 @@ fn print_human_readable(
                 println!("✓ Successfully cleaned {} expired lock(s)", cleaned);
             } else {
                 println!("ℹ No expired locks found");
+            }
+        }
+        Commands::ListLockedUTXOs => {
+            let count = result
+                .get("locked_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            if count == 0 {
+                println!("No locked UTXOs found");
+            } else {
+                println!("Found {} locked UTXO(s):\n", count);
+
+                if let Some(locked) = result.get("locked_utxos").and_then(|v| v.as_array()) {
+                    for utxo in locked {
+                        let txid = utxo.get("txid").and_then(|v| v.as_str()).unwrap_or("N/A");
+                        let vout = utxo.get("vout").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let amount = utxo.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let locked_by = utxo
+                            .get("locked_by_tx")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("N/A");
+                        let age = utxo
+                            .get("age_seconds")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        let expired = utxo
+                            .get("expired")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+
+                        println!("  UTXO: {}:{}", txid, vout);
+                        println!("    Amount:     {} TIME", amount);
+                        println!("    Locked by:  {}", locked_by);
+                        println!("    Age:        {} seconds", age);
+                        println!(
+                            "    Status:     {}",
+                            if expired { "⚠️  EXPIRED" } else { "Active" }
+                        );
+                        println!();
+                    }
+                }
+            }
+        }
+        Commands::UnlockUTXO { .. } => {
+            let unlocked = result
+                .get("unlocked")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+
+            if unlocked {
+                println!("✓ {}", message);
+                if let Some(was_locked_by) = result.get("was_locked_by").and_then(|v| v.as_str()) {
+                    println!("  Was locked by transaction: {}", was_locked_by);
+                }
+            } else {
+                println!("❌ Failed to unlock: {}", message);
+            }
+        }
+        Commands::UnlockOrphanedUTXOs => {
+            let unlocked = result.get("unlocked").and_then(|v| v.as_u64()).unwrap_or(0);
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+
+            println!("{}", message);
+
+            if unlocked > 0 {
+                println!("✓ Unlocked {} orphaned UTXO(s)", unlocked);
+
+                if let Some(orphaned) = result.get("orphaned_utxos").and_then(|v| v.as_array()) {
+                    println!("\nDetails:");
+                    for utxo in orphaned {
+                        let txid = utxo.get("txid").and_then(|v| v.as_str()).unwrap_or("N/A");
+                        let vout = utxo.get("vout").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let amount = utxo.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let missing_tx = utxo
+                            .get("locked_by_missing_tx")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("N/A");
+
+                        println!(
+                            "  {}:{} - {} TIME (was locked by missing tx: {})",
+                            txid,
+                            vout,
+                            amount,
+                            &missing_tx[..16]
+                        );
+                    }
+                }
+            } else {
+                println!("ℹ No orphaned locks found");
             }
         }
         Commands::MasternodeStatus => {
