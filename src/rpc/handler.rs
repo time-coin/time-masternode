@@ -817,13 +817,31 @@ impl RpcHandler {
                 }
             })
             .map(|u| {
+                // Get UTXO state
+                let state = self.utxo_manager.get_state(&u.outpoint);
+                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
+
+                let (spendable, state_str) = match state {
+                    Some(crate::types::UTXOState::Unspent) if !is_locked => (true, "unspent"),
+                    Some(crate::types::UTXOState::Unspent) if is_locked => {
+                        (false, "collateral_locked")
+                    }
+                    Some(crate::types::UTXOState::Locked { .. }) => (false, "locked"),
+                    Some(crate::types::UTXOState::SpentPending { .. }) => (false, "spending"),
+                    Some(crate::types::UTXOState::SpentFinalized { .. }) => (false, "spent"),
+                    Some(crate::types::UTXOState::Confirmed { .. }) => (false, "confirmed"),
+                    None => (false, "unknown"),
+                    _ => (false, "unavailable"),
+                };
+
                 json!({
                     "txid": hex::encode(u.outpoint.txid),
                     "vout": u.outpoint.vout,
                     "address": u.address,
                     "amount": u.value as f64 / 100_000_000.0,
                     "confirmations": 1,
-                    "spendable": true,
+                    "spendable": spendable,
+                    "state": state_str,
                     "solvable": true,
                     "safe": true
                 })
@@ -1121,17 +1139,27 @@ impl RpcHandler {
         // Get UTXOs for this wallet
         let all_utxos = self.utxo_manager.list_all_utxos().await;
 
-        // Filter to only spendable UTXOs (not locked as collateral)
+        // Filter to only spendable UTXOs (not locked as collateral AND in Unspent state)
         let mut utxos: Vec<_> = all_utxos
             .into_iter()
-            .filter(|u| !self.utxo_manager.is_collateral_locked(&u.outpoint))
+            .filter(|u| {
+                // Check if locked as collateral
+                if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                    return false;
+                }
+                // Check UTXO state - only accept Unspent
+                match self.utxo_manager.get_state(&u.outpoint) {
+                    Some(crate::types::UTXOState::Unspent) => true,
+                    _ => false, // Skip Locked, SpentPending, SpentFinalized, Confirmed
+                }
+            })
             .collect();
 
         if utxos.is_empty() {
             return Err(RpcError {
                 code: -6,
                 message:
-                    "No spendable UTXOs available (check if all funds are locked as collateral)"
+                    "No spendable UTXOs available (all funds may be locked or in use by pending transactions)"
                         .to_string(),
             });
         }
@@ -1292,6 +1320,19 @@ impl RpcHandler {
         } else {
             utxos.retain(|utxo| utxo.address == local_address);
         }
+
+        // Filter out collateral locked and non-Unspent UTXOs
+        utxos.retain(|u| {
+            // Must not be collateral locked
+            if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                return false;
+            }
+            // Must be in Unspent state
+            matches!(
+                self.utxo_manager.get_state(&u.outpoint),
+                Some(crate::types::UTXOState::Unspent)
+            )
+        });
 
         // Check if we have enough UTXOs to merge
         if utxos.len() < min_count {
