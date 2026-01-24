@@ -139,8 +139,8 @@ impl RpcHandler {
             "verificationprogress": 1.0,
             "chainwork": format!("{:064x}", height),
             "pruned": false,
-            "consensus": "timevote + TSDC",
-            "finality_mechanism": "timevote consensus",
+            "consensus": "TimeVote + TSDC",
+            "finality_mechanism": "TimeVote consensus",
             "instant_finality": true,
             "average_finality_time_ms": avg_finality_ms,
             "block_time_seconds": 600
@@ -593,12 +593,12 @@ impl RpcHandler {
         }
 
         // Process transaction through consensus
-        // Start timevote consensus to finalize this transaction
+        // Start TimeVote consensus to finalize this transaction
         tokio::spawn({
             let consensus = self.consensus.clone();
             let tx_for_consensus = tx.clone();
             async move {
-                // Initiate timevote consensus for transaction
+                // Initiate TimeVote consensus for transaction
                 if let Err(e) = consensus.add_transaction(tx_for_consensus).await {
                     tracing::error!("Failed to process transaction through consensus: {}", e);
                 }
@@ -1003,9 +1003,9 @@ impl RpcHandler {
         let masternodes = self.consensus.get_active_masternodes();
         let mn_count = masternodes.len();
 
-        // timevote consensus parameters
+        // TimeVote consensus parameters
         let timevote_config = json!({
-            "protocol": "timevote + TSDC",
+            "protocol": "TimeVote + TSDC",
             "timevote": {
                 "sample_size": 20,
                 "finality_confidence": 15,
@@ -1018,7 +1018,7 @@ impl RpcHandler {
                 "description": "Deterministic 10-minute block production"
             },
             "active_validators": mn_count,
-            "finality_type": "timevote consensus (seconds) + TimeLock Blocks (10 minutes)",
+            "finality_type": "TimeVote consensus (seconds) + TimeLock blocks (10 minutes)",
             "instant_finality": true,
             "average_finality_time_ms": 750
         });
@@ -1026,13 +1026,13 @@ impl RpcHandler {
         Ok(timevote_config)
     }
 
-    /// Get timevote consensus status and metrics
+    /// Get TimeVote consensus status and metrics
     async fn get_timevote_status(&self) -> Result<Value, RpcError> {
         let masternodes = self.consensus.get_active_masternodes();
         let active_validators = masternodes.len();
 
         Ok(json!({
-            "protocol": "timevote",
+            "protocol": "TimeVote",
             "status": "active",
             "active_validators": active_validators,
             "configuration": {
@@ -1045,9 +1045,9 @@ impl RpcHandler {
                 "average_finality_time_ms": 750,
                 "finality_type": "probabilistic (cryptographically secure)",
                 "validator_sampling": "random k-of-n",
-                "description": "timevote consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
+                "description": "TimeVote consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
             },
-            "note": "Transactions finalized by timevote in seconds, blocks produced every 10 minutes by TSDC"
+            "note": "Transactions finalized by TimeVote in seconds, blocks produced every 10 minutes by TSDC"
         }))
     }
 
@@ -1417,7 +1417,7 @@ impl RpcHandler {
                 "txid": txid,
                 "finalized": true,
                 "confirmations": confirmations,
-                "finality_type": "timevote"
+                "finality_type": "TimeVote"
             }));
         }
 
@@ -1481,7 +1481,7 @@ impl RpcHandler {
                     "txid": txid,
                     "finalized": true,
                     "confirmations": confirmations,
-                    "finality_type": "timevote",
+                    "finality_type": "TimeVote",
                     "wait_time_ms": start_time.elapsed().as_millis()
                 }));
             }
