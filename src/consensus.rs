@@ -1805,8 +1805,8 @@ impl ConsensusEngine {
             return Err("No masternodes available".to_string());
         }
 
-        // Validate locally first
-        self.validate_transaction(&tx).await?;
+        // NOTE: Validation already done in lock_and_validate_transaction before this is called
+        // No need to validate again here
 
         // Update UTXO states to SpentPending
         let now = chrono::Utc::now().timestamp();
