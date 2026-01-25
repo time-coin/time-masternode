@@ -1502,7 +1502,7 @@ mod tests {
         // Include a non-existent voter
         let voters = vec!["node0".to_string(), "node999".to_string()];
 
-        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+        let (_bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
 
         // Only node0 should be counted (node999 doesn't exist)
         assert_eq!(active_count, 1);

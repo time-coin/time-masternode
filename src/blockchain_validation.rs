@@ -271,22 +271,19 @@ mod tests {
     fn test_missing_bitmap_rejected() {
         let validator = BlockValidator::new(crate::NetworkType::Testnet);
         let mut block = create_test_block(1, chrono::Utc::now().timestamp());
-        
+
         // Ensure bitmap is empty (simulating old block without bitmap)
         block.header.active_masternodes_bitmap = vec![];
 
         let result = validator.validate_block(&block, Some([0u8; 32]));
-        assert!(matches!(
-            result,
-            Err(BlockchainError::InvalidBlock { .. })
-        ));
+        assert!(matches!(result, Err(BlockchainError::InvalidBlock { .. })));
     }
 
     #[test]
     fn test_genesis_without_bitmap_accepted() {
         let validator = BlockValidator::new(crate::NetworkType::Testnet);
         let mut block = create_test_block(0, chrono::Utc::now().timestamp());
-        
+
         // Genesis can have empty bitmap
         block.header.active_masternodes_bitmap = vec![];
         block.header.height = 0;
@@ -299,7 +296,7 @@ mod tests {
     fn test_block_with_bitmap_accepted() {
         let validator = BlockValidator::new(crate::NetworkType::Testnet);
         let mut block = create_test_block(1, chrono::Utc::now().timestamp());
-        
+
         // Add a bitmap (even if just zeros)
         block.header.active_masternodes_bitmap = vec![0u8; 1];
 

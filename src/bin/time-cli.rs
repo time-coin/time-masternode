@@ -230,9 +230,13 @@ enum Commands {
     // ============================================================
     // MASTERNODE COMMANDS
     // ============================================================
-    /// Get masternode information
+    /// Get masternode information (connected only by default)
     #[command(next_help_heading = "Masternode")]
-    MasternodeList,
+    MasternodeList {
+        /// Show all masternodes including disconnected
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Get masternode status
     #[command(next_help_heading = "Masternode")]
@@ -403,7 +407,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             minconf,
             include_empty,
         } => ("listreceivedbyaddress", json!([minconf, include_empty])),
-        Commands::MasternodeList => ("masternodelist", json!([])),
+        Commands::MasternodeList { all } => ("masternodelist", json!([all])),
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
         Commands::MasternodeRegister {
             tier,
@@ -648,15 +652,30 @@ fn print_human_readable(
                 println!("\n{}", total_count_msg);
             }
         }
-        Commands::MasternodeList => {
+        Commands::MasternodeList { all: _ } => {
             if let Some(obj) = result.as_object() {
                 if let Some(nodes) = obj.get("masternodes").and_then(|v| v.as_array()) {
-                    println!("Masternodes:");
+                    let show_all = obj
+                        .get("show_all")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let total_in_registry = obj
+                        .get("total_in_registry")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+
+                    if show_all {
+                        println!("All Masternodes:");
+                    } else {
+                        println!("Connected Masternodes:");
+                    }
                     println!(
-                        "{:<42} {:<10} {:<8} {:<12} {:<12}",
-                        "Address", "Tier", "Active", "Uptime", "Collateral"
+                        "{:<42} {:<10} {:<8} {:<11} {:<12} {:<12}",
+                        "Address", "Tier", "Active", "Connected", "Uptime", "Collateral"
                     );
-                    println!("{}", "-".repeat(90));
+                    println!("{}", "-".repeat(103));
+
+                    let mut connected_count = 0;
                     for node in nodes {
                         let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("");
                         let tier = node.get("tier").and_then(|v| v.as_str()).unwrap_or("");
@@ -664,6 +683,13 @@ fn print_human_readable(
                             .get("is_active")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
+                        let connected = node
+                            .get("is_connected")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if connected {
+                            connected_count += 1;
+                        }
                         let uptime = node
                             .get("total_uptime")
                             .and_then(|v| v.as_u64())
@@ -680,11 +706,28 @@ fn print_human_readable(
                         };
 
                         println!(
-                            "{:<42} {:<10} {:<8} {:<12} {:<12}",
-                            address, tier, active, uptime, collateral_status
+                            "{:<42} {:<10} {:<8} {:<11} {:<12} {:<12}",
+                            address, tier, active, connected, uptime, collateral_status
                         );
                     }
-                    println!("\nTotal Masternodes: {}", nodes.len());
+
+                    if show_all {
+                        println!(
+                            "\nShowing: {} masternodes ({} connected, {} disconnected)",
+                            nodes.len(),
+                            connected_count,
+                            nodes.len() - connected_count
+                        );
+                    } else {
+                        println!(
+                            "\nShowing: {} connected masternodes (Total in registry: {})",
+                            nodes.len(),
+                            total_in_registry
+                        );
+                        println!(
+                            "💡 Use --all flag to show all masternodes including disconnected"
+                        );
+                    }
                 }
             }
         }

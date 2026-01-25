@@ -73,7 +73,7 @@ impl RpcHandler {
             "listunspent" => self.list_unspent(&params_array).await,
             "getnewaddress" => self.get_new_address(&params_array).await,
             "getwalletinfo" => self.get_wallet_info().await,
-            "masternodelist" => self.masternode_list().await,
+            "masternodelist" => self.masternode_list(&params_array).await,
             "masternodestatus" => self.masternode_status().await,
             "masternoderegister" => self.masternode_register(&params_array).await,
             "masternodeunlock" => self.masternode_unlock(&params_array).await,
@@ -1074,9 +1074,17 @@ impl RpcHandler {
         }))
     }
 
-    async fn masternode_list(&self) -> Result<Value, RpcError> {
-        let masternodes = self.registry.list_all().await;
-        let list: Vec<Value> = masternodes
+    async fn masternode_list(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // Parse show_all parameter (defaults to false - only show connected)
+        let show_all = params.first().and_then(|v| v.as_bool()).unwrap_or(false);
+
+        let all_masternodes = self.registry.list_all().await;
+
+        // Get connection manager from blockchain to check connection status
+        let connection_manager = self.blockchain.get_connection_manager().await;
+
+        // Build full list with connection status
+        let full_list: Vec<_> = all_masternodes
             .iter()
             .map(|mn| {
                 // Phase 4.1: Check collateral status
@@ -1091,23 +1099,51 @@ impl RpcHandler {
                         (false, None)
                     };
 
-                json!({
-                    "address": mn.masternode.address,
-                    "wallet_address": mn.masternode.wallet_address,
-                    "collateral": mn.masternode.collateral,
-                    "tier": format!("{:?}", mn.masternode.tier),
-                    "registered_at": mn.masternode.registered_at,
-                    "is_active": mn.is_active,
-                    "uptime_start": mn.uptime_start,
-                    "total_uptime": mn.total_uptime,
-                    "collateral_locked": collateral_locked,
-                    "collateral_outpoint": collateral_outpoint,
-                })
+                // Check if masternode is currently connected
+                let is_connected = if let Some(ref cm) = connection_manager {
+                    let ip_only = mn
+                        .masternode
+                        .address
+                        .split(':')
+                        .next()
+                        .unwrap_or(&mn.masternode.address);
+                    cm.is_connected(ip_only)
+                } else {
+                    false
+                };
+
+                (mn, is_connected, collateral_locked, collateral_outpoint)
             })
             .collect();
+
+        // Filter to connected only if show_all is false
+        let filtered_list: Vec<Value> = full_list
+            .iter()
+            .filter(|(_, is_connected, _, _)| show_all || *is_connected)
+            .map(
+                |(mn, is_connected, collateral_locked, collateral_outpoint)| {
+                    json!({
+                        "address": mn.masternode.address,
+                        "wallet_address": mn.masternode.wallet_address,
+                        "collateral": mn.masternode.collateral,
+                        "tier": format!("{:?}", mn.masternode.tier),
+                        "registered_at": mn.masternode.registered_at,
+                        "is_active": mn.is_active,
+                        "is_connected": is_connected,
+                        "uptime_start": mn.uptime_start,
+                        "total_uptime": mn.total_uptime,
+                        "collateral_locked": collateral_locked,
+                        "collateral_outpoint": collateral_outpoint,
+                    })
+                },
+            )
+            .collect();
+
         Ok(json!({
-            "total": masternodes.len(),
-            "masternodes": list
+            "total": filtered_list.len(),
+            "total_in_registry": all_masternodes.len(),
+            "show_all": show_all,
+            "masternodes": filtered_list
         }))
     }
 
