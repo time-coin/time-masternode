@@ -490,6 +490,9 @@ async fn main() {
 
     // Network client will be started after server is created so we can share resources
 
+    // Create sync completion notifier for masternode announcement
+    let sync_complete = Arc::new(tokio::sync::Notify::new());
+
     // Register this node if running as masternode
     let masternode_address = masternode_info.as_ref().map(|mn| mn.address.clone());
 
@@ -516,15 +519,8 @@ async fn main() {
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Consensus engine identity configured");
 
-                // Broadcast masternode announcement to the network so peers discover us
-                let announcement = NetworkMessage::MasternodeAnnouncement {
-                    address: mn.address.clone(),
-                    reward_address: mn.wallet_address.clone(),
-                    tier: mn.tier,
-                    public_key: mn.public_key,
-                };
-                peer_connection_registry.broadcast(announcement).await;
-                tracing::info!("📢 Broadcast masternode announcement to network peers");
+                // Broadcast masternode announcement will happen after initial sync completes
+                // (see announcement task below)
             }
             Err(e) => {
                 tracing::error!("❌ Failed to register masternode: {}", e);
@@ -554,12 +550,39 @@ async fn main() {
             }
         });
         shutdown_manager.register_task(peer_exchange_handle);
+
+        // Start masternode announcement task (waits for sync to complete)
+        let mn_for_announcement = mn.clone();
+        let peer_registry_for_announcement = peer_connection_registry.clone();
+        let sync_complete_wait = sync_complete.clone();
+        let announcement_handle = tokio::spawn(async move {
+            tracing::info!(
+                "⏳ Waiting for blockchain sync to complete before announcing masternode..."
+            );
+
+            // Wait for sync completion signal
+            sync_complete_wait.notified().await;
+
+            // Sync complete - now broadcast announcement
+            let announcement = NetworkMessage::MasternodeAnnouncement {
+                address: mn_for_announcement.address.clone(),
+                reward_address: mn_for_announcement.wallet_address.clone(),
+                tier: mn_for_announcement.tier,
+                public_key: mn_for_announcement.public_key,
+            };
+
+            peer_registry_for_announcement.broadcast(announcement).await;
+            tracing::info!("📢 Broadcast masternode announcement to network (after sync complete)");
+        });
+        shutdown_manager.register_task(announcement_handle);
     }
 
     // Initialize blockchain and sync from peers in background
     let blockchain_init = blockchain.clone();
     let blockchain_server = blockchain_init.clone();
     let peer_registry_for_sync = peer_connection_registry.clone();
+    let sync_complete_signal = sync_complete.clone();
+
     tokio::spawn(async move {
         // STEP 1: Load genesis from file FIRST (before waiting for peers)
         // Genesis file is local - no network needed
@@ -643,6 +666,10 @@ async fn main() {
         if let Err(e) = blockchain_init.sync_from_peers(None).await {
             tracing::warn!("⚠️  Block sync from peers: {}", e);
         }
+
+        // Initial sync complete - signal masternode announcement can proceed
+        tracing::info!("✅ Initial blockchain sync complete");
+        sync_complete_signal.notify_one();
 
         // Start periodic genesis validation check (in case of late genesis file deployment)
         let blockchain_for_genesis = blockchain_init.clone();
@@ -951,17 +978,26 @@ async fn main() {
                         .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
                         .await;
 
-                    tracing::debug!(
-                        "📊 Using {} active masternodes from previous block's bitmap",
-                        active_infos.len()
-                    );
+                    // Fallback: If bitmap is empty (legacy blocks or no voters), use all connected masternodes
+                    if active_infos.is_empty() {
+                        tracing::warn!(
+                            "⚠️  Previous block has empty bitmap (legacy block or no voters) - falling back to all active masternodes"
+                        );
+                        block_registry.get_eligible_for_rewards().await
+                    } else {
+                        tracing::debug!(
+                            "📊 Using {} active masternodes from previous block's bitmap",
+                            active_infos.len()
+                        );
 
-                    active_infos
-                        .into_iter()
-                        .map(|info| (info.masternode, info.reward_address))
-                        .collect()
+                        active_infos
+                            .into_iter()
+                            .map(|info| (info.masternode, info.reward_address))
+                            .collect()
+                    }
                 } else {
                     // Genesis block - use all connected masternodes
+                    tracing::debug!("🌱 Genesis/missing block - using all active masternodes");
                     block_registry.get_eligible_for_rewards().await
                 };
 

@@ -1749,20 +1749,35 @@ impl Blockchain {
         // Calculate merkle root from ALL transactions in canonical order
         let merkle_root = crate::block::types::calculate_merkle_root(&all_txs);
 
-        // Create active masternode bitmap for this block
-        // Use previous block's bitmap to maintain continuity and gradual propagation
-        let prev_bitmap = if next_height > 0 {
-            match self.get_block_by_height(next_height - 1).await {
-                Ok(prev_block) => prev_block.header.active_masternodes_bitmap,
-                Err(_) => vec![],
-            }
+        // Create active masternode bitmap based on who voted on the PREVIOUS block
+        // New nodes can vote immediately after announcing, getting into next bitmap
+        // Only nodes in previous bitmap are eligible for leader selection
+        let voters = if next_height > 1 {
+            // Get voters from previous block (who voted to accept it)
+            let prev_block_hash = prev_hash;
+            // Use precommit voters (final voting phase before block acceptance)
+            self.consensus
+                .timevote
+                .precommit_votes
+                .get_voters(prev_block_hash)
         } else {
-            vec![] // Genesis block has no previous bitmap
+            // Genesis or block 1: use all active masternodes (no previous votes)
+            self.masternode_registry
+                .get_active_masternodes()
+                .await
+                .into_iter()
+                .map(|mn| mn.masternode.address)
+                .collect()
         };
+
+        tracing::debug!(
+            "📊 Creating bitmap from {} voters on previous block",
+            voters.len()
+        );
 
         let (active_bitmap, _) = self
             .masternode_registry
-            .create_active_bitmap(&prev_bitmap)
+            .create_active_bitmap_from_voters(&voters)
             .await;
 
         let mut block = Block {
@@ -1782,8 +1797,8 @@ impl Blockchain {
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
             time_attestations: vec![],
-            // Record masternodes that are receiving rewards - they are the active participants
-            consensus_participants: rewards.iter().map(|(a, _)| a.clone()).collect(),
+            // Record masternodes that voted on previous block (active participants)
+            consensus_participants: voters.clone(),
         };
 
         // Compute attestation root after attestations are set

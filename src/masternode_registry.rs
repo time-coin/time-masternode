@@ -478,18 +478,19 @@ impl MasternodeRegistry {
         self.masternodes.read().await.len()
     }
 
-    /// Create a compact bitmap of active masternodes for block header
+    /// Create a compact bitmap of active masternodes based on who voted on the block
     /// Returns (bitmap_bytes, sorted_masternode_list)
     ///
-    /// Active detection logic:
-    /// - New nodes: is_active=true when connected (via MasternodeAnnouncement)
-    /// - Propagation: once in ANY bitmap, stays active (gradual network propagation)
-    /// - Removal: MasternodeInactive gossip sets is_active=false, removing from next bitmap
+    /// Voting-based activity:
+    /// - New nodes: announce → added to active list → can vote immediately
+    /// - Voting: nodes that vote on block N get included in block N's bitmap
+    /// - Leader selection: only nodes in previous block's bitmap are eligible
+    /// - Removal: nodes that don't vote → excluded from bitmap → can't be selected
     ///
     /// Bitmap format: 1 bit per masternode in deterministic sorted order
-    /// Bit = 1: masternode is active (connected to someone OR was in previous bitmap)
-    /// Bit = 0: masternode is inactive (not connected and not in previous bitmap)
-    pub async fn create_active_bitmap(&self, prev_bitmap: &[u8]) -> (Vec<u8>, Vec<MasternodeInfo>) {
+    /// Bit = 1: masternode voted on this block (active participant)
+    /// Bit = 0: masternode did not vote (inactive or offline)
+    pub async fn create_active_bitmap_from_voters(&self, voters: &[String]) -> (Vec<u8>, usize) {
         let masternodes = self.masternodes.read().await;
 
         // Create deterministic sorted list of all masternodes
@@ -497,47 +498,39 @@ impl MasternodeRegistry {
         sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
         if sorted_mns.is_empty() {
-            return (vec![], vec![]);
+            return (vec![], 0);
         }
+
+        // Convert voters to HashSet for fast lookup
+        let voter_set: std::collections::HashSet<String> = voters.iter().cloned().collect();
 
         // Create bitmap: 1 bit per masternode
         let num_bits = sorted_mns.len();
-        let num_bytes = (num_bits + 7) / 8; // Round up to nearest byte
+        let num_bytes = num_bits.div_ceil(8); // Round up to nearest byte
         let mut bitmap = vec![0u8; num_bytes];
 
         let mut active_count = 0;
         for (i, mn) in sorted_mns.iter().enumerate() {
-            // Check if was active in previous bitmap (gradual propagation)
-            let was_active_before = if !prev_bitmap.is_empty() && i < prev_bitmap.len() * 8 {
-                let byte_idx = i / 8;
-                let bit_idx = i % 8;
-                byte_idx < prev_bitmap.len() && (prev_bitmap[byte_idx] & (1 << bit_idx)) != 0
-            } else {
-                false
-            };
+            // Active if voted on this block
+            let voted = voter_set.contains(&mn.masternode.address);
 
-            // Active if: directly connected to us OR was in previous bitmap
-            // This allows new nodes to propagate through network gradually
-            // and maintains active status until explicit disconnect
-            let is_active = mn.is_active || was_active_before;
-
-            if is_active {
+            if voted {
                 let byte_index = i / 8;
-                let bit_index = i % 8;
+                let bit_index = 7 - (i % 8); // Big-endian: MSB first
                 bitmap[byte_index] |= 1 << bit_index;
                 active_count += 1;
             }
         }
 
-        tracing::debug!(
-            "Created active bitmap: {} masternodes total, {} active ({:.1}%), {} bytes",
+        tracing::info!(
+            "📊 Created active bitmap: {} masternodes total, {} voted ({:.1}%), {} bytes",
             sorted_mns.len(),
             active_count,
             (active_count as f64 / sorted_mns.len() as f64) * 100.0,
             bitmap.len()
         );
 
-        (bitmap, sorted_mns)
+        (bitmap, active_count)
     }
 
     /// Get active masternodes from a block's bitmap
@@ -553,7 +546,7 @@ impl MasternodeRegistry {
         let mut active = Vec::new();
         for (i, mn) in sorted_mns.iter().enumerate() {
             let byte_index = i / 8;
-            let bit_index = i % 8;
+            let bit_index = 7 - (i % 8); // Big-endian: MSB first
 
             if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
                 active.push(mn.clone());
@@ -1373,5 +1366,357 @@ mod tests {
         let cleanup_count = registry.cleanup_invalid_collaterals(&utxo_manager).await;
         assert_eq!(cleanup_count, 0);
         assert_eq!(registry.count().await, 1);
+    }
+
+    // ========== Voting Bitmap Tests ==========
+
+    #[tokio::test]
+    async fn test_create_active_bitmap_from_voters_empty() {
+        let registry = create_test_registry();
+
+        // No voters, no masternodes
+        let voters: Vec<String> = vec![];
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        assert_eq!(bitmap.len(), 0);
+        assert_eq!(active_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_active_bitmap_from_voters_single() {
+        let registry = create_test_registry();
+
+        // Register one masternode
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let public_key = signing_key.verifying_key();
+
+        let masternode = crate::types::Masternode::new_legacy(
+            "node1".to_string(),
+            "reward1".to_string(),
+            1_000,
+            public_key,
+            MasternodeTier::Bronze,
+            MasternodeRegistry::now(),
+        );
+
+        registry
+            .register(masternode.clone(), "reward1".to_string())
+            .await
+            .unwrap();
+
+        // Node1 voted
+        let voters = vec!["node1".to_string()];
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        // 1 bit = 1 byte
+        assert_eq!(bitmap.len(), 1);
+        assert_eq!(active_count, 1);
+        assert_eq!(bitmap[0] & 0b10000000, 0b10000000); // First bit set
+    }
+
+    #[tokio::test]
+    async fn test_create_active_bitmap_from_voters_multiple() {
+        let registry = create_test_registry();
+
+        // Register 10 masternodes
+        for i in 0..10 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{}", i),
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // Only nodes 0, 2, 4, 6, 8 voted (even indices)
+        let voters: Vec<String> = (0..10)
+            .filter(|i| i % 2 == 0)
+            .map(|i| format!("node{}", i))
+            .collect();
+
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        // 10 bits = 2 bytes
+        assert_eq!(bitmap.len(), 2);
+        assert_eq!(active_count, 5); // 5 voters
+
+        // Check that only even-indexed bits are set
+        let all_masternodes = registry.list_all().await;
+        let sorted_mns: Vec<_> = {
+            let mut mns = all_masternodes.clone();
+            mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+            mns
+        };
+
+        for (i, mn) in sorted_mns.iter().enumerate() {
+            let byte_idx = i / 8;
+            let bit_idx = 7 - (i % 8); // Big-endian bit order
+            let is_set = (bitmap[byte_idx] >> bit_idx) & 1 == 1;
+
+            let expected = voters.contains(&mn.masternode.address);
+            assert_eq!(
+                is_set,
+                expected,
+                "Node {} (index {}) should be {}",
+                mn.masternode.address,
+                i,
+                if expected { "set" } else { "unset" }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_create_active_bitmap_from_voters_non_existent_voter() {
+        let registry = create_test_registry();
+
+        // Register 3 masternodes
+        for i in 0..3 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{}", i),
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // Include a non-existent voter
+        let voters = vec!["node0".to_string(), "node999".to_string()];
+
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        // Only node0 should be counted (node999 doesn't exist)
+        assert_eq!(active_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_active_from_bitmap() {
+        let registry = create_test_registry();
+
+        // Register 5 masternodes
+        for i in 0..5 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{}", i),
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // Create bitmap from voters (nodes 1, 3)
+        let voters = vec!["node1".to_string(), "node3".to_string()];
+        let (bitmap, _) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        // Extract active masternodes from bitmap
+        let active_masternodes = registry.get_active_from_bitmap(&bitmap).await;
+
+        // Should get exactly the 2 voters back
+        assert_eq!(active_masternodes.len(), 2);
+
+        let active_addresses: Vec<String> = active_masternodes
+            .iter()
+            .map(|mn| mn.masternode.address.clone())
+            .collect();
+
+        assert!(active_addresses.contains(&"node1".to_string()));
+        assert!(active_addresses.contains(&"node3".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_bitmap_roundtrip() {
+        let registry = create_test_registry();
+
+        // Register 100 masternodes to test larger bitmap
+        for i in 0..100 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{:03}", i), // Pad to ensure consistent sorting
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // Select random voters
+        let voters: Vec<String> = (0..100)
+            .filter(|i| i % 3 == 0) // Every 3rd node
+            .map(|i| format!("node{:03}", i))
+            .collect();
+
+        // Create bitmap from voters
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        assert_eq!(active_count, 34); // 100/3 = 33 + node0 = 34
+
+        // Extract active masternodes from bitmap
+        let active_masternodes = registry.get_active_from_bitmap(&bitmap).await;
+
+        // Should get exactly the voters back
+        assert_eq!(active_masternodes.len(), voters.len());
+
+        let active_addresses: std::collections::HashSet<String> = active_masternodes
+            .iter()
+            .map(|mn| mn.masternode.address.clone())
+            .collect();
+
+        for voter in &voters {
+            assert!(
+                active_addresses.contains(voter),
+                "Voter {} missing from extracted actives",
+                voter
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bitmap_size_efficiency() {
+        let registry = create_test_registry();
+
+        // Register 1000 masternodes (reduced from 10000 for faster test)
+        for i in 0..1000 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{:04}", i),
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // All nodes voted
+        let voters: Vec<String> = (0..1000).map(|i| format!("node{:04}", i)).collect();
+
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        // 1000 bits = 125 bytes (compared to 20KB for address list)
+        assert_eq!(bitmap.len(), 125);
+        assert_eq!(active_count, 1000);
+
+        // Verify space efficiency: bitmap is ~99% smaller than address list
+        let address_list_size = 1000 * 20; // Assuming 20 bytes per address
+        let space_saving_percent =
+            ((address_list_size - bitmap.len()) as f64 / address_list_size as f64) * 100.0;
+        assert!(
+            space_saving_percent > 99.0,
+            "Space saving should be >99%, got {:.2}%",
+            space_saving_percent
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bitmap_empty_voters_full_registry() {
+        let registry = create_test_registry();
+
+        // Register masternodes but none voted
+        for i in 0..5 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{}", i),
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // No voters
+        let voters: Vec<String> = vec![];
+        let (bitmap, active_count) = registry.create_active_bitmap_from_voters(&voters).await;
+
+        // Should still create bitmap with correct size, but all bits 0
+        assert_eq!(bitmap.len(), 1); // 5 nodes = 1 byte
+        assert_eq!(active_count, 0);
+        assert_eq!(bitmap[0], 0); // All bits should be 0
+
+        // Extracting from empty bitmap should return empty list
+        let active_masternodes = registry.get_active_from_bitmap(&bitmap).await;
+        assert_eq!(active_masternodes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_bitmap_legacy_empty_fallback() {
+        let registry = create_test_registry();
+
+        // Register masternodes
+        for i in 0..3 {
+            let signing_key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+            let public_key = signing_key.verifying_key();
+
+            let masternode = crate::types::Masternode::new_legacy(
+                format!("node{}", i),
+                format!("reward{}", i),
+                1_000,
+                public_key,
+                MasternodeTier::Bronze,
+                MasternodeRegistry::now(),
+            );
+
+            registry
+                .register(masternode.clone(), format!("reward{}", i))
+                .await
+                .unwrap();
+        }
+
+        // Simulate legacy block with empty bitmap
+        let empty_bitmap: Vec<u8> = vec![];
+        let active_masternodes = registry.get_active_from_bitmap(&empty_bitmap).await;
+
+        // Empty bitmap should return empty list, triggering fallback in production code
+        assert_eq!(active_masternodes.len(), 0);
     }
 }
