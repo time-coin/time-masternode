@@ -274,9 +274,18 @@ impl MasternodeRegistry {
                     info.total_uptime += now - info.uptime_start;
                 }
                 warn!(
-                    "⚠️  Masternode {} marked inactive (connection lost)",
+                    "⚠️  Masternode {} marked inactive (connection lost) - broadcasting to network",
                     address
                 );
+
+                // Broadcast inactive status to all peers for consensus
+                if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
+                    let msg = crate::network::message::NetworkMessage::MasternodeInactive {
+                        address: address.to_string(),
+                        timestamp: now,
+                    };
+                    let _ = tx.send(msg); // Ignore errors if no receivers
+                }
 
                 // Persist to disk
                 let key = format!("masternode:{}", address);

@@ -234,6 +234,10 @@ impl MessageHandler {
                 self.handle_masternodes_response(masternodes.clone(), context)
                     .await
             }
+            NetworkMessage::MasternodeInactive { address, timestamp } => {
+                self.handle_masternode_inactive(address.clone(), *timestamp, context)
+                    .await
+            }
             NetworkMessage::GetLockedCollaterals => {
                 self.handle_get_locked_collaterals(context).await
             }
@@ -584,6 +588,41 @@ impl MessageHandler {
         );
 
         Ok(Some(NetworkMessage::MasternodesResponse(mn_data)))
+    }
+
+    /// Handle masternode inactive notification from network
+    async fn handle_masternode_inactive(
+        &self,
+        address: String,
+        timestamp: u64,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        info!(
+            "📭 [{}] Received masternode inactive notification for {} from {}",
+            self.direction, address, self.peer_ip
+        );
+
+        // Mark the masternode as inactive in our registry
+        match context
+            .masternode_registry
+            .mark_inactive_on_disconnect(&address)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "✅ [{}] Marked masternode {} as inactive (timestamp: {})",
+                    self.direction, address, timestamp
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ [{}] Failed to mark masternode {} as inactive: {}",
+                    self.direction, address, e
+                );
+            }
+        }
+
+        Ok(None)
     }
 
     /// Handle TimeLock Block Proposal - cache and vote

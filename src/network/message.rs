@@ -72,6 +72,11 @@ pub enum NetworkMessage {
     },
     GetMasternodes,
     MasternodesResponse(Vec<MasternodeAnnouncementData>),
+    /// Notify network that a masternode went offline/inactive
+    MasternodeInactive {
+        address: String,
+        timestamp: u64,
+    },
     /// Request locked collateral data from peer
     GetLockedCollaterals,
     /// Response with locked collateral data
@@ -274,6 +279,7 @@ impl NetworkMessage {
             NetworkMessage::MasternodeUnlock { .. } => "MasternodeUnlock",
             NetworkMessage::GetMasternodes => "GetMasternodes",
             NetworkMessage::MasternodesResponse(_) => "MasternodesResponse",
+            NetworkMessage::MasternodeInactive { .. } => "MasternodeInactive",
             NetworkMessage::GetLockedCollaterals => "GetLockedCollaterals",
             NetworkMessage::LockedCollateralsResponse(_) => "LockedCollateralsResponse",
             NetworkMessage::Version { .. } => "Version",
