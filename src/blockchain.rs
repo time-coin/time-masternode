@@ -1480,12 +1480,13 @@ impl Blockchain {
 
     /// Produce a block for the current TSDC slot
     pub async fn produce_block(&self) -> Result<Block, String> {
-        self.produce_block_at_height(None).await
+        self.produce_block_at_height(None, None).await
     }
 
     pub async fn produce_block_at_height(
         &self,
         target_height: Option<u64>,
+        producer_address: Option<String>,
     ) -> Result<Block, String> {
         use crate::block::genesis::GenesisBlock;
 
@@ -1657,7 +1658,34 @@ impl Blockchain {
         // Calculate rewards: base_reward + fees_from_previous_block
         let base_reward = BLOCK_REWARD_SATOSHIS;
         let total_reward = base_reward + previous_block_fees;
-        let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
+
+        // NEW: All rewards go to the block producer only
+        let rewards = if let Some(ref prod_addr) = producer_address {
+            // Find the producer in the masternodes list
+            if let Some(producer) = masternodes
+                .iter()
+                .find(|mn| &mn.masternode.address == prod_addr)
+            {
+                tracing::info!(
+                    "💰 Block {}: {} satoshis ({} TIME) -> block producer {}",
+                    next_height,
+                    total_reward,
+                    total_reward / 100_000_000,
+                    producer.masternode.address
+                );
+                vec![(producer.masternode.wallet_address.clone(), total_reward)]
+            } else {
+                // Fallback: producer not in list (shouldn't happen)
+                tracing::warn!(
+                    "⚠️  Producer {} not found in masternode list, using old distribution",
+                    prod_addr
+                );
+                self.calculate_rewards_with_amount(&masternodes, total_reward)
+            }
+        } else {
+            // Fallback: no producer specified (old behavior)
+            self.calculate_rewards_with_amount(&masternodes, total_reward)
+        };
 
         if rewards.is_empty() {
             return Err(format!(
@@ -2520,62 +2548,18 @@ impl Blockchain {
             return vec![];
         }
 
-        // Maximum nodes that receive rewards per block (for scalability)
-        const MAX_REWARD_RECIPIENTS: usize = 10;
-
-        // Select masternodes for rewards using deterministic rotation
-        let selected_masternodes =
-            self.select_reward_recipients(masternodes, MAX_REWARD_RECIPIENTS);
-
-        if selected_masternodes.is_empty() {
-            return vec![];
-        }
-
-        // Calculate total weight using tier's reward_weight
-        let total_weight: u64 = selected_masternodes
-            .iter()
-            .map(|mn| mn.masternode.tier.reward_weight())
-            .sum();
+        // NEW: All rewards go to the block producer only (first masternode in list)
+        // The first masternode is the one selected as producer by the consensus algorithm
+        let producer = &masternodes[0];
 
         tracing::info!(
-            "💰 Reward calculation: {} of {} masternodes selected, total_reward={} satoshis ({} TIME), total_weight={}",
-            selected_masternodes.len(),
-            masternodes.len(),
+            "💰 Reward calculation: {} satoshis ({} TIME) -> block producer {}",
             total_reward,
             total_reward / 100_000_000,
-            total_weight
+            producer.masternode.address
         );
 
-        if total_weight == 0 {
-            return vec![];
-        }
-
-        // Distribute rewards proportionally based on tier weights
-        let mut rewards = Vec::new();
-        let mut distributed = 0u64;
-
-        for (i, mn) in selected_masternodes.iter().enumerate() {
-            let share = if i == selected_masternodes.len() - 1 {
-                // Last masternode gets remainder to avoid rounding errors
-                total_reward - distributed
-            } else {
-                (total_reward * mn.masternode.tier.reward_weight()) / total_weight
-            };
-
-            tracing::info!(
-                "   → {} (tier {:?}, weight {}): share={} satoshis ({} TIME)",
-                mn.masternode.address,
-                mn.masternode.tier,
-                mn.masternode.tier.reward_weight(),
-                share,
-                share / 100_000_000
-            );
-
-            rewards.push((mn.masternode.wallet_address.clone(), share));
-            distributed += share;
-        }
-
-        rewards
+        vec![(producer.masternode.wallet_address.clone(), total_reward)]
     }
 
     /// Select masternodes for reward distribution using deterministic rotation

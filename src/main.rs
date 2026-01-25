@@ -1348,7 +1348,10 @@ async fn main() {
             }
 
             // Produce the block
-            match block_blockchain.produce_block().await {
+            match block_blockchain
+                .produce_block_at_height(None, Some(selected_producer.address.clone()))
+                .await
+            {
                 Ok(block) => {
                     let block_height = block.header.height;
                     let block_hash = block.hash();
