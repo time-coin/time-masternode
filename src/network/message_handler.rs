@@ -2063,41 +2063,6 @@ impl MessageHandler {
         let mut skipped = 0;
         let mut fork_detected = false;
 
-        // Check if we're in fork resolution mode with this peer
-        let in_fork_resolution = context
-            .blockchain
-            .is_in_fork_resolution_with(&self.peer_ip)
-            .await;
-
-        if in_fork_resolution {
-            info!(
-                "🔍 [{}] Processing {} blocks from {} during fork resolution",
-                self.direction, block_count, self.peer_ip
-            );
-
-            // During fork resolution, route blocks to fork resolution handler
-            for block in blocks.iter() {
-                match context
-                    .blockchain
-                    .handle_fork_resolution_block(block.clone(), &self.peer_ip)
-                    .await
-                {
-                    Ok(()) => {
-                        // Fork resolution handler processed the block
-                    }
-                    Err(e) => {
-                        warn!(
-                            "⚠️ [{}] Fork resolution block handling failed: {}",
-                            self.direction, e
-                        );
-                    }
-                }
-            }
-
-            // Don't count these as added/skipped in normal flow
-            return Ok(None);
-        }
-
         for block in blocks.iter() {
             // Validate block has non-zero previous_hash (except genesis at height 0)
             if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
