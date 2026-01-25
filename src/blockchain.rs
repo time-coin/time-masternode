@@ -1486,7 +1486,7 @@ impl Blockchain {
     pub async fn produce_block_at_height(
         &self,
         target_height: Option<u64>,
-        producer_address: Option<String>,
+        producer_wallet: Option<String>,
     ) -> Result<Block, String> {
         use crate::block::genesis::GenesisBlock;
 
@@ -1660,30 +1660,20 @@ impl Blockchain {
         let total_reward = base_reward + previous_block_fees;
 
         // NEW: All rewards go to the block producer only
-        let rewards = if let Some(ref prod_addr) = producer_address {
-            // Find the producer in the masternodes list
-            if let Some(producer) = masternodes
-                .iter()
-                .find(|mn| &mn.masternode.address == prod_addr)
-            {
-                tracing::info!(
-                    "💰 Block {}: {} satoshis ({} TIME) -> block producer {}",
-                    next_height,
-                    total_reward,
-                    total_reward / 100_000_000,
-                    producer.masternode.address
-                );
-                vec![(producer.masternode.wallet_address.clone(), total_reward)]
-            } else {
-                // Fallback: producer not in list (shouldn't happen)
-                tracing::warn!(
-                    "⚠️  Producer {} not found in masternode list, using old distribution",
-                    prod_addr
-                );
-                self.calculate_rewards_with_amount(&masternodes, total_reward)
-            }
+        let rewards = if let Some(ref wallet) = producer_wallet {
+            tracing::info!(
+                "💰 Block {}: {} satoshis ({} TIME) -> block producer wallet {}",
+                next_height,
+                total_reward,
+                total_reward / 100_000_000,
+                wallet
+            );
+            vec![(wallet.clone(), total_reward)]
         } else {
-            // Fallback: no producer specified (old behavior)
+            // Fallback: no producer specified (old behavior - should never happen)
+            tracing::warn!(
+                "⚠️  No producer wallet specified, using old distribution (THIS SHOULD NOT HAPPEN)"
+            );
             self.calculate_rewards_with_amount(&masternodes, total_reward)
         };
 

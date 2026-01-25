@@ -1349,7 +1349,7 @@ async fn main() {
 
             // Produce the block
             match block_blockchain
-                .produce_block_at_height(None, Some(selected_producer.address.clone()))
+                .produce_block_at_height(None, Some(selected_producer.wallet_address.clone()))
                 .await
             {
                 Ok(block) => {
