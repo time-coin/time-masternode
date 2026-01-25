@@ -89,10 +89,12 @@ impl MasternodeRegistry {
                 if let Some(_existing) = nodes.get(&ip_only) {
                     // Keep the existing one
                 } else {
-                    // New entry - initialize peer_reports
+                    // New entry - initialize peer_reports and mark as INACTIVE on load
+                    // Masternodes only become active when they connect
                     let mut updated_info = info;
                     updated_info.masternode.address = ip_only.clone();
                     updated_info.peer_reports = Arc::new(DashMap::new());
+                    updated_info.is_active = false; // Force inactive on load - only active on connection
                     nodes.insert(ip_only, updated_info);
                 }
             }
@@ -218,7 +220,7 @@ impl MasternodeRegistry {
             reward_address: reward_address.clone(),
             uptime_start: now,
             total_uptime: 0,
-            is_active: true, // Always active on registration - gossip will sync status
+            is_active: should_activate, // Only active if explicitly activated (true for connections, false for gossip)
             peer_reports: Arc::new(DashMap::new()),
         };
 
