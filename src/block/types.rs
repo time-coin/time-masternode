@@ -136,6 +136,13 @@ pub struct BlockHeader {
     /// VRF score derived from output (for chain comparison)
     #[serde(default)]
     pub vrf_score: u64,
+    /// Compact bitmap indicating which masternodes are active (1 bit per masternode)
+    /// Masternodes are in deterministic order (sorted by address)
+    /// Bit = 1 means active (connected or recently produced block)
+    /// Bit = 0 means inactive
+    /// Space: 10,000 masternodes = 1,250 bytes (vs 200KB for address list)
+    #[serde(default)]
+    pub active_masternodes_bitmap: Vec<u8>,
 }
 
 impl Block {

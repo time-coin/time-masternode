@@ -478,6 +478,94 @@ impl MasternodeRegistry {
         self.masternodes.read().await.len()
     }
 
+    /// Create a compact bitmap of active masternodes for block header
+    /// Returns (bitmap_bytes, sorted_masternode_list)
+    /// 
+    /// Bitmap format: 1 bit per masternode in deterministic sorted order
+    /// Bit = 1: masternode is active (connected or recently produced)
+    /// Bit = 0: masternode is inactive
+    pub async fn create_active_bitmap(
+        &self,
+        blockchain: &crate::blockchain::Blockchain,
+    ) -> (Vec<u8>, Vec<MasternodeInfo>) {
+        const RECENT_PRODUCTION_WINDOW: u64 = 144; // Last 24 hours
+        
+        let masternodes = self.masternodes.read().await;
+        
+        // Create deterministic sorted list of all masternodes
+        let mut sorted_mns: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
+        sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+        
+        if sorted_mns.is_empty() {
+            return (vec![], vec![]);
+        }
+        
+        // Get recent block producers for activity check
+        let current_height = blockchain.get_height();
+        let cutoff_height = current_height.saturating_sub(RECENT_PRODUCTION_WINDOW);
+        let mut recent_producers = std::collections::HashSet::new();
+        
+        for height in cutoff_height..=current_height {
+            if let Ok(block) = blockchain.get_block_by_height(height).await {
+                if !block.header.leader.is_empty() {
+                    recent_producers.insert(block.header.leader.clone());
+                }
+            }
+        }
+        
+        // Create bitmap: 1 bit per masternode
+        let num_bits = sorted_mns.len();
+        let num_bytes = (num_bits + 7) / 8; // Round up to nearest byte
+        let mut bitmap = vec![0u8; num_bytes];
+        
+        for (i, mn) in sorted_mns.iter().enumerate() {
+            let is_active = mn.is_active // Directly connected
+                || recent_producers.contains(&mn.masternode.address); // Or recently produced
+            
+            if is_active {
+                let byte_index = i / 8;
+                let bit_index = i % 8;
+                bitmap[byte_index] |= 1 << bit_index;
+            }
+        }
+        
+        tracing::debug!(
+            "Created active bitmap: {} masternodes, {} bytes, {} active",
+            sorted_mns.len(),
+            bitmap.len(),
+            sorted_mns.iter().enumerate().filter(|(i, _mn)| {
+                let byte_index = i / 8;
+                let bit_index = i % 8;
+                byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0
+            }).count()
+        );
+        
+        (bitmap, sorted_mns)
+    }
+
+    /// Get active masternodes from a block's bitmap
+    /// Returns list of masternodes where bitmap bit = 1
+    pub async fn get_active_from_bitmap(&self, bitmap: &[u8]) -> Vec<MasternodeInfo> {
+        let masternodes = self.masternodes.read().await;
+        
+        // Create deterministic sorted list (same order as bitmap)
+        let mut sorted_mns: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
+        sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+        
+        // Extract active ones based on bitmap
+        let mut active = Vec::new();
+        for (i, mn) in sorted_mns.iter().enumerate() {
+            let byte_index = i / 8;
+            let bit_index = i % 8;
+            
+            if byte_index < bitmap.len() && (bitmap[byte_index] & (1 << bit_index)) != 0 {
+                active.push(mn.clone());
+            }
+        }
+        
+        active
+    }
+
     #[allow(dead_code)]
     pub async fn get_all(&self) -> Vec<MasternodeInfo> {
         self.masternodes.read().await.values().cloned().collect()

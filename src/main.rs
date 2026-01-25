@@ -1127,9 +1127,9 @@ async fn main() {
                 }
             }
 
-            // Deterministic leader selection using TSDC
+            // Deterministic leader selection using TSDC with tier-based weighting
             // Hash(prev_block_hash || next_height || attempt) determines the leader
-            // The attempt counter allows rotation when the primary leader fails to produce
+            // Higher tiers get selected more frequently based on reward_weight()
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(prev_block_hash);
@@ -1137,13 +1137,29 @@ async fn main() {
             hasher.update(leader_attempt.to_le_bytes()); // Include attempt for leader rotation
             let selection_hash: [u8; 32] = hasher.finalize().into();
 
-            let producer_index = {
+            // Build cumulative weight array for weighted selection
+            // Each masternode's weight = tier.reward_weight()
+            let mut cumulative_weights: Vec<u64> = Vec::with_capacity(masternodes.len());
+            let mut total_weight = 0u64;
+            for mn in &masternodes {
+                total_weight = total_weight.saturating_add(mn.tier.reward_weight());
+                cumulative_weights.push(total_weight);
+            }
+
+            // Convert hash to random value in range [0, total_weight)
+            let random_value = {
                 let mut val = 0u64;
                 for (i, &byte) in selection_hash.iter().take(8).enumerate() {
                     val |= (byte as u64) << (i * 8);
                 }
-                (val % masternodes.len() as u64) as usize
+                val % total_weight
             };
+
+            // Binary search to find selected masternode based on weight
+            let producer_index = cumulative_weights
+                .iter()
+                .position(|&w| random_value < w)
+                .unwrap_or(masternodes.len() - 1);
 
             let selected_producer = &masternodes[producer_index];
             let is_producer = block_masternode_address
