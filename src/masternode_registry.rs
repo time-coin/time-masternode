@@ -389,21 +389,23 @@ impl MasternodeRegistry {
     ) -> Vec<MasternodeInfo> {
         let current_height = blockchain.get_height();
 
-        // Genesis block has no previous block, no rewards
-        if current_height == 0 {
-            tracing::info!("💰 Block 0 (genesis): no rewards (no previous block)");
-            return vec![];
-        }
-
-        // BOOTSTRAP MODE: For first few blocks, use all active masternodes
-        // since there's no participation history yet
+        // BOOTSTRAP MODE: For first few blocks (0-3), use all active masternodes
+        // - Block 0 (genesis): produced during initialization, no rewards
+        // - Blocks 1-3: bootstrap phase, use all active masternodes since no participation history yet
         if current_height <= 3 {
             let active = self.get_active_masternodes().await;
-            tracing::info!(
-                "💰 Block {} (bootstrap): using {} active masternodes (no participation history yet)",
-                current_height,
-                active.len()
-            );
+            if current_height == 0 {
+                tracing::info!(
+                    "💰 Block 1 (first block after genesis): using {} active masternodes for bootstrap",
+                    active.len()
+                );
+            } else {
+                tracing::info!(
+                    "💰 Block {} (bootstrap): using {} active masternodes (no participation history yet)",
+                    current_height + 1,
+                    active.len()
+                );
+            }
             return active;
         }
 
