@@ -3914,11 +3914,18 @@ impl Blockchain {
             connected_peers.len()
         );
 
+        tracing::info!(
+            "🔍 [FORK CHECK] Querying {} connected compatible peers for chain status",
+            connected_peers.len()
+        );
+
         // Request chain tips (height + hash) from all peers
         for peer in &connected_peers {
             let request = NetworkMessage::GetChainTip;
             if let Err(e) = registry.send_to_peer(peer, request).await {
-                tracing::debug!("Failed to send GetChainTip to {}: {}", peer, e);
+                tracing::warn!("⚠️  Failed to send GetChainTip to {}: {}", peer, e);
+            } else {
+                tracing::debug!("📤 Sent GetChainTip request to {}", peer);
             }
         }
 
@@ -3931,18 +3938,25 @@ impl Blockchain {
         for peer_ip in &connected_peers {
             if let Some((height, hash)) = registry.get_peer_chain_tip(peer_ip).await {
                 peer_tips.insert(peer_ip.clone(), (height, hash));
+                tracing::debug!("✅ Got response from {}: height {}", peer_ip, height);
+            } else {
+                tracing::warn!("❌ No response from {} within timeout", peer_ip);
             }
         }
 
         if peer_tips.is_empty() {
-            tracing::debug!("No peer chain tip responses received");
+            tracing::warn!(
+                "⚠️  No peer chain tip responses received from {} peers!",
+                connected_peers.len()
+            );
             return None;
         }
 
         // DEBUG: Log what we received from peers
         tracing::info!(
-            "🔍 [DEBUG] Received chain tips from {} peers:",
-            peer_tips.len()
+            "🔍 [DEBUG] Received chain tips from {}/{} peers:",
+            peer_tips.len(),
+            connected_peers.len()
         );
         for (peer_ip, (height, hash)) in &peer_tips {
             tracing::info!(
@@ -3975,10 +3989,14 @@ impl Blockchain {
         // A single peer on a higher height should NOT override majority at lower height
         // This prevents incompatible/forked peers from blocking consensus
 
-        // Debug: log all chains
+        // Log all detected chains
+        tracing::info!(
+            "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
+            chain_counts.len()
+        );
         for ((height, hash), peers) in &chain_counts {
-            tracing::debug!(
-                "   Chain: height {} hash {} - {} peers: {:?}",
+            tracing::info!(
+                "   📊 Chain @ height {}, hash {}: {} peers {:?}",
                 height,
                 hex::encode(&hash[..8]),
                 peers.len(),
@@ -4002,6 +4020,14 @@ impl Blockchain {
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
+
+        tracing::info!(
+            "✅ [CONSENSUS SELECTED] Height {}, hash {}, {} peers: {:?}",
+            consensus_height,
+            hex::encode(&consensus_hash[..8]),
+            consensus_peers.len(),
+            consensus_peers
+        );
 
         // AI Consensus Health: Calculate and record metrics
         let heights: Vec<u64> = peer_tips.values().map(|(h, _)| *h).collect();
@@ -4055,12 +4081,14 @@ impl Blockchain {
 
         // Case 1: Consensus chain is longer - definitely switch
         if consensus_height > our_height {
-            tracing::info!(
-                "🔀 Fork detected: consensus height {} > our height {} ({} peers agree)",
+            tracing::warn!(
+                "🔀 FORK RESOLUTION TRIGGERED: consensus height {} > our height {} ({} peers agree: {:?})",
                 consensus_height,
                 our_height,
-                consensus_peers.len()
+                consensus_peers.len(),
+                consensus_peers
             );
+            tracing::warn!("   Will attempt to sync from peer: {}", consensus_peers[0]);
             return Some((consensus_height, consensus_peers[0].clone()));
         }
 
@@ -4181,20 +4209,13 @@ impl Blockchain {
         }
 
         // Case 3: We're ahead of consensus
-        // LONGEST CHAIN RULE: If we have a valid longer chain, WE are canonical
-        // Other nodes should sync TO us, not the other way around
+        // LONGEST VALID CHAIN RULE: If we have a valid longer chain, WE are canonical
         if our_height > consensus_height {
-            let our_chain_peer_count = chain_counts
-                .get(&(our_height, our_hash))
-                .map(|peers| peers.len())
-                .unwrap_or(0);
-
             tracing::info!(
-                "📈 We have the longest chain: height {} > consensus {} ({} peers behind, {} peers with us)",
+                "📈 We have the longest chain: height {} > consensus {} ({} peers behind)",
                 our_height,
                 consensus_height,
-                consensus_peers.len(),
-                our_chain_peer_count
+                consensus_peers.len()
             );
 
             // Don't roll back - we ARE the canonical chain
