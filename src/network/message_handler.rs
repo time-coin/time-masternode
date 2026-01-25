@@ -2151,41 +2151,36 @@ impl MessageHandler {
                         self.direction, self.peer_ip, e
                     );
 
-                    // Track fork errors
-                    let error_count = context.peer_registry.increment_fork_errors(&self.peer_ip);
+                    // Track fork errors (for metrics/debugging)
+                    let _error_count = context.peer_registry.increment_fork_errors(&self.peer_ip);
 
-                    // Check if this is a persistent fork (many consecutive errors)
-                    if error_count >= 50 {
-                        warn!(
-                            "🔀 [{}] Persistent fork with peer {} ({} errors) - needs fork resolution (finding common ancestor)",
-                            self.direction, self.peer_ip, error_count
-                        );
-                        warn!(
-                            "🔀 [{}] Fork detected with peer {} at height {}: {}",
-                            self.direction, self.peer_ip, block.header.height, e
-                        );
+                    // IMMEDIATE fork resolution - don't wait for multiple errors
+                    // If we detect a fork, we need to resolve it right away
+                    warn!(
+                        "🔀 [{}] Fork detected with peer {} at height {}: {}",
+                        self.direction, self.peer_ip, block.header.height, e
+                    );
 
-                        // Trigger immediate fork resolution check
-                        info!(
-                            "🔄 [{}] Fork with {} - immediate resolution check initiated",
-                            self.direction, self.peer_ip
-                        );
+                    // Trigger immediate fork resolution check
+                    info!(
+                        "🔄 [{}] Fork with {} - initiating immediate resolution",
+                        self.direction, self.peer_ip
+                    );
 
-                        // Collect all fork blocks for resolution
-                        let fork_blocks = blocks.to_vec();
-                        let peer_ip = self.peer_ip.clone();
-                        let blockchain = context.blockchain.clone();
+                    // Collect all fork blocks for resolution
+                    let fork_blocks = blocks.to_vec();
+                    let peer_ip = self.peer_ip.clone();
+                    let blockchain = context.blockchain.clone();
 
-                        // Trigger fork resolution in background
-                        tokio::spawn(async move {
-                            if let Err(e) = blockchain.handle_fork(fork_blocks, peer_ip).await {
-                                warn!("Fork resolution failed: {}", e);
-                            }
-                        });
+                    // Trigger fork resolution in background
+                    tokio::spawn(async move {
+                        if let Err(e) = blockchain.handle_fork(fork_blocks, peer_ip).await {
+                            warn!("Fork resolution failed: {}", e);
+                        }
+                    });
 
-                        // Stop processing remaining blocks - let fork resolution handle it
-                        break;
-                    }
+                    // Stop processing remaining blocks - let fork resolution handle it
+                    break;
                 }
                 Err(e) => {
                     warn!(
