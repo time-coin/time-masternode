@@ -369,115 +369,107 @@ impl MasternodeRegistry {
         self.get_active_masternodes().await
     }
 
-    /// Get masternodes eligible for rewards using 10-node rotation
+    /// Get masternodes eligible for rewards based on previous block participation
     ///
-    /// DETERMINISTIC SELECTION: Returns masternodes based on a round-robin rotation
-    /// system that selects 10 masternodes per block. This ensures:
-    /// 1. Rewards remain meaningful even with thousands of masternodes
-    /// 2. All nodes eventually receive rewards through rotation
-    /// 3. Deterministic selection prevents forks (all nodes agree)
-    /// 4. Fair distribution over time
+    /// PARTICIPATION-BASED REWARDS: Masternodes only receive rewards if they participated
+    /// in the previous block (either as producer or voter). This ensures:
+    /// 1. Only active, connected masternodes receive rewards
+    /// 2. No gaming via gossip - requires cryptographic proof on-chain
+    /// 3. Deterministic - all nodes compute same result from blockchain
+    /// 4. Solves chicken-egg: new nodes can participate in block N, get rewards in N+1
     ///
-    /// ROTATION ALGORITHM:
-    /// - Sort all registered masternodes by address (deterministic)
-    /// - Select 10 nodes starting from: (height * 10) % total_nodes
-    /// - Each node receives rewards every N/10 blocks (where N = total masternodes)
+    /// ALGORITHM:
+    /// - For block at height H, rewards go to masternodes that participated in block H-1
+    /// - Participation = produced block OR voted in consensus
+    /// - Both producer and voters are recorded on-chain in previous block
+    /// - Bootstrap: first few blocks use all active masternodes (no previous participation yet)
     pub async fn get_masternodes_for_rewards(
         &self,
         blockchain: &crate::blockchain::Blockchain,
     ) -> Vec<MasternodeInfo> {
-        const REWARD_SLOTS: usize = 10; // Number of masternodes to reward per block
-        const MIN_PARTICIPATION_SECS: u64 = 3600; // 1 hour minimum participation before eligible
+        let current_height = blockchain.get_height();
 
-        let height = blockchain.get_height();
-        let masternodes = self.masternodes.read().await;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        // Use gossip consensus instead of direct connection check
-        // BOOTSTRAP MODE: If no peer reports exist yet, accept all registered masternodes
-        // This allows the network to start producing blocks while gossip propagates
-        let mut all_nodes: Vec<MasternodeInfo> = masternodes
-            .values()
-            .filter(|mn| {
-                // Check participation time first
-                let participation_time = now.saturating_sub(mn.masternode.registered_at);
-                if participation_time < MIN_PARTICIPATION_SECS {
-                    return false;
-                }
-
-                // BOOTSTRAP: If gossip hasn't populated yet (no peer reports anywhere),
-                // accept all masternodes to allow initial block production
-                let total_reports: usize = masternodes.values().map(|m| m.peer_reports.len()).sum();
-
-                if total_reports == 0 {
-                    tracing::debug!(
-                        "Bootstrap mode: accepting masternode {} (no gossip reports yet)",
-                        mn.masternode.address
-                    );
-                    return true;
-                }
-
-                // Normal mode: must be active based on gossip consensus
-                mn.is_active
-            })
-            .cloned()
-            .collect();
-
-        if all_nodes.is_empty() {
-            tracing::warn!(
-                "⚠️  No masternodes with {}+ minute participation for rewards at height {}",
-                MIN_PARTICIPATION_SECS / 60,
-                height
-            );
+        // Genesis block has no previous block, no rewards
+        if current_height == 0 {
+            tracing::info!("💰 Block 0 (genesis): no rewards (no previous block)");
             return vec![];
         }
 
-        // Sort deterministically by address (ensures all nodes agree on order)
-        all_nodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
-
-        // For genesis and first few blocks, use all masternodes if less than 10
-        if height <= 3 || all_nodes.len() <= REWARD_SLOTS {
+        // BOOTSTRAP MODE: For first few blocks, use all active masternodes
+        // since there's no participation history yet
+        if current_height <= 3 {
+            let active = self.get_active_masternodes().await;
             tracing::info!(
-                "💰 Block {}: using all {} registered masternodes (below rotation threshold)",
-                height,
-                all_nodes.len()
+                "💰 Block {} (bootstrap): using {} active masternodes (no participation history yet)",
+                current_height,
+                active.len()
             );
-            return all_nodes;
+            return active;
         }
 
-        // ROTATION LOGIC: Select 10 masternodes based on block height
-        // The starting position rotates through all masternodes
-        let total_nodes = all_nodes.len();
-        let start_index = ((height as usize) * REWARD_SLOTS) % total_nodes;
+        // Get previous block to see who participated
+        let prev_block = match blockchain.get_block_by_height(current_height).await {
+            Ok(block) => block,
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️  Failed to get previous block {} for reward calculation: {}",
+                    current_height,
+                    e
+                );
+                // Fallback to active masternodes if we can't get previous block
+                return self.get_active_masternodes().await;
+            }
+        };
 
-        let mut selected_nodes = Vec::with_capacity(REWARD_SLOTS);
-        for i in 0..REWARD_SLOTS {
-            let index = (start_index + i) % total_nodes;
-            selected_nodes.push(all_nodes[index].clone());
+        // Collect addresses that participated (producer + consensus voters)
+        let mut participants = std::collections::HashSet::new();
+
+        // Block producer always participated
+        if !prev_block.header.leader.is_empty() {
+            participants.insert(prev_block.header.leader.clone());
         }
+
+        // Consensus participants (voters) also participated
+        for voter in &prev_block.consensus_participants {
+            if !voter.is_empty() {
+                participants.insert(voter.clone());
+            }
+        }
+
+        // If no participants recorded, fall back to active masternodes
+        // This handles legacy blocks that don't have consensus_participants populated
+        if participants.is_empty() {
+            tracing::warn!(
+                "⚠️  No participants recorded in previous block {} - using active masternodes as fallback",
+                current_height
+            );
+            return self.get_active_masternodes().await;
+        }
+
+        // Filter masternodes to only those that participated
+        let masternodes = self.masternodes.read().await;
+        let eligible: Vec<MasternodeInfo> = masternodes
+            .values()
+            .filter(|mn| participants.contains(&mn.masternode.address))
+            .cloned()
+            .collect();
 
         tracing::info!(
-            "💰 Block {}: rotation selected {} of {} masternodes (rotation starts at index {})",
-            height,
-            selected_nodes.len(),
-            total_nodes,
-            start_index
+            "💰 Block {}: {} masternodes eligible for rewards (participated in block {})",
+            current_height + 1,
+            eligible.len(),
+            current_height
         );
 
-        // Log which masternodes are selected in this rotation
-        for (i, node) in selected_nodes.iter().enumerate() {
+        for mn in &eligible {
             tracing::debug!(
-                "   Slot {}: {} (tier {:?})",
-                i + 1,
-                node.masternode.address,
-                node.masternode.tier
+                "   → {} (tier {:?})",
+                mn.masternode.address,
+                mn.masternode.tier
             );
         }
 
-        selected_nodes
+        eligible
     }
 
     /// Count all registered masternodes (not just active ones)
