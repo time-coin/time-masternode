@@ -1749,6 +1749,22 @@ impl Blockchain {
         // Calculate merkle root from ALL transactions in canonical order
         let merkle_root = crate::block::types::calculate_merkle_root(&all_txs);
 
+        // Create active masternode bitmap for this block
+        // Use previous block's bitmap to maintain continuity and gradual propagation
+        let prev_bitmap = if next_height > 0 {
+            match self.get_block_by_height(next_height - 1).await {
+                Ok(prev_block) => prev_block.header.active_masternodes_bitmap,
+                Err(_) => vec![],
+            }
+        } else {
+            vec![] // Genesis block has no previous bitmap
+        };
+
+        let (active_bitmap, _) = self
+            .masternode_registry
+            .create_active_bitmap(&prev_bitmap)
+            .await;
+
         let mut block = Block {
             header: BlockHeader {
                 version: 1,
@@ -1760,6 +1776,7 @@ impl Blockchain {
                 leader: String::new(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
+                active_masternodes_bitmap: active_bitmap,
                 ..Default::default()
             },
             transactions: all_txs,

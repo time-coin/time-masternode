@@ -861,7 +861,7 @@ async fn main() {
 
         // Leader rotation timeout tracking
         // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
-        const LEADER_TIMEOUT_SECS: u64 = 60; // Wait 60s before rotating to backup leader
+        const LEADER_TIMEOUT_SECS: u64 = 10; // Wait 10s before rotating to backup leader (2x block production time)
         let mut waiting_for_height: Option<u64> = None;
         let mut waiting_since: Option<std::time::Instant> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
@@ -934,8 +934,38 @@ async fn main() {
                 }
                 compatible_mns
             } else {
-                // Use only active masternodes during normal operation
-                block_registry.get_eligible_for_rewards().await
+                // Use active masternodes from previous block's bitmap during normal operation
+                // Get previous block to extract its bitmap
+                let prev_block = if current_height > 0 {
+                    block_blockchain
+                        .get_block_by_height(current_height)
+                        .await
+                        .ok()
+                } else {
+                    None
+                };
+
+                let active_mns = if let Some(prev_block) = prev_block {
+                    // Extract active masternodes using previous block's bitmap
+                    let active_infos = block_registry
+                        .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
+                        .await;
+
+                    tracing::debug!(
+                        "📊 Using {} active masternodes from previous block's bitmap",
+                        active_infos.len()
+                    );
+
+                    active_infos
+                        .into_iter()
+                        .map(|info| (info.masternode, info.reward_address))
+                        .collect()
+                } else {
+                    // Genesis block - use all connected masternodes
+                    block_registry.get_eligible_for_rewards().await
+                };
+
+                active_mns
             };
 
             let mut masternodes: Vec<Masternode> =
