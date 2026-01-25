@@ -1560,7 +1560,7 @@ impl MessageHandler {
 
             if context
                 .masternode_registry
-                .register_internal(masternode, mn_data.reward_address, false)
+                .register_internal(masternode, mn_data.reward_address, true) // Mark active immediately - gossip syncs status
                 .await
                 .is_ok()
             {

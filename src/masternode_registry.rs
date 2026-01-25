@@ -218,7 +218,7 @@ impl MasternodeRegistry {
             reward_address: reward_address.clone(),
             uptime_start: now,
             total_uptime: 0,
-            is_active: should_activate, // Only mark as active if explicitly requested
+            is_active: true, // Always active on registration - gossip will sync status
             peer_reports: Arc::new(DashMap::new()),
         };
 

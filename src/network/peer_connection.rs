@@ -1981,7 +1981,7 @@ impl PeerConnection {
                     );
 
                     if masternode_registry
-                        .register_internal(masternode, mn_data.reward_address.clone(), false)
+                        .register_internal(masternode, mn_data.reward_address.clone(), true) // Mark active immediately - gossip syncs status
                         .await
                         .is_ok()
                     {
