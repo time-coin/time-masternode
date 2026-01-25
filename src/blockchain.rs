@@ -1235,6 +1235,12 @@ impl Blockchain {
 
         // Search backward from current height to find matching block
         for height in (0..=search_start).rev() {
+            // Check if peer is still connected before attempting to send
+            if !registry.is_connected(peer_ip) {
+                tracing::warn!("⚠️ Peer {} disconnected during fork resolution", peer_ip);
+                return Err(format!("Peer {} disconnected", peer_ip));
+            }
+
             // Get our block hash at this height
             let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,
@@ -1254,8 +1260,11 @@ impl Blockchain {
             // Send request
             if let Err(e) = registry.send_to_peer(peer_ip, req).await {
                 tracing::warn!("⚠️ Failed to send GetBlockHash to {}: {}", peer_ip, e);
-                // Move to next height
-                continue;
+                // If send failed, peer likely disconnected - exit the loop
+                return Err(format!(
+                    "Failed to communicate with peer {}: {}",
+                    peer_ip, e
+                ));
             }
 
             // Wait for response with timeout
@@ -4385,6 +4394,16 @@ impl Blockchain {
         }
 
         Ok(added)
+    }
+
+    /// Check if we're currently in fork resolution mode for a specific peer
+    pub async fn is_in_fork_resolution_with(&self, peer_addr: &str) -> bool {
+        let state = self.fork_state.read().await;
+        match &*state {
+            ForkResolutionState::FindingAncestor { peer_addr: p, .. }
+            | ForkResolutionState::FetchingChain { peer_addr: p, .. } => p == peer_addr,
+            _ => false,
+        }
     }
 
     /// Main entry point when blocks don't match our chain
