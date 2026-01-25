@@ -60,6 +60,16 @@ impl BlockValidator {
         // 5. Validate block size
         self.validate_block_size(block)?;
 
+        // 6. Validate active masternodes bitmap (consensus-breaking change)
+        // Blocks after genesis MUST have a bitmap (even if empty with all zeros)
+        // This ensures we reject old blocks without bitmaps
+        if height > 0 && block.header.active_masternodes_bitmap.is_empty() {
+            return Err(BlockchainError::InvalidBlock {
+                height,
+                reason: "Block missing required active_masternodes_bitmap field (incompatible with current consensus rules)".to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -194,6 +204,8 @@ mod tests {
                 leader: "test".to_string(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: Default::default(),
+                // Add bitmap for non-genesis blocks (required by new consensus rules)
+                active_masternodes_bitmap: if height > 0 { vec![0u8; 1] } else { vec![] },
                 ..Default::default()
             },
             transactions,
@@ -253,5 +265,45 @@ mod tests {
         let blocks = vec![block1, block2];
 
         assert!(validator.validate_chain_sequence(&blocks).is_ok());
+    }
+
+    #[test]
+    fn test_missing_bitmap_rejected() {
+        let validator = BlockValidator::new(crate::NetworkType::Testnet);
+        let mut block = create_test_block(1, chrono::Utc::now().timestamp());
+        
+        // Ensure bitmap is empty (simulating old block without bitmap)
+        block.header.active_masternodes_bitmap = vec![];
+
+        let result = validator.validate_block(&block, Some([0u8; 32]));
+        assert!(matches!(
+            result,
+            Err(BlockchainError::InvalidBlock { .. })
+        ));
+    }
+
+    #[test]
+    fn test_genesis_without_bitmap_accepted() {
+        let validator = BlockValidator::new(crate::NetworkType::Testnet);
+        let mut block = create_test_block(0, chrono::Utc::now().timestamp());
+        
+        // Genesis can have empty bitmap
+        block.header.active_masternodes_bitmap = vec![];
+        block.header.height = 0;
+
+        let result = validator.validate_block(&block, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_block_with_bitmap_accepted() {
+        let validator = BlockValidator::new(crate::NetworkType::Testnet);
+        let mut block = create_test_block(1, chrono::Utc::now().timestamp());
+        
+        // Add a bitmap (even if just zeros)
+        block.header.active_masternodes_bitmap = vec![0u8; 1];
+
+        let result = validator.validate_block(&block, Some([0u8; 32]));
+        assert!(result.is_ok());
     }
 }
