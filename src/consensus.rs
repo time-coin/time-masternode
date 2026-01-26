@@ -1752,22 +1752,39 @@ impl ConsensusEngine {
     /// 5. Finalize (2/3 quorum) or reject
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
         let txid = tx.txid();
+        let txid_hex = hex::encode(txid);
+
+        tracing::info!("🔍 Validating transaction {}...", &txid_hex[..16]);
 
         // Step 1: Atomically lock and validate
         if let Err(e) = self.lock_and_validate_transaction(&tx).await {
+            tracing::error!(
+                "❌ Transaction {} validation FAILED: {}",
+                &txid_hex[..16],
+                e
+            );
             // If lock_and_validate fails, UTXOs may be locked - unlock them
             self.unlock_transaction_inputs(&tx, &txid).await;
             return Err(e);
         }
 
+        tracing::info!("✅ Transaction {} validation passed", &txid_hex[..16]);
+
         // Step 2: Broadcast transaction to network FIRST
         // This ensures validators receive the TX before vote requests
+        tracing::debug!("📡 Broadcasting transaction {} to network", &txid_hex[..16]);
         self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()))
             .await;
 
         // Step 3: Process transaction through consensus locally (this adds to pool)
         // AND broadcasts vote request - validators will have received TX by now
+        tracing::debug!("🗳️  Starting consensus for transaction {}", &txid_hex[..16]);
         if let Err(e) = self.process_transaction(tx.clone()).await {
+            tracing::error!(
+                "❌ Transaction {} consensus processing FAILED: {}",
+                &txid_hex[..16],
+                e
+            );
             // If processing fails, unlock the inputs
             self.unlock_transaction_inputs(&tx, &txid).await;
             return Err(e);

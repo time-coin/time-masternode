@@ -599,13 +599,28 @@ impl RpcHandler {
 
         // Process transaction through consensus
         // Start TimeVote consensus to finalize this transaction
+        let txid_hex = hex::encode(txid);
+        tracing::info!("📤 Submitting transaction {} to consensus", &txid_hex[..16]);
         tokio::spawn({
             let consensus = self.consensus.clone();
             let tx_for_consensus = tx.clone();
+            let txid_for_log = txid_hex.clone();
             async move {
                 // Initiate TimeVote consensus for transaction
-                if let Err(e) = consensus.add_transaction(tx_for_consensus).await {
-                    tracing::error!("Failed to process transaction through consensus: {}", e);
+                match consensus.add_transaction(tx_for_consensus).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "✅ Transaction {} accepted by consensus",
+                            &txid_for_log[..16]
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "❌ Transaction {} REJECTED by consensus: {}",
+                            &txid_for_log[..16],
+                            e
+                        );
+                    }
                 }
             }
         });
