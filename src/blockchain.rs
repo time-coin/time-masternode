@@ -5194,15 +5194,86 @@ impl Blockchain {
         };
 
         // Use the efficient exponential + binary search algorithm
-        let ancestor = network_resolver
+        let candidate_ancestor = network_resolver
             .find_common_ancestor(our_height, peer_height, check_fn)
             .await
             .map_err(|e| format!("Error in common ancestor search: {}", e))?;
 
+        // CRITICAL VALIDATION: Verify that peer's next block actually builds on this ancestor
+        // If we say height N is common ancestor, peer's block N+1 must have previous_hash = our block N's hash
+        if candidate_ancestor < peer_height {
+            let our_block_hash = self.get_block_hash(candidate_ancestor)?;
+
+            // Find peer's next block after candidate ancestor
+            if let Some(peer_next_block) = sorted_blocks
+                .iter()
+                .find(|b| b.header.height == candidate_ancestor + 1)
+            {
+                let peer_next_prev_hash = peer_next_block.header.previous_hash;
+
+                if our_block_hash != peer_next_prev_hash {
+                    warn!(
+                        "⚠️  Binary search validation failed: candidate ancestor {} has hash {:x?}, \
+                        but peer's block {} expects previous_hash {:x?}",
+                        candidate_ancestor,
+                        hex::encode(our_block_hash),
+                        candidate_ancestor + 1,
+                        hex::encode(peer_next_prev_hash)
+                    );
+
+                    // The binary search gave us a false positive - actual fork is earlier
+                    // This happens when our chain and peer's chain have different blocks at same height
+                    // but the binary search only compared heights, not the chain continuity
+
+                    // Search backwards from candidate to find the true common ancestor
+                    let mut true_ancestor = candidate_ancestor;
+                    while true_ancestor > 0 {
+                        true_ancestor -= 1;
+
+                        // Check if blocks at this height match
+                        if let Ok(our_hash_at) = self.get_block_hash(true_ancestor) {
+                            if let Some(peer_hash_at) = peer_blocks.get(&true_ancestor) {
+                                if our_hash_at == *peer_hash_at {
+                                    // Verify this is a true common ancestor by checking next block
+                                    if let Some(peer_next) = sorted_blocks
+                                        .iter()
+                                        .find(|b| b.header.height == true_ancestor + 1)
+                                    {
+                                        if self.get_block_hash(true_ancestor).ok()
+                                            == Some(peer_next.header.previous_hash)
+                                        {
+                                            info!("✓ Validated true common ancestor at height {} (corrected from {})", true_ancestor, candidate_ancestor);
+                                            return Ok(true_ancestor);
+                                        }
+                                    } else {
+                                        // Peer doesn't have next block in provided set
+                                        info!("✓ Found common ancestor at height {} (no next block to validate)", true_ancestor);
+                                        return Ok(true_ancestor);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Couldn't find common ancestor - chains diverged at or before peer_lowest
+                    if peer_lowest > 100 {
+                        return Err(format!(
+                            "Fork earlier than provided blocks: peer blocks start at {}, but common ancestor not found. \
+                            Need deeper block history.",
+                            peer_lowest
+                        ));
+                    }
+
+                    // Fork at genesis
+                    return Ok(0);
+                }
+            }
+        }
+
         // CRITICAL FIX: If ancestor is 0 but peer_lowest is > 100,
         // the blocks slice doesn't go back far enough to find the true common ancestor.
         // Return an error to force the peer to send deeper block history.
-        if ancestor == 0 && peer_lowest > 100 {
+        if candidate_ancestor == 0 && peer_lowest > 100 {
             return Err(format!(
                 "Insufficient block history: peer blocks only go back to height {}, \
                 but common ancestor was not found. Peer must provide blocks starting from a lower height \
@@ -5211,8 +5282,8 @@ impl Blockchain {
             ));
         }
 
-        info!("✓ Found common ancestor at height {}", ancestor);
-        Ok(ancestor)
+        info!("✓ Found common ancestor at height {}", candidate_ancestor);
+        Ok(candidate_ancestor)
     }
 
     /// Get chain work at a specific height
