@@ -2028,42 +2028,44 @@ impl Blockchain {
             block.transactions.len()
         );
 
-        // Save block
-        self.save_block(&block)?;
+        // Save block - but DON'T update chain height yet
+        self.save_block_without_height_update(&block)?;
 
-        // DIAGNOSTIC: Immediately read back and verify hash
-        let retrieved_block = self.get_block(block.header.height)?;
+        // CRITICAL: Immediately read back and verify hash BEFORE updating chain height
+        let retrieved_block = self.get_block_from_storage_only(block.header.height)?;
         let post_storage_hash = retrieved_block.hash();
         if post_storage_hash != pre_storage_hash {
-            warn!(
-                "🔬 POST-STORAGE HASH MISMATCH: Block {} changed from {} to {}",
-                block.header.height,
+            tracing::error!(
+                "🔬 CRITICAL: POST-STORAGE HASH MISMATCH for block {}!",
+                block.header.height
+            );
+            tracing::error!(
+                "  Expected: {}, Got: {}",
                 hex::encode(&pre_storage_hash[..8]),
                 hex::encode(&post_storage_hash[..8])
             );
-            warn!(
-                "🔍 POST-STORAGE: Block {} hash {} (v:{} h:{} prev:{} mr:{} ts:{} br:{} l:'{}' ar:{} vrf_o:{} vrf_s:{} txs:{})",
-                retrieved_block.header.height,
-                hex::encode(&post_storage_hash[..8]),
-                retrieved_block.header.version,
-                retrieved_block.header.height,
-                hex::encode(&retrieved_block.header.previous_hash[..8]),
-                hex::encode(&retrieved_block.header.merkle_root[..8]),
-                retrieved_block.header.timestamp,
-                retrieved_block.header.block_reward,
-                retrieved_block.header.leader,
-                hex::encode(&retrieved_block.header.attestation_root[..8]),
-                hex::encode(&retrieved_block.header.vrf_output[..8]),
-                retrieved_block.header.vrf_score,
-                retrieved_block.transactions.len()
-            );
+            tracing::error!("  This block will be REJECTED to prevent chain corruption");
+            // Remove the corrupted block from storage
+            let key = format!("block_{}", block.header.height);
+            let _ = self.storage.remove(key.as_bytes());
+            self.block_cache.invalidate(block.header.height);
+
             return Err(format!(
-                "CRITICAL: Block {} hash mutated during storage! Before: {}, After: {}",
+                "Block {} hash changed after storage (expected {}, got {}). Block rejected.",
                 block.header.height,
                 hex::encode(&pre_storage_hash[..8]),
                 hex::encode(&post_storage_hash[..8])
             ));
         }
+
+        // Hash verified - NOW update chain height
+        self.update_chain_height(block.header.height)?;
+
+        tracing::debug!(
+            "✓ Block {} hash verified after storage: {}",
+            block.header.height,
+            hex::encode(&post_storage_hash[..8])
+        );
 
         // Update cumulative chain work
         let block_work = self.calculate_block_work(&block);
@@ -2501,6 +2503,58 @@ impl Blockchain {
         }
 
         Ok(())
+    }
+
+    /// Save block to storage without updating chain height (for verification)
+    fn save_block_without_height_update(&self, block: &Block) -> Result<(), String> {
+        let key = format!("block_{}", block.header.height);
+        let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
+        self.storage
+            .insert(key.as_bytes(), serialized)
+            .map_err(|e| e.to_string())?;
+
+        // CRITICAL: Update cache to ensure consistency
+        self.block_cache.put(block.header.height, block.clone());
+
+        // Optimize disk I/O: Only flush every 10 blocks
+        if block.header.height % 10 == 0 {
+            self.storage.flush().map_err(|e| {
+                tracing::error!(
+                    "❌ Failed to flush block {} to disk: {}",
+                    block.header.height,
+                    e
+                );
+                e.to_string()
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Update chain height in storage
+    fn update_chain_height(&self, height: u64) -> Result<(), String> {
+        let height_key = "chain_height".as_bytes();
+        let height_bytes = bincode::serialize(&height).map_err(|e| e.to_string())?;
+        self.storage
+            .insert(height_key, height_bytes)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Get block directly from storage, bypassing cache (for verification)
+    fn get_block_from_storage_only(&self, height: u64) -> Result<Block, String> {
+        let key = format!("block_{}", height);
+        let value = self
+            .storage
+            .get(key.as_bytes())
+            .map_err(|e| e.to_string())?;
+
+        if let Some(v) = value {
+            let block: Block = bincode::deserialize(&v).map_err(|e| e.to_string())?;
+            Ok(block)
+        } else {
+            Err(format!("Block {} not found in storage", height))
+        }
     }
 
     /// Store pending fees to be added to next block reward
