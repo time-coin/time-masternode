@@ -150,15 +150,6 @@ enum ForkResolutionState {
     /// No fork detected
     None,
 
-    /// Fork detected, need to find common ancestor
-    FindingAncestor {
-        fork_height: u64,
-        peer_addr: String,
-        check_height: u64,
-        searched_back: u64,
-        started_at: std::time::Instant, // NEW: Track when state started
-    },
-
     /// Common ancestor found, need to get peer's chain
     FetchingChain {
         common_ancestor: u64,
@@ -166,20 +157,21 @@ enum ForkResolutionState {
         peer_addr: String,
         peer_height: u64,
         fetched_up_to: u64,
-        started_at: std::time::Instant, // NEW: Track when state started
+        started_at: std::time::Instant,
     },
 
     /// Have complete alternate chain, ready to reorg
     ReadyToReorg {
         common_ancestor: u64,
         alternate_blocks: Vec<Block>,
+        started_at: std::time::Instant,
     },
 
     /// Performing reorganization
     Reorging {
         from_height: u64,
         to_height: u64,
-        started_at: std::time::Instant, // NEW: Track when state started
+        started_at: std::time::Instant,
     },
 }
 
@@ -4445,22 +4437,187 @@ impl Blockchain {
         }
 
         let fork_height = blocks[0].header.height;
+        let peer_tip_height = blocks
+            .iter()
+            .map(|b| b.header.height)
+            .max()
+            .unwrap_or(fork_height);
+        let our_height = self.get_height();
+
         info!(
-            "🔀 Fork detected at height {} from peer {}",
-            fork_height, peer_addr
+            "🔀 Fork detected at height {} from peer {} ({} blocks provided, peer_tip: {}, our_height: {})",
+            fork_height, peer_addr, blocks.len(), peer_tip_height, our_height
         );
 
-        // Transition to FindingAncestor state
-        *self.fork_state.write().await = ForkResolutionState::FindingAncestor {
-            fork_height,
-            peer_addr: peer_addr.clone(),
-            check_height: fork_height.saturating_sub(1),
-            searched_back: 0,
-            started_at: std::time::Instant::now(), // NEW: Track start time
-        };
+        // STRATEGY: Binary search requires we have enough blocks from the peer.
+        // If we don't have enough blocks, request more first.
 
-        // Start the ancestor search
-        self.continue_fork_resolution().await
+        // Calculate how many blocks we need to make an informed decision
+        // We need blocks going back far enough to find common ancestor
+        let lowest_peer_block = blocks
+            .iter()
+            .map(|b| b.header.height)
+            .min()
+            .unwrap_or(fork_height);
+        let blocks_needed_for_search = 200.min(fork_height); // Go back at most 200 blocks or to genesis
+
+        if lowest_peer_block > fork_height.saturating_sub(blocks_needed_for_search)
+            && fork_height > 10
+        {
+            // We don't have enough block history - request more blocks from peer
+            let request_from = fork_height.saturating_sub(blocks_needed_for_search);
+            let request_to = peer_tip_height;
+
+            info!(
+                "📥 Requesting additional blocks {}-{} from {} for fork resolution (have {}-{})",
+                request_from, request_to, peer_addr, lowest_peer_block, peer_tip_height
+            );
+
+            // Transition to fetching state
+            *self.fork_state.write().await = ForkResolutionState::FetchingChain {
+                common_ancestor: 0, // Not yet known
+                fork_height,
+                peer_addr: peer_addr.clone(),
+                peer_height: peer_tip_height,
+                fetched_up_to: peer_tip_height, // We already have up to peer tip
+                started_at: std::time::Instant::now(),
+            };
+
+            // Request the blocks
+            self.request_blocks_from_peer(&peer_addr, request_from, request_to)
+                .await?;
+
+            // Note: When blocks arrive, handle_blocks() will check fork_state and call binary search
+            return Ok(());
+        }
+
+        // We have enough blocks - use binary search to find common ancestor
+        match self.find_fork_common_ancestor(&blocks).await {
+            Ok(common_ancestor) => {
+                info!(
+                    "✅ Binary search found common ancestor at height {} (searched {} blocks)",
+                    common_ancestor,
+                    blocks.len()
+                );
+
+                // Decision: reorg or stay on our chain?
+                if peer_tip_height > our_height {
+                    info!(
+                        "📊 Peer chain is longer ({} vs {}), will reorg to peer chain",
+                        peer_tip_height, our_height
+                    );
+
+                    // Filter blocks to only those after common ancestor
+                    let reorg_blocks: Vec<Block> = blocks
+                        .into_iter()
+                        .filter(|b| b.header.height > common_ancestor)
+                        .collect();
+
+                    if reorg_blocks.is_empty() {
+                        return Err("No blocks to reorg with after filtering".to_string());
+                    }
+
+                    // Verify blocks are contiguous from common_ancestor + 1
+                    let expected_start = common_ancestor + 1;
+                    let actual_start = reorg_blocks
+                        .iter()
+                        .map(|b| b.header.height)
+                        .min()
+                        .unwrap_or(0);
+
+                    if actual_start != expected_start {
+                        // We're missing blocks - need to fetch them
+                        info!(
+                            "📥 Missing blocks after common ancestor {} - requesting {}-{}",
+                            common_ancestor, expected_start, peer_tip_height
+                        );
+
+                        *self.fork_state.write().await = ForkResolutionState::FetchingChain {
+                            common_ancestor,
+                            fork_height,
+                            peer_addr: peer_addr.clone(),
+                            peer_height: peer_tip_height,
+                            fetched_up_to: peer_tip_height,
+                            started_at: std::time::Instant::now(),
+                        };
+
+                        self.request_blocks_from_peer(&peer_addr, expected_start, peer_tip_height)
+                            .await?;
+                        return Ok(());
+                    }
+
+                    // Transition to reorg state
+                    *self.fork_state.write().await = ForkResolutionState::ReadyToReorg {
+                        common_ancestor,
+                        alternate_blocks: reorg_blocks,
+                        started_at: std::time::Instant::now(),
+                    };
+
+                    self.continue_fork_resolution().await
+                } else if peer_tip_height == our_height {
+                    // Same height - use hash as tiebreaker
+                    let our_tip_hash = self.get_block_hash(our_height)?;
+                    let peer_tip_block = blocks.iter().max_by_key(|b| b.header.height).unwrap();
+                    let peer_tip_hash = peer_tip_block.hash();
+
+                    if peer_tip_hash < our_tip_hash {
+                        info!("📊 Same height, but peer has lower hash (tiebreaker), will reorg");
+
+                        let reorg_blocks: Vec<Block> = blocks
+                            .into_iter()
+                            .filter(|b| b.header.height > common_ancestor)
+                            .collect();
+
+                        *self.fork_state.write().await = ForkResolutionState::ReadyToReorg {
+                            common_ancestor,
+                            alternate_blocks: reorg_blocks,
+                            started_at: std::time::Instant::now(),
+                        };
+
+                        self.continue_fork_resolution().await
+                    } else {
+                        info!(
+                            "📊 Same height, but our hash is lower (tiebreaker), staying on our chain"
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        Ok(())
+                    }
+                } else {
+                    info!(
+                        "📊 Our chain is longer ({} vs {}), staying on our chain",
+                        our_height, peer_tip_height
+                    );
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    Ok(())
+                }
+            }
+            Err(e) => {
+                warn!("⚠️  Binary search failed: {} - requesting more blocks", e);
+
+                // Binary search failed - probably because peer blocks don't go back far enough
+                // Request deeper history from peer
+                let request_from = fork_height.saturating_sub(1000); // Go back up to 1000 blocks
+                let request_to = peer_tip_height;
+
+                info!(
+                    "📥 Requesting deeper block history {}-{} from {}",
+                    request_from, request_to, peer_addr
+                );
+
+                *self.fork_state.write().await = ForkResolutionState::FetchingChain {
+                    common_ancestor: 0,
+                    fork_height,
+                    peer_addr: peer_addr.clone(),
+                    peer_height: peer_tip_height,
+                    fetched_up_to: peer_tip_height,
+                    started_at: std::time::Instant::now(),
+                };
+
+                self.request_blocks_from_peer(&peer_addr, request_from, request_to)
+                    .await?;
+                Ok(())
+            }
+        }
     }
 
     /// Continue fork resolution state machine with timeout protection
@@ -4472,9 +4629,9 @@ impl Blockchain {
 
         // Check timeout for states with timestamps
         match &state {
-            ForkResolutionState::FindingAncestor { started_at, .. }
-            | ForkResolutionState::FetchingChain { started_at, .. }
-            | ForkResolutionState::Reorging { started_at, .. } => {
+            ForkResolutionState::FetchingChain { started_at, .. }
+            | ForkResolutionState::Reorging { started_at, .. }
+            | ForkResolutionState::ReadyToReorg { started_at, .. } => {
                 if started_at.elapsed().as_secs() > FORK_RESOLUTION_TIMEOUT_SECS {
                     warn!(
                         "⚠️  Fork resolution timed out after {}s, resetting state",
@@ -4493,31 +4650,6 @@ impl Blockchain {
         match state {
             ForkResolutionState::None => Ok(()),
 
-            ForkResolutionState::FindingAncestor {
-                fork_height: _,
-                peer_addr,
-                check_height,
-                searched_back,
-                started_at: _,
-            } => {
-                // Safety check - don't search too far back
-                if searched_back > 2000 {
-                    warn!(
-                        "🚨 Searched back {} blocks without finding common ancestor",
-                        searched_back
-                    );
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Err("Deep fork >2000 blocks - chains incompatible".to_string());
-                }
-
-                // Request the block at check_height from peer
-                self.request_single_block_from_peer(&peer_addr, check_height)
-                    .await?;
-
-                // State will transition when we receive the block
-                Ok(())
-            }
-
             ForkResolutionState::FetchingChain {
                 common_ancestor: _,
                 fork_height: _,
@@ -4526,29 +4658,31 @@ impl Blockchain {
                 fetched_up_to,
                 started_at: _,
             } => {
-                if fetched_up_to >= peer_height {
-                    // We have the complete alternate chain, ready to reorg
-                    info!(
-                        "✅ Fetched complete alternate chain up to height {}",
-                        peer_height
-                    );
-                    // Transition handled when blocks arrive
-                    Ok(())
-                } else {
-                    // Request more blocks
-                    let start = fetched_up_to + 1;
-                    let end = (start + 100).min(peer_height);
-                    info!("📤 Requesting blocks {}-{} from peer", start, end);
-                    self.request_blocks_from_peer(&peer_addr, start, end)
-                        .await?;
-                    Ok(())
-                }
+                // When we're in FetchingChain, the blocks will arrive via handle_blocks
+                // and we'll retry binary search when we have more blocks
+                // For now, just log status
+                info!(
+                    "⏳ Waiting for blocks from peer {} (have up to {}, need up to {})",
+                    peer_addr, fetched_up_to, peer_height
+                );
+                Ok(())
             }
 
             ForkResolutionState::ReadyToReorg {
                 common_ancestor,
                 alternate_blocks,
+                started_at,
             } => {
+                // Check if reorg preparation is taking too long
+                if started_at.elapsed().as_secs() > 60 {
+                    warn!(
+                        "⚠️  Reorg preparation stuck for {}s, resetting",
+                        started_at.elapsed().as_secs()
+                    );
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Err("Reorg preparation stalled".to_string());
+                }
+
                 // Perform the reorganization
                 self.perform_reorg(common_ancestor, alternate_blocks)
                     .await?;
@@ -4573,99 +4707,6 @@ impl Blockchain {
                 // Already reorging, wait
                 Ok(())
             }
-        }
-    }
-
-    /// Called when we receive a block during fork resolution
-    pub async fn handle_fork_resolution_block(
-        &self,
-        block: Block,
-        peer_addr: &str,
-    ) -> Result<(), String> {
-        let mut state = self.fork_state.write().await;
-
-        match &*state {
-            ForkResolutionState::FindingAncestor {
-                fork_height,
-                check_height,
-                searched_back,
-                started_at,
-                ..
-            } => {
-                let check_height = *check_height;
-                let searched_back = *searched_back;
-                let fork_height = *fork_height;
-                let started_at = *started_at; // Capture for use below
-
-                // Check if this block matches our block at the same height
-                if let Ok(our_block) = self.get_block(block.header.height) {
-                    if our_block.hash() == block.hash() {
-                        // Found common ancestor!
-                        info!("✅ Found common ancestor at height {}", block.header.height);
-
-                        // Get peer's tip height (we'll need to request it)
-                        // For now, assume fork_height is close to their tip
-                        let peer_height = fork_height + 10; // Estimate, will be corrected
-
-                        *state = ForkResolutionState::FetchingChain {
-                            common_ancestor: block.header.height,
-                            fork_height,
-                            peer_addr: peer_addr.to_string(),
-                            peer_height,
-                            fetched_up_to: block.header.height,
-                            started_at: std::time::Instant::now(), // NEW: Track start time
-                        };
-
-                        drop(state);
-                        return self.continue_fork_resolution().await;
-                    }
-                }
-
-                // No match - go back further
-                if check_height == 0 {
-                    *state = ForkResolutionState::None;
-                    return Err("No common ancestor found - chains split at genesis".to_string());
-                }
-
-                *state = ForkResolutionState::FindingAncestor {
-                    fork_height,
-                    peer_addr: peer_addr.to_string(),
-                    check_height: check_height - 1,
-                    searched_back: searched_back + 1,
-                    started_at, // Preserve original start time
-                };
-
-                drop(state);
-                self.continue_fork_resolution().await
-            }
-
-            _ => {
-                // Not in ancestor-finding state, block will be handled normally
-                Ok(())
-            }
-        }
-    }
-
-    /// Request a single block from a peer
-    async fn request_single_block_from_peer(
-        &self,
-        peer_addr: &str,
-        height: u64,
-    ) -> Result<(), String> {
-        info!(
-            "📤 Requesting block at height {} from {}",
-            height, peer_addr
-        );
-
-        let registry = self.peer_registry.read().await;
-        if let Some(reg) = registry.as_ref() {
-            let msg = NetworkMessage::GetBlocks(height, height + 1);
-            reg.send_to_peer(peer_addr, msg)
-                .await
-                .map_err(|e| format!("Failed to request block: {}", e))?;
-            Ok(())
-        } else {
-            Err("Peer registry not available".to_string())
         }
     }
 
