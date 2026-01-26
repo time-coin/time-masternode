@@ -113,10 +113,17 @@ if [ $? -ne 0 ]; then
 fi
 
 # Extract transaction ID
-TXID=$(echo "$SEND_RESULT" | jq -r '.txid // empty')
-
-if [ -z "$TXID" ]; then
-    # Try parsing as plain string (some versions return just the txid)
+# Handle both JSON object with txid field and plain string response
+if echo "$SEND_RESULT" | jq -e . >/dev/null 2>&1; then
+    # Valid JSON - try to extract txid field
+    TXID=$(echo "$SEND_RESULT" | jq -r '.txid // empty')
+    
+    # If no txid field, try parsing as plain string in quotes
+    if [ -z "$TXID" ]; then
+        TXID=$(echo "$SEND_RESULT" | jq -r '. // empty' | grep -oE '[a-f0-9]{64}')
+    fi
+else
+    # Not JSON - extract hex string directly
     TXID=$(echo "$SEND_RESULT" | tr -d '"' | tr -d '\n' | grep -oE '[a-f0-9]{64}')
 fi
 
