@@ -164,6 +164,8 @@ impl Block {
         // NOTE: vrf_proof is NOT included (it's a proof OF the output)
         hasher.update(self.header.vrf_output);
         hasher.update(self.header.vrf_score.to_le_bytes());
+        // Include active masternodes bitmap (consensus-critical field)
+        hasher.update(&self.header.active_masternodes_bitmap);
         // Explicitly NOT including masternode_tiers - it's metadata only
 
         hasher.finalize().into()
