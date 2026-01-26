@@ -129,21 +129,23 @@ echo ""
 log_info "Step 4: Verifying transaction in mempool..."
 sleep 2  # Give it a moment to propagate
 
-MEMPOOL_TX=$($CLI_CMD getrawtransaction "$TXID" true 2>&1)
+MEMPOOL_TX=$($CLI_CMD getrawtransaction "$TXID" true 2>&1) || true
 
-if [ $? -ne 0 ]; then
-    log_warning "Transaction not found in mempool (may have been confirmed quickly)"
+if [ $? -ne 0 ] || echo "$MEMPOOL_TX" | grep -qi "error\|not found"; then
+    log_warning "Transaction not immediately visible in mempool (may have been confirmed quickly or still propagating)"
 else
     log_success "Transaction found in mempool"
     
-    # Parse mempool transaction details
-    TX_SIZE=$(echo "$MEMPOOL_TX" | jq -r '.size // "N/A"')
-    TX_INPUTS=$(echo "$MEMPOOL_TX" | jq -r '.vin | length')
-    TX_OUTPUTS=$(echo "$MEMPOOL_TX" | jq -r '.vout | length')
-    
-    log_info "  Size: $TX_SIZE bytes"
-    log_info "  Inputs: $TX_INPUTS"
-    log_info "  Outputs: $TX_OUTPUTS"
+    # Parse mempool transaction details if JSON is valid
+    if echo "$MEMPOOL_TX" | jq -e . >/dev/null 2>&1; then
+        TX_SIZE=$(echo "$MEMPOOL_TX" | jq -r '.size // "N/A"')
+        TX_INPUTS=$(echo "$MEMPOOL_TX" | jq -r '.vin | length // "N/A"')
+        TX_OUTPUTS=$(echo "$MEMPOOL_TX" | jq -r '.vout | length // "N/A"')
+        
+        log_info "  Size: $TX_SIZE bytes"
+        log_info "  Inputs: $TX_INPUTS"
+        log_info "  Outputs: $TX_OUTPUTS"
+    fi
 fi
 echo ""
 
@@ -153,9 +155,9 @@ CONFIRMED=false
 START_TIME=$(date +%s)
 
 while [ $(($(date +%s) - START_TIME)) -lt $TEST_TIMEOUT ]; do
-    TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1)
+    TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
     
-    if [ $? -eq 0 ]; then
+    if [ $? -eq 0 ] && echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
         CONFIRMATIONS=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
         
         if [ "$CONFIRMATIONS" -gt 0 ]; then
@@ -172,7 +174,7 @@ while [ $(($(date +%s) - START_TIME)) -lt $TEST_TIMEOUT ]; do
             echo -ne "\r  Waiting for confirmation... (${CONFIRMATIONS} confirmations, elapsed: $(($(date +%s) - START_TIME))s)"
         fi
     else
-        echo -ne "\r  Transaction not yet confirmed... (elapsed: $(($(date +%s) - START_TIME))s)"
+        echo -ne "\r  Transaction pending... (elapsed: $(($(date +%s) - START_TIME))s)                    "
     fi
     
     sleep 2
@@ -191,11 +193,11 @@ echo ""
 
 # Step 6: Final verification
 log_info "Step 6: Final verification..."
-FINAL_TX=$($CLI_CMD gettransaction "$TXID" 2>&1)
+FINAL_TX=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
 
-if [ $? -ne 0 ]; then
+if [ $? -ne 0 ] || ! echo "$FINAL_TX" | jq -e . >/dev/null 2>&1; then
     log_error "Failed to retrieve final transaction details"
-    echo "$FINAL_TX"
+    log_info "Response: $FINAL_TX"
     exit 1
 fi
 
