@@ -3294,6 +3294,23 @@ impl Blockchain {
 
         let block_height = block.header.height;
 
+        // CRITICAL: Reject blocks during active reorg to prevent concurrent fork resolutions
+        // Multiple peers sending competing chains simultaneously causes chain corruption
+        {
+            let fork_state = self.fork_state.read().await;
+            match &*fork_state {
+                ForkResolutionState::Reorging { .. } | ForkResolutionState::ReadyToReorg { .. } => {
+                    tracing::debug!(
+                        "🚫 Rejecting block {} during active reorg (state: {:?})",
+                        block_height,
+                        std::mem::discriminant(&*fork_state)
+                    );
+                    return Ok(false);
+                }
+                _ => {} // Allow blocks when not reorging
+            }
+        }
+
         // Special case: Genesis block (height 0)
         if block_height == 0 {
             // Check if we already have genesis
@@ -4769,9 +4786,12 @@ impl Blockchain {
                 }
 
                 // Perform the reorganization
-                self.perform_reorg(common_ancestor, alternate_blocks)
-                    .await?;
+                let reorg_result = self.perform_reorg(common_ancestor, alternate_blocks).await;
+
+                // Always clear fork state after reorg attempt (success or failure)
                 *self.fork_state.write().await = ForkResolutionState::None;
+
+                reorg_result?;
                 Ok(())
             }
 
