@@ -2009,8 +2009,61 @@ impl Blockchain {
         // Save undo log for rollback support
         self.save_undo_log(&undo_log)?;
 
+        // DIAGNOSTIC: Log block hash before storage
+        let pre_storage_hash = block.hash();
+        tracing::debug!(
+            "🔍 PRE-STORAGE: Block {} hash {} (v:{} h:{} prev:{} mr:{} ts:{} br:{} l:'{}' ar:{} vrf_o:{} vrf_s:{} txs:{})",
+            block.header.height,
+            hex::encode(&pre_storage_hash[..8]),
+            block.header.version,
+            block.header.height,
+            hex::encode(&block.header.previous_hash[..8]),
+            hex::encode(&block.header.merkle_root[..8]),
+            block.header.timestamp,
+            block.header.block_reward,
+            block.header.leader,
+            hex::encode(&block.header.attestation_root[..8]),
+            hex::encode(&block.header.vrf_output[..8]),
+            block.header.vrf_score,
+            block.transactions.len()
+        );
+
         // Save block
         self.save_block(&block)?;
+
+        // DIAGNOSTIC: Immediately read back and verify hash
+        let retrieved_block = self.get_block(block.header.height)?;
+        let post_storage_hash = retrieved_block.hash();
+        if post_storage_hash != pre_storage_hash {
+            warn!(
+                "🔬 POST-STORAGE HASH MISMATCH: Block {} changed from {} to {}",
+                block.header.height,
+                hex::encode(&pre_storage_hash[..8]),
+                hex::encode(&post_storage_hash[..8])
+            );
+            warn!(
+                "🔍 POST-STORAGE: Block {} hash {} (v:{} h:{} prev:{} mr:{} ts:{} br:{} l:'{}' ar:{} vrf_o:{} vrf_s:{} txs:{})",
+                retrieved_block.header.height,
+                hex::encode(&post_storage_hash[..8]),
+                retrieved_block.header.version,
+                retrieved_block.header.height,
+                hex::encode(&retrieved_block.header.previous_hash[..8]),
+                hex::encode(&retrieved_block.header.merkle_root[..8]),
+                retrieved_block.header.timestamp,
+                retrieved_block.header.block_reward,
+                retrieved_block.header.leader,
+                hex::encode(&retrieved_block.header.attestation_root[..8]),
+                hex::encode(&retrieved_block.header.vrf_output[..8]),
+                retrieved_block.header.vrf_score,
+                retrieved_block.transactions.len()
+            );
+            return Err(format!(
+                "CRITICAL: Block {} hash mutated during storage! Before: {}, After: {}",
+                block.header.height,
+                hex::encode(&pre_storage_hash[..8]),
+                hex::encode(&post_storage_hash[..8])
+            ));
+        }
 
         // Update cumulative chain work
         let block_work = self.calculate_block_work(&block);
@@ -2420,6 +2473,10 @@ impl Blockchain {
         self.storage
             .insert(key.as_bytes(), serialized)
             .map_err(|e| e.to_string())?;
+
+        // CRITICAL: Update cache to ensure consistency
+        // Without this, cached stale blocks can cause hash mismatches
+        self.block_cache.put(block.header.height, block.clone());
 
         // Update chain height
         let height_key = "chain_height".as_bytes();
@@ -3140,6 +3197,8 @@ impl Blockchain {
             if let Err(e) = self.storage.remove(key.as_bytes()) {
                 tracing::warn!("Failed to remove block {}: {}", height, e);
             }
+            // CRITICAL: Invalidate cache to prevent stale reads
+            self.block_cache.invalidate(height);
         }
 
         // Step 3: Update chain height
@@ -4937,9 +4996,68 @@ impl Blockchain {
                 .map_err(|e| format!("Failed to add block {} during reorg: {}", block_height, e))?;
 
             // CRITICAL: Verify the hash after storage matches what we expected
-            match self.get_block_hash(block_height) {
-                Ok(stored_hash) => {
+            match self.get_block(block_height) {
+                Ok(stored_block) => {
+                    let stored_hash = stored_block.hash();
                     if stored_hash != expected_hash {
+                        // DEEP DIAGNOSTIC: Log exactly what changed
+                        warn!("🔬 DEEP DIAGNOSTIC - Block {} hash mismatch:", block_height);
+                        warn!("  Expected hash: {}", hex::encode(expected_hash));
+                        warn!("  Stored hash:   {}", hex::encode(stored_hash));
+
+                        // Compare all consensus-critical fields
+                        warn!(
+                            "  version: {} vs {}",
+                            block.header.version, stored_block.header.version
+                        );
+                        warn!(
+                            "  height: {} vs {}",
+                            block.header.height, stored_block.header.height
+                        );
+                        warn!(
+                            "  previous_hash: {} vs {}",
+                            hex::encode(block.header.previous_hash),
+                            hex::encode(stored_block.header.previous_hash)
+                        );
+                        warn!(
+                            "  merkle_root: {} vs {}",
+                            hex::encode(block.header.merkle_root),
+                            hex::encode(stored_block.header.merkle_root)
+                        );
+                        warn!(
+                            "  timestamp: {} vs {}",
+                            block.header.timestamp, stored_block.header.timestamp
+                        );
+                        warn!(
+                            "  block_reward: {} vs {}",
+                            block.header.block_reward, stored_block.header.block_reward
+                        );
+                        warn!(
+                            "  leader: '{}' vs '{}'",
+                            block.header.leader, stored_block.header.leader
+                        );
+                        warn!(
+                            "  attestation_root: {} vs {}",
+                            hex::encode(block.header.attestation_root),
+                            hex::encode(stored_block.header.attestation_root)
+                        );
+                        warn!(
+                            "  vrf_output: {} vs {}",
+                            hex::encode(block.header.vrf_output),
+                            hex::encode(stored_block.header.vrf_output)
+                        );
+                        warn!(
+                            "  vrf_score: {} vs {}",
+                            block.header.vrf_score, stored_block.header.vrf_score
+                        );
+
+                        // Also check transaction count (affects merkle root)
+                        warn!(
+                            "  transactions.len(): {} vs {}",
+                            block.transactions.len(),
+                            stored_block.transactions.len()
+                        );
+
                         return Err(format!(
                             "HASH MISMATCH after storage! Block {} expected hash {}, but stored as {}. \
                             This indicates non-deterministic block hashing or storage corruption!",

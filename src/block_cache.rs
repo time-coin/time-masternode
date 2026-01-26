@@ -136,6 +136,13 @@ impl BlockCacheManager {
         }
     }
 
+    /// Invalidate a specific cache entry (removes from both hot and warm caches)
+    /// Use this when a block is removed or replaced to prevent stale reads
+    pub fn invalidate(&self, height: u64) {
+        self.hot.write().pop(&height);
+        self.warm.write().pop(&height);
+    }
+
     /// Clear all caches
     pub fn clear(&self) {
         self.hot.write().clear();
