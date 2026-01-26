@@ -4500,11 +4500,74 @@ impl Blockchain {
                     blocks.len()
                 );
 
-                // Decision: reorg or stay on our chain?
-                if peer_tip_height > our_height {
+                // Use AI fork resolver to make intelligent decision
+                let peer_tip_block = blocks.iter().max_by_key(|b| b.header.height).unwrap();
+                let peer_tip_hash = peer_tip_block.hash();
+                let our_tip_hash = self.get_block_hash(our_height)?;
+
+                // Calculate chain work
+                let our_chain_work = self.get_chain_work_at_height(our_height).await?;
+                let peer_chain_work = self
+                    .estimate_peer_chain_work(&blocks, peer_tip_height)
+                    .await;
+
+                // Gather supporting peers info
+                let supporting_peers = self
+                    .gather_supporting_peers(our_height, peer_tip_height)
+                    .await;
+
+                // Get timestamps
+                let our_tip_timestamp = self.get_block(our_height)?.header.timestamp;
+                let peer_tip_timestamp = peer_tip_block.header.timestamp;
+
+                // Check if peer is whitelisted (registered as masternode)
+                let peer_is_whitelisted = self.masternode_registry.is_registered(&peer_addr).await;
+
+                // Calculate fork depth
+                let fork_depth = our_height.saturating_sub(common_ancestor);
+
+                info!(
+                    "🤖 [AI] Evaluating fork: our={} peer={}, ancestor={}, depth={}, work_diff={}",
+                    our_height,
+                    peer_tip_height,
+                    common_ancestor,
+                    fork_depth,
+                    peer_chain_work as i128 - our_chain_work as i128
+                );
+
+                // Use AI fork resolver to make decision
+                let resolution = self
+                    .fork_resolver
+                    .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
+                        our_height,
+                        our_chain_work,
+                        peer_height: peer_tip_height,
+                        peer_chain_work,
+                        peer_ip: peer_addr.clone(),
+                        supporting_peers,
+                        common_ancestor,
+                        peer_tip_timestamp: Some(peer_tip_timestamp),
+                        our_tip_hash: Some(our_tip_hash),
+                        peer_tip_hash: Some(peer_tip_hash),
+                        peer_is_whitelisted,
+                        our_tip_timestamp: Some(our_tip_timestamp),
+                        fork_depth,
+                    })
+                    .await;
+
+                let reasoning_summary = resolution.reasoning.join("; ");
+                info!(
+                    "🤖 [AI] Fork resolution decision: accept={}, confidence={:.2}%, reasoning: {}",
+                    resolution.accept_peer_chain,
+                    resolution.confidence * 100.0,
+                    reasoning_summary
+                );
+
+                // Decision: reorg or stay based on AI resolver
+                if resolution.accept_peer_chain {
                     info!(
-                        "📊 Peer chain is longer ({} vs {}), will reorg to peer chain",
-                        peer_tip_height, our_height
+                        "📊 AI decided to accept peer chain (confidence: {:.1}%)",
+                        resolution.confidence * 100.0
                     );
 
                     // Filter blocks to only those after common ancestor
@@ -4554,38 +4617,10 @@ impl Blockchain {
                     };
 
                     self.continue_fork_resolution().await
-                } else if peer_tip_height == our_height {
-                    // Same height - use hash as tiebreaker
-                    let our_tip_hash = self.get_block_hash(our_height)?;
-                    let peer_tip_block = blocks.iter().max_by_key(|b| b.header.height).unwrap();
-                    let peer_tip_hash = peer_tip_block.hash();
-
-                    if peer_tip_hash < our_tip_hash {
-                        info!("📊 Same height, but peer has lower hash (tiebreaker), will reorg");
-
-                        let reorg_blocks: Vec<Block> = blocks
-                            .into_iter()
-                            .filter(|b| b.header.height > common_ancestor)
-                            .collect();
-
-                        *self.fork_state.write().await = ForkResolutionState::ReadyToReorg {
-                            common_ancestor,
-                            alternate_blocks: reorg_blocks,
-                            started_at: std::time::Instant::now(),
-                        };
-
-                        self.continue_fork_resolution().await
-                    } else {
-                        info!(
-                            "📊 Same height, but our hash is lower (tiebreaker), staying on our chain"
-                        );
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        Ok(())
-                    }
                 } else {
                     info!(
-                        "📊 Our chain is longer ({} vs {}), staying on our chain",
-                        our_height, peer_tip_height
+                        "📊 AI decided to reject peer chain (confidence: {:.1}%)",
+                        resolution.confidence * 100.0
                     );
                     *self.fork_state.write().await = ForkResolutionState::None;
                     Ok(())
