@@ -5,7 +5,6 @@
 set -e  # Exit on error
 
 # Configuration
-CLI_PATH="${CLI_PATH:-./time-cli}"
 AMOUNT="1.0"
 TEST_TIMEOUT=60  # seconds to wait for confirmation
 
@@ -33,19 +32,31 @@ log_error() {
     echo -e "${RED}❌ $1${NC}"
 }
 
-# Check if time-cli is available
-if [ ! -x "$CLI_PATH" ]; then
-    log_error "CLI not found at: $CLI_PATH"
-    log_info "Set CLI_PATH environment variable or ensure time-cli is in current directory"
+# Find time-cli binary
+if [ -n "$CLI_PATH" ]; then
+    # User specified CLI_PATH
+    CLI_CMD="$CLI_PATH"
+elif command -v time-cli &> /dev/null; then
+    # time-cli is in PATH
+    CLI_CMD="time-cli"
+elif [ -x "./time-cli" ]; then
+    # time-cli is in current directory
+    CLI_CMD="./time-cli"
+else
+    log_error "time-cli not found"
+    log_info "Ensure time-cli is installed in PATH or set CLI_PATH environment variable"
+    log_info "Example: export CLI_PATH=/usr/local/bin/time-cli"
     exit 1
 fi
+
+log_info "Using CLI: $CLI_CMD"
 
 log_info "Starting transaction test..."
 echo ""
 
 # Step 1: Get list of connected masternodes
 log_info "Step 1: Fetching connected masternodes..."
-MASTERNODE_JSON=$($CLI_PATH masternodelist 2>&1)
+MASTERNODE_JSON=$($CLI_CMD masternodelist 2>&1)
 
 if [ $? -ne 0 ]; then
     log_error "Failed to fetch masternode list"
@@ -68,7 +79,7 @@ echo ""
 
 # Step 2: Check our balance
 log_info "Step 2: Checking wallet balance..."
-BALANCE_JSON=$($CLI_PATH getbalance 2>&1)
+BALANCE_JSON=$($CLI_CMD getbalance 2>&1)
 
 if [ $? -ne 0 ]; then
     log_error "Failed to fetch balance"
@@ -93,7 +104,7 @@ echo ""
 
 # Step 3: Send transaction
 log_info "Step 3: Sending $AMOUNT TIME to $RECIPIENT_ADDRESS..."
-SEND_RESULT=$($CLI_PATH sendtoaddress "$RECIPIENT_ADDRESS" "$AMOUNT" 2>&1)
+SEND_RESULT=$($CLI_CMD sendtoaddress "$RECIPIENT_ADDRESS" "$AMOUNT" 2>&1)
 
 if [ $? -ne 0 ]; then
     log_error "Failed to send transaction"
@@ -122,7 +133,7 @@ echo ""
 log_info "Step 4: Verifying transaction in mempool..."
 sleep 2  # Give it a moment to propagate
 
-MEMPOOL_TX=$($CLI_PATH getrawtransaction "$TXID" true 2>&1)
+MEMPOOL_TX=$($CLI_CMD getrawtransaction "$TXID" true 2>&1)
 
 if [ $? -ne 0 ]; then
     log_warning "Transaction not found in mempool (may have been confirmed quickly)"
@@ -146,7 +157,7 @@ CONFIRMED=false
 START_TIME=$(date +%s)
 
 while [ $(($(date +%s) - START_TIME)) -lt $TEST_TIMEOUT ]; do
-    TX_INFO=$($CLI_PATH gettransaction "$TXID" 2>&1)
+    TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1)
     
     if [ $? -eq 0 ]; then
         CONFIRMATIONS=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
@@ -176,7 +187,7 @@ echo ""  # Newline after progress indicator
 if [ "$CONFIRMED" = false ]; then
     log_warning "Transaction not confirmed within ${TEST_TIMEOUT} seconds"
     log_info "Transaction may still be pending. TXID: $TXID"
-    log_info "Check status later with: $CLI_PATH gettransaction $TXID"
+    log_info "Check status later with: $CLI_CMD gettransaction $TXID"
     exit 2
 fi
 
@@ -184,7 +195,7 @@ echo ""
 
 # Step 6: Final verification
 log_info "Step 6: Final verification..."
-FINAL_TX=$($CLI_PATH gettransaction "$TXID" 2>&1)
+FINAL_TX=$($CLI_CMD gettransaction "$TXID" 2>&1)
 
 if [ $? -ne 0 ]; then
     log_error "Failed to retrieve final transaction details"
