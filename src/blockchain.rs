@@ -205,6 +205,8 @@ pub struct Blockchain {
     fork_state: Arc<RwLock<ForkResolutionState>>,
     /// Fork resolution mutex to prevent concurrent fork resolutions (race condition protection)
     fork_resolution_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Consensus peers (majority chain) - reject blocks from non-consensus peers during fork resolution
+    consensus_peers: Arc<RwLock<Vec<String>>>,
     /// Two-tier block cache for efficient memory usage (10-50x faster reads)
     block_cache: Arc<BlockCacheManager>,
     /// Block validator for validation logic
@@ -278,6 +280,7 @@ impl Blockchain {
             reorg_history: Arc::new(RwLock::new(Vec::new())),
             fork_state: Arc::new(RwLock::new(ForkResolutionState::None)),
             fork_resolution_lock: Arc::new(tokio::sync::Mutex::new(())),
+            consensus_peers: Arc::new(RwLock::new(Vec::new())),
             block_cache,
             validator,
             consensus_health,
@@ -607,6 +610,19 @@ impl Blockchain {
         );
 
         Ok(())
+    }
+
+    /// Check if a peer is part of the current consensus majority
+    /// Returns true if peer is in consensus list OR if no consensus has been established yet
+    pub async fn is_peer_in_consensus(&self, peer_ip: &str) -> bool {
+        let consensus = self.consensus_peers.read().await;
+        if consensus.is_empty() {
+            // No consensus established yet - accept blocks from all peers
+            true
+        } else {
+            // Only accept from consensus peers
+            consensus.contains(&peer_ip.to_string())
+        }
     }
 
     /// Clear all block data from storage (for complete reset)
@@ -4089,6 +4105,9 @@ impl Blockchain {
             consensus_peers
         );
 
+        // Store consensus peers for validation during block acceptance
+        *self.consensus_peers.write().await = consensus_peers.clone();
+
         // AI Consensus Health: Calculate and record metrics
         let heights: Vec<u64> = peer_tips.values().map(|(h, _)| *h).collect();
         let height_mean = heights.iter().sum::<u64>() as f64 / heights.len() as f64;
@@ -4790,6 +4809,9 @@ impl Blockchain {
 
                 // Always clear fork state after reorg attempt (success or failure)
                 *self.fork_state.write().await = ForkResolutionState::None;
+
+                // Clear consensus peers list - will be refreshed on next periodic check
+                self.consensus_peers.write().await.clear();
 
                 reorg_result?;
                 Ok(())
@@ -5659,6 +5681,7 @@ impl Clone for Blockchain {
             reorg_history: self.reorg_history.clone(),
             fork_state: self.fork_state.clone(),
             fork_resolution_lock: self.fork_resolution_lock.clone(),
+            consensus_peers: self.consensus_peers.clone(),
             block_cache: self.block_cache.clone(),
             validator: BlockValidator::new(self.network_type),
             consensus_health: self.consensus_health.clone(),

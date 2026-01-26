@@ -2044,7 +2044,18 @@ impl MessageHandler {
                 );
             }
         } else if peer_height > our_height {
-            // Peer is ahead - we need to sync
+            // Peer is ahead - check if they're part of consensus before syncing
+            let is_consensus_peer = context.blockchain.is_peer_in_consensus(&self.peer_ip).await;
+
+            if !is_consensus_peer {
+                warn!(
+                    "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {})",
+                    self.direction, self.peer_ip, peer_height, our_height
+                );
+                return Ok(None);
+            }
+
+            // Peer is ahead and in consensus - sync from them
             info!(
                 "📈 [{}] Peer {} ahead at height {} (we have {}), requesting blocks",
                 self.direction, self.peer_ip, peer_height, our_height
