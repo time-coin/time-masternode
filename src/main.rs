@@ -918,67 +918,34 @@ async fn main() {
 
             let expected_height = block_blockchain.calculate_expected_height();
 
-            // Get masternodes eligible for rewards
-            // During catchup or bootstrap, use all registered masternodes (connections may not be established yet)
-            // During normal operation, only use active masternodes
+            // Get masternodes eligible for leader selection and rewards
+            // CRITICAL: This MUST use the SAME logic as blockchain.rs produce_block_at_height()
+            // to ensure selected leader is eligible for rewards (prevents participation chain break)
             let blocks_behind = expected_height.saturating_sub(current_height);
-            let is_catchup_or_bootstrap = blocks_behind > 0 || current_height == 0;
+            let is_bootstrap = current_height <= 3;
 
-            let eligible = if is_catchup_or_bootstrap {
-                // Use all registered masternodes during catchup/bootstrap
-                // BUT filter out masternodes that are on incompatible chains (old software)
-                let all_mns = block_registry.list_all().await;
-
-                // Filter out incompatible masternodes to ensure deterministic leader selection
-                // All compatible nodes must agree on the same masternode list
-                let mut compatible_mns: Vec<_> = Vec::new();
-                for info in all_mns {
-                    // Extract IP from masternode address (format: "IP:port" or just "IP")
-                    let ip_only = info
-                        .masternode
-                        .address
-                        .split(':')
-                        .next()
-                        .unwrap_or(&info.masternode.address);
-
-                    // Check if this masternode's peer is on an incompatible chain
-                    if !block_peer_registry.is_incompatible(ip_only).await {
-                        compatible_mns.push((info.masternode, info.reward_address));
-                    } else {
-                        tracing::debug!(
-                            "🚫 Excluding incompatible masternode {} from leader selection",
-                            info.masternode.address
-                        );
-                    }
-                }
-
-                if !compatible_mns.is_empty() {
-                    tracing::debug!(
-                        "🔄 Catchup/bootstrap mode: using {} compatible masternodes (filtered from {} total)",
-                        compatible_mns.len(),
-                        block_registry.list_all().await.len()
-                    );
-                }
-                compatible_mns
+            let eligible = if is_bootstrap {
+                // Bootstrap mode (height 0-3): use all active masternodes
+                tracing::debug!(
+                    "🌱 Bootstrap mode (height {}): using all active masternodes",
+                    current_height
+                );
+                block_registry.get_eligible_for_rewards().await
             } else {
-                // Use active masternodes from previous block's bitmap during normal operation
-                // Get previous block to extract its bitmap
-                let prev_block = if current_height > 0 {
-                    block_blockchain
-                        .get_block_by_height(current_height)
-                        .await
-                        .ok()
-                } else {
-                    None
-                };
+                // Normal/catchup mode (height > 3): use participation-based selection
+                // This matches blockchain.rs get_masternodes_for_rewards() logic
+                let prev_block = block_blockchain
+                    .get_block_by_height(current_height)
+                    .await
+                    .ok();
 
-                let active_mns = if let Some(prev_block) = prev_block {
+                if let Some(prev_block) = prev_block {
                     // Extract active masternodes using previous block's bitmap
                     let active_infos = block_registry
                         .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
                         .await;
 
-                    // Fallback: If bitmap is empty (legacy blocks or no voters), use all connected masternodes
+                    // Fallback: If bitmap is empty (legacy blocks or no voters), use all active masternodes
                     if active_infos.is_empty() {
                         tracing::warn!(
                             "⚠️  Previous block has empty bitmap (legacy block or no voters) - falling back to all active masternodes"
@@ -996,12 +963,13 @@ async fn main() {
                             .collect()
                     }
                 } else {
-                    // Genesis block - use all connected masternodes
-                    tracing::debug!("🌱 Genesis/missing block - using all active masternodes");
+                    // Can't get previous block - fallback to all active
+                    tracing::warn!(
+                        "⚠️  Cannot get previous block {} - falling back to all active masternodes",
+                        current_height
+                    );
                     block_registry.get_eligible_for_rewards().await
-                };
-
-                active_mns
+                }
             };
 
             let mut masternodes: Vec<Masternode> =
@@ -1349,7 +1317,11 @@ async fn main() {
 
             // Produce the block
             match block_blockchain
-                .produce_block_at_height(None, Some(selected_producer.wallet_address.clone()))
+                .produce_block_at_height(
+                    None,
+                    Some(selected_producer.wallet_address.clone()),
+                    Some(selected_producer.address.clone()),
+                )
                 .await
             {
                 Ok(block) => {

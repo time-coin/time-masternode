@@ -1480,13 +1480,14 @@ impl Blockchain {
 
     /// Produce a block for the current TSDC slot
     pub async fn produce_block(&self) -> Result<Block, String> {
-        self.produce_block_at_height(None, None).await
+        self.produce_block_at_height(None, None, None).await
     }
 
     pub async fn produce_block_at_height(
         &self,
         target_height: Option<u64>,
         producer_wallet: Option<String>,
+        producer_address: Option<String>,
     ) -> Result<Block, String> {
         use crate::block::genesis::GenesisBlock;
 
@@ -1575,6 +1576,15 @@ impl Blockchain {
 
         let prev_hash = self.get_block_hash(current_height)?;
 
+        // CRITICAL: Validate producer_address is provided for non-genesis blocks
+        // This prevents creating blocks with empty leader field (which breaks participation tracking)
+        if next_height > 3 && producer_address.is_none() {
+            return Err(format!(
+                "Producer address required for block {} (height > 3) to track participation",
+                next_height
+            ));
+        }
+
         // Calculate deterministic timestamp based on block schedule
         let deterministic_timestamp =
             self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
@@ -1608,6 +1618,7 @@ impl Blockchain {
         // Use blockchain-based masternode eligibility for rewards (consensus-safe)
         // This ensures all nodes agree on which masternodes get rewards, preventing forks
         // Masternode eligibility is determined by gossip consensus
+        // NOTE: This MUST use same logic as main.rs leader selection to prevent inconsistency
         let masternodes = self
             .masternode_registry
             .get_masternodes_for_rewards(self)
@@ -1806,7 +1817,7 @@ impl Blockchain {
                 merkle_root,
                 timestamp: aligned_timestamp,
                 block_reward: total_reward,
-                leader: String::new(),
+                leader: producer_address.unwrap_or_default(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
                 active_masternodes_bitmap: active_bitmap,
@@ -3213,6 +3224,15 @@ impl Blockchain {
                 block.header.height,
                 serialized.len(),
                 MAX_BLOCK_SIZE
+            ));
+        }
+
+        // 5.5. Leader field validation: After bootstrap (height > 3), leader must be set
+        // This prevents deadlock from blocks with missing participation tracking
+        if block.header.height > 3 && block.header.leader.is_empty() {
+            return Err(format!(
+                "Block {} has empty leader field (required for height > 3 to track participation)",
+                block.header.height
             ));
         }
 

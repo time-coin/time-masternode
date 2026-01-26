@@ -463,6 +463,27 @@ impl MasternodeRegistry {
             current_height
         );
 
+        // CRITICAL SAFETY: If no eligible masternodes after filtering, fall back to all active
+        // This prevents deadlock when participation records don't match current registry
+        if eligible.is_empty() {
+            let active = self.get_active_masternodes().await;
+            tracing::error!(
+                "🚨 PARTICIPATION TRACKING FAILURE: No masternodes matched participation filter!"
+            );
+            tracing::error!(
+                "   Block {} had {} participants: {:?}",
+                current_height,
+                participants.len(),
+                participants.iter().collect::<Vec<_>>()
+            );
+            tracing::error!(
+                "   Registry has {} active masternodes available",
+                active.len()
+            );
+            tracing::warn!("⚠️  Falling back to all active masternodes to prevent deadlock");
+            return active;
+        }
+
         for mn in &eligible {
             tracing::debug!(
                 "   → {} (tier {:?})",
