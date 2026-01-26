@@ -1781,22 +1781,47 @@ impl Blockchain {
         // Create active masternode bitmap based on who voted on the PREVIOUS block
         // New nodes can vote immediately after announcing, getting into next bitmap
         // Only nodes in previous bitmap are eligible for leader selection
-        let voters = if next_height > 1 {
-            // Get voters from previous block (who voted to accept it)
-            let prev_block_hash = prev_hash;
-            // Use precommit voters (final voting phase before block acceptance)
-            self.consensus
-                .timevote
-                .precommit_votes
-                .get_voters(prev_block_hash)
-        } else {
-            // Genesis or block 1: use all active masternodes (no previous votes)
+        let voters = if next_height == 1 {
+            // Block 1: Genesis has no voters, so use all active masternodes
+            tracing::debug!("📊 Block 1 (after genesis): using all active masternodes for bitmap");
             self.masternode_registry
                 .get_active_masternodes()
                 .await
                 .into_iter()
                 .map(|mn| mn.masternode.address)
                 .collect()
+        } else {
+            // Get voters from previous block (who voted to accept it)
+            let prev_block_hash = prev_hash;
+            // Use precommit voters (final voting phase before block acceptance)
+            let precommit_voters = self
+                .consensus
+                .timevote
+                .precommit_votes
+                .get_voters(prev_block_hash);
+
+            // CRITICAL: If no voters recorded, use all active masternodes as fallback
+            // This prevents bitmap from becoming empty and breaking participation tracking
+            if precommit_voters.is_empty() {
+                tracing::error!(
+                    "🚨 No precommit voters found for block {} (hash: {}) - using all active masternodes as fallback",
+                    next_height - 1,
+                    hex::encode(&prev_block_hash[..8])
+                );
+                self.masternode_registry
+                    .get_active_masternodes()
+                    .await
+                    .into_iter()
+                    .map(|mn| mn.masternode.address)
+                    .collect()
+            } else {
+                tracing::debug!(
+                    "📊 Block {}: using {} precommit voters from previous block",
+                    next_height,
+                    precommit_voters.len()
+                );
+                precommit_voters
+            }
         };
 
         tracing::debug!(
