@@ -11,7 +11,7 @@ use crate::blockchain_validation::BlockValidator;
 use crate::consensus::ConsensusEngine;
 use crate::constants;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
-use crate::network::fork_resolver::ForkResolver as NetworkForkResolver;
+
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{OutPoint, Transaction, TxInput, TxOutput, UTXO};
@@ -193,8 +193,10 @@ pub struct Blockchain {
         Arc<RwLock<Option<Arc<crate::network::connection_manager::ConnectionManager>>>>,
     /// AI-based peer scoring for intelligent peer selection
     peer_scoring: Arc<crate::network::peer_scoring::PeerScoringSystem>,
-    /// AI-powered fork resolution
+    /// AI-powered fork resolution (decision making)
     fork_resolver: Arc<crate::ai::fork_resolver::ForkResolver>,
+    /// Network fork resolver (state machine & algorithms)
+    network_fork_resolver: Arc<crate::network::fork_resolver::ForkResolver>,
     /// Sync coordinator to prevent sync storms and duplicate requests
     sync_coordinator: Arc<crate::network::sync_coordinator::SyncCoordinator>,
     /// Cumulative chain work for longest-chain-by-work rule
@@ -243,6 +245,10 @@ impl Blockchain {
             storage.clone(),
         )));
 
+        // Initialize network fork resolver (state machine & algorithms)
+        let network_fork_resolver =
+            Arc::new(crate::network::fork_resolver::ForkResolver::default());
+
         // Initialize sync coordinator to prevent sync storms
         let sync_coordinator = Arc::new(crate::network::sync_coordinator::SyncCoordinator::new());
 
@@ -275,6 +281,7 @@ impl Blockchain {
             connection_manager: Arc::new(RwLock::new(None)),
             peer_scoring,
             fork_resolver,
+            network_fork_resolver,
             sync_coordinator,
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
@@ -2929,57 +2936,6 @@ impl Blockchain {
         Some(check_height)
     }
 
-    /// Find the common ancestor between our chain and a peer's chain
-    /// peer_hashes: Vec of (height, hash) from peer, ordered by height descending
-    pub async fn find_common_ancestor(&self, peer_hashes: &[(u64, [u8; 32])]) -> Option<u64> {
-        if peer_hashes.is_empty() {
-            return None;
-        }
-
-        // First, check all the provided peer hashes
-        for (height, peer_hash) in peer_hashes {
-            if *height == 0 {
-                return Some(0); // Genesis is always common
-            }
-
-            if let Ok(our_hash) = self.get_block_hash(*height) {
-                if our_hash == *peer_hash {
-                    return Some(*height);
-                }
-            }
-        }
-
-        // If no match found in provided hashes, keep going back through our chain
-        // to find the common ancestor. Start from the lowest provided peer hash.
-        let lowest_peer_height = peer_hashes.iter().map(|(h, _)| *h).min().unwrap_or(0);
-
-        info!(
-            "No common ancestor found in provided hashes, searching backwards from height {}",
-            lowest_peer_height
-        );
-
-        // Walk backwards from the lowest peer height to genesis
-        for height in (0..lowest_peer_height).rev() {
-            if let Ok(_our_hash) = self.get_block_hash(height) {
-                // Check if peer has this block (we'd need to query, but for now just check what we have)
-                // Since we don't have all peer hashes, continue walking back
-                // The safest fallback is genesis if we can't find a common point
-                if height == 0 {
-                    info!("Reached genesis block, using as common ancestor");
-                    return Some(0);
-                }
-            }
-        }
-
-        // Genesis should always exist as the common ancestor
-        if self.get_block(0).is_ok() {
-            info!("Falling back to genesis as common ancestor");
-            return Some(0);
-        }
-
-        None
-    }
-
     /// Save undo log for a block
     fn save_undo_log(&self, undo_log: &UndoLog) -> Result<(), String> {
         let key = format!("undo_{}", undo_log.height);
@@ -5515,13 +5471,11 @@ impl Blockchain {
         let mut sorted_blocks = competing_blocks.to_vec();
         sorted_blocks.sort_by_key(|b| b.header.height);
 
-        // Build a map of peer's blocks for fast lookup (wrapped in Arc for closure)
-        let peer_blocks = Arc::new(
-            sorted_blocks
-                .iter()
-                .map(|b| (b.header.height, b.hash()))
-                .collect::<std::collections::HashMap<u64, [u8; 32]>>(),
-        );
+        // Build a map of peer's blocks for fast lookup
+        let peer_blocks: std::collections::HashMap<u64, [u8; 32]> = sorted_blocks
+            .iter()
+            .map(|b| (b.header.height, b.hash()))
+            .collect();
 
         let peer_height = sorted_blocks.last().unwrap().header.height;
         let peer_lowest = sorted_blocks.first().unwrap().header.height;
@@ -5532,38 +5486,34 @@ impl Blockchain {
             our_height, peer_height, peer_lowest, peer_height
         );
 
-        // Create network fork resolver for efficient ancestor finding
-        let network_resolver = NetworkForkResolver::default();
+        // Clone what we need for the closure to avoid move issues
+        let blockchain = self.clone();
+        let peer_blocks_for_check = peer_blocks.clone();
 
         // Check function: returns true if peer has same block hash at height
-        // Clone Arc references for the closure
-        let peer_blocks_ref = Arc::clone(&peer_blocks);
-        let blockchain_ref = self;
-
         let check_fn = move |height: u64| {
-            let peer_blocks = Arc::clone(&peer_blocks_ref);
+            let blockchain = blockchain.clone();
+            let peer_blocks = peer_blocks_for_check.clone();
             async move {
                 // Get our block hash at this height
-                let our_hash = match blockchain_ref.get_block_hash(height) {
+                let our_hash = match blockchain.get_block_hash(height) {
                     Ok(hash) => hash,
                     Err(_) => return Ok(false), // Can't find our block at this height
                 };
 
-                // Check if peer has a block at this height
+                // Check if peer has a block at this height with matching hash
                 if let Some(peer_hash) = peer_blocks.get(&height) {
-                    // Peer has block at this height - check if hashes match
                     Ok(our_hash == *peer_hash)
                 } else {
-                    // Peer doesn't have this height in the provided blocks.
-                    // We can't make assumptions - return false to indicate we need more data.
-                    // This will cause the search to either find a lower match or return 0 (genesis).
+                    // Peer doesn't have this height in provided blocks - need more data
                     Ok(false)
                 }
             }
         };
 
-        // Use the efficient exponential + binary search algorithm
-        let candidate_ancestor = network_resolver
+        // Use the efficient exponential + binary search algorithm from network resolver
+        let candidate_ancestor = self
+            .network_fork_resolver
             .find_common_ancestor(our_height, peer_height, check_fn)
             .await
             .map_err(|e| format!("Error in common ancestor search: {}", e))?;
@@ -5582,8 +5532,8 @@ impl Blockchain {
 
                 if our_block_hash != peer_next_prev_hash {
                     warn!(
-                        "⚠️  Binary search validation failed: candidate ancestor {} has hash {:x?}, \
-                        but peer's block {} expects previous_hash {:x?}",
+                        "⚠️  Binary search validation failed: candidate ancestor {} has hash {}, \
+                        but peer's block {} expects previous_hash {}",
                         candidate_ancestor,
                         hex::encode(our_block_hash),
                         candidate_ancestor + 1,
@@ -5591,9 +5541,6 @@ impl Blockchain {
                     );
 
                     // The binary search gave us a false positive - actual fork is earlier
-                    // This happens when our chain and peer's chain have different blocks at same height
-                    // but the binary search only compared heights, not the chain continuity
-
                     // Search backwards from candidate to find the true common ancestor
                     let mut true_ancestor = candidate_ancestor;
                     while true_ancestor > 0 {
@@ -5918,6 +5865,7 @@ impl Clone for Blockchain {
             connection_manager: self.connection_manager.clone(),
             peer_scoring: self.peer_scoring.clone(),
             fork_resolver: self.fork_resolver.clone(),
+            network_fork_resolver: self.network_fork_resolver.clone(),
             sync_coordinator: self.sync_coordinator.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
