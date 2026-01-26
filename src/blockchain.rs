@@ -4887,10 +4887,69 @@ impl Blockchain {
         self.rollback_to_height(common_ancestor).await?;
 
         // 2. Apply alternate chain
-        for block in alternate_blocks {
-            self.add_block(block)
+        info!("📝 Applying {} alternate blocks starting from height {}", alternate_blocks.len(), common_ancestor + 1);
+        for (idx, block) in alternate_blocks.iter().enumerate() {
+            let block_height = block.header.height;
+            let expected_hash = block.hash();
+            
+            info!(
+                "📝 Applying block {}/{}: height {} hash {} prev_hash {}",
+                idx + 1,
+                alternate_blocks.len(),
+                block_height,
+                hex::encode(&expected_hash[..8]),
+                hex::encode(&block.header.previous_hash[..8])
+            );
+            
+            // Verify this block builds on what we currently have
+            if block_height > 0 {
+                match self.get_block_hash(block_height - 1) {
+                    Ok(our_prev_hash) => {
+                        if our_prev_hash != block.header.previous_hash {
+                            return Err(format!(
+                                "DIAGNOSTIC: Block {} expects previous_hash {}, but we have {} at height {}. \
+                                Common ancestor was {}, reorg chain diverged earlier than expected!",
+                                block_height,
+                                hex::encode(&block.header.previous_hash[..8]),
+                                hex::encode(&our_prev_hash[..8]),
+                                block_height - 1,
+                                common_ancestor
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "DIAGNOSTIC: Cannot get block {} to verify chain before applying block {}: {}",
+                            block_height - 1,
+                            block_height,
+                            e
+                        ));
+                    }
+                }
+            }
+            
+            self.add_block(block.clone())
                 .await
-                .map_err(|e| format!("Failed to add block during reorg: {}", e))?;
+                .map_err(|e| format!("Failed to add block {} during reorg: {}", block_height, e))?;
+            
+            // CRITICAL: Verify the hash after storage matches what we expected
+            match self.get_block_hash(block_height) {
+                Ok(stored_hash) => {
+                    if stored_hash != expected_hash {
+                        return Err(format!(
+                            "HASH MISMATCH after storage! Block {} expected hash {}, but stored as {}. \
+                            This indicates non-deterministic block hashing or storage corruption!",
+                            block_height,
+                            hex::encode(&expected_hash[..8]),
+                            hex::encode(&stored_hash[..8])
+                        ));
+                    }
+                    info!("✓ Block {} hash verified after storage: {}", block_height, hex::encode(&stored_hash[..8]));
+                }
+                Err(e) => {
+                    return Err(format!("Cannot verify hash after storing block {}: {}", block_height, e));
+                }
+            }
         }
 
         let duration = start_time.elapsed();
