@@ -64,13 +64,13 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Extract a connected masternode address (filter for connected=true)
-RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes[]? | select(.connected == true) | .reward_address' | head -n 1)
+# Extract a connected masternode wallet address (filter for is_connected=true)
+RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes[]? | select(.is_connected == true) | .wallet_address' | head -n 1)
 
 if [ -z "$RECIPIENT_ADDRESS" ] || [ "$RECIPIENT_ADDRESS" = "null" ]; then
     log_error "No connected masternodes found"
     log_info "Available masternodes:"
-    echo "$MASTERNODE_JSON" | jq '.masternodes[]? | {address: .reward_address, connected: .connected}'
+    echo "$MASTERNODE_JSON" | jq '.masternodes[]? | {ip: .address, wallet: .wallet_address, connected: .is_connected}'
     exit 1
 fi
 
