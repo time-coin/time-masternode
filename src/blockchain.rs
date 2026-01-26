@@ -4609,10 +4609,60 @@ impl Blockchain {
                         return Ok(());
                     }
 
+                    // CRITICAL: Validate the entire chain is continuous before reorg
+                    // Check that each block builds on the previous one
+                    info!(
+                        "🔍 Validating chain continuity for {} blocks...",
+                        reorg_blocks.len()
+                    );
+
+                    // Sort blocks by height
+                    let mut sorted_reorg_blocks = reorg_blocks.clone();
+                    sorted_reorg_blocks.sort_by_key(|b| b.header.height);
+
+                    // First block must build on common ancestor
+                    let our_ancestor_hash = self.get_block_hash(common_ancestor)?;
+                    let first_block = &sorted_reorg_blocks[0];
+                    if first_block.header.previous_hash != our_ancestor_hash {
+                        return Err(format!(
+                            "Chain validation failed: first block {} expects previous_hash {:x?}, \
+                            but common ancestor {} has hash {:x?}",
+                            first_block.header.height,
+                            hex::encode(first_block.header.previous_hash),
+                            common_ancestor,
+                            hex::encode(our_ancestor_hash)
+                        ));
+                    }
+
+                    // Each subsequent block must build on the previous block in the chain
+                    for i in 1..sorted_reorg_blocks.len() {
+                        let prev_block = &sorted_reorg_blocks[i - 1];
+                        let curr_block = &sorted_reorg_blocks[i];
+                        let prev_block_hash = prev_block.hash();
+
+                        if curr_block.header.previous_hash != prev_block_hash {
+                            return Err(format!(
+                                "Chain validation failed: block {} expects previous_hash {:x?}, \
+                                but block {} has hash {:x?}. Peer sent non-contiguous blocks!",
+                                curr_block.header.height,
+                                hex::encode(curr_block.header.previous_hash),
+                                prev_block.header.height,
+                                hex::encode(prev_block_hash)
+                            ));
+                        }
+                    }
+
+                    info!(
+                        "✅ Chain validation passed: {} blocks form valid continuous chain from height {} to {}",
+                        sorted_reorg_blocks.len(),
+                        sorted_reorg_blocks.first().unwrap().header.height,
+                        sorted_reorg_blocks.last().unwrap().header.height
+                    );
+
                     // Transition to reorg state
                     *self.fork_state.write().await = ForkResolutionState::ReadyToReorg {
                         common_ancestor,
-                        alternate_blocks: reorg_blocks,
+                        alternate_blocks: sorted_reorg_blocks, // Use sorted blocks
                         started_at: std::time::Instant::now(),
                     };
 
