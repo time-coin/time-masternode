@@ -2016,6 +2016,18 @@ impl Blockchain {
         // Save undo log for rollback support
         self.save_undo_log(&undo_log)?;
 
+        // CRITICAL FIX: Normalize block data before storage to ensure deterministic hashing
+        // Deep clone to ensure no shared references and normalize all strings
+        let mut block = block.clone();
+        block.header.leader = block.header.leader.trim().to_string();
+
+        // Normalize consensus participants (sort and deduplicate)
+        block.consensus_participants.sort();
+        block.consensus_participants.dedup();
+
+        // Normalize masternode rewards (sort by address for determinism)
+        block.masternode_rewards.sort_by(|a, b| a.0.cmp(&b.0));
+
         // DIAGNOSTIC: Log block hash before storage
         let pre_storage_hash = block.hash();
         tracing::debug!(
