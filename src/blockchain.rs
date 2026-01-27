@@ -1249,8 +1249,25 @@ impl Blockchain {
         let search_start = our_height.min(peer_height);
         let mut common_ancestor = 0u64;
 
+        // Track consecutive failures to abort early if peer is offline
+        let mut consecutive_failures = 0;
+        const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
         // Search backward from current height to find matching block
         for height in (0..=search_start).rev() {
+            // Abort if peer is consistently failing (offline/unreachable)
+            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                tracing::warn!(
+                    "❌ Aborting common ancestor search: {} consecutive failures with peer {}",
+                    consecutive_failures,
+                    peer_ip
+                );
+                return Err(format!(
+                    "Peer {} appears offline ({} consecutive failures)",
+                    peer_ip, consecutive_failures
+                ));
+            }
+
             // Get our block hash at this height
             let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,
@@ -1270,6 +1287,7 @@ impl Blockchain {
             // Send request
             if let Err(e) = registry.send_to_peer(peer_ip, req).await {
                 tracing::warn!("⚠️ Failed to send GetBlockHash to {}: {}", peer_ip, e);
+                consecutive_failures += 1;
                 // Move to next height
                 continue;
             }
@@ -1307,6 +1325,9 @@ impl Blockchain {
                 };
 
             if let Some(peer_hash) = peer_hash_opt {
+                // Reset failure counter on successful response
+                consecutive_failures = 0;
+
                 if our_hash == peer_hash {
                     // Found common ancestor!
                     common_ancestor = height;
@@ -1324,6 +1345,9 @@ impl Blockchain {
                         hex::encode(&peer_hash[..8])
                     );
                 }
+            } else {
+                // No response - count as failure
+                consecutive_failures += 1;
             }
 
             // Don't search too deep
