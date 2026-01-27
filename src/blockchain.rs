@@ -157,6 +157,7 @@ enum ForkResolutionState {
         peer_addr: String,
         peer_height: u64,
         fetched_up_to: u64,
+        accumulated_blocks: Vec<Block>, // Accumulate blocks as they arrive
         started_at: std::time::Instant,
     },
 
@@ -4566,12 +4567,40 @@ impl Blockchain {
             fork_height, peer_addr, blocks.len(), peer_tip_height, our_height
         );
 
+        // Check if we're already in FetchingChain state for this peer
+        // If so, merge these blocks with accumulated blocks
+        let mut all_blocks = blocks.clone();
+        {
+            let current_state = self.fork_state.read().await;
+            if let ForkResolutionState::FetchingChain {
+                peer_addr: fetching_peer,
+                accumulated_blocks,
+                ..
+            } = &*current_state
+            {
+                if fetching_peer == &peer_addr {
+                    info!(
+                        "📥 Merging {} new blocks with {} accumulated blocks",
+                        blocks.len(),
+                        accumulated_blocks.len()
+                    );
+                    // Merge: add accumulated blocks that aren't in new blocks
+                    for acc_block in accumulated_blocks {
+                        if !all_blocks.iter().any(|b| b.header.height == acc_block.header.height) {
+                            all_blocks.push(acc_block.clone());
+                        }
+                    }
+                    info!("📦 Total blocks for fork resolution: {}", all_blocks.len());
+                }
+            }
+        }
+
         // STRATEGY: Binary search requires we have enough blocks from the peer.
         // If we don't have enough blocks, request more first.
 
         // Calculate how many blocks we need to make an informed decision
         // We need blocks going back far enough to find common ancestor
-        let lowest_peer_block = blocks
+        let lowest_peer_block = all_blocks
             .iter()
             .map(|b| b.header.height)
             .min()
@@ -4597,6 +4626,7 @@ impl Blockchain {
                 peer_addr: peer_addr.clone(),
                 peer_height: peer_tip_height,
                 fetched_up_to: peer_tip_height, // We already have up to peer tip
+                accumulated_blocks: all_blocks.clone(), // Save all blocks we have
                 started_at: std::time::Instant::now(),
             };
 
@@ -4604,12 +4634,12 @@ impl Blockchain {
             self.request_blocks_from_peer(&peer_addr, request_from, request_to)
                 .await?;
 
-            // Note: When blocks arrive, handle_blocks() will check fork_state and call binary search
+            // Note: When blocks arrive, handle_fork() will be called again with accumulated blocks
             return Ok(());
         }
 
         // We have enough blocks - use binary search to find common ancestor
-        match self.find_fork_common_ancestor(&blocks).await {
+        match self.find_fork_common_ancestor(&all_blocks).await {
             Ok(common_ancestor) => {
                 info!(
                     "✅ Binary search found common ancestor at height {} (searched {} blocks)",
@@ -4718,6 +4748,7 @@ impl Blockchain {
                             peer_addr: peer_addr.clone(),
                             peer_height: peer_tip_height,
                             fetched_up_to: peer_tip_height,
+                            accumulated_blocks: Vec::new(), // Will be filled when blocks arrive
                             started_at: std::time::Instant::now(),
                         };
 
@@ -4812,6 +4843,7 @@ impl Blockchain {
                     peer_addr: peer_addr.clone(),
                     peer_height: peer_tip_height,
                     fetched_up_to: peer_tip_height,
+                    accumulated_blocks: Vec::new(), // Will accumulate as blocks arrive
                     started_at: std::time::Instant::now(),
                 };
 
@@ -4858,6 +4890,7 @@ impl Blockchain {
                 peer_addr,
                 peer_height,
                 fetched_up_to,
+                accumulated_blocks: _,
                 started_at: _,
             } => {
                 // When we're in FetchingChain, the blocks will arrive via handle_blocks
