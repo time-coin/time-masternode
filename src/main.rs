@@ -1306,6 +1306,29 @@ async fn main() {
                 continue;
             }
 
+            // CRITICAL: Check if block already exists in chain OR consensus cache
+            // This prevents multiple leaders from producing the same block during leader rotation
+            if block_blockchain.get_height() >= next_height {
+                tracing::debug!(
+                    "⏭️  Block {} already exists in chain (height {}), skipping production",
+                    next_height,
+                    block_blockchain.get_height()
+                );
+                continue;
+            }
+
+            // Check if block proposal already in consensus (block cache)
+            let (_, block_cache_opt, _) = block_peer_registry.get_tsdc_resources().await;
+            if let Some(block_cache) = &block_cache_opt {
+                if block_cache.has_block_at_height(next_height) {
+                    tracing::info!(
+                        "⏭️  Block {} already has active consensus proposal, skipping duplicate production",
+                        next_height
+                    );
+                    continue;
+                }
+            }
+
             // Acquire block production lock
             if is_producing
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)

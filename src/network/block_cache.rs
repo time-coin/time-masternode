@@ -146,6 +146,13 @@ impl BlockCache {
         self.cache.lock().cap().get()
     }
 
+    /// Check if any block at the given height exists in the cache
+    /// Returns true if at least one block proposal exists for this height
+    pub fn has_block_at_height(&self, height: u64) -> bool {
+        let cache = self.cache.lock();
+        cache.iter().any(|(_, cached)| cached.block.header.height == height)
+    }
+
     /// Remove expired entries (if max_age is set)
     ///
     /// Returns the number of expired entries removed
