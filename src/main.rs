@@ -923,13 +923,22 @@ async fn main() {
             // to ensure selected leader is eligible for rewards (prevents participation chain break)
             let blocks_behind = expected_height.saturating_sub(current_height);
             let is_bootstrap = current_height <= 3;
+            // During deep catchup, use all active masternodes (participation bitmap may be corrupted from fork)
+            let is_deep_catchup = blocks_behind >= 50;
 
-            let eligible = if is_bootstrap {
-                // Bootstrap mode (height 0-3): use all active masternodes
-                tracing::debug!(
-                    "🌱 Bootstrap mode (height {}): using all active masternodes",
-                    current_height
-                );
+            let eligible = if is_bootstrap || is_deep_catchup {
+                // Bootstrap mode (height 0-3) OR deep catchup: use all active masternodes
+                if is_bootstrap {
+                    tracing::debug!(
+                        "🌱 Bootstrap mode (height {}): using all active masternodes",
+                        current_height
+                    );
+                } else {
+                    tracing::info!(
+                        "🔄 Deep catchup mode ({} blocks behind): using all active masternodes (bypassing potentially corrupted bitmap)",
+                        blocks_behind
+                    );
+                }
                 block_registry.get_eligible_for_rewards().await
             } else {
                 // Normal/catchup mode (height > 3): use participation-based selection
