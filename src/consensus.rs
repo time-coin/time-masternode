@@ -3276,16 +3276,16 @@ mod tests {
         [byte; 32]
     }
 
-    #[test]
-    fn test_timevote_init() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_timevote_init() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let av = TimeVoteConsensus::new(config, registry).unwrap();
         assert_eq!(av.get_validators().len(), 0);
     }
 
-    #[test]
-    fn test_validator_management() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_validator_management() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let av = TimeVoteConsensus::new(config, registry).unwrap();
@@ -3296,8 +3296,8 @@ mod tests {
         assert_eq!(validators.len(), 0); // No masternodes registered
     }
 
-    #[test]
-    fn test_initiate_consensus() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_initiate_consensus() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let av = TimeVoteConsensus::new(config, registry).unwrap();
@@ -3312,8 +3312,8 @@ mod tests {
         assert!(!finalized);
     }
 
-    #[test]
-    fn test_vote_submission() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_vote_submission() {
         let config = TimeVoteConfig::default();
         let registry = create_test_registry();
         let av = TimeVoteConsensus::new(config, registry).unwrap();

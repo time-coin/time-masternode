@@ -4610,7 +4610,10 @@ impl Blockchain {
                     );
                     // Merge: add accumulated blocks that aren't in new blocks
                     for acc_block in accumulated_blocks {
-                        if !all_blocks.iter().any(|b| b.header.height == acc_block.header.height) {
+                        if !all_blocks
+                            .iter()
+                            .any(|b| b.header.height == acc_block.header.height)
+                        {
                             all_blocks.push(acc_block.clone());
                         }
                     }
@@ -4676,70 +4679,39 @@ impl Blockchain {
                 let peer_tip_hash = peer_tip_block.hash();
                 let our_tip_hash = self.get_block_hash(our_height)?;
 
-                // Calculate chain work
-                let our_chain_work = self.get_chain_work_at_height(our_height).await?;
-                let peer_chain_work = self
-                    .estimate_peer_chain_work(&blocks, peer_tip_height)
-                    .await;
-
-                // Gather supporting peers info
-                let supporting_peers = self
-                    .gather_supporting_peers(our_height, peer_tip_height)
-                    .await;
-
                 // Get timestamps
-                let our_tip_timestamp = self.get_block(our_height)?.header.timestamp;
                 let peer_tip_timestamp = peer_tip_block.header.timestamp;
-
-                // Check if peer is whitelisted (registered as masternode)
-                let peer_is_whitelisted = self.masternode_registry.is_registered(&peer_addr).await;
 
                 // Calculate fork depth
                 let fork_depth = our_height.saturating_sub(common_ancestor);
 
                 info!(
-                    "🤖 [AI] Evaluating fork: our={} peer={}, ancestor={}, depth={}, work_diff={}",
-                    our_height,
-                    peer_tip_height,
-                    common_ancestor,
-                    fork_depth,
-                    peer_chain_work as i128 - our_chain_work as i128
+                    "🤖 [SIMPLIFIED] Evaluating fork: our={} peer={}, ancestor={}, depth={}",
+                    our_height, peer_tip_height, common_ancestor, fork_depth
                 );
 
-                // Use AI fork resolver to make decision
+                // Use simplified fork resolver (longest valid chain wins)
                 let resolution = self
                     .fork_resolver
                     .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
                         our_height,
-                        our_chain_work,
                         peer_height: peer_tip_height,
-                        peer_chain_work,
                         peer_ip: peer_addr.clone(),
-                        supporting_peers,
-                        common_ancestor,
                         peer_tip_timestamp: Some(peer_tip_timestamp),
                         our_tip_hash: Some(our_tip_hash),
                         peer_tip_hash: Some(peer_tip_hash),
-                        peer_is_whitelisted,
-                        our_tip_timestamp: Some(our_tip_timestamp),
-                        fork_depth,
                     })
                     .await;
 
                 let reasoning_summary = resolution.reasoning.join("; ");
                 info!(
-                    "🤖 [AI] Fork resolution decision: accept={}, confidence={:.2}%, reasoning: {}",
-                    resolution.accept_peer_chain,
-                    resolution.confidence * 100.0,
-                    reasoning_summary
+                    "🤖 [SIMPLIFIED] Fork resolution decision: accept={}, reasoning: {}",
+                    resolution.accept_peer_chain, reasoning_summary
                 );
 
-                // Decision: reorg or stay based on AI resolver
+                // Decision: reorg or stay based on simplified resolver
                 if resolution.accept_peer_chain {
-                    info!(
-                        "📊 AI decided to accept peer chain (confidence: {:.1}%)",
-                        resolution.confidence * 100.0
-                    );
+                    info!("📊 Simplified resolver decided to accept peer chain (longest valid chain rule)");
 
                     // Filter blocks to only those after common ancestor
                     let reorg_blocks: Vec<Block> = blocks
@@ -4841,8 +4813,7 @@ impl Blockchain {
                     self.continue_fork_resolution().await
                 } else {
                     info!(
-                        "📊 AI decided to reject peer chain (confidence: {:.1}%)",
-                        resolution.confidence * 100.0
+                        "📊 Simplified resolver decided to reject peer chain (our chain is longer)"
                     );
                     *self.fork_state.write().await = ForkResolutionState::None;
                     Ok(())
@@ -5240,32 +5211,6 @@ impl Blockchain {
             peer_claimed_height
         );
 
-        // Get chain work for both chains
-        let our_chain_work = *self.cumulative_work.read().await;
-
-        // Calculate peer's chain work (estimate based on blocks we have)
-        let peer_chain_work = self
-            .estimate_peer_chain_work(competing_blocks, peer_claimed_height)
-            .await;
-
-        // Gather supporting peer information
-        let supporting_peers = self
-            .gather_supporting_peers(our_height, peer_claimed_height)
-            .await;
-
-        // Find common ancestor
-        let common_ancestor = match self.find_fork_common_ancestor(competing_blocks).await {
-            Ok(ancestor) => ancestor,
-            Err(e) => {
-                // Peer didn't provide enough block history - reject this attempt
-                warn!(
-                    "Cannot determine common ancestor: {}. Rejecting peer chain.",
-                    e
-                );
-                return Ok(false);
-            }
-        };
-
         // Get peer's tip timestamp for future-block validation
         let peer_tip_timestamp = competing_blocks.last().map(|b| b.header.timestamp);
 
@@ -5273,44 +5218,20 @@ impl Blockchain {
         let our_tip_hash = self.get_block_hash(our_height).ok();
         let peer_tip_hash = competing_blocks.last().map(|b| b.hash());
 
-        // Get our tip timestamp
-        let our_tip_timestamp = if let Ok(our_tip) = self.get_block(our_height) {
-            Some(our_tip.header.timestamp)
-        } else {
-            None
-        };
-
-        // Check if peer is whitelisted
-        let peer_is_whitelisted = if let Some(registry) = self.peer_registry.read().await.as_ref() {
-            registry.is_whitelisted(peer_ip).await
-        } else {
-            false // Default to not whitelisted if registry not available
-        };
-
-        // Calculate fork depth
-        let fork_depth = our_height.saturating_sub(common_ancestor);
-
-        // Use fork resolver to make decision
+        // Use simplified fork resolver to make decision
         let resolution = self
             .fork_resolver
             .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
                 our_height,
-                our_chain_work,
                 peer_height: peer_claimed_height,
-                peer_chain_work,
                 peer_ip: peer_ip.to_string(),
-                supporting_peers,
-                common_ancestor,
                 peer_tip_timestamp,
                 our_tip_hash,
                 peer_tip_hash,
-                peer_is_whitelisted,
-                our_tip_timestamp,
-                fork_depth,
             })
             .await;
 
-        // Simple rule: if peer has higher valid height, accept
+        // Simple rule: if peer has longer valid chain, accept
         Ok(resolution.accept_peer_chain)
     }
 
@@ -5367,70 +5288,26 @@ impl Blockchain {
             );
         }
 
-        // Use AI fork resolver with minimal information
-        let our_chain_work = *self.cumulative_work.read().await;
-
-        // Estimate peer work based on claimed height
-        let estimated_peer_work = self
-            .estimate_peer_chain_work(&[], peer_claimed_height)
-            .await;
-
-        // Gather supporting peer information
-        let supporting_peers = self
-            .gather_supporting_peers(our_height, peer_claimed_height)
-            .await;
-
         // Get tip hashes for tiebreaker (may not be available in early investigation)
         let our_tip_hash = self.get_block_hash(our_height).ok();
         let peer_tip_hash = None; // Not available during early investigation
-
-        // Get our tip timestamp
-        let our_tip_timestamp = if let Ok(our_tip) = self.get_block(our_height) {
-            Some(our_tip.header.timestamp)
-        } else {
-            None
-        };
-
-        // Check if peer is whitelisted
-        let peer_is_whitelisted = if let Some(registry) = self.peer_registry.read().await.as_ref() {
-            registry.is_whitelisted(peer_ip).await
-        } else {
-            false // Default to not whitelisted if registry not available
-        };
-
-        // Calculate fork depth
-        let common_ancestor_height = fork_height.saturating_sub(1);
-        let fork_depth = our_height.saturating_sub(common_ancestor_height);
 
         let resolution = self
             .fork_resolver
             .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
                 our_height,
-                our_chain_work,
                 peer_height: peer_claimed_height,
-                peer_chain_work: estimated_peer_work,
                 peer_ip: peer_ip.to_string(),
-                supporting_peers,
-                common_ancestor: common_ancestor_height,
                 peer_tip_timestamp: None, // Unknown at this stage
                 our_tip_hash,
                 peer_tip_hash,
-                peer_is_whitelisted,
-                our_tip_timestamp,
-                fork_depth,
             })
             .await;
 
         let message = if resolution.accept_peer_chain {
-            format!(
-                "AI recommends investigating (confidence: {:.0}%)",
-                resolution.confidence * 100.0
-            )
+            "Simplified resolver recommends investigating (longest valid chain)".to_string()
         } else {
-            format!(
-                "AI recommends skipping (confidence: {:.0}%)",
-                resolution.confidence * 100.0
-            )
+            "Simplified resolver recommends skipping (our chain is longer)".to_string()
         };
 
         (resolution.accept_peer_chain, message)

@@ -257,14 +257,21 @@ impl SecureStream {
 mod tests {
     use super::*;
 
+    fn init_crypto() {
+        // Initialize crypto provider for rustls
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
     #[test]
     fn test_create_self_signed_config() {
+        init_crypto();
         let config = TlsConfig::new_self_signed();
         assert!(config.is_ok());
     }
 
     #[tokio::test]
     async fn test_tls_handshake() {
+        init_crypto();
         let config = TlsConfig::new_self_signed().unwrap();
 
         // Create a test listener

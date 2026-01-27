@@ -150,7 +150,9 @@ impl BlockCache {
     /// Returns true if at least one block proposal exists for this height
     pub fn has_block_at_height(&self, height: u64) -> bool {
         let cache = self.cache.lock();
-        cache.iter().any(|(_, cached)| cached.block.header.height == height)
+        cache
+            .iter()
+            .any(|(_, cached)| cached.block.header.height == height)
     }
 
     /// Remove expired entries (if max_age is set)

@@ -320,8 +320,14 @@ pub struct SecureWriter {
 mod tests {
     use super::*;
 
+    fn init_crypto() {
+        // Initialize crypto provider for rustls
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+
     #[test]
     fn test_config_creation() {
+        init_crypto();
         let config = SecureTransportConfig::new(false, false);
         assert!(config.is_ok());
 
@@ -331,6 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tls_transport() {
+        init_crypto();
         let config = SecureTransportConfig::new(true, false).unwrap();
         let transport = SecureTransport::new(config);
 
