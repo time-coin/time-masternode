@@ -245,6 +245,36 @@ if [ "$CONFIRMED" = false ]; then
     log_warning "Transaction not confirmed within ${TEST_TIMEOUT} seconds"
     log_info "Transaction may still be pending. TXID: $TXID"
     log_info "Check status later with: $CLI_CMD gettransaction $TXID"
+    echo ""
+    
+    # Show diagnostic logs
+    log_info "=== Diagnostic Logs (last 2 minutes) ==="
+    echo ""
+    
+    log_info "1. Transaction broadcast:"
+    journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "Received new transaction.*${TXID:0:16}" | head -5 || echo "  No broadcast logs found"
+    echo ""
+    
+    log_info "2. TimeVote finalization:"
+    journalctl -u timed --since "2 minutes ago" --no-pager | grep -iE "finalized.*${TXID:0:16}|${TXID:0:16}.*finalized" | head -5 || echo "  No finalization logs found"
+    echo ""
+    
+    log_info "3. TransactionFinalized broadcast (Bug #4 fix):"
+    journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "Broadcast TransactionFinalized.*${TXID:0:16}" | head -5 || echo "  No broadcast logs found (Bug #4 may not be fixed!)"
+    echo ""
+    
+    log_info "4. Recent blocks produced:"
+    journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "Block.*produced|Including.*finalized" | tail -5 || echo "  No block production logs found"
+    echo ""
+    
+    log_info "5. Errors/failures:"
+    journalctl -u timed --since "2 minutes ago" --no-pager | grep -iE "error|failed" | grep -v "No precommit voters" | tail -5 || echo "  No errors found"
+    echo ""
+    
+    log_info "6. Mempool status:"
+    $CLI_CMD getmempoolinfo 2>&1 || echo "  Failed to get mempool info"
+    echo ""
+    
     exit 2
 fi
 
