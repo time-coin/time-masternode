@@ -299,14 +299,31 @@ echo "════════════════════════�
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
-# Final status report
-if [ "$TIMEPROOF_STATUS" = "✅ Present" ]; then
+# Final status report with Phase 3 validation
+if [ "$TIMEPROOF_STATUS" = "✅ Present" ] && [ "$TX_CONFIRMATIONS" -gt 0 ]; then
     log_success "✨ Transaction test completed successfully!"
-    log_success "Phase 2 validation: TimeVote consensus and TimeProof working!"
-else
+    log_success "Phase 2: TimeVote consensus and TimeProof working!"
+    log_success "Phase 3: Transaction archived in blockchain!"
+    echo ""
+    log_info "Complete flow verified:"
+    log_info "  ✓ Transaction finalized via TimeVote"
+    log_info "  ✓ TimeProof assembled and verified"
+    log_info "  ✓ Included in block $TX_BLOCK"
+    log_info "  ✓ Confirmed with $TX_CONFIRMATIONS confirmation(s)"
+elif [ "$TIMEPROOF_STATUS" = "✅ Present" ]; then
+    log_success "✨ Transaction finalized via TimeVote!"
+    log_warning "Waiting for block inclusion (Phase 3)"
+    log_info "Transaction finalized but not yet in a block"
+    log_info "Next block production will include this transaction"
+elif [ "$TX_CONFIRMATIONS" -gt 0 ]; then
     log_success "✨ Transaction confirmed on blockchain!"
-    log_warning "Phase 2 notice: TimeProof not found (may indicate Phase 3 integration needed)"
-    log_info "Expected once Phase 3 (Block Production) is complete"
+    log_warning "TimeProof not found in response"
+    log_info "This may indicate:"
+    log_info "  - RPC not returning TimeProof field"
+    log_info "  - Transaction finalized before TimeProof implementation"
+else
+    log_warning "Transaction sent but not fully processed"
+    log_info "Check status with: $CLI_CMD gettransaction $TXID"
 fi
 
 exit 0
