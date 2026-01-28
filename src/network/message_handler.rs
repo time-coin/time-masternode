@@ -2260,6 +2260,15 @@ impl MessageHandler {
 
         // Forward to consensus engine if we have one
         if let Some(consensus) = &context.consensus {
+            // Phase 4: Detect equivocation before processing
+            if consensus.detect_alert_equivocation(&alert.txid, &alert.reporter_mn_id) {
+                consensus.flag_byzantine(&alert.reporter_mn_id, "Alert equivocation detected");
+                return Err(format!(
+                    "Rejecting alert from {}: equivocation detected",
+                    alert.reporter_mn_id
+                ));
+            }
+
             // Check if we also observe this stall
             if let Some(tx_status) = consensus.get_tx_status(&alert.txid) {
                 if matches!(tx_status, crate::types::TransactionStatus::Voting { .. }) {
@@ -2349,6 +2358,19 @@ impl MessageHandler {
                 hex::encode(proposal_hash),
                 txid_hex
             );
+
+            // Phase 4: Detect Byzantine behavior (multiple proposals for same tx)
+            let proposals_for_tx = consensus.detect_multiple_proposals(&proposal.txid);
+            if proposals_for_tx.len() > 1 {
+                consensus.flag_byzantine(
+                    &proposal.leader_mn_id,
+                    "Multiple proposals for same transaction",
+                );
+                warn!(
+                    "[{}] ⚠️ Multiple proposals detected for tx {} by leader {}",
+                    self.direction, txid_hex, proposal.leader_mn_id
+                );
+            }
 
             // §7.6 Week 5-6 Part 3: Verify leader and cast vote
             // Step 1: Compute who the expected leader should be
@@ -2446,11 +2468,28 @@ impl MessageHandler {
 
         // §7.6 Week 5-6 Part 2: Accumulate votes and check Q_finality threshold
         if let Some(consensus) = &context.consensus {
+            // Phase 4: Detect vote equivocation before processing
+            if consensus.detect_vote_equivocation(&vote.proposal_hash, &vote.voter_mn_id) {
+                consensus.flag_byzantine(&vote.voter_mn_id, "Vote equivocation detected");
+                return Err(format!(
+                    "Rejecting vote from {}: equivocation detected",
+                    vote.voter_mn_id
+                ));
+            }
+
             // Calculate total AVS weight (sum of all masternode stakes)
             let total_avs_weight: u64 = masternodes
                 .iter()
                 .map(|mn| mn.masternode.tier.collateral() / 1_000_000_000) // Convert to relative weight
                 .sum();
+
+            // Phase 4: Validate vote weight doesn't exceed total
+            if let Err(e) = consensus.validate_vote_weight(&vote.proposal_hash, total_avs_weight) {
+                warn!(
+                    "[{}] ⚠️ Invalid vote weight for proposal {}: {}",
+                    self.direction, proposal_hex, e
+                );
+            }
 
             // Accumulate vote and check if quorum reached
             if let Some(decision) =

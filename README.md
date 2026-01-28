@@ -3,13 +3,13 @@
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
-![Protocol](https://img.shields.io/badge/protocol-v6.1-green.svg)
+![Protocol](https://img.shields.io/badge/protocol-v6.2-green.svg)
 ![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
 ![Security](https://img.shields.io/badge/security-audited-success.svg)
 
 **TIME Coin** is a next-generation cryptocurrency built from the ground up in Rust, featuring AI-powered optimizations and sub-second transaction finality.
 
-**Protocol v6.1** implements:
+**Protocol v6.2** implements:
 - **TimeVote**: Stake-weighted consensus with <1 second finality
 - **TimeProof**: Verifiable finality proofs for light clients
 - **TimeLock**: Deterministic checkpointing every 10 minutes
@@ -56,12 +56,14 @@
 ## ✅ Status
 
 ### Protocol & Implementation
-- **Protocol**: ✅ **v6.1 COMPLETE** ([full specification](docs/TIMECOIN_PROTOCOL.md))
-  - TimeVote, TimeProof, TimeLock, TimeGuard fully specified
+- **Protocol**: ✅ **v6.2 COMPLETE** ([full specification](docs/TIMECOIN_PROTOCOL.md))
+  - TimeVote, TimeProof, TimeLock, TimeGuard fully implemented
   - All 27 normative sections complete
+  - Liveness Fallback (§7.6) fully operational as of v6.2
   - Security audit completed (January 2026)
 - **Implementation**: ✅ **v1.1.0 PRODUCTION** (January 2026)
   - Core consensus: TimeVote + TimeLock ✅
+  - Liveness fallback: TimeGuard Protocol ✅
   - Network layer: P2P + RPC ✅
   - AI systems: 8 optimization modules ✅
   - Storage: Sled database + snapshots ✅

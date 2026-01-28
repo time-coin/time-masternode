@@ -140,6 +140,7 @@ impl DeterministicBlockGenerator {
             masternode_rewards,
             time_attestations: vec![],
             consensus_participants: vec![], // Attestations added later
+            liveness_recovery: false,       // Will be set by consensus engine if needed
         }
     }
 

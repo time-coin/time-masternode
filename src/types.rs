@@ -773,6 +773,19 @@ impl FallbackVote {
     }
 }
 
+/// §7.6 Phase 5: Fallback Metrics (for monitoring and debugging)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FallbackMetrics {
+    pub total_fallback_activations: usize,
+    pub total_stall_detections: usize,
+    pub total_timelock_resolutions: usize,
+    pub active_stalled_txs: usize,
+    pub active_fallback_rounds: usize,
+    pub byzantine_nodes_flagged: usize,
+    pub pending_proposals: usize,
+    pub total_fallback_votes: usize,
+}
+
 // ============================================================================
 // UNIT TESTS
 // ============================================================================

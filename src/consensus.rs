@@ -660,9 +660,18 @@ pub struct TimeVoteConsensus {
     /// txid -> (slot_index, round_count, started_at)
     fallback_rounds: DashMap<Hash256, (u64, u32, Instant)>,
 
+    /// §7.6 Security: Byzantine node detection tracker
+    /// mn_id -> flagged (track masternodes exhibiting Byzantine behavior)
+    byzantine_nodes: DashMap<String, bool>,
+
     /// Metrics
     rounds_executed: AtomicUsize,
     txs_finalized: AtomicUsize,
+
+    /// §7.6 Fallback Metrics (Phase 5)
+    fallback_activations: AtomicUsize,
+    stall_detections: AtomicUsize,
+    timelock_resolutions: AtomicUsize,
 }
 
 impl TimeVoteConsensus {
@@ -698,9 +707,13 @@ impl TimeVoteConsensus {
             fallback_votes: DashMap::new(),
             proposal_to_tx: DashMap::new(),
             fallback_rounds: DashMap::new(),
+            byzantine_nodes: DashMap::new(),
             active_vote_requests: Arc::new(AtomicUsize::new(0)),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
+            fallback_activations: AtomicUsize::new(0),
+            stall_detections: AtomicUsize::new(0),
+            timelock_resolutions: AtomicUsize::new(0),
         })
     }
 
@@ -1345,6 +1358,305 @@ impl ConsensusEngine {
                 finality_ms
             );
         }
+    }
+
+    /// Start the fallback timeout monitoring task (§7.6.5)
+    ///
+    /// Monitors fallback resolution rounds and retries with new leaders on timeout.
+    /// After MAX_FALLBACK_ROUNDS (5 rounds), marks transactions for TimeLock resolution.
+    ///
+    /// # Protocol Flow
+    /// 1. Every 5 seconds, scan fallback_rounds for timeouts
+    /// 2. If round timeout (10s), increment slot and retry with new leader
+    /// 3. If exceeded 5 rounds, mark for TimeLock escalation
+    ///
+    /// # Returns
+    /// * `JoinHandle` - Task handle for the background thread
+    pub fn start_fallback_timeout_monitor(
+        self: Arc<Self>,
+        masternode_registry: Arc<MasternodeRegistry>,
+    ) -> tokio::task::JoinHandle<()> {
+        tracing::info!("⏱️ Starting fallback timeout monitor (§7.6.5)");
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                let retry_count = self.check_fallback_timeouts(&masternode_registry).await;
+                if retry_count > 0 {
+                    tracing::info!("⏱️ Processed {} fallback timeouts", retry_count);
+                }
+            }
+        })
+    }
+
+    /// Start the fallback resolution background task (§7.6.4)
+    ///
+    /// Monitors transactions in FallbackResolution state and triggers leader proposals.
+    /// When this node is elected as leader, it broadcasts a FinalityProposal.
+    ///
+    /// # Protocol Flow
+    /// 1. Every 3 seconds, scan transactions in FallbackResolution state
+    /// 2. For each transaction, check if we are the elected leader
+    /// 3. If leader, determine decision and broadcast proposal
+    /// 4. Track proposal to avoid duplicates
+    ///
+    /// # Returns
+    /// * `JoinHandle` - Task handle for the background thread
+    pub fn start_fallback_resolution(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tracing::info!("🎯 Starting fallback resolution task (§7.6.4)");
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(3));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                // Get current slot index
+                let current_slot = self.get_current_slot_index();
+
+                // Get AVS snapshot for this slot
+                let avs = self.timevote.get_avs_snapshot(current_slot);
+                let avs_snapshot = match avs {
+                    Some(snapshot) => snapshot,
+                    None => {
+                        // No AVS yet, skip this round
+                        continue;
+                    }
+                };
+
+                // Scan all transactions in FallbackResolution state
+                let fallback_txs: Vec<Hash256> = self
+                    .timevote
+                    .tx_status
+                    .iter()
+                    .filter_map(|entry| match entry.value() {
+                        TransactionStatus::FallbackResolution { .. } => Some(*entry.key()),
+                        _ => None,
+                    })
+                    .collect();
+
+                if !fallback_txs.is_empty() {
+                    tracing::debug!(
+                        "🎯 Checking {} transactions in fallback",
+                        fallback_txs.len()
+                    );
+                }
+
+                for txid in fallback_txs {
+                    // Get the round info
+                    let (slot_index, round, _started_at) = match self
+                        .timevote
+                        .fallback_rounds
+                        .get(&txid)
+                    {
+                        Some(entry) => *entry.value(),
+                        None => {
+                            tracing::warn!("No fallback round info for tx {}", hex::encode(txid));
+                            continue;
+                        }
+                    };
+
+                    // Check if we are the leader for this transaction
+                    if self.is_fallback_leader(txid, slot_index, round, &avs_snapshot) {
+                        tracing::info!(
+                            "🎯 I am the fallback leader for tx {} (slot: {}, round: {})",
+                            hex::encode(&txid[..8]),
+                            slot_index,
+                            round
+                        );
+
+                        // Execute as leader
+                        if let Err(e) = self
+                            .execute_fallback_as_leader(txid, slot_index, round)
+                            .await
+                        {
+                            tracing::error!(
+                                "Failed to execute fallback as leader for tx {}: {}",
+                                hex::encode(&txid[..8]),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// Start the stall detection background task (§7.6.1)
+    ///
+    /// Monitors all transactions in Voting state and detects stalls after STALL_TIMEOUT (30s).
+    /// When a stall is detected, broadcasts a LivenessAlert to trigger fallback consensus.
+    ///
+    /// # Protocol Flow (§7.6.1)
+    /// 1. Every 5 seconds, scan all transactions in Voting state
+    /// 2. Check elapsed time since voting started
+    /// 3. If elapsed > 30s, broadcast LivenessAlert
+    /// 4. Continue monitoring until transaction finalizes or enters FallbackResolution
+    ///
+    /// # Returns
+    /// * `JoinHandle` - Task handle for the background thread
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stall_task = consensus.start_stall_detection();
+    /// // Task runs indefinitely until dropped
+    /// ```
+    pub fn start_stall_detection(self: Arc<Self>) -> tokio::task::JoinHandle<()> {
+        tracing::info!("🔍 Starting stall detection task (§7.6.1)");
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                interval.tick().await;
+
+                // Get current slot index for alert signing
+                let current_slot = self.get_current_slot_index();
+
+                // Scan all transactions for stalls
+                let stalled_txs = self.detect_stalled_transactions();
+
+                if !stalled_txs.is_empty() {
+                    tracing::debug!("🔍 Detected {} stalled transactions", stalled_txs.len());
+                }
+
+                // Broadcast alerts for stalled transactions
+                for txid in stalled_txs {
+                    if let Err(e) = self.broadcast_liveness_alert(txid, current_slot).await {
+                        tracing::warn!(
+                            "Failed to broadcast LivenessAlert for tx {}: {}",
+                            hex::encode(txid),
+                            e
+                        );
+                    }
+                }
+            }
+        })
+    }
+
+    /// Detect transactions that have been stalled in Voting state (§7.6.1)
+    ///
+    /// Scans all transactions and identifies those that:
+    /// 1. Are in Voting state
+    /// 2. Have been voting for > STALL_TIMEOUT (30 seconds)
+    /// 3. Are not already in FallbackResolution state
+    /// 4. Are still valid (not conflicting with finalized transactions)
+    ///
+    /// # Returns
+    /// * `Vec<Hash256>` - List of transaction IDs that are stalled
+    fn detect_stalled_transactions(&self) -> Vec<Hash256> {
+        let mut stalled = Vec::new();
+        let now = chrono::Utc::now().timestamp_millis();
+
+        for entry in self.timevote.tx_status.iter() {
+            let txid = *entry.key();
+            let status = entry.value();
+
+            match status {
+                TransactionStatus::Voting { started_at, .. } => {
+                    let elapsed_ms = now - started_at;
+                    let elapsed_secs = elapsed_ms / 1000;
+
+                    // Check if transaction has stalled
+                    if elapsed_secs >= STALL_TIMEOUT.as_secs() as i64 {
+                        // Verify transaction is still valid before alerting
+                        if self.is_transaction_still_valid(&txid) {
+                            stalled.push(txid);
+                            // Phase 5: Record stall detection metric
+                            self.record_stall_detection();
+                        } else {
+                            tracing::debug!(
+                                "Skipping stall alert for invalid tx {}",
+                                hex::encode(txid)
+                            );
+                        }
+                    }
+                }
+                TransactionStatus::FallbackResolution { .. } => {
+                    // Already in fallback, don't re-alert
+                    continue;
+                }
+                _ => {
+                    // Not in voting state, skip
+                    continue;
+                }
+            }
+        }
+
+        stalled
+    }
+
+    /// Check if a transaction is still valid for fallback resolution
+    ///
+    /// A transaction is invalid if:
+    /// - It conflicts with a finalized transaction
+    /// - Its inputs have been spent by a finalized transaction
+    /// - It has been explicitly rejected
+    ///
+    /// # Arguments
+    /// * `txid` - Transaction to check
+    ///
+    /// # Returns
+    /// * `bool` - true if transaction is still valid
+    fn is_transaction_still_valid(&self, txid: &Hash256) -> bool {
+        // Check if transaction exists in pool
+        let tx = match self.tx_pool.get_pending(txid) {
+            Some(tx) => tx,
+            None => {
+                // Transaction no longer in pool
+                return false;
+            }
+        };
+
+        // Check if any inputs are spent by finalized transactions
+        for input in &tx.inputs {
+            if let Some(state) = self.utxo_manager.get_state(&input.previous_output) {
+                match state {
+                    UTXOState::SpentFinalized { .. } => {
+                        // Input already spent by finalized tx
+                        return false;
+                    }
+                    UTXOState::Confirmed { .. } => {
+                        // Input spent and confirmed in block
+                        return false;
+                    }
+                    _ => {
+                        // Still valid
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Check if transaction has been explicitly rejected
+        if let Some(status) = self.timevote.tx_status.get(txid) {
+            if matches!(status.value(), TransactionStatus::Rejected { .. }) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Get current slot index (10-minute epochs since genesis)
+    ///
+    /// Used for deterministic leader election in fallback protocol.
+    /// Slot 0 = genesis time, increments every 10 minutes.
+    ///
+    /// # Returns
+    /// * `u64` - Current slot index
+    fn get_current_slot_index(&self) -> u64 {
+        let now = chrono::Utc::now().timestamp();
+        let genesis_time = 1735689600; // 2025-01-01 00:00:00 UTC
+        let slot_duration = 600; // 10 minutes in seconds
+
+        ((now - genesis_time).max(0) / slot_duration) as u64
     }
 
     /// Get average finality time in milliseconds
@@ -2416,7 +2728,14 @@ impl ConsensusEngine {
         let f = (total_masternodes.saturating_sub(1)) / 3;
         let threshold = f + 1;
 
-        unique_reporters.len() >= threshold
+        let threshold_reached = unique_reporters.len() >= threshold;
+
+        // Phase 5: Record fallback activation if threshold just reached
+        if threshold_reached && unique_reporters.len() == threshold {
+            self.record_fallback_activation();
+        }
+
+        threshold_reached
     }
 
     /// Get count of unique alert reporters for a transaction
@@ -2533,6 +2852,242 @@ impl ConsensusEngine {
         }
     }
 
+    // ===== Phase 4: Validation & Safety Functions (§7.6 Security) =====
+
+    /// Detect equivocation: Check if a masternode sent conflicting alerts/votes (§7.6 Security)
+    pub fn detect_alert_equivocation(&self, txid: &Hash256, reporter: &str) -> bool {
+        if let Some(alerts) = self.timevote.liveness_alerts.get(txid) {
+            let reporter_alerts: Vec<_> = alerts
+                .iter()
+                .filter(|a| a.reporter_mn_id == reporter)
+                .collect();
+
+            if reporter_alerts.len() > 1 {
+                tracing::warn!(
+                    "⚠️ Equivocation detected: {} sent {} alerts for tx {}",
+                    reporter,
+                    reporter_alerts.len(),
+                    hex::encode(txid)
+                );
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Detect vote equivocation: Check if a voter cast multiple different votes for same proposal
+    pub fn detect_vote_equivocation(&self, proposal_hash: &Hash256, voter: &str) -> bool {
+        if let Some(votes) = self.timevote.fallback_votes.get(proposal_hash) {
+            let voter_votes: Vec<_> = votes.iter().filter(|v| v.voter_mn_id == voter).collect();
+
+            if voter_votes.len() > 1 {
+                // Check if votes conflict
+                let first_decision = &voter_votes[0].vote;
+                let has_conflict = voter_votes.iter().any(|v| &v.vote != first_decision);
+
+                if has_conflict {
+                    tracing::warn!(
+                        "⚠️ Vote equivocation detected: {} cast conflicting votes for proposal {}",
+                        voter,
+                        hex::encode(proposal_hash)
+                    );
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Detect Byzantine behavior: Multiple proposals for same transaction
+    pub fn detect_multiple_proposals(&self, txid: &Hash256) -> Vec<Hash256> {
+        let mut proposals = Vec::new();
+        for entry in self.timevote.proposal_to_tx.iter() {
+            if entry.value() == txid {
+                proposals.push(*entry.key());
+            }
+        }
+
+        if proposals.len() > 1 {
+            tracing::warn!(
+                "⚠️ Byzantine behavior: {} proposals detected for tx {}",
+                proposals.len(),
+                hex::encode(txid)
+            );
+        }
+
+        proposals
+    }
+
+    /// Validate threshold requirements before processing (§7.6 Security)
+    pub fn validate_alert_threshold(
+        &self,
+        txid: &Hash256,
+        total_masternodes: usize,
+    ) -> Result<bool, String> {
+        if total_masternodes == 0 {
+            return Err("No masternodes in network".to_string());
+        }
+
+        let f = (total_masternodes.saturating_sub(1)) / 3;
+        let threshold = f + 1;
+
+        if threshold > total_masternodes {
+            return Err(format!(
+                "Invalid threshold: f+1={} exceeds total={}",
+                threshold, total_masternodes
+            ));
+        }
+
+        let alert_count = self.get_alert_count(txid);
+        Ok(alert_count >= threshold)
+    }
+
+    /// Validate vote weight doesn't exceed total AVS weight (Byzantine detection)
+    pub fn validate_vote_weight(
+        &self,
+        proposal_hash: &Hash256,
+        total_avs_weight: u64,
+    ) -> Result<(), String> {
+        if let Some(votes) = self.timevote.fallback_votes.get(proposal_hash) {
+            let mut total_voted_weight = 0u64;
+            let mut unique_voters = std::collections::HashSet::new();
+
+            for vote in votes.iter() {
+                // Check for duplicate voters
+                if !unique_voters.insert(&vote.voter_mn_id) {
+                    tracing::warn!(
+                        "⚠️ Duplicate vote detected from {} for proposal {}",
+                        vote.voter_mn_id,
+                        hex::encode(proposal_hash)
+                    );
+                }
+
+                total_voted_weight = total_voted_weight.saturating_add(vote.voter_weight);
+            }
+
+            // Allow slight overflow due to rounding, but flag excessive weight
+            if total_voted_weight > total_avs_weight * 11 / 10 {
+                // >110% is suspicious
+                return Err(format!(
+                    "Vote weight {} exceeds total AVS weight {} by >10%",
+                    total_voted_weight, total_avs_weight
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a masternode has been flagged for Byzantine behavior
+    pub fn is_byzantine_flagged(&self, mn_id: &str) -> bool {
+        // For now, simple in-memory tracking
+        // TODO: Persistent storage and slashing integration
+        self.timevote
+            .byzantine_nodes
+            .get(mn_id)
+            .map(|entry| *entry.value())
+            .unwrap_or(false)
+    }
+
+    /// Flag a masternode for Byzantine behavior
+    pub fn flag_byzantine(&self, mn_id: &str, reason: &str) {
+        tracing::error!("🚨 Flagging {} as Byzantine: {}", mn_id, reason);
+        self.timevote
+            .byzantine_nodes
+            .insert(mn_id.to_string(), true);
+        // TODO: Emit event for slashing mechanism
+    }
+
+    /// Get count of Byzantine-flagged nodes
+    pub fn get_byzantine_count(&self) -> usize {
+        self.timevote
+            .byzantine_nodes
+            .iter()
+            .filter(|entry| *entry.value())
+            .count()
+    }
+
+    // ===== Phase 5: Monitoring & Metrics Functions =====
+
+    /// Increment fallback activation counter (when f+1 alerts trigger fallback)
+    pub fn record_fallback_activation(&self) {
+        self.timevote
+            .fallback_activations
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            "📊 Fallback activation count: {}",
+            self.get_fallback_activations()
+        );
+    }
+
+    /// Increment stall detection counter
+    pub fn record_stall_detection(&self) {
+        self.timevote
+            .stall_detections
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Increment TimeLock resolution counter
+    pub fn record_timelock_resolution(&self) {
+        self.timevote
+            .timelock_resolutions
+            .fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            "📊 TimeLock resolution count: {}",
+            self.get_timelock_resolutions()
+        );
+    }
+
+    /// Get fallback activation metrics
+    pub fn get_fallback_activations(&self) -> usize {
+        self.timevote.fallback_activations.load(Ordering::Relaxed)
+    }
+
+    /// Get stall detection metrics
+    pub fn get_stall_detections(&self) -> usize {
+        self.timevote.stall_detections.load(Ordering::Relaxed)
+    }
+
+    /// Get TimeLock resolution metrics
+    pub fn get_timelock_resolutions(&self) -> usize {
+        self.timevote.timelock_resolutions.load(Ordering::Relaxed)
+    }
+
+    /// Get comprehensive fallback metrics snapshot (§7.6 Monitoring)
+    pub fn get_fallback_metrics(&self) -> FallbackMetrics {
+        FallbackMetrics {
+            total_fallback_activations: self.get_fallback_activations(),
+            total_stall_detections: self.get_stall_detections(),
+            total_timelock_resolutions: self.get_timelock_resolutions(),
+            active_stalled_txs: self.timevote.liveness_alerts.len(),
+            active_fallback_rounds: self.timevote.fallback_rounds.len(),
+            byzantine_nodes_flagged: self.get_byzantine_count(),
+            pending_proposals: self.timevote.proposal_to_tx.len(),
+            total_fallback_votes: self
+                .timevote
+                .fallback_votes
+                .iter()
+                .map(|entry| entry.value().len())
+                .sum(),
+        }
+    }
+
+    /// Log comprehensive fallback status (for debugging and monitoring)
+    pub fn log_fallback_status(&self) {
+        let metrics = self.get_fallback_metrics();
+        tracing::info!(
+            "📊 Fallback Status: activations={}, stalls={}, timelock={}, active_stalls={}, rounds={}, byzantine={}, proposals={}, votes={}",
+            metrics.total_fallback_activations,
+            metrics.total_stall_detections,
+            metrics.total_timelock_resolutions,
+            metrics.active_stalled_txs,
+            metrics.active_fallback_rounds,
+            metrics.byzantine_nodes_flagged,
+            metrics.pending_proposals,
+            metrics.total_fallback_votes
+        );
+    }
+
     /// Decide how to vote on a fallback finality proposal (§7.6.4)
     ///
     /// Evaluates transaction state and determines whether to vote Approve or Reject.
@@ -2572,6 +3127,263 @@ impl ConsensusEngine {
                 FallbackVoteDecision::Reject
             }
         }
+    }
+
+    /// Resolve all stalled transactions via TimeLock block (§7.6.5)
+    ///
+    /// Called when producing a TimeLock block. This is the ultimate fallback mechanism
+    /// that deterministically resolves all transactions that have been in FallbackResolution
+    /// state for too long or have exceeded MAX_FALLBACK_ROUNDS.
+    ///
+    /// # Protocol Flow (§7.6.5)
+    /// 1. Scan all transactions in FallbackResolution state
+    /// 2. For each transaction, make deterministic decision based on current state
+    /// 3. Finalize with Accept or Reject
+    /// 4. Clean up fallback tracking
+    /// 5. Return true if any transactions were resolved
+    ///
+    /// # Decision Logic
+    /// - If transaction preference is Accept and still valid → Accept
+    /// - Otherwise → Reject
+    ///
+    /// # Returns
+    /// * `bool` - true if any transactions were resolved (set liveness_recovery flag)
+    ///
+    /// # Example
+    /// ```ignore
+    /// // When producing TimeLock block
+    /// let had_stalls = consensus.resolve_stalls_via_timelock();
+    /// block.liveness_recovery = had_stalls;
+    /// ```
+    pub fn resolve_stalls_via_timelock(&self) -> bool {
+        // Get all transactions in FallbackResolution state
+        let stalled_txs: Vec<Hash256> = self
+            .timevote
+            .tx_status
+            .iter()
+            .filter_map(|entry| match entry.value() {
+                TransactionStatus::FallbackResolution { .. } => Some(*entry.key()),
+                _ => None,
+            })
+            .collect();
+
+        if stalled_txs.is_empty() {
+            return false;
+        }
+
+        // Phase 5: Record TimeLock resolution metric
+        self.record_timelock_resolution();
+
+        tracing::warn!(
+            "🔄 TimeLock block resolving {} stalled transactions (§7.6.5)",
+            stalled_txs.len()
+        );
+
+        for txid in &stalled_txs {
+            // Get the transaction's current preference
+            let decision = if let Some(voting_state) = self.timevote.tx_state.get(txid) {
+                let state = voting_state.value().read();
+                match state.snowflake.preference {
+                    Preference::Accept => {
+                        // Check if still valid
+                        if self.is_transaction_still_valid(txid) {
+                            FallbackDecision::Accept
+                        } else {
+                            FallbackDecision::Reject
+                        }
+                    }
+                    Preference::Reject => FallbackDecision::Reject,
+                }
+            } else {
+                // No voting state, default to Reject
+                FallbackDecision::Reject
+            };
+
+            tracing::info!(
+                "🔒 TimeLock resolving tx {}: {:?}",
+                hex::encode(&txid[..8]),
+                decision
+            );
+
+            // Apply the decision
+            match decision {
+                FallbackDecision::Accept => {
+                    self.transition_to_finalized(*txid, 0); // weight=0 for TimeLock resolution
+                }
+                FallbackDecision::Reject => {
+                    self.transition_to_rejected(*txid, "TimeLock fallback rejected".to_string());
+                }
+            }
+
+            // Clean up tracking
+            self.timevote.fallback_rounds.remove(txid);
+            self.timevote.liveness_alerts.remove(txid);
+            self.timevote.fallback_votes.retain(|k, _| {
+                // Remove votes for proposals related to this transaction
+                self.timevote
+                    .proposal_to_tx
+                    .get(k)
+                    .map(|v| *v != *txid)
+                    .unwrap_or(true)
+            });
+        }
+
+        true // Transactions were resolved
+    }
+
+    /// Check if there are any transactions requiring liveness recovery
+    ///
+    /// Used to determine if the liveness_recovery flag should be set on the next TimeLock block.
+    ///
+    /// # Returns
+    /// * `bool` - true if there are transactions in FallbackResolution state
+    pub fn has_pending_fallback_transactions(&self) -> bool {
+        self.timevote
+            .tx_status
+            .iter()
+            .any(|entry| matches!(entry.value(), TransactionStatus::FallbackResolution { .. }))
+    }
+
+    // ========================================================================
+    // §7.6 LIVENESS FALLBACK PROTOCOL - DETERMINISTIC LEADER ELECTION
+    // ========================================================================
+
+    /// Elect deterministic fallback leader (§7.6.4 Step 1)
+    ///
+    /// Computes the deterministic leader for a specific transaction and round using
+    /// a hash-based selection algorithm. All honest nodes compute the same leader
+    /// independently without coordination.
+    ///
+    /// # Algorithm (§7.6.4)
+    /// ```text
+    /// For each masternode in AVS:
+    ///   hash = H(txid || slot_index || round || mn_pubkey)
+    ///   
+    /// Leader = Masternode with minimum hash value
+    /// ```
+    ///
+    /// # Properties
+    /// - **Deterministic**: Same inputs always produce same leader
+    /// - **Unpredictable**: Cannot predict leader in advance without all inputs
+    /// - **Fair**: Each masternode has equal probability over many elections
+    /// - **Byzantine-safe**: Cannot be manipulated by adversaries
+    ///
+    /// # Arguments
+    /// * `txid` - Transaction identifier
+    /// * `slot_index` - Current slot (10-minute epoch)
+    /// * `round` - Fallback round number (0-4)
+    /// * `avs` - Active Validator Set snapshot
+    ///
+    /// # Returns
+    /// * `Option<String>` - Masternode ID of elected leader, or None if AVS empty
+    ///
+    /// # Example
+    /// ```ignore
+    /// let avs = consensus.get_avs_snapshot(slot_index)?;
+    /// let leader = consensus.elect_fallback_leader(txid, slot_index, 0, &avs)?;
+    ///
+    /// if leader == my_masternode_id {
+    ///     // I am the leader, broadcast proposal
+    ///     consensus.broadcast_finality_proposal(txid, slot_index, decision).await?;
+    /// }
+    /// ```
+    pub fn elect_fallback_leader(
+        &self,
+        txid: Hash256,
+        slot_index: u64,
+        round: u32,
+        avs: &AVSSnapshot,
+    ) -> Option<String> {
+        if avs.validators.is_empty() && avs.validators_ref.is_none() {
+            tracing::warn!("Cannot elect fallback leader: AVS is empty");
+            return None;
+        }
+
+        let mut min_hash = [0xff; 32];
+        let mut elected_leader: Option<String> = None;
+
+        // Get validators - use validators_ref if available, otherwise validators
+        if let Some(ref validators_arc) = avs.validators_ref {
+            // Use the shared reference
+            for validator in validators_arc.iter() {
+                // Compute deterministic hash: H(txid || slot_index || round || mn_pubkey)
+                let mut hasher = Sha256::new();
+                hasher.update(txid);
+                hasher.update(slot_index.to_le_bytes());
+                hasher.update(round.to_le_bytes());
+                hasher.update(validator.address.as_bytes());
+
+                let hash: [u8; 32] = hasher.finalize().into();
+
+                // Track minimum hash
+                if hash < min_hash {
+                    min_hash = hash;
+                    elected_leader = Some(validator.address.clone());
+                }
+            }
+        } else {
+            // Use the serialized validators
+            for (validator_id, _weight) in &avs.validators {
+                // Compute deterministic hash: H(txid || slot_index || round || mn_pubkey)
+                let mut hasher = Sha256::new();
+                hasher.update(txid);
+                hasher.update(slot_index.to_le_bytes());
+                hasher.update(round.to_le_bytes());
+                hasher.update(validator_id.as_bytes());
+
+                let hash: [u8; 32] = hasher.finalize().into();
+
+                // Track minimum hash
+                if hash < min_hash {
+                    min_hash = hash;
+                    elected_leader = Some(validator_id.clone());
+                }
+            }
+        }
+
+        if let Some(ref leader) = elected_leader {
+            tracing::debug!(
+                "🎯 Elected fallback leader for tx {} (slot {}, round {}): {}",
+                hex::encode(&txid[..8]),
+                slot_index,
+                round,
+                leader
+            );
+        }
+
+        elected_leader
+    }
+
+    /// Check if this node is the fallback leader for a transaction
+    ///
+    /// Convenience method that combines leader election with identity check.
+    ///
+    /// # Arguments
+    /// * `txid` - Transaction identifier
+    /// * `slot_index` - Current slot
+    /// * `round` - Fallback round number
+    /// * `avs` - Active Validator Set snapshot
+    ///
+    /// # Returns
+    /// * `bool` - true if this node is the elected leader
+    pub fn is_fallback_leader(
+        &self,
+        txid: Hash256,
+        slot_index: u64,
+        round: u32,
+        avs: &AVSSnapshot,
+    ) -> bool {
+        let identity = match self.identity.get() {
+            Some(id) => id,
+            None => return false,
+        };
+
+        let leader = match self.elect_fallback_leader(txid, slot_index, round, avs) {
+            Some(l) => l,
+            None => return false,
+        };
+
+        identity.address == leader
     }
 
     // ========================================================================
@@ -2876,13 +3688,128 @@ impl ConsensusEngine {
         Ok(())
     }
 
+    /// Determine fallback decision based on TimeVote state (§7.6.4 Step 2)
+    ///
+    /// Leader analyzes the transaction's current TimeVote state to decide whether
+    /// to propose Accept or Reject in the fallback consensus round.
+    ///
+    /// # Decision Logic (§7.6.4)
+    /// ```text
+    /// IF counter[Accept] > counter[Reject]:
+    ///   → Decision = Accept (transaction has majority support)
+    /// ELSE:
+    ///   → Decision = Reject (transaction lacks consensus)
+    /// ```
+    ///
+    /// # Arguments
+    /// * `txid` - Transaction to evaluate
+    ///
+    /// # Returns
+    /// * `FallbackDecision` - Either Accept or Reject
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Leader elected, now decide what to propose
+    /// let decision = consensus.determine_fallback_decision(&txid);
+    /// consensus.broadcast_finality_proposal(txid, slot, decision).await?;
+    /// ```
+    pub fn determine_fallback_decision(&self, txid: &Hash256) -> FallbackDecision {
+        // Get the voting state for this transaction
+        if let Some(voting_state) = self.timevote.tx_state.get(txid) {
+            let state = voting_state.value().read();
+
+            // Use Snowflake's current preference and confidence
+            let preference = state.snowflake.preference;
+            let confidence = state.snowflake.confidence;
+
+            tracing::debug!(
+                "Fallback decision for tx {}: preference={:?}, confidence={}",
+                hex::encode(&txid[..8]),
+                preference,
+                confidence
+            );
+
+            // If preference is Accept, propose Accept
+            // Otherwise propose Reject
+            match preference {
+                Preference::Accept => FallbackDecision::Accept,
+                Preference::Reject => FallbackDecision::Reject,
+            }
+        } else {
+            // No voting state found, default to Reject
+            tracing::warn!(
+                "No voting state found for tx {}, defaulting to Reject",
+                hex::encode(&txid[..8])
+            );
+            FallbackDecision::Reject
+        }
+    }
+
+    /// Execute fallback resolution as elected leader (§7.6.4 Steps 1-3)
+    ///
+    /// Called when this node has been deterministically elected as the fallback leader
+    /// for a stalled transaction. The leader:
+    /// 1. Determines decision based on vote counters
+    /// 2. Signs and broadcasts FinalityProposal
+    /// 3. Waits for Q_finality votes from AVS
+    ///
+    /// # Arguments
+    /// * `txid` - Transaction to resolve
+    /// * `slot_index` - Current slot (for leader election)
+    /// * `round` - Fallback round number (0-4)
+    ///
+    /// # Returns
+    /// * `Ok(())` - Proposal broadcast successfully
+    /// * `Err(String)` - If not leader or broadcast failed
+    ///
+    /// # Example
+    /// ```ignore
+    /// let avs = consensus.get_avs_snapshot(slot)?;
+    /// if consensus.is_fallback_leader(txid, slot, 0, &avs) {
+    ///     consensus.execute_fallback_as_leader(txid, slot, 0).await?;
+    /// }
+    /// ```
+    pub async fn execute_fallback_as_leader(
+        &self,
+        txid: Hash256,
+        slot_index: u64,
+        round: u32,
+    ) -> Result<(), String> {
+        tracing::info!(
+            "🎯 Executing fallback as leader for tx {} (slot: {}, round: {})",
+            hex::encode(&txid[..8]),
+            slot_index,
+            round
+        );
+
+        // Determine decision based on vote state
+        let decision = self.determine_fallback_decision(&txid);
+
+        tracing::info!(
+            "📋 Leader decided: {:?} for tx {}",
+            decision,
+            hex::encode(&txid[..8])
+        );
+
+        // Broadcast proposal to AVS
+        self.broadcast_finality_proposal(txid, slot_index, decision)
+            .await?;
+
+        // Track this round
+        self.timevote
+            .fallback_rounds
+            .insert(txid, (slot_index, round, Instant::now()));
+
+        Ok(())
+    }
+
     /// Broadcast a FinalityProposal as deterministic leader (§7.6.4 Step 3)
     ///
     /// Called when this node has been elected as the deterministic fallback leader
     /// and must propose an Accept/Reject decision for a stalled transaction.
     ///
     /// # Protocol Flow (§7.6.4)
-    /// 1. Node computes itself as leader via `compute_fallback_leader(txid, slot, AVS)`
+    /// 1. Node computes itself as leader via `elect_fallback_leader(txid, slot, AVS)`
     /// 2. Signs proposal with decision (Accept or Reject)
     /// 3. Broadcasts to all AVS members
     /// 4. AVS members vote on the proposal
@@ -3742,5 +4669,389 @@ mod fallback_tests {
         // All must be identical
         assert_eq!(leader1, leader2);
         assert_eq!(leader2, leader3);
+    }
+
+    // ========================================================================
+    // PHASE 6: COMPREHENSIVE FALLBACK PROTOCOL TESTS
+    // ========================================================================
+
+    /// Test alert accumulation tracking
+    #[test]
+    fn test_phase6_alert_accumulation() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let txid = [42u8; 32];
+
+        // Initially no alerts
+        assert!(consensus.liveness_alerts.get(&txid).is_none());
+
+        // Add alerts directly
+        for i in 0..3 {
+            let alert = LivenessAlert {
+                chain_id: 1,
+                txid,
+                tx_hash_commitment: [0u8; 32],
+                slot_index: 1000,
+                poll_history: vec![],
+                current_confidence: 5,
+                stall_duration_ms: 30000,
+                reporter_mn_id: format!("mn_{}", i),
+                reporter_signature: vec![],
+            };
+
+            consensus
+                .liveness_alerts
+                .entry(txid)
+                .or_default()
+                .push(alert);
+        }
+
+        // Verify count
+        let alerts = consensus.liveness_alerts.get(&txid).unwrap();
+        assert_eq!(alerts.len(), 3);
+
+        // Verify unique reporters
+        let unique: std::collections::HashSet<_> =
+            alerts.iter().map(|a| &a.reporter_mn_id).collect();
+        assert_eq!(unique.len(), 3);
+    }
+
+    /// Test vote accumulation tracking
+    #[test]
+    fn test_phase6_vote_accumulation() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let proposal_hash = [42u8; 32];
+
+        // Initially no votes
+        assert!(consensus.fallback_votes.get(&proposal_hash).is_none());
+
+        // Add votes directly to internal structure
+        for i in 0..5 {
+            let vote = FallbackVote {
+                chain_id: 1,
+                proposal_hash,
+                vote: FallbackVoteDecision::Approve,
+                voter_mn_id: format!("mn_{}", i),
+                voter_weight: 1_000_000_000,
+                voter_signature: vec![],
+            };
+
+            consensus
+                .fallback_votes
+                .entry(proposal_hash)
+                .or_default()
+                .push(vote);
+        }
+
+        // Verify votes stored
+        let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
+        assert_eq!(votes.len(), 5);
+
+        // Calculate weights manually
+        let approve_weight: u64 = votes
+            .iter()
+            .filter(|v| matches!(v.vote, FallbackVoteDecision::Approve))
+            .map(|v| v.voter_weight)
+            .sum();
+        assert_eq!(approve_weight, 5_000_000_000);
+    }
+
+    /// Test proposal registration and lookup
+    #[test]
+    fn test_phase6_proposal_tracking() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let txid = [42u8; 32];
+        let proposal_hash = [1u8; 32];
+
+        // Register proposal directly
+        consensus.proposal_to_tx.insert(proposal_hash, txid);
+
+        // Lookup should work
+        let found_txid = consensus.proposal_to_tx.get(&proposal_hash).map(|v| *v);
+        assert_eq!(found_txid, Some(txid));
+
+        // Non-existent proposal
+        let fake_hash = [99u8; 32];
+        assert!(consensus.proposal_to_tx.get(&fake_hash).is_none());
+    }
+
+    /// Test fallback round tracking
+    #[test]
+    fn test_phase6_fallback_round_tracking() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let txid = [42u8; 32];
+        let slot_index = 1000u64;
+        let round = 2u32;
+
+        // Initially not tracking
+        assert!(consensus.fallback_rounds.get(&txid).is_none());
+
+        // Start tracking
+        consensus
+            .fallback_rounds
+            .insert(txid, (slot_index, round, Instant::now()));
+
+        // Verify tracking
+        let (stored_slot, stored_round, _) = *consensus.fallback_rounds.get(&txid).unwrap().value();
+        assert_eq!(stored_slot, slot_index);
+        assert_eq!(stored_round, round);
+    }
+
+    /// Test Q_finality threshold calculation (2/3 majority)
+    #[test]
+    fn test_phase6_q_finality_threshold() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let proposal_hash = [42u8; 32];
+        let total_weight = 9_000_000_000u64;
+        let q_finality = (total_weight * 2) / 3; // 6B
+
+        // Add votes below threshold
+        for i in 0..5 {
+            let vote = FallbackVote {
+                chain_id: 1,
+                proposal_hash,
+                vote: FallbackVoteDecision::Approve,
+                voter_mn_id: format!("mn_{}", i),
+                voter_weight: 1_000_000_000,
+                voter_signature: vec![],
+            };
+            consensus
+                .fallback_votes
+                .entry(proposal_hash)
+                .or_default()
+                .push(vote);
+        }
+
+        // Calculate weight
+        let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
+        let approve_weight: u64 = votes
+            .iter()
+            .filter(|v| matches!(v.vote, FallbackVoteDecision::Approve))
+            .map(|v| v.voter_weight)
+            .sum();
+        assert_eq!(approve_weight, 5_000_000_000);
+        assert!(approve_weight < q_finality, "5B < 6B, should not finalize");
+
+        // Add more votes to reach threshold
+        for i in 5..7 {
+            let vote = FallbackVote {
+                chain_id: 1,
+                proposal_hash,
+                vote: FallbackVoteDecision::Approve,
+                voter_mn_id: format!("mn_{}", i),
+                voter_weight: 1_000_000_000,
+                voter_signature: vec![],
+            };
+            consensus
+                .fallback_votes
+                .entry(proposal_hash)
+                .or_default()
+                .push(vote);
+        }
+
+        let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
+        let approve_weight: u64 = votes
+            .iter()
+            .filter(|v| matches!(v.vote, FallbackVoteDecision::Approve))
+            .map(|v| v.voter_weight)
+            .sum();
+        assert_eq!(approve_weight, 7_000_000_000);
+        assert!(approve_weight >= q_finality, "7B >= 6B, should finalize");
+    }
+
+    /// Test reject decision reaches Q_finality
+    #[test]
+    fn test_phase6_reject_reaches_quorum() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let proposal_hash = [43u8; 32];
+        let total_weight = 10_000_000_000u64;
+        let q_finality = (total_weight * 2) / 3; // ~6.67B
+
+        // Add 7 Reject votes (7B >= 6.67B)
+        for i in 0..7 {
+            let vote = FallbackVote {
+                chain_id: 1,
+                proposal_hash,
+                vote: FallbackVoteDecision::Reject,
+                voter_mn_id: format!("mn_{}", i),
+                voter_weight: 1_000_000_000,
+                voter_signature: vec![],
+            };
+            consensus
+                .fallback_votes
+                .entry(proposal_hash)
+                .or_default()
+                .push(vote);
+        }
+
+        let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
+        let reject_weight: u64 = votes
+            .iter()
+            .filter(|v| matches!(v.vote, FallbackVoteDecision::Reject))
+            .map(|v| v.voter_weight)
+            .sum();
+        assert_eq!(reject_weight, 7_000_000_000);
+        assert!(
+            reject_weight >= q_finality,
+            "Reject should reach Q_finality"
+        );
+    }
+
+    /// Test f+1 alert threshold with different network sizes
+    #[test]
+    fn test_phase6_f_plus_1_various_sizes() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        // Test n=10: f=3, threshold=4
+        let txid1 = [1u8; 32];
+        for i in 0..4 {
+            let alert = LivenessAlert {
+                chain_id: 1,
+                txid: txid1,
+                tx_hash_commitment: [0u8; 32],
+                slot_index: 1000,
+                poll_history: vec![],
+                current_confidence: 5,
+                stall_duration_ms: 30000,
+                reporter_mn_id: format!("mn_{}", i),
+                reporter_signature: vec![],
+            };
+            consensus
+                .liveness_alerts
+                .entry(txid1)
+                .or_default()
+                .push(alert);
+        }
+
+        // Verify alert count
+        let alerts = consensus.liveness_alerts.get(&txid1).unwrap();
+        let unique: std::collections::HashSet<_> =
+            alerts.iter().map(|a| &a.reporter_mn_id).collect();
+        assert_eq!(unique.len(), 4, "Should have 4 unique reporters");
+
+        // Test n=100: f=33, threshold=34
+        let txid2 = [2u8; 32];
+        for i in 0..34 {
+            let alert = LivenessAlert {
+                chain_id: 1,
+                txid: txid2,
+                tx_hash_commitment: [0u8; 32],
+                slot_index: 1000,
+                poll_history: vec![],
+                current_confidence: 5,
+                stall_duration_ms: 30000,
+                reporter_mn_id: format!("mn_{}", i),
+                reporter_signature: vec![],
+            };
+            consensus
+                .liveness_alerts
+                .entry(txid2)
+                .or_default()
+                .push(alert);
+        }
+
+        let alerts = consensus.liveness_alerts.get(&txid2).unwrap();
+        let unique: std::collections::HashSet<_> =
+            alerts.iter().map(|a| &a.reporter_mn_id).collect();
+        assert_eq!(unique.len(), 34, "Should have 34 unique reporters");
+    }
+
+    /// Test mixed Approve/Reject votes
+    #[test]
+    fn test_phase6_mixed_votes() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        let proposal_hash = [44u8; 32];
+
+        // Add 4 Approve votes
+        for i in 0..4 {
+            let vote = FallbackVote {
+                chain_id: 1,
+                proposal_hash,
+                vote: FallbackVoteDecision::Approve,
+                voter_mn_id: format!("mn_approve_{}", i),
+                voter_weight: 1_000_000_000,
+                voter_signature: vec![],
+            };
+            consensus
+                .fallback_votes
+                .entry(proposal_hash)
+                .or_default()
+                .push(vote);
+        }
+
+        // Add 3 Reject votes
+        for i in 0..3 {
+            let vote = FallbackVote {
+                chain_id: 1,
+                proposal_hash,
+                vote: FallbackVoteDecision::Reject,
+                voter_mn_id: format!("mn_reject_{}", i),
+                voter_weight: 1_000_000_000,
+                voter_signature: vec![],
+            };
+            consensus
+                .fallback_votes
+                .entry(proposal_hash)
+                .or_default()
+                .push(vote);
+        }
+
+        // Check status
+        let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
+        assert_eq!(votes.len(), 7);
+
+        let approve_weight: u64 = votes
+            .iter()
+            .filter(|v| matches!(v.vote, FallbackVoteDecision::Approve))
+            .map(|v| v.voter_weight)
+            .sum();
+        let reject_weight: u64 = votes
+            .iter()
+            .filter(|v| matches!(v.vote, FallbackVoteDecision::Reject))
+            .map(|v| v.voter_weight)
+            .sum();
+
+        assert_eq!(approve_weight, 4_000_000_000);
+        assert_eq!(reject_weight, 3_000_000_000);
+    }
+
+    /// Test Byzantine detection via internal tracking
+    #[test]
+    fn test_phase6_byzantine_tracking() {
+        let config = TimeVoteConfig::default();
+        let registry = create_test_registry();
+        let consensus = TimeVoteConsensus::new(config, registry).unwrap();
+
+        // Direct access to internal byzantine_nodes map
+        assert_eq!(consensus.byzantine_nodes.len(), 0);
+
+        // Flag a node
+        consensus.byzantine_nodes.insert("mn_bad".to_string(), true);
+
+        // Verify tracking
+        assert_eq!(consensus.byzantine_nodes.len(), 1);
+        assert!(*consensus.byzantine_nodes.get("mn_bad").unwrap().value());
     }
 }

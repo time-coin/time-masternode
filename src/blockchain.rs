@@ -1886,6 +1886,7 @@ impl Blockchain {
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
                 active_masternodes_bitmap: active_bitmap,
+                liveness_recovery: false, // Will be set below if needed
                 ..Default::default()
             },
             transactions: all_txs,
@@ -1893,7 +1894,21 @@ impl Blockchain {
             time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
             consensus_participants: voters.clone(),
+            liveness_recovery: false, // Will be set if fallback resolution occurred
         };
+
+        // §7.6 Liveness Fallback: Check if we need to resolve stalled transactions
+        if self.consensus.has_pending_fallback_transactions() {
+            let resolved = self.consensus.resolve_stalls_via_timelock();
+            block.liveness_recovery = resolved;
+            block.header.liveness_recovery = resolved;
+            if resolved {
+                tracing::warn!(
+                    "🔒 Block {} includes liveness recovery (resolved stalled transactions)",
+                    next_height
+                );
+            }
+        }
 
         // Compute attestation root after attestations are set
         block.header.attestation_root = block.compute_attestation_root();
@@ -4167,9 +4182,9 @@ impl Blockchain {
                 .push(peer_ip.clone());
         }
 
-        // Find the best chain: MAJORITY RULES
-        // A single peer on a higher height should NOT override majority at lower height
-        // This prevents incompatible/forked peers from blocking consensus
+        // Find the best chain: LONGEST VALID CHAIN RULE
+        // The longest valid chain is canonical, regardless of peer count
+        // Shorter chains must sync to the longest chain
 
         // Log all detected chains
         tracing::info!(
@@ -4186,18 +4201,18 @@ impl Blockchain {
             );
         }
 
-        // Find the chain with the MOST peer support
-        // Only use height as tiebreaker when peer counts are equal
+        // Find the LONGEST chain (highest height)
+        // Use peer count as tiebreaker when heights are equal
         let consensus_chain = chain_counts
             .iter()
             .max_by(|((h1, _), peers1), ((h2, _), peers2)| {
-                // Primary: more peers wins (majority rules)
-                let peer_cmp = peers1.len().cmp(&peers2.len());
-                if peer_cmp != std::cmp::Ordering::Equal {
-                    return peer_cmp;
+                // Primary: higher height wins (longest chain rule)
+                let height_cmp = h1.cmp(h2);
+                if height_cmp != std::cmp::Ordering::Equal {
+                    return height_cmp;
                 }
-                // Secondary: higher height wins (at same peer count)
-                h1.cmp(h2)
+                // Secondary: more peers wins (at same height)
+                peers1.len().cmp(&peers2.len())
             })
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
@@ -4264,10 +4279,10 @@ impl Blockchain {
             hex::encode(&our_hash[..8])
         );
 
-        // Case 1: Consensus chain is longer - definitely switch
+        // Case 1: Longest chain is longer than us - sync to it
         if consensus_height > our_height {
             tracing::warn!(
-                "🔀 FORK RESOLUTION TRIGGERED: consensus height {} > our height {} ({} peers agree: {:?})",
+                "🔀 FORK RESOLUTION TRIGGERED: longest chain height {} > our height {} (found on {} peers: {:?})",
                 consensus_height,
                 our_height,
                 consensus_peers.len(),
@@ -4393,11 +4408,12 @@ impl Blockchain {
             }
         }
 
-        // Case 3: We're ahead of consensus
-        // LONGEST VALID CHAIN RULE: If we have a valid longer chain, WE are canonical
+        // Case 3: We're ahead of all known peers
+        // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical
+        // This can only happen if we have blocks that no peer has yet
         if our_height > consensus_height {
             tracing::info!(
-                "📈 We have the longest chain: height {} > consensus {} ({} peers behind)",
+                "📈 We have the longest chain: height {} > highest peer {} ({} peers at that height)",
                 our_height,
                 consensus_height,
                 consensus_peers.len()

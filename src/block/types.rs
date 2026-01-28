@@ -94,6 +94,10 @@ pub struct Block {
     /// Used to determine eligibility for next block's rewards
     #[serde(default)]
     pub consensus_participants: Vec<String>,
+    /// §7.6 Liveness Fallback: Flag indicating this block resolved stalled transactions
+    /// When true, this TimeLock block deterministically resolved all pending fallback transactions
+    #[serde(default)]
+    pub liveness_recovery: bool,
 }
 
 /// Masternode counts by tier at time of block production
@@ -143,6 +147,9 @@ pub struct BlockHeader {
     /// Space: 10,000 masternodes = 1,250 bytes (vs 200KB for address list)
     #[serde(default)]
     pub active_masternodes_bitmap: Vec<u8>,
+    /// §7.6 Liveness Fallback: Flag indicating this TimeLock block resolved stalled transactions
+    #[serde(default)]
+    pub liveness_recovery: bool,
 }
 
 impl Block {
@@ -375,6 +382,7 @@ mod tests {
             masternode_rewards: vec![],
             time_attestations: vec![],
             consensus_participants: vec![],
+            liveness_recovery: false,
         };
 
         let merkle = calculate_merkle_root(&block.transactions);
@@ -404,6 +412,7 @@ mod tests {
             masternode_rewards: vec![],
             time_attestations: vec![],
             consensus_participants: vec![],
+            liveness_recovery: false,
         };
 
         let merkle = calculate_merkle_root(&block.transactions);
