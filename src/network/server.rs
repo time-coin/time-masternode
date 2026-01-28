@@ -657,6 +657,14 @@ async fn handle_peer(
                                     tracing::info!("✅ Transaction {} finalized (from {})",
                                         hex::encode(*txid), peer.addr);
 
+                                    // CRITICAL: Actually finalize the transaction on THIS node
+                                    // Move from pending → finalized pool so block producers can include it
+                                    if let Some(_tx) = consensus.tx_pool.finalize_transaction(*txid) {
+                                        tracing::info!("📦 Moved TX {} to finalized pool on this node", hex::encode(*txid));
+                                    } else {
+                                        tracing::debug!("TX {} not in pending pool (may already be finalized or not received yet)", hex::encode(*txid));
+                                    }
+
                                     // Gossip finalization to other peers
                                     match broadcast_tx.send(msg.clone()) {
                                         Ok(receivers) => {
