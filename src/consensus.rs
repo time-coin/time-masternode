@@ -2817,6 +2817,11 @@ impl ConsensusEngine {
         self.tx_pool.clear_finalized();
     }
 
+    /// Clear only specific finalized transactions that were included in a block
+    pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
+        self.tx_pool.clear_finalized_txs(txids);
+    }
+
     #[allow(dead_code)]
     pub fn get_mempool_info(&self) -> (usize, usize) {
         let pending = self.tx_pool.pending_count();

@@ -14,7 +14,7 @@ use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
 
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use crate::types::{OutPoint, Transaction, TxInput, TxOutput, UTXO};
+use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use chrono::Utc;
@@ -2182,8 +2182,24 @@ impl Blockchain {
         self.current_height
             .store(block.header.height, Ordering::Release);
 
-        // Clear finalized transactions now that they're in a block (archived)
-        self.consensus.clear_finalized_transactions();
+        // Clear only finalized transactions that were in THIS block
+        // Extract non-coinbase, non-reward transaction IDs from the block
+        // Skip first 2 transactions (coinbase + reward distribution)
+        let block_txids: Vec<Hash256> = block
+            .transactions
+            .iter()
+            .skip(2)
+            .map(|tx| tx.txid())
+            .collect();
+
+        if !block_txids.is_empty() {
+            tracing::debug!(
+                "🔍 Block {}: Clearing {} finalized transaction(s) from pool",
+                block.header.height,
+                block_txids.len()
+            );
+            self.consensus.clear_finalized_txs(&block_txids);
+        }
 
         // Phase 3.3: Cleanup invalid collaterals after block processing
         // This ensures masternodes with spent collateral are automatically deregistered

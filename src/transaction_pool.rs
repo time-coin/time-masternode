@@ -187,6 +187,23 @@ impl TransactionPool {
         );
     }
 
+    /// Clear only specific finalized transactions that were included in a block
+    /// This prevents clearing transactions that weren't actually in the block
+    pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
+        let mut cleared = 0;
+        for txid in txids {
+            if self.finalized.remove(txid).is_some() {
+                cleared += 1;
+            }
+        }
+        if cleared > 0 {
+            tracing::info!(
+                "🧹 TxPool: Cleared {} finalized transaction(s) that were included in block",
+                cleared
+            );
+        }
+    }
+
     /// Get pending transaction count (O(1))
     pub fn pending_count(&self) -> usize {
         self.pending_count.load(Ordering::Relaxed)
