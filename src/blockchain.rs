@@ -4595,26 +4595,17 @@ impl Blockchain {
         }
 
         let fork_height = blocks[0].header.height;
-        let peer_tip_height = blocks
-            .iter()
-            .map(|b| b.header.height)
-            .max()
-            .unwrap_or(fork_height);
         let our_height = self.get_height();
 
-        info!(
-            "🔀 Fork detected at height {} from peer {} ({} blocks provided, peer_tip: {}, our_height: {})",
-            fork_height, peer_addr, blocks.len(), peer_tip_height, our_height
-        );
-
         // Check if we're already in FetchingChain state for this peer
-        // If so, merge these blocks with accumulated blocks
+        // If so, merge these blocks with accumulated blocks and preserve peer_height
         let mut all_blocks = blocks.clone();
-        {
+        let peer_tip_height = {
             let current_state = self.fork_state.read().await;
             if let ForkResolutionState::FetchingChain {
                 peer_addr: fetching_peer,
                 accumulated_blocks,
+                peer_height,
                 ..
             } = &*current_state
             {
@@ -4634,9 +4625,30 @@ impl Blockchain {
                         }
                     }
                     info!("📦 Total blocks for fork resolution: {}", all_blocks.len());
+                    // Use the peer_height from state, not max block height
+                    *peer_height
+                } else {
+                    // Different peer, use max block height
+                    blocks
+                        .iter()
+                        .map(|b| b.header.height)
+                        .max()
+                        .unwrap_or(fork_height)
                 }
+            } else {
+                // Not in FetchingChain state, use max block height
+                blocks
+                    .iter()
+                    .map(|b| b.header.height)
+                    .max()
+                    .unwrap_or(fork_height)
             }
-        }
+        };
+
+        info!(
+            "🔀 Fork detected at height {} from peer {} ({} blocks provided, peer_tip: {}, our_height: {})",
+            fork_height, peer_addr, blocks.len(), peer_tip_height, our_height
+        );
 
         // STRATEGY: Binary search requires we have enough blocks from the peer.
         // If we don't have enough blocks, request more first.
