@@ -4748,7 +4748,42 @@ impl Blockchain {
                         .collect();
 
                     if reorg_blocks.is_empty() {
-                        return Err("No blocks to reorg with after filtering".to_string());
+                        warn!(
+                            "❌ No blocks to reorg with after filtering (common_ancestor: {}, peer_tip: {}, blocks_before_filter: {})",
+                            common_ancestor, peer_tip_height, all_blocks.len()
+                        );
+
+                        // Request blocks from common_ancestor+1 to peer_tip
+                        let expected_start = common_ancestor + 1;
+                        if peer_tip_height >= expected_start {
+                            info!(
+                                "📥 Requesting missing blocks {}-{} from {} for reorg",
+                                expected_start, peer_tip_height, peer_addr
+                            );
+
+                            *self.fork_state.write().await = ForkResolutionState::FetchingChain {
+                                common_ancestor,
+                                fork_height,
+                                peer_addr: peer_addr.clone(),
+                                peer_height: peer_tip_height,
+                                fetched_up_to: peer_tip_height,
+                                accumulated_blocks: Vec::new(),
+                                started_at: std::time::Instant::now(),
+                            };
+
+                            self.request_blocks_from_peer(
+                                &peer_addr,
+                                expected_start,
+                                peer_tip_height,
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+
+                        return Err(format!(
+                            "No blocks to reorg with (ancestor: {}, peer_tip: {})",
+                            common_ancestor, peer_tip_height
+                        ));
                     }
 
                     // Verify blocks are contiguous from common_ancestor + 1
