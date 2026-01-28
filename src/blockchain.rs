@@ -146,7 +146,7 @@ pub enum CanonicalChoice {
 
 /// Fork resolution state machine
 #[derive(Debug, Clone)]
-enum ForkResolutionState {
+pub enum ForkResolutionState {
     /// No fork detected
     None,
 
@@ -205,7 +205,7 @@ pub struct Blockchain {
     /// Recent reorganization events (for monitoring and debugging)
     reorg_history: Arc<RwLock<Vec<ReorgMetrics>>>,
     /// Current fork resolution state
-    fork_state: Arc<RwLock<ForkResolutionState>>,
+    pub fork_state: Arc<RwLock<ForkResolutionState>>,
     /// Fork resolution mutex to prevent concurrent fork resolutions (race condition protection)
     fork_resolution_lock: Arc<tokio::sync::Mutex<()>>,
     /// Consensus peers (majority chain) - reject blocks from non-consensus peers during fork resolution

@@ -2108,6 +2108,33 @@ impl MessageHandler {
             if is_whitelisted { "(whitelisted)" } else { "" }
         );
 
+        // Check if we're in fork resolution state - if so, route blocks to fork handler
+        {
+            use crate::blockchain::ForkResolutionState;
+            let fork_state = context.blockchain.fork_state.read().await;
+            if let ForkResolutionState::FetchingChain { peer_addr, .. } = &*fork_state {
+                if peer_addr == &self.peer_ip {
+                    info!(
+                        "📥 [{}] Received blocks from {} match active fork resolution - routing to handle_fork()",
+                        self.direction, self.peer_ip
+                    );
+                    drop(fork_state); // Release lock before async call
+
+                    let peer_ip = self.peer_ip.clone();
+                    let blockchain = context.blockchain.clone();
+
+                    // Pass blocks to fork handler
+                    tokio::spawn(async move {
+                        if let Err(e) = blockchain.handle_fork(blocks, peer_ip).await {
+                            warn!("Fork resolution with new blocks failed: {}", e);
+                        }
+                    });
+
+                    return Ok(None);
+                }
+            }
+        }
+
         // Try to add blocks sequentially
         let mut added = 0;
         let mut skipped = 0;

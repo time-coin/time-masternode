@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.2.0] - 2026-01-28 - Protocol v6.2: TimeGuard Complete
 
+### Fixed - Fork Resolution
+- **Critical Bug Fix**: Fork resolution now properly handles historical block responses
+  - When requesting historical blocks for fork resolution, received blocks are now routed directly to `handle_fork()`
+  - Previously, blocks were re-processed through `add_block_with_fork_handling()`, triggering duplicate fork detection
+  - Made `ForkResolutionState` and `fork_state` public for cross-module coordination
+  - Fixes stuck fork resolution where nodes repeatedly detect the same fork without resolving it
+
 ### Added - Liveness Fallback Protocol (§7.6 Complete Implementation)
 - **Core Fallback Logic**
   - `start_stall_detection()` - Background task monitoring transactions every 5s for 30s+ stalls
