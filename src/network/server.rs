@@ -1133,6 +1133,244 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
                                 }
+                                NetworkMessage::TimeVoteRequest { txid, tx_hash_commitment, slot_index } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "TimeVoteRequest");
+                                    check_rate_limit!("vote");
+
+                                    // Spawn vote processing (non-blocking)
+                                    let txid_val = *txid;
+                                    let tx_hash_commitment_val = *tx_hash_commitment;
+                                    let slot_index_val = *slot_index;
+                                    let peer_addr_str = peer.addr.to_string();
+                                    let ip_str_clone = ip_str.clone();
+                                    let consensus_clone = Arc::clone(&consensus);
+                                    let peer_registry_clone = Arc::clone(&peer_registry);
+
+                                    tokio::spawn(async move {
+                                        tracing::debug!(
+                                            "🗳️  TimeVoteRequest from {} for TX {:?} (slot {})",
+                                            peer_addr_str,
+                                            hex::encode(txid_val),
+                                            slot_index_val
+                                        );
+
+                                        // Step 1: Check if transaction exists in our mempool
+                                        let tx_opt = consensus_clone.tx_pool.get_pending(&txid_val);
+
+                                        let decision = if let Some(tx) = tx_opt {
+                                            // Step 2: Verify tx_hash_commitment matches actual transaction
+                                            let actual_commitment = crate::types::TimeVote::calculate_tx_commitment(&tx);
+                                            if actual_commitment != tx_hash_commitment_val {
+                                                tracing::warn!(
+                                                    "⚠️  TX {:?} commitment mismatch: expected {:?}, got {:?}",
+                                                    hex::encode(txid_val),
+                                                    hex::encode(actual_commitment),
+                                                    hex::encode(tx_hash_commitment_val)
+                                                );
+                                                crate::types::VoteDecision::Reject
+                                            } else {
+                                                // Step 3: Verify UTXOs are available (basic validation)
+                                                match consensus_clone.validate_transaction(&tx).await {
+                                                    Ok(_) => {
+                                                        tracing::debug!("✅ TX {:?} validated successfully", hex::encode(txid_val));
+                                                        crate::types::VoteDecision::Accept
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!("⚠️  TX {:?} validation failed: {}", hex::encode(txid_val), e);
+                                                        crate::types::VoteDecision::Reject
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            tracing::debug!("⚠️  TX {:?} not found in mempool", hex::encode(txid_val));
+                                            crate::types::VoteDecision::Reject
+                                        };
+
+                                        // Step 4: Sign TimeVote with our masternode key
+                                        let vote_opt = consensus_clone.sign_timevote(
+                                            txid_val,
+                                            tx_hash_commitment_val,
+                                            slot_index_val,
+                                            decision,
+                                        );
+
+                                        if let Some(vote) = vote_opt {
+                                            // Step 5: Send TimeVoteResponse with signed vote
+                                            let vote_response = NetworkMessage::TimeVoteResponse { vote };
+                                            let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
+                                            tracing::debug!(
+                                                "✅ TimeVoteResponse sent for TX {:?} (decision: {:?})",
+                                                hex::encode(txid_val),
+                                                decision
+                                            );
+                                        } else {
+                                            tracing::warn!(
+                                                "⚠️  Failed to sign TimeVote for TX {:?} (not a masternode or identity not set)",
+                                                hex::encode(txid_val)
+                                            );
+                                        }
+                                    });
+                                }
+                                NetworkMessage::TimeVoteResponse { vote } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "TimeVoteResponse");
+                                    check_rate_limit!("vote");
+
+                                    // Received a signed TimeVote from a peer
+                                    tracing::debug!(
+                                        "📥 TimeVoteResponse from {} for TX {:?} (decision: {:?}, weight: {})",
+                                        peer.addr,
+                                        hex::encode(vote.txid),
+                                        vote.decision,
+                                        vote.voter_weight
+                                    );
+
+                                    let txid = vote.txid;
+                                    let vote_clone = vote.clone();
+                                    let consensus_clone = Arc::clone(&consensus);
+                                    let tx_pool = Arc::clone(&consensus.tx_pool);
+
+                                    // Spawn finality check (non-blocking)
+                                    tokio::spawn(async move {
+                                        // Step 1: Accumulate the vote
+                                        let accumulated_weight = match consensus_clone.timevote.accumulate_timevote(vote_clone) {
+                                            Ok(weight) => weight,
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "Failed to accumulate vote for TX {:?}: {}",
+                                                    hex::encode(txid),
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        };
+
+                                        tracing::debug!(
+                                            "Vote accumulated for TX {:?}, total weight: {}",
+                                            hex::encode(txid),
+                                            accumulated_weight
+                                        );
+
+                                        // Step 2: Check if finality threshold reached
+                                        // Calculate total AVS weight and 67% threshold
+                                        let validators = consensus_clone.timevote.get_validators();
+                                        let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
+                                        let finality_threshold = ((total_avs_weight as f64) * 0.67).ceil() as u64;
+
+                                        tracing::debug!(
+                                            "Finality check for TX {:?}: accumulated={}, threshold={} (67% of {})",
+                                            hex::encode(txid),
+                                            accumulated_weight,
+                                            finality_threshold,
+                                            total_avs_weight
+                                        );
+
+                                        // Step 3: If threshold met, finalize transaction
+                                        if accumulated_weight >= finality_threshold {
+                                            tracing::info!(
+                                                "🎉 TX {:?} reached finality threshold! ({} >= {})",
+                                                hex::encode(txid),
+                                                accumulated_weight,
+                                                finality_threshold
+                                            );
+
+                                            // Move transaction from pending to finalized
+                                            if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
+                                                tracing::info!(
+                                                    "✅ TX {:?} moved to finalized pool",
+                                                    hex::encode(txid)
+                                                );
+
+                                                // Record finalization in TimeVoteConsensus
+                                                consensus_clone.timevote.record_finalization(txid, accumulated_weight);
+
+                                                // Assemble TimeProof certificate
+                                                match consensus_clone.timevote.assemble_timeproof(txid) {
+                                                    Ok(timeproof) => {
+                                                        tracing::info!(
+                                                            "📜 TimeProof assembled for TX {:?} with {} votes",
+                                                            hex::encode(txid),
+                                                            timeproof.votes.len()
+                                                        );
+
+                                                        // Store TimeProof in finality_proof_manager
+                                                        if let Err(e) = consensus_clone.finality_proof_mgr.store_timeproof(timeproof.clone()) {
+                                                            tracing::error!(
+                                                                "❌ Failed to store TimeProof for TX {:?}: {}",
+                                                                hex::encode(txid),
+                                                                e
+                                                            );
+                                                        }
+
+                                                        // Broadcast TimeProof to network (Task 2.5)
+                                                        consensus_clone.broadcast_timeproof(timeproof).await;
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!(
+                                                            "❌ Failed to assemble TimeProof for TX {:?}: {}",
+                                                            hex::encode(txid),
+                                                            e
+                                                        );
+                                                    }
+                                                }
+                                            } else {
+                                                tracing::warn!(
+                                                    "⚠️  Failed to finalize TX {:?} - not found in pending pool",
+                                                    hex::encode(txid)
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
+                                NetworkMessage::TimeProofBroadcast { proof } => {
+                                    check_message_size!(MAX_VOTE_SIZE, "TimeProofBroadcast");
+                                    check_rate_limit!("vote");
+
+                                    // Received TimeProof certificate from peer
+                                    let proof_clone = proof.clone();
+                                    let consensus_clone = Arc::clone(&consensus);
+                                    let peer_addr_str = peer.addr.to_string();
+
+                                    // Spawn verification (non-blocking)
+                                    tokio::spawn(async move {
+                                        tracing::info!(
+                                            "📜 Received TimeProof from {} for TX {:?} with {} votes",
+                                            peer_addr_str,
+                                            hex::encode(proof_clone.txid),
+                                            proof_clone.votes.len()
+                                        );
+
+                                        // Verify TimeProof using consensus engine's verification method
+                                        match consensus_clone.timevote.verify_timeproof(&proof_clone) {
+                                            Ok(_accumulated_weight) => {
+                                                tracing::info!(
+                                                    "✅ TimeProof verified for TX {:?}",
+                                                    hex::encode(proof_clone.txid)
+                                                );
+
+                                                // Store verified TimeProof
+                                                if let Err(e) = consensus_clone.finality_proof_mgr.store_timeproof(proof_clone.clone()) {
+                                                    tracing::error!(
+                                                        "❌ Failed to store TimeProof for TX {:?}: {}",
+                                                        hex::encode(proof_clone.txid),
+                                                        e
+                                                    );
+                                                } else {
+                                                    tracing::info!(
+                                                        "💾 TimeProof stored for TX {:?}",
+                                                        hex::encode(proof_clone.txid)
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "⚠️  Invalid TimeProof from {}: {}",
+                                                    peer_addr_str,
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
                                 NetworkMessage::TransactionVoteRequest { txid } => {
                                     check_message_size!(MAX_VOTE_SIZE, "VoteRequest");
                                     check_rate_limit!("vote");

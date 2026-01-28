@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::types::{FinalityVote, Hash256, Transaction, VerifiableFinality};
+use crate::types::{FinalityVote, Hash256, TimeProof, Transaction, VerifiableFinality};
 use dashmap::DashMap;
 use ed25519_dalek::VerifyingKey;
 use std::sync::Arc;
@@ -18,6 +18,8 @@ pub struct FinalityProofManager {
     votes: Arc<DashMap<Hash256, Vec<FinalityVote>>>,
     /// finalized_txs[txid] = VerifiableFinality (when threshold reached)
     finalized_txs: Arc<DashMap<Hash256, VerifiableFinality>>,
+    /// timeproofs[txid] = TimeProof (Protocol §8.2 finality certificates)
+    timeproofs: Arc<DashMap<Hash256, TimeProof>>,
     /// Chain ID for validating votes
     chain_id: u32,
 }
@@ -27,6 +29,7 @@ impl FinalityProofManager {
         Self {
             votes: Arc::new(DashMap::new()),
             finalized_txs: Arc::new(DashMap::new()),
+            timeproofs: Arc::new(DashMap::new()),
             chain_id,
         }
     }
@@ -128,6 +131,86 @@ impl FinalityProofManager {
     /// Clear votes for a transaction (after finalization or rejection)
     pub fn clear_votes(&self, txid: &Hash256) {
         self.votes.remove(txid);
+    }
+
+    // ========================================================================
+    // TIMEPROOF STORAGE (Protocol §8.2)
+    // ========================================================================
+
+    /// Store a TimeProof certificate for a transaction
+    /// This should be called after TimeProof assembly and verification
+    pub fn store_timeproof(&self, timeproof: TimeProof) -> Result<(), String> {
+        let txid = timeproof.txid;
+
+        // Store the TimeProof
+        self.timeproofs.insert(txid, timeproof.clone());
+
+        tracing::info!(
+            "📦 Stored TimeProof for TX {:?} (slot: {}, votes: {})",
+            hex::encode(txid),
+            timeproof.slot_index,
+            timeproof.votes.len()
+        );
+
+        Ok(())
+    }
+
+    /// Retrieve a TimeProof certificate for a transaction
+    pub fn get_timeproof(&self, txid: &Hash256) -> Option<TimeProof> {
+        self.timeproofs.get(txid).map(|entry| entry.clone())
+    }
+
+    /// Check if a TimeProof exists for a transaction
+    pub fn has_timeproof(&self, txid: &Hash256) -> bool {
+        self.timeproofs.contains_key(txid)
+    }
+
+    /// Remove a TimeProof (used during cleanup)
+    pub fn remove_timeproof(&self, txid: &Hash256) -> Option<TimeProof> {
+        self.timeproofs.remove(txid).map(|(_, proof)| proof)
+    }
+
+    /// Get count of stored TimeProofs
+    pub fn timeproof_count(&self) -> usize {
+        self.timeproofs.len()
+    }
+
+    /// Cleanup old TimeProofs (keeps only recent ones)
+    /// Returns number of TimeProofs removed
+    pub fn cleanup_old_timeproofs(&self, keep_count: usize) -> usize {
+        let current_count = self.timeproofs.len();
+
+        if current_count <= keep_count {
+            return 0; // Nothing to cleanup
+        }
+
+        let to_remove = current_count - keep_count;
+
+        // Collect oldest entries (simple FIFO for now)
+        // TODO: Use slot_index or timestamp for more sophisticated cleanup
+        let keys_to_remove: Vec<Hash256> = self
+            .timeproofs
+            .iter()
+            .take(to_remove)
+            .map(|entry| *entry.key())
+            .collect();
+
+        let mut removed = 0;
+        for key in keys_to_remove {
+            if self.timeproofs.remove(&key).is_some() {
+                removed += 1;
+            }
+        }
+
+        if removed > 0 {
+            tracing::info!(
+                "🧹 Cleaned up {} old TimeProofs (kept {})",
+                removed,
+                self.timeproofs.len()
+            );
+        }
+
+        removed
     }
 }
 

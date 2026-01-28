@@ -137,25 +137,47 @@ pub enum NetworkMessage {
         consensus_peer_count: usize,
         message: String,
     },
-    // timevote consensus voting
+    // TimeVote consensus voting - Protocol §7 & §8
+    // DEPRECATED: Use TimeVoteRequest instead
     TransactionVoteRequest {
         txid: Hash256,
     },
+    // DEPRECATED: Use TimeVoteResponse instead
     TransactionVoteResponse {
         txid: Hash256,
         preference: String, // "Accept" or "Reject"
     },
-    // Verifiable Finality Proofs (VFP) - Per Protocol §8
+    // TimeVote Protocol - Signed vote request (Protocol §8.1)
+    TimeVoteRequest {
+        txid: Hash256,
+        tx_hash_commitment: Hash256,
+        slot_index: u64,
+    },
+    // TimeVote Protocol - Signed vote response (Protocol §8.1)
+    TimeVoteResponse {
+        vote: crate::types::TimeVote,
+    },
+    // TimeVote broadcast - for disseminating votes to all peers
+    TimeVoteBroadcast {
+        vote: crate::types::TimeVote,
+    },
+    // TimeProof broadcast - for disseminating finality certificates (Protocol §8.2)
+    TimeProofBroadcast {
+        proof: crate::types::TimeProof,
+    },
+    // Legacy aliases for backward compatibility
+    // DEPRECATED: Use TimeVoteRequest instead
     FinalityVoteRequest {
         txid: Hash256,
         slot_index: u64,
     },
+    // DEPRECATED: Use TimeVoteResponse instead
     FinalityVoteResponse {
-        vote: crate::types::FinalityVote,
+        vote: crate::types::FinalityVote, // Type alias to TimeVote
     },
-    // Finality vote broadcast - for disseminating votes to all peers
+    // DEPRECATED: Use TimeVoteBroadcast instead
     FinalityVoteBroadcast {
-        vote: crate::types::FinalityVote,
+        vote: crate::types::FinalityVote, // Type alias to TimeVote
     },
     // TimeLock Block production messages
     TimeLockBlockProposal {
@@ -297,6 +319,10 @@ impl NetworkMessage {
             NetworkMessage::BlockRangeResponse(_) => "BlockRangeResponse",
             NetworkMessage::TransactionVoteRequest { .. } => "TransactionVoteRequest",
             NetworkMessage::TransactionVoteResponse { .. } => "TransactionVoteResponse",
+            NetworkMessage::TimeVoteRequest { .. } => "TimeVoteRequest",
+            NetworkMessage::TimeVoteResponse { .. } => "TimeVoteResponse",
+            NetworkMessage::TimeVoteBroadcast { .. } => "TimeVoteBroadcast",
+            NetworkMessage::TimeProofBroadcast { .. } => "TimeProofBroadcast",
             NetworkMessage::FinalityVoteRequest { .. } => "FinalityVoteRequest",
             NetworkMessage::FinalityVoteResponse { .. } => "FinalityVoteResponse",
             NetworkMessage::FinalityVoteBroadcast { .. } => "FinalityVoteBroadcast",

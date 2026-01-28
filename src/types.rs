@@ -405,17 +405,23 @@ impl LockedCollateral {
 // VERIFIABLE FINALITY PROOFS (VFP) - Per Protocol §8
 // ============================================================================
 
-/// A finality vote signed by a masternode
-/// Vote decision for finality consensus
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Vote decision for TimeVote consensus
+/// Used by both TimeVote Protocol (normal path) and TimeGuard (fallback path)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum VoteDecision {
-    Accept, // Transaction is valid and preferred
-    Reject, // Transaction is invalid or conflicts with preferred transaction
+    Accept = 0x01, // Transaction is valid and preferred
+    Reject = 0x00, // Transaction is invalid or conflicts with preferred transaction
 }
 
-/// Per protocol: FinalityVote = { chain_id, txid, tx_hash_commitment, slot_index, decision, voter_mn_id, voter_weight, signature }
+/// TimeVote: Signed vote in TimeVote Protocol (Protocol §8.1)
+///
+/// Consistent naming with TimeProof, TimeLock, and TimeGuard.
+/// Each TimeVote is a cryptographically signed statement by a validator.
+///
+/// **Per Protocol §8.1:**
+/// TimeVote = { chain_id, txid, tx_hash_commitment, slot_index, decision, voter_mn_id, voter_weight, signature }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FinalityVote {
+pub struct TimeVote {
     pub chain_id: u32,
     pub txid: Hash256,
     pub tx_hash_commitment: Hash256, // H(canonical_tx_bytes)
@@ -426,8 +432,8 @@ pub struct FinalityVote {
     pub signature: Vec<u8>, // Ed25519 signature
 }
 
-impl FinalityVote {
-    /// Verify the finality vote signature
+impl TimeVote {
+    /// Verify the vote signature
     pub fn verify(&self, pubkey: &VerifyingKey) -> Result<(), Box<dyn std::error::Error>> {
         // Reconstruct the signed message
         let msg = self.signing_message();
@@ -440,22 +446,35 @@ impl FinalityVote {
     }
 
     /// Get the message that was signed
-    fn signing_message(&self) -> Vec<u8> {
+    pub fn signing_message(&self) -> Vec<u8> {
         let mut msg = Vec::new();
         msg.extend_from_slice(&self.chain_id.to_le_bytes());
         msg.extend_from_slice(&self.txid);
         msg.extend_from_slice(&self.tx_hash_commitment);
         msg.extend_from_slice(&self.slot_index.to_le_bytes());
         // CRITICAL: Include decision in signature to prevent equivocation
-        msg.push(match self.decision {
-            VoteDecision::Accept => 0x01,
-            VoteDecision::Reject => 0x00,
-        });
+        msg.push(self.decision as u8);
         msg.extend_from_slice(self.voter_mn_id.as_bytes());
         msg.extend_from_slice(&self.voter_weight.to_le_bytes());
         msg
     }
+
+    /// Calculate transaction hash commitment from transaction
+    /// Uses same method as txid() for consistency
+    pub fn calculate_tx_commitment(tx: &Transaction) -> Hash256 {
+        tx.txid()
+    }
+
+    /// Check if this vote contributes to finality weight (Protocol §8.2)
+    /// Only Accept votes count toward the 67% threshold
+    pub fn contributes_to_finality(&self) -> bool {
+        matches!(self.decision, VoteDecision::Accept)
+    }
 }
+
+/// Legacy alias for backward compatibility
+/// Will be deprecated once all code is updated
+pub type FinalityVote = TimeVote;
 
 /// Verifiable Finality Proof for a transaction
 /// Per protocol §8.2: VFP(X) = { tx, slot_index, votes[] }
@@ -463,7 +482,7 @@ impl FinalityVote {
 pub struct VerifiableFinality {
     pub tx: Transaction,
     pub slot_index: u64,
-    pub votes: Vec<FinalityVote>,
+    pub votes: Vec<TimeVote>,
 }
 
 impl VerifiableFinality {
@@ -530,6 +549,110 @@ impl VerifiableFinality {
         }
 
         Ok(total_weight)
+    }
+}
+
+/// TimeProof: Lightweight finality certificate (Protocol §8)
+///
+/// Similar to VerifiableFinality but without embedding the full transaction.
+/// Used for compact storage in blocks (store just the txid and timeproof_hash).
+///
+/// **Validity Requirements (Protocol §8.2):**
+/// 1. All vote signatures verify
+/// 2. All votes agree on (chain_id, txid, tx_hash_commitment, slot_index)
+/// 3. All votes have decision=Accept
+/// 4. Voters are distinct (by voter_mn_id)
+/// 5. Each voter is in AVS snapshot for slot_index
+/// 6. Sum of voter weights ≥ Q_finality (67% of total AVS weight)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeProof {
+    /// The transaction this proof finalizes
+    pub txid: Hash256,
+    /// Slot index when finality was achieved
+    pub slot_index: u64,
+    /// Accumulated Accept votes (all with decision=Accept)
+    pub votes: Vec<TimeVote>,
+}
+
+impl TimeProof {
+    /// Verify the TimeProof is valid (Protocol §8.2)
+    ///
+    /// Returns Ok(total_weight) if valid, Err if invalid
+    pub fn verify(
+        &self,
+        total_avs_weight: u64,
+        get_validator_pubkey: impl Fn(&str) -> Option<VerifyingKey>,
+    ) -> Result<u64, String> {
+        if self.votes.is_empty() {
+            return Err("TimeProof has no votes".to_string());
+        }
+
+        let mut accumulated_weight = 0u64;
+        let mut seen_voters = std::collections::HashSet::new();
+
+        // Get reference values from first vote
+        let ref_vote = &self.votes[0];
+        let ref_chain_id = ref_vote.chain_id;
+        let ref_txid = ref_vote.txid;
+        let ref_commitment = ref_vote.tx_hash_commitment;
+        let ref_slot = ref_vote.slot_index;
+
+        for vote in &self.votes {
+            // 1. Check all votes agree on critical fields
+            if vote.chain_id != ref_chain_id
+                || vote.txid != ref_txid
+                || vote.tx_hash_commitment != ref_commitment
+                || vote.slot_index != ref_slot
+            {
+                return Err("Vote fields mismatch in TimeProof".to_string());
+            }
+
+            // 2. Check decision is Accept (Protocol §8.2 requirement 3)
+            if vote.decision != VoteDecision::Accept {
+                return Err("TimeProof contains non-Accept vote".to_string());
+            }
+
+            // 3. Check voter uniqueness
+            if !seen_voters.insert(vote.voter_mn_id.clone()) {
+                return Err(format!(
+                    "Duplicate voter in TimeProof: {}",
+                    vote.voter_mn_id
+                ));
+            }
+
+            // 4. Verify signature
+            let pubkey = get_validator_pubkey(&vote.voter_mn_id)
+                .ok_or_else(|| format!("Voter not in AVS: {}", vote.voter_mn_id))?;
+
+            vote.verify(&pubkey)
+                .map_err(|e| format!("Invalid vote signature from {}: {}", vote.voter_mn_id, e))?;
+
+            // 5. Accumulate weight
+            accumulated_weight += vote.voter_weight;
+        }
+
+        // 6. Check finality threshold (Protocol §8.3)
+        let finality_threshold = (total_avs_weight * 67) / 100;
+        if accumulated_weight < finality_threshold {
+            return Err(format!(
+                "Insufficient weight: {} < {} (67% of {})",
+                accumulated_weight, finality_threshold, total_avs_weight
+            ));
+        }
+
+        Ok(accumulated_weight)
+    }
+
+    /// Calculate the Merkle root hash of this TimeProof for compact storage in blocks
+    pub fn hash(&self) -> Hash256 {
+        let mut hasher = Sha256::new();
+        hasher.update(self.txid);
+        hasher.update(self.slot_index.to_le_bytes());
+        hasher.update((self.votes.len() as u64).to_le_bytes());
+        for vote in &self.votes {
+            hasher.update(&vote.signature);
+        }
+        hasher.finalize().into()
     }
 }
 
@@ -1032,5 +1155,299 @@ mod tests {
         let decision = FallbackVoteDecision::Approve;
         let cloned = decision.clone();
         assert_eq!(decision, cloned);
+    }
+
+    // ========================================================================
+    // FINALITY VOTE TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_vote_decision_enum() {
+        // Test enum values match protocol specification
+        assert_eq!(VoteDecision::Accept as u8, 0x01);
+        assert_eq!(VoteDecision::Reject as u8, 0x00);
+
+        // Test equality
+        assert_eq!(VoteDecision::Accept, VoteDecision::Accept);
+        assert_eq!(VoteDecision::Reject, VoteDecision::Reject);
+        assert_ne!(VoteDecision::Accept, VoteDecision::Reject);
+    }
+
+    #[test]
+    fn test_timevote_signing_message() {
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        let vote = TimeVote {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: commitment,
+            slot_index: 100,
+            decision: VoteDecision::Accept,
+            voter_mn_id: "TIME0test123".to_string(),
+            voter_weight: 1000,
+            signature: Vec::new(),
+        };
+
+        let msg = vote.signing_message();
+
+        // Message should include all fields
+        assert!(!msg.is_empty());
+        // chain_id (4 bytes) + txid (32) + commitment (32) + slot (8) + decision (1) + ... > 77 bytes
+        assert!(msg.len() > 77);
+
+        // Different decisions should produce different messages
+        let vote_reject = TimeVote {
+            decision: VoteDecision::Reject,
+            ..vote.clone()
+        };
+        assert_ne!(vote.signing_message(), vote_reject.signing_message());
+    }
+
+    #[test]
+    fn test_timevote_signature_and_verification() {
+        let signing_key = test_signing_key();
+        let verifying_key = signing_key.verifying_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        let mut vote = TimeVote {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: commitment,
+            slot_index: 100,
+            decision: VoteDecision::Accept,
+            voter_mn_id: "TIME0test123".to_string(),
+            voter_weight: 1000,
+            signature: Vec::new(),
+        };
+
+        // Sign the vote
+        let msg = vote.signing_message();
+        let signature = signing_key.sign(&msg);
+        vote.signature = signature.to_bytes().to_vec();
+
+        // Verify with correct key
+        assert!(vote.verify(&verifying_key).is_ok());
+
+        // Verify with wrong key should fail
+        let wrong_key = SigningKey::from_bytes(&[99u8; 32]);
+        assert!(vote.verify(&wrong_key.verifying_key()).is_err());
+
+        // Modified vote should fail verification
+        let mut tampered_vote = vote.clone();
+        tampered_vote.decision = VoteDecision::Reject; // Change decision
+        assert!(tampered_vote.verify(&verifying_key).is_err());
+    }
+
+    #[test]
+    fn test_timevote_accept_reject_both_signed() {
+        let signing_key = test_signing_key();
+        let verifying_key = signing_key.verifying_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        // Create and sign Accept vote
+        let mut accept_vote = TimeVote {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: commitment,
+            slot_index: 100,
+            decision: VoteDecision::Accept,
+            voter_mn_id: "TIME0test123".to_string(),
+            voter_weight: 1000,
+            signature: Vec::new(),
+        };
+        let msg = accept_vote.signing_message();
+        accept_vote.signature = signing_key.sign(&msg).to_bytes().to_vec();
+
+        // Create and sign Reject vote
+        let mut reject_vote = TimeVote {
+            decision: VoteDecision::Reject,
+            ..accept_vote.clone()
+        };
+        let msg = reject_vote.signing_message();
+        reject_vote.signature = signing_key.sign(&msg).to_bytes().to_vec();
+
+        // Both should verify successfully
+        assert!(accept_vote.verify(&verifying_key).is_ok());
+        assert!(reject_vote.verify(&verifying_key).is_ok());
+
+        // Signatures should be different
+        assert_ne!(accept_vote.signature, reject_vote.signature);
+
+        // Only Accept contributes to finality
+        assert!(accept_vote.contributes_to_finality());
+        assert!(!reject_vote.contributes_to_finality());
+    }
+
+    #[test]
+    fn test_timeproof_verification() {
+        let signing_key1 = SigningKey::from_bytes(&[1u8; 32]);
+        let signing_key2 = SigningKey::from_bytes(&[2u8; 32]);
+        let signing_key3 = SigningKey::from_bytes(&[3u8; 32]);
+
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        // Create 3 votes with different validators
+        let mut votes = Vec::new();
+        for (i, signing_key) in [&signing_key1, &signing_key2, &signing_key3]
+            .iter()
+            .enumerate()
+        {
+            let mut vote = TimeVote {
+                chain_id: 1,
+                txid,
+                tx_hash_commitment: commitment,
+                slot_index: 100,
+                decision: VoteDecision::Accept,
+                voter_mn_id: format!("TIME0voter{}", i),
+                voter_weight: 400, // 400 * 3 = 1200 > 67% of 1500
+                signature: Vec::new(),
+            };
+            let msg = vote.signing_message();
+            vote.signature = signing_key.sign(&msg).to_bytes().to_vec();
+            votes.push(vote);
+        }
+
+        let timeproof = TimeProof {
+            txid,
+            slot_index: 100,
+            votes,
+        };
+
+        // Create validator lookup
+        let validators = vec![
+            ("TIME0voter0".to_string(), signing_key1.verifying_key()),
+            ("TIME0voter1".to_string(), signing_key2.verifying_key()),
+            ("TIME0voter2".to_string(), signing_key3.verifying_key()),
+        ];
+
+        let get_pubkey = |mn_id: &str| {
+            validators
+                .iter()
+                .find(|(id, _)| id == mn_id)
+                .map(|(_, pk)| *pk)
+        };
+
+        // Total AVS weight = 1500, votes = 1200 = 80% > 67%
+        let total_avs_weight = 1500;
+        let result = timeproof.verify(total_avs_weight, get_pubkey);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 1200); // 400 * 3
+
+        // Test with insufficient weight (need 67% of 2000 = 1340, but only have 1200)
+        let result = timeproof.verify(2000, get_pubkey);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Insufficient weight"));
+    }
+
+    #[test]
+    fn test_timeproof_rejects_non_accept_votes() {
+        let signing_key = test_signing_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        // Create a Reject vote
+        let mut vote = TimeVote {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: commitment,
+            slot_index: 100,
+            decision: VoteDecision::Reject, // Reject, not Accept
+            voter_mn_id: "TIME0voter0".to_string(),
+            voter_weight: 1000,
+            signature: Vec::new(),
+        };
+        let msg = vote.signing_message();
+        vote.signature = signing_key.sign(&msg).to_bytes().to_vec();
+
+        let timeproof = TimeProof {
+            txid,
+            slot_index: 100,
+            votes: vec![vote],
+        };
+
+        let get_pubkey = |_: &str| Some(signing_key.verifying_key());
+        let result = timeproof.verify(1000, get_pubkey);
+
+        // Should fail because TimeProof contains non-Accept vote
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("non-Accept"));
+    }
+
+    #[test]
+    fn test_timeproof_detects_duplicate_voters() {
+        let signing_key = test_signing_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        // Create two votes from the same voter
+        let mut vote1 = TimeVote {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: commitment,
+            slot_index: 100,
+            decision: VoteDecision::Accept,
+            voter_mn_id: "TIME0voter0".to_string(), // Same voter
+            voter_weight: 500,
+            signature: Vec::new(),
+        };
+        let msg = vote1.signing_message();
+        vote1.signature = signing_key.sign(&msg).to_bytes().to_vec();
+
+        let vote2 = vote1.clone(); // Duplicate vote
+
+        let timeproof = TimeProof {
+            txid,
+            slot_index: 100,
+            votes: vec![vote1, vote2],
+        };
+
+        let get_pubkey = |_: &str| Some(signing_key.verifying_key());
+        let result = timeproof.verify(1000, get_pubkey);
+
+        // Should fail due to duplicate voter
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Duplicate voter"));
+    }
+
+    #[test]
+    fn test_timeproof_hash_deterministic() {
+        let signing_key = test_signing_key();
+        let tx = test_transaction();
+        let txid = tx.txid();
+        let commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        let mut vote = TimeVote {
+            chain_id: 1,
+            txid,
+            tx_hash_commitment: commitment,
+            slot_index: 100,
+            decision: VoteDecision::Accept,
+            voter_mn_id: "TIME0voter0".to_string(),
+            voter_weight: 1000,
+            signature: Vec::new(),
+        };
+        let msg = vote.signing_message();
+        vote.signature = signing_key.sign(&msg).to_bytes().to_vec();
+
+        let timeproof = TimeProof {
+            txid,
+            slot_index: 100,
+            votes: vec![vote],
+        };
+
+        // Hash should be deterministic
+        let hash1 = timeproof.hash();
+        let hash2 = timeproof.hash();
+        assert_eq!(hash1, hash2);
     }
 }

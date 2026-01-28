@@ -20,7 +20,7 @@ use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
-use ed25519_dalek::Verifier;
+use ed25519_dalek::{Verifier, VerifyingKey};
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -622,9 +622,13 @@ pub struct TimeVoteConsensus {
     /// slot_index -> AVSSnapshot
     avs_snapshots: DashMap<u64, AVSSnapshot>,
 
-    /// VFP (Verifiable Finality Proof) vote accumulator
-    /// txid -> accumulated votes
-    vfp_votes: DashMap<Hash256, Vec<FinalityVote>>,
+    /// TimeProof vote accumulator (formerly VFP)
+    /// txid -> accumulated votes for TimeProof assembly
+    timeproof_votes: DashMap<Hash256, Vec<TimeVote>>,
+
+    /// Accumulated weight tracker for efficient finality checking
+    /// txid -> accumulated weight (sum of Accept vote weights only)
+    accumulated_weight: DashMap<Hash256, u64>,
 
     /// Phase 3D: Prepare vote accumulator for timevote blocks
     pub prepare_votes: Arc<PrepareVoteAccumulator>,
@@ -698,7 +702,8 @@ impl TimeVoteConsensus {
             active_rounds: DashMap::new(),
             finalized_txs: DashMap::new(),
             avs_snapshots: DashMap::new(),
-            vfp_votes: DashMap::new(),
+            timeproof_votes: DashMap::new(),
+            accumulated_weight: DashMap::new(),
             prepare_votes: Arc::new(PrepareVoteAccumulator::new()),
             precommit_votes: Arc::new(PrecommitVoteAccumulator::new()),
             tx_status: Arc::new(DashMap::new()),
@@ -753,7 +758,8 @@ impl TimeVoteConsensus {
             self.finalized_txs.remove(&txid);
             self.tx_state.remove(&txid);
             self.active_rounds.remove(&txid);
-            self.vfp_votes.remove(&txid);
+            self.timeproof_votes.remove(&txid);
+            self.accumulated_weight.remove(&txid);
             removed_count += 1;
         }
 
@@ -775,7 +781,7 @@ impl TimeVoteConsensus {
             active_rounds: self.active_rounds.len(),
             finalized_txs: self.finalized_txs.len(),
             avs_snapshots: self.avs_snapshots.len(),
-            vfp_votes: self.vfp_votes.len(),
+            vfp_votes: self.timeproof_votes.len(), // Legacy field name in struct
         }
     }
 
@@ -1069,26 +1075,101 @@ impl TimeVoteConsensus {
     }
 
     // ========================================================================
-    // FINALITY VOTE ACCUMULATION (Per Protocol §8.5)
+    // TIMEVOTE ACCUMULATION (Per Protocol §8.5)
     // ========================================================================
 
-    /// Accumulate a finality vote for VFP assembly
+    /// Accumulate a TimeVote for a transaction (Protocol §8.5)
+    ///
+    /// This method:
+    /// 1. Verifies vote signature
+    /// 2. Checks for duplicate voters
+    /// 3. Accumulates Accept votes only (Reject votes logged but not counted)
+    /// 4. Updates accumulated weight
+    ///
+    /// Returns Ok(accumulated_weight) if vote accepted, Err if rejected
+    pub fn accumulate_timevote(&self, vote: TimeVote) -> Result<u64, String> {
+        let txid = vote.txid;
+
+        // Step 1: Verify signature
+        // Get masternode info to get public key
+        let masternodes = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
+        });
+
+        let mn_info = masternodes
+            .iter()
+            .find(|info| info.masternode.address == vote.voter_mn_id)
+            .ok_or_else(|| format!("Voter {} not in active validator set", vote.voter_mn_id))?;
+
+        // Verify signature
+        vote.verify(&mn_info.masternode.public_key)
+            .map_err(|e| format!("Vote signature verification failed: {}", e))?;
+
+        // Step 2: Check for duplicate voters
+        let mut votes = self.timeproof_votes.entry(txid).or_default();
+
+        // Check if this voter already voted
+        if votes.iter().any(|v| v.voter_mn_id == vote.voter_mn_id) {
+            return Err(format!(
+                "Duplicate vote from {} for TX {:?}",
+                vote.voter_mn_id,
+                hex::encode(txid)
+            ));
+        }
+
+        // Step 3: Add vote to accumulator
+        votes.push(vote.clone());
+        drop(votes); // Release lock
+
+        // Step 4: Update accumulated weight (only for Accept votes)
+        let new_weight = if vote.decision == VoteDecision::Accept {
+            let mut weight_entry = self.accumulated_weight.entry(txid).or_insert(0);
+            *weight_entry += vote.voter_weight;
+            *weight_entry
+        } else {
+            // Reject votes are tracked but don't contribute to weight
+            tracing::debug!(
+                "Reject vote from {} for TX {:?} (not counted toward finality)",
+                vote.voter_mn_id,
+                hex::encode(txid)
+            );
+            self.accumulated_weight.get(&txid).map(|w| *w).unwrap_or(0)
+        };
+
+        tracing::debug!(
+            "Accumulated vote from {} for TX {:?} (decision: {:?}, weight: {}, total: {})",
+            vote.voter_mn_id,
+            hex::encode(txid),
+            vote.decision,
+            vote.voter_weight,
+            new_weight
+        );
+
+        Ok(new_weight)
+    }
+
+    /// Legacy method - redirects to accumulate_timevote()
+    /// Kept for backward compatibility
     pub fn accumulate_finality_vote(&self, vote: FinalityVote) -> Result<(), String> {
-        self.vfp_votes.entry(vote.txid).or_default().push(vote);
-        Ok(())
+        self.accumulate_timevote(vote).map(|_| ())
     }
 
     /// Get accumulated votes for a transaction
-    pub fn get_accumulated_votes(&self, txid: &Hash256) -> Vec<FinalityVote> {
-        self.vfp_votes
+    pub fn get_accumulated_votes(&self, txid: &Hash256) -> Vec<TimeVote> {
+        self.timeproof_votes
             .get(txid)
             .map(|v| v.clone())
             .unwrap_or_default()
     }
 
-    /// Check if transaction meets VFP finality threshold
-    /// Returns Ok(true) if votes >= 67% of AVS weight
-    pub fn check_vfp_finality(
+    /// Get accumulated weight for a transaction (Accept votes only)
+    pub fn get_accumulated_weight(&self, txid: &Hash256) -> u64 {
+        self.accumulated_weight.get(txid).map(|w| *w).unwrap_or(0)
+    }
+
+    /// Check if transaction meets TimeProof finality threshold (Protocol §8.3)
+    /// Returns Ok(true) if accumulated weight >= 67% of AVS weight
+    pub fn check_timeproof_finality(
         &self,
         txid: &Hash256,
         snapshot: &AVSSnapshot,
@@ -1111,7 +1192,7 @@ impl TimeVoteConsensus {
 
             // Voter can only vote once
             if seen_voters.contains(&vote.voter_mn_id) {
-                return Err("Duplicate voter in VFP".to_string());
+                return Err("Duplicate voter in TimeProof".to_string());
             }
             seen_voters.insert(vote.voter_mn_id.clone());
 
@@ -1125,9 +1206,165 @@ impl TimeVoteConsensus {
         Ok(total_weight >= threshold)
     }
 
+    /// Legacy alias for check_timeproof_finality
+    pub fn check_vfp_finality(
+        &self,
+        txid: &Hash256,
+        snapshot: &AVSSnapshot,
+    ) -> Result<bool, String> {
+        self.check_timeproof_finality(txid, snapshot)
+    }
+
     /// Clear accumulated votes for a transaction after finality
+    pub fn clear_timeproof_votes(&self, txid: &Hash256) {
+        self.timeproof_votes.remove(txid);
+        self.accumulated_weight.remove(txid);
+    }
+
+    /// Legacy alias for clear_timeproof_votes
     pub fn clear_vfp_votes(&self, txid: &Hash256) {
-        self.vfp_votes.remove(txid);
+        self.clear_timeproof_votes(txid);
+    }
+
+    /// Record transaction finalization (called when threshold reached)
+    /// Updates internal state tracking
+    pub fn record_finalization(&self, txid: Hash256, accumulated_weight: u64) {
+        // Record finalization with timestamp
+        self.finalized_txs
+            .insert(txid, (Preference::Accept, Instant::now()));
+
+        // Update transaction status
+        self.tx_status.insert(
+            txid,
+            TransactionStatus::Finalized {
+                finalized_at: chrono::Utc::now().timestamp_millis(),
+                vfp_weight: accumulated_weight,
+            },
+        );
+
+        // Update metrics
+        self.txs_finalized.fetch_add(1, Ordering::Relaxed);
+
+        tracing::info!(
+            "✅ TX {:?} finalized with weight {} (total finalized: {})",
+            hex::encode(txid),
+            accumulated_weight,
+            self.txs_finalized.load(Ordering::Relaxed)
+        );
+    }
+
+    /// Assemble TimeProof for a finalized transaction (Protocol §8.2)
+    ///
+    /// Collects all Accept votes for the transaction and creates a TimeProof certificate.
+    /// This should be called immediately after finalization is recorded.
+    ///
+    /// Returns Ok(TimeProof) if successful, Err if insufficient votes or invalid votes
+    pub fn assemble_timeproof(&self, txid: Hash256) -> Result<TimeProof, String> {
+        // Get all accumulated votes for this transaction
+        let all_votes = self.get_accumulated_votes(&txid);
+
+        if all_votes.is_empty() {
+            return Err(format!("No votes found for TX {:?}", hex::encode(txid)));
+        }
+
+        // Filter to only Accept votes (per Protocol §8.2)
+        let accept_votes: Vec<TimeVote> = all_votes
+            .into_iter()
+            .filter(|v| v.decision == VoteDecision::Accept)
+            .collect();
+
+        if accept_votes.is_empty() {
+            return Err(format!(
+                "No Accept votes found for TX {:?}",
+                hex::encode(txid)
+            ));
+        }
+
+        // Get slot_index from first vote (all votes must have same slot_index)
+        let slot_index = accept_votes[0].slot_index;
+
+        // Verify all votes have the same slot_index
+        if !accept_votes.iter().all(|v| v.slot_index == slot_index) {
+            return Err(format!(
+                "Votes have mismatched slot_index for TX {:?}",
+                hex::encode(txid)
+            ));
+        }
+
+        // Verify all votes have the same txid and tx_hash_commitment
+        let ref_commitment = accept_votes[0].tx_hash_commitment;
+        if !accept_votes
+            .iter()
+            .all(|v| v.txid == txid && v.tx_hash_commitment == ref_commitment)
+        {
+            return Err(format!(
+                "Votes have mismatched txid or commitment for TX {:?}",
+                hex::encode(txid)
+            ));
+        }
+
+        // Create TimeProof
+        let timeproof = TimeProof {
+            txid,
+            slot_index,
+            votes: accept_votes.clone(),
+        };
+
+        // Calculate total weight for logging
+        let total_weight: u64 = accept_votes.iter().map(|v| v.voter_weight).sum();
+
+        tracing::info!(
+            "📜 Assembled TimeProof for TX {:?} with {} Accept votes (total weight: {})",
+            hex::encode(txid),
+            accept_votes.len(),
+            total_weight
+        );
+
+        Ok(timeproof)
+    }
+
+    /// Verify a TimeProof certificate (Protocol §8.2)
+    ///
+    /// This method verifies that a TimeProof is valid by:
+    /// 1. Checking all vote signatures
+    /// 2. Verifying voters are in AVS
+    /// 3. Checking accumulated weight >= 67% threshold
+    /// 4. Ensuring vote consistency
+    ///
+    /// Returns Ok(accumulated_weight) if valid, Err if invalid
+    pub fn verify_timeproof(&self, timeproof: &TimeProof) -> Result<u64, String> {
+        // Get active masternodes for AVS verification
+        let masternodes = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
+        });
+
+        // Calculate total AVS weight
+        let total_avs_weight: u64 = masternodes
+            .iter()
+            .map(|info| info.masternode.tier.sampling_weight() as u64)
+            .sum();
+
+        // Create closure for public key lookup
+        let get_pubkey = |voter_mn_id: &str| -> Option<VerifyingKey> {
+            masternodes
+                .iter()
+                .find(|info| info.masternode.address == voter_mn_id)
+                .map(|info| info.masternode.public_key)
+        };
+
+        // Verify the TimeProof using its built-in verification
+        let accumulated_weight = timeproof.verify(total_avs_weight, get_pubkey)?;
+
+        tracing::info!(
+            "✅ TimeProof verified for TX {:?}: weight={}/{} ({}%), {} votes",
+            hex::encode(timeproof.txid),
+            accumulated_weight,
+            total_avs_weight,
+            (accumulated_weight * 100) / total_avs_weight,
+            timeproof.votes.len()
+        );
+
+        Ok(accumulated_weight)
     }
 
     // ========================================================================
@@ -1739,6 +1976,39 @@ impl ConsensusEngine {
         NetworkMessage::FinalityVoteBroadcast { vote }
     }
 
+    /// Sign a TimeVote for a transaction (simplified version for vote request handling)
+    /// Used when responding to TimeVoteRequest messages
+    /// Returns None if node identity not set or node is not a masternode
+    pub fn sign_timevote(
+        &self,
+        txid: Hash256,
+        tx_hash_commitment: Hash256,
+        slot_index: u64,
+        decision: VoteDecision,
+    ) -> Option<TimeVote> {
+        // Get node identity
+        let identity = self.identity.get()?;
+        let voter_mn_id = identity.address.clone();
+
+        // Get masternode info to determine weight
+        let masternodes = self.get_masternodes();
+        let mn = masternodes.iter().find(|mn| mn.address == voter_mn_id)?;
+        let voter_weight = mn.tier.sampling_weight() as u64;
+
+        // Sign and create the vote
+        let vote = identity.sign_finality_vote(
+            1, // TODO: Make chain_id configurable
+            txid,
+            tx_hash_commitment,
+            slot_index,
+            decision,
+            voter_mn_id,
+            voter_weight,
+        );
+
+        Some(vote)
+    }
+
     // ========================================================================
     // MASTERNODE HELPERS
     // ========================================================================
@@ -1769,6 +2039,16 @@ impl ConsensusEngine {
         if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
             callback(msg);
         }
+    }
+
+    /// Broadcast TimeProof to all network peers (Protocol §8.2)
+    pub async fn broadcast_timeproof(&self, proof: TimeProof) {
+        tracing::info!(
+            "📡 Broadcasting TimeProof for TX {:?} to network",
+            hex::encode(proof.txid)
+        );
+        self.broadcast(NetworkMessage::TimeProofBroadcast { proof })
+            .await;
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
@@ -2269,8 +2549,22 @@ impl ConsensusEngine {
         self.timevote.active_rounds.insert(txid, query_round);
 
         // §7.6 Integration: Set initial transaction status to Voting
-        // Pre-generate vote requests (before async, so RNG doesn't cross await boundary)
-        let vote_request_msg = NetworkMessage::TransactionVoteRequest { txid };
+        // Calculate transaction hash commitment (Protocol §8.1)
+        let tx_hash_commitment = TimeVote::calculate_tx_commitment(&tx);
+
+        // Get slot_index for replay protection and AVS snapshot lookup
+        // Per Protocol §9.1: slot_time = slot_index * 600 (BLOCK_INTERVAL)
+        // TODO: Use blockchain height once blockchain reference is added to ConsensusEngine
+        // For now, derive from current timestamp: slot_index = timestamp / BLOCK_INTERVAL
+        const BLOCK_INTERVAL: u64 = 600; // 10 minutes
+        let slot_index = chrono::Utc::now().timestamp() as u64 / BLOCK_INTERVAL;
+
+        // Create TimeVoteRequest message with all required fields
+        let vote_request_msg = NetworkMessage::TimeVoteRequest {
+            txid,
+            tx_hash_commitment,
+            slot_index,
+        };
 
         // Immediately broadcast vote request to all validators
         // BUT: Give validators 200ms to receive and process the TransactionBroadcast first
@@ -2279,8 +2573,9 @@ impl ConsensusEngine {
 
         if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
             tracing::info!(
-                "📡 Broadcasting vote request for TX {:?} to all validators (after propagation delay)",
-                hex::encode(txid)
+                "📡 Broadcasting TimeVoteRequest for TX {:?} (slot {}) to all validators",
+                hex::encode(txid),
+                slot_index
             );
             callback(vote_request_msg.clone());
         } else {
