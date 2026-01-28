@@ -13,6 +13,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Previously, blocks were re-processed through `add_block_with_fork_handling()`, triggering duplicate fork detection
   - Made `ForkResolutionState` and `fork_state` public for cross-module coordination
   - Fixes stuck fork resolution where nodes repeatedly detect the same fork without resolving it
+  
+- **Fork Resolution Enhancements**:
+  - Preserve peer_height from FetchingChain state during block merging
+  - Request missing blocks after finding common ancestor (fixes empty reorg blocks error)
+  - Add detailed logging for fork resolution progress
+
+- **Critical: Whitelisted Peer Protection**
+  - Fixed bug where whitelisted masternodes could be disconnected on timeout
+  - Old timeout check code path bypassed `should_disconnect()` protection
+  - Whitelisted peers now NEVER disconnect regardless of missed pongs
+  - Ensures persistent connections for essential network infrastructure
 
 ### Added - Liveness Fallback Protocol (§7.6 Complete Implementation)
 - **Core Fallback Logic**

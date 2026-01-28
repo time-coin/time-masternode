@@ -2229,21 +2229,24 @@ impl PeerConnection {
                 _ = timeout_check.tick() => {
                     let mut state = self.ping_state.write().await;
 
-                    // Use relaxed timeouts for whitelisted masternodes
-                    let (max_missed, timeout_duration) = if self.is_whitelisted {
-                        (Self::WHITELISTED_MAX_MISSED_PONGS, Self::WHITELISTED_PONG_TIMEOUT)
-                    } else {
-                        (Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT)
-                    };
-
-                    if state.check_timeout(max_missed, timeout_duration) {
-                        if self.is_whitelisted {
-                            error!("❌ [{:?}] Disconnecting WHITELISTED masternode {} due to timeout ({} missed pongs, {}s timeout)",
-                                   self.direction, self.peer_ip, state.missed_pongs, timeout_duration.as_secs());
-                        } else {
-                            error!("❌ [{:?}] Disconnecting {} due to timeout",
-                                   self.direction, self.peer_ip);
+                    // CRITICAL: Whitelisted masternodes must NEVER be disconnected
+                    // They are essential network infrastructure requiring persistent connections
+                    if self.is_whitelisted {
+                        // Log warning for monitoring but DO NOT disconnect
+                        if state.missed_pongs > Self::WHITELISTED_MAX_MISSED_PONGS {
+                            warn!(
+                                "⚠️ [{:?}] Whitelisted masternode {} has {} missed pongs (NOT disconnecting - protected)",
+                                self.direction, self.peer_ip, state.missed_pongs
+                            );
                         }
+                        // Continue loop - never disconnect whitelisted peers
+                        continue;
+                    }
+
+                    // Non-whitelisted peers: Use normal timeout logic
+                    if state.check_timeout(Self::MAX_MISSED_PONGS, Self::PONG_TIMEOUT) {
+                        error!("❌ [{:?}] Disconnecting non-whitelisted peer {} due to timeout ({} missed pongs)",
+                               self.direction, self.peer_ip, state.missed_pongs);
                         break;
                     }
                 }
