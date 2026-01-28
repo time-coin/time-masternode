@@ -51,6 +51,7 @@ Commands:
     validateaddress        Validate an address
     stop                   Stop the daemon
     uptime                 Get daemon uptime
+    getinfo                Get general node information
     reindextransactions    Rebuild transaction index
   
     help                   Print this message or the help of the given subcommand(s)
@@ -308,6 +309,10 @@ enum Commands {
     #[command(next_help_heading = "Utility")]
     Uptime,
 
+    /// Get general information about the node
+    #[command(next_help_heading = "Utility")]
+    GetInfo,
+
     /// Rebuild transaction index
     #[command(next_help_heading = "Utility")]
     ReindexTransactions,
@@ -432,6 +437,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
         Commands::Uptime => ("uptime", json!([])),
+        Commands::GetInfo => ("getinfo", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
@@ -785,6 +791,31 @@ fn print_human_readable(
                 "Uptime: {} days, {} hours, {} minutes, {} seconds",
                 days, hours, minutes, secs
             );
+        }
+        Commands::GetInfo => {
+            // Display general node information
+            println!("=== Node Information ===");
+            if let Some(version) = result.get("version").and_then(|v| v.as_str()) {
+                println!("Version:         {}", version);
+            }
+            if let Some(blocks) = result.get("blocks").and_then(|v| v.as_u64()) {
+                println!("Blocks:          {}", blocks);
+            }
+            if let Some(connections) = result.get("connections").and_then(|v| v.as_u64()) {
+                println!("Connections:     {}", connections);
+            }
+            if let Some(masternodes) = result.get("masternodes").and_then(|v| v.as_u64()) {
+                println!("Masternodes:     {}", masternodes);
+            }
+            if let Some(balance) = result.get("balance").and_then(|v| v.as_f64()) {
+                println!("Balance:         {} TIME", balance);
+            }
+            if let Some(uptime) = result.get("uptime").and_then(|v| v.as_u64()) {
+                let days = uptime / 86400;
+                let hours = (uptime % 86400) / 3600;
+                let minutes = (uptime % 3600) / 60;
+                println!("Uptime:          {}d {}h {}m", days, hours, minutes);
+            }
         }
         Commands::CleanupLockedUTXOs => {
             let cleaned = result.get("cleaned").and_then(|v| v.as_u64()).unwrap_or(0);

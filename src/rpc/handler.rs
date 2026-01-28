@@ -83,6 +83,7 @@ impl RpcHandler {
             "validateaddress" => self.validate_address(&params_array).await,
             "stop" => self.stop().await,
             "uptime" => self.uptime().await,
+            "getinfo" => self.get_info().await,
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
@@ -1168,6 +1169,37 @@ impl RpcHandler {
             .unwrap()
             .as_secs();
         Ok(json!(uptime))
+    }
+
+    async fn get_info(&self) -> Result<Value, RpcError> {
+        // Get blockchain info
+        let height = self.blockchain.get_height();
+        
+        // Get masternode count
+        let masternodes = self.registry.active_count().await;
+        
+        // Get balance
+        let all_utxos = self.utxo_manager.list_all_utxos().await;
+        let balance: u64 = all_utxos.iter().map(|u| u.value).sum();
+        let balance_time = balance as f64 / 100_000_000.0;
+        
+        // Get uptime
+        let uptime = SystemTime::now()
+            .duration_since(self.start_time)
+            .unwrap()
+            .as_secs();
+        
+        // Get version
+        let version = env!("CARGO_PKG_VERSION");
+        
+        Ok(json!({
+            "version": version,
+            "blocks": height,
+            "masternodes": masternodes,
+            "balance": balance_time,
+            "uptime": uptime,
+            "network": format!("{:?}", self.network),
+        }))
     }
 
     async fn send_to_address(&self, params: &[Value]) -> Result<Value, RpcError> {
