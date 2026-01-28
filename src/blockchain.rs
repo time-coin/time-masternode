@@ -1730,7 +1730,8 @@ impl Blockchain {
             // Calculate output sum
             let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
             // Fee is difference (if any)
-            finalized_txs_fees = finalized_txs_fees.saturating_add(input_sum.saturating_sub(output_sum));
+            finalized_txs_fees =
+                finalized_txs_fees.saturating_add(input_sum.saturating_sub(output_sum));
         }
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block

@@ -2514,10 +2514,14 @@ impl ConsensusEngine {
             // Move directly to finalized pool
             if let Some(_finalized_tx) = self.tx_pool.finalize_transaction(txid) {
                 tracing::info!("✅ TX {:?} auto-finalized", hex::encode(txid));
-                
+
                 // Broadcast finalization to all nodes so they also finalize it
-                self.broadcast(NetworkMessage::TransactionFinalized { txid }).await;
-                tracing::debug!("📡 Broadcast TransactionFinalized for {:?}", hex::encode(txid));
+                self.broadcast(NetworkMessage::TransactionFinalized { txid })
+                    .await;
+                tracing::debug!(
+                    "📡 Broadcast TransactionFinalized for {:?}",
+                    hex::encode(txid)
+                );
             }
 
             // Record finalization
@@ -2743,11 +2747,14 @@ impl ConsensusEngine {
                             "📦 TX {:?} moved to finalized pool (Snowball confidence threshold reached)",
                             hex::encode(txid)
                         );
-                        
+
                         // Broadcast finalization to all nodes
                         if let Some(callback) = broadcast_callback.read().await.as_ref() {
                             callback(NetworkMessage::TransactionFinalized { txid });
-                            tracing::debug!("📡 Broadcast TransactionFinalized for {:?}", hex::encode(txid));
+                            tracing::debug!(
+                                "📡 Broadcast TransactionFinalized for {:?}",
+                                hex::encode(txid)
+                            );
                         }
                     }
                     // Record finalization preference for reference
@@ -2780,11 +2787,14 @@ impl ConsensusEngine {
                                 "✅ TX {:?} auto-finalized (UTXO-lock protected, 0 validator responses)",
                                 hex::encode(txid)
                             );
-                            
+
                             // Broadcast finalization to all nodes
                             if let Some(callback) = broadcast_callback.read().await.as_ref() {
                                 callback(NetworkMessage::TransactionFinalized { txid });
-                                tracing::debug!("📡 Broadcast TransactionFinalized for {:?}", hex::encode(txid));
+                                tracing::debug!(
+                                    "📡 Broadcast TransactionFinalized for {:?}",
+                                    hex::encode(txid)
+                                );
                             }
                         }
                         consensus
