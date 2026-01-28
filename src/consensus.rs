@@ -2518,7 +2518,7 @@ impl ConsensusEngine {
                 // Broadcast finalization to all nodes so they also finalize it
                 self.broadcast(NetworkMessage::TransactionFinalized { txid })
                     .await;
-                tracing::debug!(
+                tracing::info!(
                     "📡 Broadcast TransactionFinalized for {:?}",
                     hex::encode(txid)
                 );
@@ -2596,7 +2596,19 @@ impl ConsensusEngine {
         let consensus = self.timevote.clone();
         let _utxo_mgr = self.utxo_manager.clone();
         let tx_pool = self.tx_pool.clone();
-        let broadcast_callback = self.broadcast_callback.clone();
+        let consensus_engine_clone = Arc::new(ConsensusEngine {
+            masternode_registry: self.masternode_registry.clone(),
+            identity: OnceLock::new(), // Clone doesn't copy OnceLock content, but we don't need identity in spawned task
+            utxo_manager: self.utxo_manager.clone(),
+            tx_pool: self.tx_pool.clone(),
+            broadcast_callback: self.broadcast_callback.clone(),
+            state_notifier: self.state_notifier.clone(),
+            timevote: self.timevote.clone(),
+            finality_proof_mgr: self.finality_proof_mgr.clone(),
+            ai_validator: self.ai_validator.clone(),
+            finality_times: self.finality_times.clone(),
+            avg_finality_ms: self.avg_finality_ms.clone(),
+        });
         let _masternodes_for_voting = masternodes.clone();
         let tx_status_map = self.timevote.tx_status.clone(); // §7.6: Track status for fallback
 
@@ -2648,9 +2660,7 @@ impl ConsensusEngine {
                 );
 
                 // Send vote request to all peers (broadcast)
-                if let Some(callback) = broadcast_callback.read().await.as_ref() {
-                    callback(vote_request_msg.clone());
-                }
+                consensus_engine_clone.broadcast(vote_request_msg.clone()).await;
 
                 // Wait for votes to arrive - reduced for instant finality
                 // 200ms should be enough for local network responses
@@ -2749,13 +2759,11 @@ impl ConsensusEngine {
                         );
 
                         // Broadcast finalization to all nodes
-                        if let Some(callback) = broadcast_callback.read().await.as_ref() {
-                            callback(NetworkMessage::TransactionFinalized { txid });
-                            tracing::debug!(
-                                "📡 Broadcast TransactionFinalized for {:?}",
-                                hex::encode(txid)
-                            );
-                        }
+                        consensus_engine_clone.broadcast(NetworkMessage::TransactionFinalized { txid }).await;
+                        tracing::info!(
+                            "📡 Broadcast TransactionFinalized for {:?}",
+                            hex::encode(txid)
+                        );
                     }
                     // Record finalization preference for reference
                     consensus
@@ -2789,13 +2797,11 @@ impl ConsensusEngine {
                             );
 
                             // Broadcast finalization to all nodes
-                            if let Some(callback) = broadcast_callback.read().await.as_ref() {
-                                callback(NetworkMessage::TransactionFinalized { txid });
-                                tracing::debug!(
-                                    "📡 Broadcast TransactionFinalized for {:?}",
-                                    hex::encode(txid)
-                                );
-                            }
+                            consensus_engine_clone.broadcast(NetworkMessage::TransactionFinalized { txid }).await;
+                            tracing::info!(
+                                "📡 Broadcast TransactionFinalized for {:?}",
+                                hex::encode(txid)
+                            );
                         }
                         consensus
                             .finalized_txs
