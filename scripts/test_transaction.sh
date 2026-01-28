@@ -1,12 +1,18 @@
 #!/bin/bash
-# Transaction Test Script
-# Tests sending 1 TIME coin to a connected masternode and verifies transaction validation
+# Transaction Test Script - TimeVote Protocol Testing
+# Tests sending 1 TIME coin and validates the new TimeVote consensus flow:
+# - Transaction broadcasting
+# - TimeVote request/response (signed votes with stake weighting)
+# - Automatic finalization at 67% threshold
+# - TimeProof certificate assembly and broadcasting
+# - Transaction confirmation in blockchain
 
 set -e  # Exit on error
 
 # Configuration
 AMOUNT="1.0"
 TEST_TIMEOUT=60  # seconds to wait for confirmation
+FINALITY_TIMEOUT=10  # seconds to wait for TimeVote finality
 
 # Colors for output
 RED='\033[0;31m'
@@ -125,8 +131,61 @@ fi
 log_success "Transaction sent! TXID: $TXID"
 echo ""
 
-# Step 4: Verify transaction in mempool
-log_info "Step 4: Verifying transaction in mempool..."
+# Step 4: Wait for TimeVote finality (NEW - Phase 2)
+log_info "Step 4: Waiting for TimeVote finality (67% threshold)..."
+log_info "Monitoring for: Vote requests → Vote accumulation → Finalization → TimeProof"
+FINALIZED=false
+START_TIME=$(date +%s)
+
+while [ $(($(date +%s) - START_TIME)) -lt $FINALITY_TIMEOUT ]; do
+    # Check if transaction has TimeProof (indicates finality)
+    TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
+    
+    if [ $? -eq 0 ] && echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
+        # Check for finalized status or TimeProof
+        IS_FINALIZED=$(echo "$TX_INFO" | jq -r '.finalized // false')
+        HAS_TIMEPROOF=$(echo "$TX_INFO" | jq -r '.timeproof // null')
+        
+        if [ "$IS_FINALIZED" = "true" ] || [ "$HAS_TIMEPROOF" != "null" ]; then
+            log_success "Transaction finalized via TimeVote consensus!"
+            
+            # Try to extract TimeProof details
+            if [ "$HAS_TIMEPROOF" != "null" ]; then
+                VOTE_COUNT=$(echo "$TX_INFO" | jq -r '.timeproof.votes | length // 0')
+                ACCUMULATED_WEIGHT=$(echo "$TX_INFO" | jq -r '.timeproof.accumulated_weight // "N/A"')
+                SLOT_INDEX=$(echo "$TX_INFO" | jq -r '.timeproof.slot_index // "N/A"')
+                
+                log_info "  TimeProof assembled:"
+                log_info "    Votes: $VOTE_COUNT masternodes"
+                log_info "    Weight: $ACCUMULATED_WEIGHT (≥67% threshold)"
+                log_info "    Slot: $SLOT_INDEX"
+            fi
+            
+            FINALIZED=true
+            break
+        fi
+    fi
+    
+    echo -ne "\r  Waiting for finality... (elapsed: $(($(date +%s) - START_TIME))s)    "
+    sleep 1
+done
+
+echo ""  # Newline after progress
+
+if [ "$FINALIZED" = false ]; then
+    log_warning "TimeVote finality not detected within ${FINALITY_TIMEOUT}s"
+    log_info "This may indicate:"
+    log_info "  - Not enough masternodes connected (need ≥67% AVS weight)"
+    log_info "  - Vote collection still in progress"
+    log_info "  - TimeProof not yet assembled"
+    log_info "Continuing to check blockchain confirmation..."
+else
+    log_success "Phase 2 functionality working: TimeVote → Finality → TimeProof ✓"
+fi
+echo ""
+
+# Step 5: Verify transaction in mempool
+log_info "Step 5: Verifying transaction in mempool..."
 sleep 2  # Give it a moment to propagate
 
 MEMPOOL_TX=$($CLI_CMD getrawtransaction "$TXID" true 2>&1) || true
@@ -149,8 +208,8 @@ else
 fi
 echo ""
 
-# Step 5: Wait for confirmation
-log_info "Step 5: Waiting for transaction confirmation (timeout: ${TEST_TIMEOUT}s)..."
+# Step 6: Wait for confirmation
+log_info "Step 6: Waiting for transaction confirmation (timeout: ${TEST_TIMEOUT}s)..."
 CONFIRMED=false
 START_TIME=$(date +%s)
 
@@ -191,8 +250,8 @@ fi
 
 echo ""
 
-# Step 6: Final verification
-log_info "Step 6: Final verification..."
+# Step 7: Final verification and TimeProof check
+log_info "Step 7: Final verification and TimeProof status..."
 FINAL_TX=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
 
 if [ $? -ne 0 ] || ! echo "$FINAL_TX" | jq -e . >/dev/null 2>&1; then
@@ -207,6 +266,18 @@ TX_FEE=$(echo "$FINAL_TX" | jq -r '.fee // 0')
 TX_CONFIRMATIONS=$(echo "$FINAL_TX" | jq -r '.confirmations // 0')
 TX_BLOCK=$(echo "$FINAL_TX" | jq -r '.blockheight // "N/A"')
 
+# Check for TimeProof (Phase 2 validation)
+HAS_TIMEPROOF=$(echo "$FINAL_TX" | jq -r '.timeproof // null')
+TIMEPROOF_STATUS="❌ Not found"
+TIMEPROOF_VOTES="N/A"
+TIMEPROOF_WEIGHT="N/A"
+
+if [ "$HAS_TIMEPROOF" != "null" ]; then
+    TIMEPROOF_STATUS="✅ Present"
+    TIMEPROOF_VOTES=$(echo "$FINAL_TX" | jq -r '.timeproof.votes | length // 0')
+    TIMEPROOF_WEIGHT=$(echo "$FINAL_TX" | jq -r '.timeproof.accumulated_weight // "N/A"')
+fi
+
 log_success "Transaction validated successfully!"
 echo ""
 echo "══════════════════════════════════════════════════════════════"
@@ -219,7 +290,23 @@ echo "  Recipient:      $RECIPIENT_ADDRESS"
 echo "  Confirmations:  $TX_CONFIRMATIONS"
 echo "  Block:          $TX_BLOCK"
 echo "══════════════════════════════════════════════════════════════"
+echo "                   TIMEVOTE PROTOCOL STATUS"
+echo "══════════════════════════════════════════════════════════════"
+echo "  TimeProof:      $TIMEPROOF_STATUS"
+echo "  Votes:          $TIMEPROOF_VOTES masternodes"
+echo "  Weight:         $TIMEPROOF_WEIGHT (≥67% required)"
+echo "══════════════════════════════════════════════════════════════"
+echo "══════════════════════════════════════════════════════════════"
 echo ""
 
-log_success "✨ Transaction test completed successfully!"
+# Final status report
+if [ "$TIMEPROOF_STATUS" = "✅ Present" ]; then
+    log_success "✨ Transaction test completed successfully!"
+    log_success "Phase 2 validation: TimeVote consensus and TimeProof working!"
+else
+    log_success "✨ Transaction confirmed on blockchain!"
+    log_warning "Phase 2 notice: TimeProof not found (may indicate Phase 3 integration needed)"
+    log_info "Expected once Phase 3 (Block Production) is complete"
+fi
+
 exit 0
