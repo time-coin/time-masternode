@@ -1717,15 +1717,25 @@ impl Blockchain {
             );
         }
 
-        // Calculate fees from current transactions (will be added to NEXT block)
-        let current_block_fees = self.consensus.tx_pool.get_total_fees();
+        // Calculate fees from finalized transactions that will be included in THIS block
+        let mut finalized_txs_fees = 0u64;
+        for tx in &finalized_txs {
+            // Calculate input sum
+            let mut input_sum = 0u64;
+            for input in &tx.inputs {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                    input_sum = input_sum.saturating_add(utxo.value);
+                }
+            }
+            // Calculate output sum
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            // Fee is difference (if any)
+            finalized_txs_fees = finalized_txs_fees.saturating_add(input_sum.saturating_sub(output_sum));
+        }
 
-        // Get fees from PREVIOUS block (stored during last block production)
-        let previous_block_fees = self.get_pending_fees();
-
-        // Calculate rewards: base_reward + fees_from_previous_block
+        // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
         let base_reward = BLOCK_REWARD_SATOSHIS;
-        let total_reward = base_reward + previous_block_fees;
+        let total_reward = base_reward + finalized_txs_fees;
 
         // NEW: All rewards go to the block producer only
         let rewards = if let Some(ref wallet) = producer_wallet {
@@ -1756,20 +1766,18 @@ impl Blockchain {
             "💰 Block {}: base {} + fees {} = {} satoshis total to {} masternodes",
             next_height,
             base_reward,
-            previous_block_fees,
+            finalized_txs_fees,
             total_reward,
             rewards.len()
         );
 
-        // Store current block fees for NEXT block
-        self.store_pending_fees(current_block_fees)?;
-
-        if current_block_fees > 0 {
+        // No longer storing fees for next block - fees are included immediately
+        if finalized_txs_fees > 0 {
             tracing::info!(
-                "💸 Block {}: collected {} satoshis in fees (will be added to block {})",
+                "💸 Block {}: included {} satoshis in fees from {} finalized transaction(s)",
                 next_height,
-                current_block_fees,
-                next_height + 1
+                finalized_txs_fees,
+                finalized_txs.len()
             );
         }
 
