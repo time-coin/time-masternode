@@ -1886,7 +1886,7 @@ impl Blockchain {
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
                 active_masternodes_bitmap: active_bitmap,
-                liveness_recovery: false, // Will be set below if needed
+                liveness_recovery: Some(false), // Will be set below if needed
                 ..Default::default()
             },
             transactions: all_txs,
@@ -1894,14 +1894,14 @@ impl Blockchain {
             time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
             consensus_participants: voters.clone(),
-            liveness_recovery: false, // Will be set if fallback resolution occurred
+            liveness_recovery: Some(false), // Will be set if fallback resolution occurred
         };
 
         // §7.6 Liveness Fallback: Check if we need to resolve stalled transactions
         if self.consensus.has_pending_fallback_transactions() {
             let resolved = self.consensus.resolve_stalls_via_timelock();
-            block.liveness_recovery = resolved;
-            block.header.liveness_recovery = resolved;
+            block.liveness_recovery = Some(resolved);
+            block.header.liveness_recovery = Some(resolved);
             if resolved {
                 tracing::warn!(
                     "🔒 Block {} includes liveness recovery (resolved stalled transactions)",

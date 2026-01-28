@@ -578,7 +578,7 @@ impl TSCDConsensus {
             masternode_rewards,
             time_attestations: vec![],
             consensus_participants: vec![],
-            liveness_recovery: false, // TSDC blocks don't trigger liveness recovery by default
+            liveness_recovery: Some(false), // TSDC blocks don't trigger liveness recovery by default
         })
     }
 
@@ -1076,7 +1076,7 @@ mod tests {
             masternode_rewards: vec![],
             time_attestations: vec![],
             consensus_participants: vec![],
-            liveness_recovery: false,
+            liveness_recovery: Some(false),
         };
 
         let block2 = Block {
@@ -1096,7 +1096,7 @@ mod tests {
             masternode_rewards: vec![],
             time_attestations: vec![],
             consensus_participants: vec![],
-            liveness_recovery: false,
+            liveness_recovery: Some(false),
         };
 
         let blocks = vec![(block1.clone(), None), (block2.clone(), None)];
