@@ -1834,6 +1834,19 @@ async fn main() {
                 .set_blacklist(server.blacklist.clone())
                 .await;
 
+            // CRITICAL: Wire up consensus broadcast callback for TimeVote requests
+            // This enables the consensus engine to broadcast vote requests to the network
+            let broadcast_registry = peer_connection_registry.clone();
+            consensus_engine
+                .set_broadcast_callback(move |msg| {
+                    let registry = broadcast_registry.clone();
+                    tokio::spawn(async move {
+                        registry.broadcast(msg).await;
+                    });
+                })
+                .await;
+            tracing::info!("✓ Consensus broadcast callback configured");
+
             println!("  ✅ Network server listening on {}", p2p_addr);
 
             // Phase 3 Step 3: Start sync coordinator
