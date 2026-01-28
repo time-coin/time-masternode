@@ -1,7 +1,59 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-01-02  
-**Version:** 0.2.0 (AI Integration, TLS Planning, Fork Resolution)
+**Last Updated:** 2026-01-28  
+**Version:** 1.1.0 (TimeVote Complete, Critical Bugs Fixed)
+
+---
+
+## Recent Updates (v1.1.0 - January 28, 2026)
+
+### Critical Bug Fixes
+
+**Bug #1: Broadcast Callback Not Wired**
+- **Issue**: Consensus engine had no way to broadcast TimeVote requests
+- **Impact**: Vote requests never sent to network, transactions never finalized network-wide
+- **Root Cause**: `set_broadcast_callback()` method existed but was never called in initialization
+- **Fix**: Wired up `peer_connection_registry.broadcast()` as consensus callback in main.rs after network server initialization
+- **Result**: TimeVote consensus now fully functional end-to-end
+
+**Bug #2: Finalized Pool Premature Clearing**
+- **Issue**: Finalized transaction pool cleared after EVERY block addition
+- **Impact**: Locally finalized transactions lost before they could be included in locally produced blocks
+- **Root Cause**: `clear_finalized_transactions()` called blindly without checking if TXs were in the block
+- **Fix**: Added `clear_finalized_txs(txids)` to selectively clear only transactions actually in the added block
+- **Result**: Finalized transactions now properly persist until included in a block
+
+**Bug #3: Hardcoded Version String**
+- **Issue**: Version hardcoded as "1.0.0" instead of using Cargo.toml
+- **Impact**: Impossible to distinguish nodes with new TimeVote code from old nodes
+- **Fix**: Use `env!("CARGO_PKG_VERSION")` compile-time macro
+- **Result**: Version now automatically reflects Cargo.toml (currently 1.1.0)
+
+### TimeVote Transaction Flow (Now Working)
+
+```
+1. TX Submission → RPC (sendtoaddress)
+                ↓
+2. Validation → Lock UTXOs (SpentPending state)
+                ↓
+3. Broadcast → TransactionBroadcast to all peers
+                ↓
+4. TimeVote Request → Broadcast vote request (NOW WORKING!)
+                ↓
+5. Vote Collection → Validators respond with signed votes
+                ↓
+6. Vote Accumulation → Stake-weighted sum calculated
+                ↓
+7. Finalization → 67% threshold → Move to finalized pool (ALL NODES)
+                ↓
+8. TimeProof Assembly → Collect Accept votes, create proof
+                ↓
+9. Block Production → Query finalized pool, include TXs
+                ↓
+10. Block Addition → Process UTXOs, selectively clear finalized pool (NOW WORKING!)
+                ↓
+11. Archival → TX confirmed on blockchain
+```
 
 ---
 

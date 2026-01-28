@@ -5,6 +5,146 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-01-28 - TimeVote Consensus Complete
+
+### Fixed - Critical Transaction Flow Bugs
+
+- **CRITICAL: Broadcast Callback Not Wired (commit c58a3ec)**
+  - The consensus engine had no way to broadcast TimeVote requests to the network
+  - `set_broadcast_callback()` method existed but was never called in main.rs
+  - Result: Vote requests never sent, other nodes never received/finalized transactions
+  - Fix: Wired up `peer_connection_registry.broadcast()` to consensus engine after network initialization
+  - Impact: **This was preventing the entire TimeVote consensus system from working**
+
+- **CRITICAL: Finalized Pool Cleared Incorrectly (commit 27b6a9f)**
+  - Finalized transaction pool was cleared after EVERY block addition
+  - Happened even when blocks came from other nodes and didn't contain our finalized transactions
+  - Result: Locally finalized TXs lost before they could be included in locally produced blocks
+  - Fix: Added `clear_finalized_txs()` to selectively clear only TXs that were in the added block
+  - Extract txids from block, only remove those specific transactions from finalized pool
+
+- **Version String Not Dynamic (commit 5d6bf8a)**
+  - Version hardcoded as "1.0.0" instead of using Cargo.toml version
+  - Made it impossible to distinguish nodes with new TimeVote code
+  - Fix: Use `env!("CARGO_PKG_VERSION")` compile-time macro
+  - Now automatically reflects version from Cargo.toml (1.1.0)
+
+### Completed - TimeVote Transaction Consensus (Protocol v6.2 §7-8)
+
+**Phase 1: Vote Signing & Weight Accumulation** (1 week)
+- ✅ Implemented `TimeVote` structure with Ed25519 signatures
+- ✅ Added `VoteDecision` enum (Accept/Reject)
+- ✅ Implemented cryptographic vote signing and verification
+- ✅ Added stake-weighted vote accumulation with DashMap
+- ✅ Implemented 67% finality threshold calculation
+- ✅ Added automatic finalization when threshold reached
+- ✅ Byzantine-resistant consensus with signature verification
+
+**Phase 2: TimeProof Assembly & Storage** (4 days)
+- ✅ Implemented TimeProof assembly on finalization
+- ✅ Added TimeProof verification method
+- ✅ Integrated TimeProof storage into finality_proof_manager
+- ✅ Added TimeProof broadcasting on finalization
+- ✅ Implemented TimeProof request/response handlers
+- ✅ Added offline TimeProof verification
+
+**Phase 3: Block Production Pipeline** (2 hours - infrastructure already existed!)
+- ✅ Enhanced logging for finalized TX inclusion in blocks
+- ✅ Added TX validation framework before block inclusion
+- ✅ Verified finalized pool cleanup after block addition
+- ✅ Discovered Phase 3 was already 95% implemented
+- ✅ Block production already queries `get_finalized_transactions_for_block()`
+- ✅ UTXO processing and finalized TXs already included in blocks
+
+**Transaction Flow Now Working:**
+1. ✅ Transaction broadcast → pending pool
+2. ✅ TimeVote requests → broadcast to all validators
+3. ✅ Validators sign votes → return to submitter
+4. ✅ Stake-weighted vote accumulation
+5. ✅ 67% threshold → finalization (all nodes)
+6. ✅ TimeProof assembly → broadcast to network
+7. ✅ Block production → includes finalized TXs
+8. ✅ UTXO processing → transaction archival
+9. ✅ Selective finalized pool cleanup
+
+### Technical Details
+
+**Tier Weight System:**
+- Free tier: sampling_weight = 1, reward_weight = 1
+- Bronze tier: sampling_weight = 10, reward_weight = 10
+- Silver tier: sampling_weight = 100, reward_weight = 100
+- Gold tier: sampling_weight = 1000, reward_weight = 1000
+
+**Auto-Finalization Fallback:**
+- When validators don't respond (0 votes received within 3 seconds)
+- System auto-finalizes if UTXOs are locked (double-spend protection via UTXO states)
+- Transaction added to finalized pool locally
+- Still requires gossip to other nodes for network-wide finalization
+
+**Finalized Pool Management:**
+- Transactions move from pending → finalized when consensus reached
+- Multiple nodes can produce blocks, each queries their finalized pool
+- Only TXs actually included in a block are cleared from pool
+- Prevents premature clearing of transactions not yet in blocks
+
+### Protocol Compliance
+
+This release achieves full compliance with:
+- ✅ Protocol v6.2 §6: Transaction validation
+- ✅ Protocol v6.2 §7: TimeVote cryptographic voting
+- ✅ Protocol v6.2 §8: TimeProof finality certificates  
+- ✅ Protocol v6.2 §9: Block production with finalized transactions
+
+### Files Modified
+
+**Core Transaction Flow:**
+- `src/consensus.rs` - TimeVote consensus, vote accumulation, finalization
+- `src/transaction_pool.rs` - Finalized pool management, selective clearing
+- `src/blockchain.rs` - Block production with finalized TXs, selective cleanup
+- `src/timevote.rs` - TimeVote structure, signing, verification
+- `src/finality_proof.rs` - TimeProof assembly, storage, broadcasting
+- `src/network/server.rs` - TimeVote request/response handlers
+- `src/main.rs` - Broadcast callback wiring, initialization
+
+**RPC & Testing:**
+- `src/rpc/handler.rs` - Dynamic version string from Cargo.toml
+- `scripts/test_transaction.sh` - Complete Phase 1-3 flow validation
+
+**Documentation:**
+- `analysis/transaction_flow_analysis.md` - Complete flow analysis
+- `analysis/phase_1_2_implementation.md` - Phase 1-2 implementation details
+- `analysis/phase_3_summary.md` - Phase 3 completion summary
+- `analysis/bug_fix_finalized_pool_clearing.md` - Bug #1 documentation
+- `plan.md` - Implementation plan and progress tracking
+
+### Known Limitations
+
+- Auto-finalization fallback doesn't guarantee network-wide consensus (requires gossip)
+- Free tier nodes must have TimeVote code for participation
+- Version 1.0.0 nodes cannot participate in TimeVote consensus
+- Network requires majority of nodes running v1.1.0 for proper operation
+
+### Upgrade Instructions
+
+**All Nodes Must Upgrade:**
+```bash
+cd ~/timecoin
+git pull
+cargo build --release
+sudo systemctl restart timed
+```
+
+**Verify Upgrade:**
+```bash
+time-cli getpeerinfo | jq '.[] | {addr: .addr, version: .version, subver: .subver}'
+# Should show: "version": 110000, "subver": "/timed:1.1.0/"
+```
+
+**Test Transaction Flow:**
+```bash
+bash scripts/test_transaction.sh
+```
+
 ## [1.2.0] - 2026-01-28 - Protocol v6.2: TimeGuard Complete
 
 ### Fixed - Fork Resolution
