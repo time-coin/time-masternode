@@ -25,8 +25,9 @@ const MEMORY_PRESSURE_THRESHOLD: f64 = 0.9; // 90% capacity = high pressure
 const LOW_FEE_EVICTION_THRESHOLD: f64 = 0.8; // Start evicting at 80% capacity
 
 #[derive(Clone)]
-struct PoolEntry {
-    tx: Transaction,
+pub(crate) struct PoolEntry {
+    // Made pub(crate) so drop() can be used on return value
+    pub(crate) tx: Transaction,
     fee: u64,
     #[allow(dead_code)]
     added_at: Instant,
@@ -136,9 +137,9 @@ impl TransactionPool {
     }
 
     /// Move transaction from pending to finalized (atomic)
-    pub fn finalize_transaction(&self, txid: Hash256) -> Option<Transaction> {
-        self.pending.remove(&txid).map(|(_, entry)| {
-            let tx = entry.tx.clone();
+    /// Returns true if the transaction was successfully finalized
+    pub fn finalize_transaction(&self, txid: Hash256) -> bool {
+        if let Some((_, entry)) = self.pending.remove(&txid) {
             self.finalized.insert(txid, entry.clone());
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
@@ -147,8 +148,15 @@ impl TransactionPool {
                 hex::encode(txid),
                 self.finalized.len()
             );
-            tx
-        })
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Check if transaction exists in pending or finalized pool
+    pub fn has_transaction(&self, txid: &Hash256) -> bool {
+        self.pending.contains_key(txid) || self.finalized.contains_key(txid)
     }
 
     /// Reject a transaction (atomic)

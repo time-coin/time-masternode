@@ -616,7 +616,8 @@ pub struct TimeVoteConsensus {
     active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>,
 
     /// Finalized transactions with timestamp for cleanup
-    finalized_txs: DashMap<Hash256, (Preference, Instant)>,
+    /// Made pub(crate) for atomic finalization guard in network server
+    pub(crate) finalized_txs: DashMap<Hash256, (Preference, Instant)>,
 
     /// AVS (Active Validator Set) snapshots per slot for finality vote verification
     /// slot_index -> AVSSnapshot
@@ -2348,6 +2349,18 @@ impl ConsensusEngine {
 
         tracing::info!("🔍 Validating transaction {}...", &txid_hex[..16]);
 
+        // FIX: Check broadcast callback early - fail fast if not available
+        // This prevents transactions from being locked and then stuck forever
+        {
+            let callback_guard = self.broadcast_callback.read().await;
+            if callback_guard.is_none() {
+                tracing::error!("❌ No broadcast callback available - cannot process transactions");
+                return Err(
+                    "Network not initialized - broadcast callback not available".to_string()
+                );
+            }
+        }
+
         // Step 1: Atomically lock and validate
         if let Err(e) = self.lock_and_validate_transaction(&tx).await {
             tracing::error!(
@@ -2364,9 +2377,9 @@ impl ConsensusEngine {
 
         // Step 2: Broadcast transaction to network FIRST
         // This ensures validators receive the TX before vote requests
-        tracing::debug!("📡 Broadcasting transaction {} to network", &txid_hex[..16]);
         self.broadcast(NetworkMessage::TransactionBroadcast(tx.clone()))
             .await;
+        tracing::info!("📡 Broadcast transaction {} to network", &txid_hex[..16]);
 
         // Step 3: Process transaction through consensus locally (this adds to pool)
         // AND broadcasts vote request - validators will have received TX by now
@@ -2415,33 +2428,12 @@ impl ConsensusEngine {
         }
 
         // NOTE: Validation already done in lock_and_validate_transaction before this is called
-        // No need to validate again here
+        // UTXOs are already in Locked state - DO NOT transition to SpentPending here
+        // That transition happens when voting actually starts (after broadcast)
 
-        // Update UTXO states to SpentPending
-        let now = chrono::Utc::now().timestamp();
-        for input in &tx.inputs {
-            let old_state = self.utxo_manager.get_state(&input.previous_output);
-            let new_state = UTXOState::SpentPending {
-                txid,
-                votes: 0,
-                total_nodes: n,
-                spent_at: now,
-            };
-            self.utxo_manager
-                .update_state(&input.previous_output, new_state.clone());
-
-            // Notify clients of state change
-            self.state_notifier
-                .notify_state_change(input.previous_output.clone(), old_state, new_state.clone())
-                .await;
-
-            // Broadcast state update
-            self.broadcast(NetworkMessage::UTXOStateUpdate {
-                outpoint: input.previous_output.clone(),
-                state: new_state,
-            })
-            .await;
-        }
+        // REMOVED: Duplicate UTXO state transition to SpentPending
+        // The UTXOs are already locked from lock_and_validate_transaction()
+        // They will transition to SpentPending when consensus voting begins
 
         // Add to pending pool first
         let input_sum: u64 = {
@@ -2512,12 +2504,20 @@ impl ConsensusEngine {
             }
 
             // Move directly to finalized pool
-            if let Some(_finalized_tx) = self.tx_pool.finalize_transaction(txid) {
+            // Get TX before finalizing since PoolEntry is private
+            let tx_for_broadcast = tx.clone();
+            self.tx_pool.finalize_transaction(txid); // Drop private return type
+
+            if self.tx_pool.is_finalized(&txid) {
                 tracing::info!("✅ TX {:?} auto-finalized", hex::encode(txid));
 
                 // Broadcast finalization to all nodes so they also finalize it
-                self.broadcast(NetworkMessage::TransactionFinalized { txid })
-                    .await;
+                // Include the transaction itself so nodes can add it if they don't have it
+                self.broadcast(NetworkMessage::TransactionFinalized {
+                    txid,
+                    tx: tx_for_broadcast,
+                })
+                .await;
                 tracing::info!(
                     "📡 Broadcast TransactionFinalized for {:?}",
                     hex::encode(txid)
@@ -2568,16 +2568,17 @@ impl ConsensusEngine {
         let slot_index = chrono::Utc::now().timestamp() as u64 / BLOCK_INTERVAL;
 
         // Create TimeVoteRequest message with all required fields
+        // FIX: Include transaction data so validators can process immediately
+        // This eliminates the need for a delay waiting for broadcast propagation
         let vote_request_msg = NetworkMessage::TimeVoteRequest {
             txid,
             tx_hash_commitment,
             slot_index,
+            tx: Some(tx.clone()), // Include TX so validators have it immediately
         };
 
-        // Immediately broadcast vote request to all validators
-        // BUT: Give validators 200ms to receive and process the TransactionBroadcast first
-        // This prevents voting "Reject" because they haven't seen the TX yet
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // FIX: No delay needed! Validators will have TX from the vote request itself
+        // This makes finality truly event-driven and eliminates arbitrary timing
 
         if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
             tracing::info!(
@@ -2586,9 +2587,8 @@ impl ConsensusEngine {
                 slot_index
             );
             callback(vote_request_msg.clone());
-        } else {
-            tracing::error!("❌ No broadcast callback available - cannot send vote requests!");
         }
+        // NOTE: No else branch needed - we check broadcast_callback at start of submit_transaction()
 
         self.transition_to_voting(txid);
 
@@ -2660,7 +2660,9 @@ impl ConsensusEngine {
                 );
 
                 // Send vote request to all peers (broadcast)
-                consensus_engine_clone.broadcast(vote_request_msg.clone()).await;
+                consensus_engine_clone
+                    .broadcast(vote_request_msg.clone())
+                    .await;
 
                 // Wait for votes to arrive - reduced for instant finality
                 // 200ms should be enough for local network responses
@@ -2751,19 +2753,31 @@ impl ConsensusEngine {
             // Final finalization: check if we reached consensus
             if let Some((preference, _, _, is_finalized)) = consensus.get_tx_state(&txid) {
                 if is_finalized {
+                    // Get TX before finalizing (PoolEntry is private)
+                    let tx_for_broadcast = tx_pool.get_pending(&txid);
+
                     // Move to finalized pool
-                    if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
+                    tx_pool.finalize_transaction(txid);
+
+                    if tx_pool.is_finalized(&txid) {
                         tracing::info!(
                             "📦 TX {:?} moved to finalized pool (Snowball confidence threshold reached)",
                             hex::encode(txid)
                         );
 
-                        // Broadcast finalization to all nodes
-                        consensus_engine_clone.broadcast(NetworkMessage::TransactionFinalized { txid }).await;
-                        tracing::info!(
-                            "📡 Broadcast TransactionFinalized for {:?}",
-                            hex::encode(txid)
-                        );
+                        // Broadcast finalization to all nodes if we have the TX
+                        if let Some(tx_data) = tx_for_broadcast {
+                            consensus_engine_clone
+                                .broadcast(NetworkMessage::TransactionFinalized {
+                                    txid,
+                                    tx: tx_data,
+                                })
+                                .await;
+                            tracing::info!(
+                                "📡 Broadcast TransactionFinalized for {:?}",
+                                hex::encode(txid)
+                            );
+                        }
                     }
                     // Record finalization preference for reference
                     consensus
@@ -2790,18 +2804,30 @@ impl ConsensusEngine {
                         );
 
                         // Auto-finalize with UTXO lock safety
-                        if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
+                        // Get TX before finalizing (PoolEntry is private)
+                        let tx_for_broadcast = tx_pool.get_pending(&txid);
+
+                        tx_pool.finalize_transaction(txid);
+
+                        if tx_pool.is_finalized(&txid) {
                             tracing::info!(
                                 "✅ TX {:?} auto-finalized (UTXO-lock protected, 0 validator responses)",
                                 hex::encode(txid)
                             );
 
-                            // Broadcast finalization to all nodes
-                            consensus_engine_clone.broadcast(NetworkMessage::TransactionFinalized { txid }).await;
-                            tracing::info!(
-                                "📡 Broadcast TransactionFinalized for {:?}",
-                                hex::encode(txid)
-                            );
+                            // Broadcast finalization to all nodes if we have the TX
+                            if let Some(tx_data) = tx_for_broadcast {
+                                consensus_engine_clone
+                                    .broadcast(NetworkMessage::TransactionFinalized {
+                                        txid,
+                                        tx: tx_data,
+                                    })
+                                    .await;
+                                tracing::info!(
+                                    "📡 Broadcast TransactionFinalized for {:?}",
+                                    hex::encode(txid)
+                                );
+                            }
                         }
                         consensus
                             .finalized_txs
@@ -2891,12 +2917,10 @@ impl ConsensusEngine {
     /// Check if a transaction has exceeded the stall timeout (§7.6.1)
     /// Returns true if transaction has been in Voting for > STALL_TIMEOUT
     pub fn check_stall_timeout(&self, txid: &Hash256) -> bool {
-        if let Some(entry) = self.timevote.stall_timers.get(txid) {
-            let elapsed = entry.value().elapsed();
-            elapsed > STALL_TIMEOUT
-        } else {
-            false
-        }
+        self.timevote
+            .stall_timers
+            .get(txid)
+            .is_some_and(|entry| entry.value().elapsed() > STALL_TIMEOUT)
     }
 
     /// Stop monitoring a transaction (remove stall timer)
@@ -2924,6 +2948,31 @@ impl ConsensusEngine {
         };
         self.set_tx_status(txid, status);
         self.start_stall_timer(txid);
+
+        // FIX: Transition UTXOs from Locked to SpentPending when voting starts
+        // This is the correct place per protocol: Unspent → Locked → SpentPending
+        if let Some(tx) = self.tx_pool.get_pending(&txid) {
+            let now = chrono::Utc::now().timestamp();
+            let n = self.get_masternodes().len() as u32;
+
+            for input in &tx.inputs {
+                let new_state = UTXOState::SpentPending {
+                    txid,
+                    votes: 0,
+                    total_nodes: n,
+                    spent_at: now,
+                };
+                self.utxo_manager
+                    .update_state(&input.previous_output, new_state.clone());
+
+                tracing::debug!(
+                    "UTXO {:?} → SpentPending (txid: {})",
+                    input.previous_output,
+                    hex::encode(txid)
+                );
+            }
+        }
+
         tracing::debug!("Transaction {} → Voting", hex::encode(txid));
     }
 

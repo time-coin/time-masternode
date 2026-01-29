@@ -35,6 +35,7 @@ pub enum NetworkMessage {
     TransactionBroadcast(Transaction),
     TransactionFinalized {
         txid: [u8; 32],
+        tx: Transaction, // Include full transaction for nodes that don't have it yet
     },
     UTXOStateQuery(Vec<OutPoint>),
     UTXOStateResponse(Vec<(OutPoint, UTXOState)>),
@@ -148,10 +149,13 @@ pub enum NetworkMessage {
         preference: String, // "Accept" or "Reject"
     },
     // TimeVote Protocol - Signed vote request (Protocol §8.1)
+    // FIX: Include optional TX data so validators can process immediately
+    // without waiting for separate TransactionBroadcast to propagate
     TimeVoteRequest {
         txid: Hash256,
         tx_hash_commitment: Hash256,
         slot_index: u64,
+        tx: Option<crate::types::Transaction>, // NEW: Include TX for validators who don't have it
     },
     // TimeVote Protocol - Signed vote response (Protocol §8.1)
     TimeVoteResponse {

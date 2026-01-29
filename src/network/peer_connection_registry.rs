@@ -17,7 +17,7 @@ use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::sync::RwLock;
 use tokio::sync::{broadcast, oneshot};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 type PeerWriter = BufWriter<OwnedWriteHalf>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
@@ -888,7 +888,7 @@ impl PeerConnectionRegistry {
         let writers = self.peer_writers.read().await;
 
         if writers.is_empty() {
-            debug!("📡 Broadcast: no peers connected");
+            warn!("📡 Broadcast: no peers connected!");
             return;
         }
 
@@ -905,17 +905,28 @@ impl PeerConnectionRegistry {
         let mut send_count = 0;
         let mut fail_count = 0;
 
+        // Log for transaction broadcasts
+        let is_tx_broadcast = matches!(message, NetworkMessage::TransactionBroadcast(_));
+
         for (peer_ip, writer_arc) in writers.iter() {
             let mut writer = writer_arc.lock().await;
 
             if let Err(e) = writer.write_all(msg_bytes).await {
-                debug!("❌ Broadcast to {} failed: {}", peer_ip, e);
+                if is_tx_broadcast {
+                    warn!("❌ TX broadcast to {} failed: {}", peer_ip, e);
+                } else {
+                    debug!("❌ Broadcast to {} failed: {}", peer_ip, e);
+                }
                 fail_count += 1;
                 continue;
             }
 
             if let Err(e) = writer.flush().await {
-                debug!("❌ Broadcast flush to {} failed: {}", peer_ip, e);
+                if is_tx_broadcast {
+                    warn!("❌ TX broadcast flush to {} failed: {}", peer_ip, e);
+                } else {
+                    debug!("❌ Broadcast flush to {} failed: {}", peer_ip, e);
+                }
                 fail_count += 1;
                 continue;
             }
@@ -923,7 +934,12 @@ impl PeerConnectionRegistry {
             send_count += 1;
         }
 
-        if send_count > 0 || fail_count > 0 {
+        if is_tx_broadcast {
+            info!(
+                "📡 TX broadcast complete: {} peers sent, {} failed",
+                send_count, fail_count
+            );
+        } else if send_count > 0 || fail_count > 0 {
             debug!(
                 "📡 Broadcast complete: {} sent, {} failed",
                 send_count, fail_count

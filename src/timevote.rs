@@ -182,41 +182,49 @@ impl TimeVoteHandler {
     ) -> Result<(), TimeVoteError> {
         match preference {
             Preference::Accept => {
+                // Get TX before finalizing (PoolEntry is private)
+                let tx_data = self.tx_pool.get_pending(&txid);
+
                 // Move transaction to finalized pool
-                if let Some(tx) = self.tx_pool.finalize_transaction(txid) {
-                    // Update inputs to SpentFinalized
-                    for input in &tx.inputs {
-                        let new_state = UTXOState::SpentFinalized {
-                            txid,
-                            finalized_at: chrono::Utc::now().timestamp(),
-                            votes: 0,
-                        };
-                        self.utxo_manager
-                            .update_state(&input.previous_output, new_state);
-                    }
+                self.tx_pool.finalize_transaction(txid);
 
-                    // Create new UTXOs from outputs
-                    for (idx, output) in tx.outputs.iter().enumerate() {
-                        let outpoint = OutPoint {
-                            txid,
-                            vout: idx as u32,
-                        };
-                        let utxo = UTXO {
-                            outpoint: outpoint.clone(),
-                            value: output.value,
-                            script_pubkey: output.script_pubkey.clone(),
-                            address: String::new(),
-                        };
+                if self.tx_pool.is_finalized(&txid) {
+                    // Only proceed if we got the TX data
+                    if let Some(tx) = tx_data {
+                        // Update inputs to SpentFinalized
+                        for input in &tx.inputs {
+                            let new_state = UTXOState::SpentFinalized {
+                                txid,
+                                finalized_at: chrono::Utc::now().timestamp(),
+                                votes: 0,
+                            };
+                            self.utxo_manager
+                                .update_state(&input.previous_output, new_state);
+                        }
 
-                        let _ = self.utxo_manager.add_utxo(utxo).await;
-                        self.utxo_manager
-                            .update_state(&outpoint, UTXOState::Unspent);
-                    }
+                        // Create new UTXOs from outputs
+                        for (idx, output) in tx.outputs.iter().enumerate() {
+                            let outpoint = OutPoint {
+                                txid,
+                                vout: idx as u32,
+                            };
+                            let utxo = UTXO {
+                                outpoint: outpoint.clone(),
+                                value: output.value,
+                                script_pubkey: output.script_pubkey.clone(),
+                                address: String::new(),
+                            };
 
-                    tracing::info!(
-                        "💾 Transaction {:?} finalized and available for block inclusion",
-                        hex::encode(txid)
-                    );
+                            let _ = self.utxo_manager.add_utxo(utxo).await;
+                            self.utxo_manager
+                                .update_state(&outpoint, UTXOState::Unspent);
+                        }
+
+                        tracing::info!(
+                            "💾 Transaction {:?} finalized and available for block inclusion",
+                            hex::encode(txid)
+                        );
+                    } // End if let Some(tx) = tx_data
                 }
                 Ok(())
             }

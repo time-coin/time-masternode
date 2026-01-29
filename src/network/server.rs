@@ -653,16 +653,28 @@ async fn handle_peer(
                                         }
                                     }
                                 }
-                                NetworkMessage::TransactionFinalized { txid } => {
+                                NetworkMessage::TransactionFinalized { txid, tx } => {
                                     tracing::info!("✅ Transaction {} finalized (from {})",
                                         hex::encode(*txid), peer.addr);
 
-                                    // CRITICAL: Actually finalize the transaction on THIS node
+                                    // CRITICAL: Ensure we have the transaction in pending pool first
+                                    // If not, add it now (this handles the race where finalization arrives before TX broadcast)
+                                    if !consensus.tx_pool.has_transaction(txid) {
+                                        tracing::warn!("⚠️ Received TransactionFinalized but TX {} not in pool - adding it now", hex::encode(*txid));
+
+                                        // Process the transaction to add it to pending pool
+                                        if let Err(e) = consensus.process_transaction(tx.clone()).await {
+                                            tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
+                                            line.clear();
+                                            continue;
+                                        }
+                                    }
+
                                     // Move from pending → finalized pool so block producers can include it
-                                    if let Some(_tx) = consensus.tx_pool.finalize_transaction(*txid) {
+                                    if consensus.tx_pool.finalize_transaction(*txid) {
                                         tracing::info!("📦 Moved TX {} to finalized pool on this node", hex::encode(*txid));
                                     } else {
-                                        tracing::debug!("TX {} not in pending pool (may already be finalized or not received yet)", hex::encode(*txid));
+                                        tracing::warn!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
                                     }
 
                                     // Gossip finalization to other peers
@@ -1141,7 +1153,7 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
                                 }
-                                NetworkMessage::TimeVoteRequest { txid, tx_hash_commitment, slot_index } => {
+                                NetworkMessage::TimeVoteRequest { txid, tx_hash_commitment, slot_index, tx } => {
                                     check_message_size!(MAX_VOTE_SIZE, "TimeVoteRequest");
                                     check_rate_limit!("vote");
 
@@ -1149,6 +1161,7 @@ async fn handle_peer(
                                     let txid_val = *txid;
                                     let tx_hash_commitment_val = *tx_hash_commitment;
                                     let slot_index_val = *slot_index;
+                                    let tx_from_request = tx.clone(); // NEW: Optional TX included in request
                                     let peer_addr_str = peer.addr.to_string();
                                     let ip_str_clone = ip_str.clone();
                                     let consensus_clone = Arc::clone(&consensus);
@@ -1156,14 +1169,43 @@ async fn handle_peer(
 
                                     tokio::spawn(async move {
                                         tracing::debug!(
-                                            "🗳️  TimeVoteRequest from {} for TX {:?} (slot {})",
+                                            "🗳️  TimeVoteRequest from {} for TX {:?} (slot {}){}",
                                             peer_addr_str,
                                             hex::encode(txid_val),
-                                            slot_index_val
+                                            slot_index_val,
+                                            if tx_from_request.is_some() { " [TX included]" } else { "" }
                                         );
 
-                                        // Step 1: Check if transaction exists in our mempool
-                                        let tx_opt = consensus_clone.tx_pool.get_pending(&txid_val);
+                                        // FIX: Step 1 - Get TX from mempool OR from request
+                                        let mut tx_opt = consensus_clone.tx_pool.get_pending(&txid_val);
+
+                                        // If not in mempool but included in request, add it
+                                        if tx_opt.is_none() {
+                                            if let Some(tx_from_req) = tx_from_request {
+                                                tracing::debug!(
+                                                    "📥 TX {:?} not in mempool, adding from TimeVoteRequest",
+                                                    hex::encode(txid_val)
+                                                );
+
+                                                // Add to pending pool (this also validates basic structure)
+                                                let input_sum: u64 = {
+                                                    let mut sum = 0u64;
+                                                    for input in &tx_from_req.inputs {
+                                                        if let Ok(utxo) = consensus_clone.utxo_manager.get_utxo(&input.previous_output).await {
+                                                            sum += utxo.value;
+                                                        }
+                                                    }
+                                                    sum
+                                                };
+                                                let output_sum: u64 = tx_from_req.outputs.iter().map(|o| o.value).sum();
+                                                let fee = input_sum.saturating_sub(output_sum);
+
+                                                if consensus_clone.tx_pool.add_pending(tx_from_req.clone(), fee).is_ok() {
+                                                    tracing::debug!("✅ TX {:?} added to mempool from request", hex::encode(txid_val));
+                                                    tx_opt = Some(tx_from_req);
+                                                }
+                                            }
+                                        }
 
                                         let decision = if let Some(tx) = tx_opt {
                                             // Step 2: Verify tx_hash_commitment matches actual transaction
@@ -1190,7 +1232,7 @@ async fn handle_peer(
                                                 }
                                             }
                                         } else {
-                                            tracing::debug!("⚠️  TX {:?} not found in mempool", hex::encode(txid_val));
+                                            tracing::debug!("⚠️  TX {:?} not found in mempool and not included in request", hex::encode(txid_val));
                                             crate::types::VoteDecision::Reject
                                         };
 
@@ -1281,50 +1323,72 @@ async fn handle_peer(
                                                 finality_threshold
                                             );
 
-                                            // Move transaction from pending to finalized
-                                            if let Some(_finalized_tx) = tx_pool.finalize_transaction(txid) {
-                                                tracing::info!(
-                                                    "✅ TX {:?} moved to finalized pool",
-                                                    hex::encode(txid)
-                                                );
+                                            // FIX: Use atomic finalization guard to prevent race conditions
+                                            // Multiple concurrent votes may all try to finalize - only first succeeds
+                                            use dashmap::mapref::entry::Entry;
+                                            match consensus_clone.timevote.finalized_txs.entry(txid) {
+                                                Entry::Vacant(e) => {
+                                                    // We're the first to finalize - claim it
+                                                    e.insert((crate::consensus::Preference::Accept, std::time::Instant::now()));
 
-                                                // Record finalization in TimeVoteConsensus
-                                                consensus_clone.timevote.record_finalization(txid, accumulated_weight);
+                                                    tracing::info!(
+                                                        "🔒 Acquired finalization lock for TX {:?}",
+                                                        hex::encode(txid)
+                                                    );
 
-                                                // Assemble TimeProof certificate
-                                                match consensus_clone.timevote.assemble_timeproof(txid) {
-                                                    Ok(timeproof) => {
+                                                    // Move transaction from pending to finalized
+                                                    if tx_pool.finalize_transaction(txid) {
                                                         tracing::info!(
-                                                            "📜 TimeProof assembled for TX {:?} with {} votes",
-                                                            hex::encode(txid),
-                                                            timeproof.votes.len()
+                                                            "✅ TX {:?} moved to finalized pool",
+                                                            hex::encode(txid)
                                                         );
 
-                                                        // Store TimeProof in finality_proof_manager
-                                                        if let Err(e) = consensus_clone.finality_proof_mgr.store_timeproof(timeproof.clone()) {
-                                                            tracing::error!(
-                                                                "❌ Failed to store TimeProof for TX {:?}: {}",
-                                                                hex::encode(txid),
-                                                                e
-                                                            );
-                                                        }
+                                                        // Record finalization weight
+                                                        consensus_clone.timevote.record_finalization(txid, accumulated_weight);
 
-                                                        // Broadcast TimeProof to network (Task 2.5)
-                                                        consensus_clone.broadcast_timeproof(timeproof).await;
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!(
-                                                            "❌ Failed to assemble TimeProof for TX {:?}: {}",
-                                                            hex::encode(txid),
-                                                            e
+                                                        // Assemble TimeProof certificate
+                                                        match consensus_clone.timevote.assemble_timeproof(txid) {
+                                                            Ok(timeproof) => {
+                                                                tracing::info!(
+                                                                    "📜 TimeProof assembled for TX {:?} with {} votes",
+                                                                    hex::encode(txid),
+                                                                    timeproof.votes.len()
+                                                                );
+
+                                                                // Store TimeProof in finality_proof_manager
+                                                                if let Err(e) = consensus_clone.finality_proof_mgr.store_timeproof(timeproof.clone()) {
+                                                                    tracing::error!(
+                                                                        "❌ Failed to store TimeProof for TX {:?}: {}",
+                                                                        hex::encode(txid),
+                                                                        e
+                                                                    );
+                                                                }
+
+                                                                // Broadcast TimeProof to network (Task 2.5)
+                                                                consensus_clone.broadcast_timeproof(timeproof).await;
+                                                            }
+                                                            Err(e) => {
+                                                                tracing::error!(
+                                                                    "❌ Failed to assemble TimeProof for TX {:?}: {}",
+                                                                    hex::encode(txid),
+                                                                    e
+                                                                );
+                                                            }
+                                                        }
+                                                    } else {
+                                                        tracing::warn!(
+                                                            "⚠️  Failed to finalize TX {:?} - not found in pending pool",
+                                                            hex::encode(txid)
                                                         );
                                                     }
                                                 }
-                                            } else {
-                                                tracing::warn!(
-                                                    "⚠️  Failed to finalize TX {:?} - not found in pending pool",
-                                                    hex::encode(txid)
-                                                );
+                                                Entry::Occupied(_) => {
+                                                    // Another task already finalized this TX - skip
+                                                    tracing::debug!(
+                                                        "TX {:?} already finalized by another task",
+                                                        hex::encode(txid)
+                                                    );
+                                                }
                                             }
                                         }
                                     });

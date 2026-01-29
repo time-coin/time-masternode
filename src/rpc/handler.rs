@@ -1174,24 +1174,24 @@ impl RpcHandler {
     async fn get_info(&self) -> Result<Value, RpcError> {
         // Get blockchain info
         let height = self.blockchain.get_height();
-        
+
         // Get masternode count
         let masternodes = self.registry.active_count().await;
-        
+
         // Get balance
         let all_utxos = self.utxo_manager.list_all_utxos().await;
         let balance: u64 = all_utxos.iter().map(|u| u.value).sum();
         let balance_time = balance as f64 / 100_000_000.0;
-        
+
         // Get uptime
         let uptime = SystemTime::now()
             .duration_since(self.start_time)
             .unwrap()
             .as_secs();
-        
+
         // Get version
         let version = env!("CARGO_PKG_VERSION");
-        
+
         Ok(json!({
             "version": version,
             "blocks": height,
