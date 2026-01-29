@@ -2081,7 +2081,7 @@ impl MessageHandler {
             .update_peer_chain_tip(&self.peer_ip, peer_height, peer_hash)
             .await;
 
-        debug!(
+        tracing::info!(
             "📥 [{}] Received ChainTipResponse from {}: height {} hash {} (our height: {})",
             self.direction,
             self.peer_ip,

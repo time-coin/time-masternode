@@ -4107,9 +4107,12 @@ impl Blockchain {
                     continue;
                 }
                 peer_tips.insert(peer_ip.clone(), (height, hash));
-                tracing::debug!("✅ Got response from {}: height {}", peer_ip, height);
+                tracing::info!("✅ Got cached response from {}: height {}", peer_ip, height);
             } else {
-                tracing::warn!("❌ No response from {} within timeout", peer_ip);
+                tracing::warn!(
+                    "❌ No cached response from {} (not in peer_chain_tips map)",
+                    peer_ip
+                );
             }
         }
 
