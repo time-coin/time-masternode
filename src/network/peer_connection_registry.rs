@@ -724,32 +724,37 @@ impl PeerConnectionRegistry {
 
     /// Set a peer's reported blockchain height
     pub async fn set_peer_height(&self, peer_ip: &str, height: u64) {
+        let ip_only = extract_ip(peer_ip);
         let mut heights = self.peer_heights.write().await;
-        heights.insert(peer_ip.to_string(), height);
+        heights.insert(ip_only.to_string(), height);
     }
 
     /// Get a peer's reported blockchain height
     pub async fn get_peer_height(&self, peer_ip: &str) -> Option<u64> {
+        let ip_only = extract_ip(peer_ip);
         let heights = self.peer_heights.read().await;
-        heights.get(peer_ip).copied()
+        heights.get(ip_only).copied()
     }
 
     /// Phase 3: Update a peer's known height
     pub async fn update_peer_height(&self, peer_ip: &str, height: u64) {
+        let ip_only = extract_ip(peer_ip);
         let mut heights = self.peer_heights.write().await;
-        heights.insert(peer_ip.to_string(), height);
+        heights.insert(ip_only.to_string(), height);
     }
 
     /// Update a peer's chain tip (height + hash)
     pub async fn update_peer_chain_tip(&self, peer_ip: &str, height: u64, hash: [u8; 32]) {
+        let ip_only = extract_ip(peer_ip);
         let mut tips = self.peer_chain_tips.write().await;
-        tips.insert(peer_ip.to_string(), (height, hash));
+        tips.insert(ip_only.to_string(), (height, hash));
     }
 
     /// Get a peer's chain tip (height + hash)
     pub async fn get_peer_chain_tip(&self, peer_ip: &str) -> Option<ChainTip> {
+        let ip_only = extract_ip(peer_ip);
         let tips = self.peer_chain_tips.read().await;
-        tips.get(peer_ip).copied()
+        tips.get(ip_only).copied()
     }
 
     /// Clear stale peer data when peer disconnects
