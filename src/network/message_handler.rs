@@ -464,7 +464,7 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let our_height = context.blockchain.get_height();
-        debug!(
+        info!(
             "📥 [{}] Received GetBlocks({}-{}) from {} (our height: {})",
             self.direction, start, end, self.peer_ip, our_height
         );
@@ -532,7 +532,7 @@ impl MessageHandler {
                     self.direction, self.peer_ip, start, end, our_height, missing_blocks
                 );
             } else {
-                debug!(
+                info!(
                     "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{}, missing: {})",
                     self.direction,
                     blocks.len(),
@@ -2219,7 +2219,7 @@ impl MessageHandler {
         // Check if peer is whitelisted
         let is_whitelisted = context.peer_registry.is_whitelisted(&self.peer_ip).await;
 
-        debug!(
+        info!(
             "📥 [{}] Received {} blocks (height {}-{}) from {} {}",
             self.direction,
             block_count,

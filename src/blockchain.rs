@@ -2257,17 +2257,42 @@ impl Blockchain {
         // Try new format first (block_HEIGHT)
         let key_new = format!("block_{}", height);
         if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
-            let block: Block = bincode::deserialize(&v).map_err(|e| e.to_string())?;
-            self.block_cache.put(height, block.clone());
-            return Ok(block);
+            match bincode::deserialize::<Block>(&v) {
+                Ok(block) => {
+                    self.block_cache.put(height, block.clone());
+                    return Ok(block);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "⚠️ Failed to deserialize block {} from new storage format: {}",
+                        height,
+                        e
+                    );
+                    // Continue to try old format
+                }
+            }
         }
 
         // Fallback to old format (block:HEIGHT) for backward compatibility
         let key_old = format!("block:{}", height);
         if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
-            let block: Block = bincode::deserialize(&v).map_err(|e| e.to_string())?;
-            self.block_cache.put(height, block.clone());
-            return Ok(block);
+            match bincode::deserialize::<Block>(&v) {
+                Ok(block) => {
+                    self.block_cache.put(height, block.clone());
+                    return Ok(block);
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "⚠️ Failed to deserialize block {} from old storage format: {} - BLOCKCHAIN CORRUPTED",
+                        height,
+                        e
+                    );
+                    return Err(format!(
+                        "Block {} found but deserialization failed (incompatible format): {}",
+                        height, e
+                    ));
+                }
+            }
         }
 
         Err(format!("Block {} not found", height))
