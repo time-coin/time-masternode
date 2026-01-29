@@ -547,7 +547,7 @@ impl MessageHandler {
         } else {
             // Requested blocks are beyond our height - we don't have them yet
             info!(
-                "⏭️  [{}] Cannot send blocks {}-{} to {} - we only have up to height {}",
+                "⏭️  [{}] Cannot send blocks {}-{} to {} - we only have up to height {} (peer is ahead of us)",
                 self.direction, start, end, self.peer_ip, our_height
             );
         }
