@@ -1301,12 +1301,9 @@ async fn main() {
             );
 
             // Safety checks before producing
-            // During catchup (far behind), relax peer requirement since all nodes need to catch up together
-            let min_peers_required = if blocks_behind >= SYNC_THRESHOLD_BLOCKS {
-                0
-            } else {
-                2
-            };
+            // Always require at least 3 peers to prevent isolated nodes from creating forks
+            // Even during catchup, we need network consensus to produce valid blocks
+            let min_peers_required = 3;
             if connected_peers.len() < min_peers_required {
                 tracing::warn!(
                     "⚠️ Only {} peer(s) connected - waiting for more peers before producing",
