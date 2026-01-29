@@ -208,6 +208,7 @@ pub struct Blockchain {
     /// Two-tier block cache for efficient memory usage (10-50x faster reads)
     block_cache: Arc<BlockCacheManager>,
     /// Block validator for validation logic
+    #[allow(dead_code)]
     validator: BlockValidator,
     /// AI-powered consensus health monitoring
     consensus_health: Arc<ConsensusHealthMonitor>,
@@ -556,6 +557,7 @@ impl Blockchain {
     }
 
     /// Clear all blocks above a given height from storage
+    #[allow(dead_code)]
     fn clear_blocks_above(&self, height: u64) {
         let mut cleared = 0;
         for h in (height + 1)..=(height + 10000) {
@@ -1924,6 +1926,7 @@ impl Blockchain {
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
+            time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
             consensus_participants: voters.clone(),
             liveness_recovery: Some(false), // Will be set if fallback resolution occurred
@@ -2656,6 +2659,7 @@ impl Blockchain {
     }
 
     /// Store pending fees to be added to next block reward
+    #[allow(dead_code)]
     fn store_pending_fees(&self, fees: u64) -> Result<(), String> {
         let key = "pending_fees".as_bytes();
         let fee_bytes = bincode::serialize(&fees).map_err(|e| e.to_string())?;
@@ -2770,6 +2774,7 @@ impl Blockchain {
         Ok(undo_log)
     }
 
+    #[allow(dead_code)]
     fn calculate_rewards_from_info(&self, masternodes: &[MasternodeInfo]) -> Vec<(String, u64)> {
         if masternodes.is_empty() {
             return vec![];
@@ -5212,6 +5217,7 @@ impl Blockchain {
     }
 
     /// Remove a block at specific height (helper for rollback)
+    #[allow(dead_code)]
     async fn remove_block_at_height(&self, height: u64) -> Result<(), String> {
         let key = format!("block_{}", height);
         self.storage
@@ -5224,6 +5230,7 @@ impl Blockchain {
     }
 
     /// Traditional fork resolution (fallback when AI confidence is low)
+    #[allow(dead_code)]
     async fn traditional_fork_resolution(
         &self,
         our_height: u64,
@@ -5269,6 +5276,7 @@ impl Blockchain {
     }
 
     /// Estimate peer's chain work based on blocks we've seen
+    #[allow(dead_code)]
     async fn estimate_peer_chain_work(&self, blocks: &[Block], peer_height: u64) -> u128 {
         // Start with our common work up to the fork point
         let fork_point = if !blocks.is_empty() {
@@ -5293,6 +5301,7 @@ impl Blockchain {
     }
 
     /// Gather information about which peers support which chain
+    #[allow(dead_code)]
     async fn gather_supporting_peers(
         &self,
         _our_height: u64,
@@ -5459,6 +5468,7 @@ impl Blockchain {
     }
 
     /// Get chain work at a specific height
+    #[allow(dead_code)]
     async fn get_chain_work_at_height(&self, height: u64) -> Result<u128, String> {
         // For now, estimate based on height
         // In the future, this could store actual cumulative work

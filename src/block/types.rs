@@ -44,11 +44,37 @@ pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
 /// This proves a masternode was online and witnessed by peers
 ///
 
+/// DEPRECATED: Heartbeat system removed - kept for backward compatibility with old blocks
+#[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TimeAttestation {
+    pub masternode_address: String,
+    pub sequence_number: u64,
+    pub heartbeat_timestamp: i64,
+    pub masternode_pubkey: String,
+    pub heartbeat_signature: String,
+    pub witnesses: Vec<WitnessRecord>,
+}
+
+/// DEPRECATED: Part of removed heartbeat system - kept for backward compatibility
+#[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WitnessRecord {
+    pub witness_address: String,
+    pub witness_pubkey: String,
+    pub witness_timestamp: i64,
+    pub signature: String,
+}
+
+#[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
+    /// DEPRECATED: Heartbeat attestations - kept for deserializing old blocks
+    #[serde(default, skip_serializing)]
+    pub time_attestations: Vec<TimeAttestation>,
     /// List of masternodes that participated in consensus (voted) for this block
     /// Used to determine eligibility for next block's rewards
     #[serde(default)]
