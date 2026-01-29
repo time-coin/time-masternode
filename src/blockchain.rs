@@ -1426,24 +1426,30 @@ impl Blockchain {
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
                 // Use the fresh chain tip data we just requested (already stored in peer registry)
-                // NOTE: compare_chain_with_peers() uses cached data from peer_registry,
-                // so we DON'T send duplicate GetChainTip requests
-                if let Some((consensus_height, sync_peer)) = self.compare_chain_with_peers().await {
+                if let Some((consensus_height, _sync_peer)) = self.compare_chain_with_peers().await
+                {
                     // Fork detected by consensus mechanism
                     info!(
-                        "🔀 Sync coordinator: Fork detected via consensus at height {}, syncing from {}",
-                        consensus_height,
-                        sync_peer
+                        "🔀 Sync coordinator: Consensus at height {} (our height: {})",
+                        consensus_height, our_height
                     );
-                    if !already_syncing {
+
+                    // Only sync if we're behind AND not already syncing
+                    if consensus_height > our_height && !already_syncing {
+                        info!(
+                            "📥 Starting sync: {} → {} ({} blocks behind)",
+                            our_height,
+                            consensus_height,
+                            consensus_height - our_height
+                        );
+
                         let blockchain_clone = Arc::clone(&self);
                         tokio::spawn(async move {
-                            // CRITICAL FIX: Pass consensus height to sync, not time-based height
                             if let Err(e) = blockchain_clone
                                 .sync_from_peers(Some(consensus_height))
                                 .await
                             {
-                                warn!("⚠️  Consensus fork sync failed: {}", e);
+                                warn!("⚠️  Sync failed: {}", e);
                             }
                         });
                     }

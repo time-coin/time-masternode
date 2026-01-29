@@ -1073,6 +1073,13 @@ async fn main() {
                 // Use only compatible peers for sync (excludes nodes on incompatible chains)
                 let connected_peers = block_peer_registry.get_compatible_peers().await;
 
+                // CRITICAL: If sync coordinator is already syncing, wait for it
+                if block_blockchain.is_syncing() {
+                    tracing::info!("⏳ Sync coordinator is syncing - waiting for progress...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    continue; // Loop back to re-check height
+                }
+
                 if !connected_peers.is_empty() {
                     // First, check consensus: are all peers at the same height as us?
                     // This detects bootstrap scenarios where no one has produced blocks yet
