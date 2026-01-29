@@ -25,7 +25,7 @@ pub mod timevote;
 pub mod transaction_pool;
 pub mod transaction_priority;
 pub mod transaction_selection;
-pub mod tsdc;
+pub mod timelock;
 pub mod tx_index;
 pub mod types;
 pub mod utxo_manager;
@@ -51,7 +51,7 @@ use std::sync::Arc;
 
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
-use tsdc::TSCDConsensus;
+use timelock::TSCDConsensus;
 use types::*;
 use utxo_manager::UTXOStateManager;
 use wallet::WalletManager;

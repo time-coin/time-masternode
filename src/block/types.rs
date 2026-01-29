@@ -74,8 +74,9 @@ pub struct Block {
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
     /// DEPRECATED: Heartbeat attestations - kept for deserializing old blocks
-    #[serde(default, skip_serializing)]
-    pub time_attestations: Vec<TimeAttestation>,
+    /// Wrapped in Option for backward compatibility with blocks stored before removal
+    #[serde(default)]
+    pub time_attestations: Option<Vec<TimeAttestation>>,
     /// List of masternodes that participated in consensus (voted) for this block
     /// Used to determine eligibility for next block's rewards
     #[serde(default)]

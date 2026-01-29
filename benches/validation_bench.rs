@@ -26,7 +26,7 @@ fn create_test_block(height: u64) -> Block {
         },
         transactions,
         masternode_rewards: vec![],
-        time_attestations: vec![],
+        time_attestations: None,
         consensus_participants: vec![],
         liveness_recovery: Some(false),
     }
