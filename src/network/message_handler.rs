@@ -458,7 +458,7 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let our_height = context.blockchain.get_height();
-        info!(
+        debug!(
             "📥 [{}] Received GetBlocks({}-{}) from {} (our height: {})",
             self.direction, start, end, self.peer_ip, our_height
         );
@@ -501,7 +501,9 @@ impl MessageHandler {
 
         let mut blocks = Vec::new();
         // Send blocks we have: cap at our_height, requested end, and batch limit of 100
-        let effective_end = end.min(start + 100).min(our_height);
+        let effective_end = end
+            .min(start + crate::constants::network::SYNC_BATCH_SIZE - 1)
+            .min(our_height);
 
         if start <= our_height {
             let mut missing_blocks = Vec::new();
@@ -524,7 +526,7 @@ impl MessageHandler {
                     self.direction, self.peer_ip, start, end, our_height, missing_blocks
                 );
             } else {
-                info!(
+                debug!(
                     "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{}, missing: {})",
                     self.direction,
                     blocks.len(),
@@ -1960,7 +1962,7 @@ impl MessageHandler {
             .update_peer_chain_tip(&self.peer_ip, peer_height, peer_hash)
             .await;
 
-        info!(
+        debug!(
             "📥 [{}] Received ChainTipResponse from {}: height {} hash {} (our height: {})",
             self.direction,
             self.peer_ip,
@@ -2056,7 +2058,7 @@ impl MessageHandler {
             }
 
             // Peer is ahead and in consensus - sync from them
-            info!(
+            debug!(
                 "📈 [{}] Peer {} ahead at height {} (we have {}), requesting blocks",
                 self.direction, self.peer_ip, peer_height, our_height
             );
@@ -2098,7 +2100,7 @@ impl MessageHandler {
         // Check if peer is whitelisted
         let is_whitelisted = context.peer_registry.is_whitelisted(&self.peer_ip).await;
 
-        info!(
+        debug!(
             "📥 [{}] Received {} blocks (height {}-{}) from {} {}",
             self.direction,
             block_count,

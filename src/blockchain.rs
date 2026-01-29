@@ -886,10 +886,10 @@ impl Blockchain {
                 } else {
                     current + 1 // Request next block after our tip
                 };
-                let batch_end = (batch_start + 100).min(target);
+                let batch_end = (batch_start + constants::network::SYNC_BATCH_SIZE - 1).min(target);
 
                 let req = NetworkMessage::GetBlocks(batch_start, batch_end);
-                tracing::info!(
+                tracing::debug!(
                     "📤 Requesting blocks {}-{} from {}",
                     batch_start,
                     batch_end,
@@ -920,7 +920,7 @@ impl Blockchain {
                         let blocks_received = now_height - last_height;
                         let response_time = batch_start_time.elapsed();
 
-                        tracing::info!(
+                        tracing::debug!(
                             "📈 Block sync progress: {} → {} from {} ({} blocks in {:.2}s)",
                             last_height,
                             now_height,
@@ -1120,7 +1120,7 @@ impl Blockchain {
         match sync_approved {
             Ok(true) => {
                 // Sync approved - proceed
-                tracing::info!(
+                tracing::debug!(
                     "📤 Requesting blocks {}-{} from consensus peer {}",
                     batch_start,
                     batch_end,
@@ -1428,7 +1428,9 @@ impl Blockchain {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
-                // This uses fresh chain tip data we just requested
+                // Use the fresh chain tip data we just requested (already stored in peer registry)
+                // NOTE: compare_chain_with_peers() uses cached data from peer_registry,
+                // so we DON'T send duplicate GetChainTip requests
                 if let Some((consensus_height, sync_peer)) = self.compare_chain_with_peers().await {
                     // Fork detected by consensus mechanism
                     info!(
@@ -4134,15 +4136,15 @@ impl Blockchain {
     }
 
     /// Periodic chain comparison with peers to detect forks
-    /// Requests block height from peers and compares
+    /// Analyzes cached chain tip data from peers (updated by periodic tasks)
     ///
     /// **PRIMARY FORK RESOLUTION ENTRY POINT**
     /// This is the recommended way to detect and resolve forks.
     /// It runs periodically and queries all peers for consensus.
     ///
-    /// TODO(refactor): Coordinate with sync_coordinator to prevent duplicate sync requests
-    /// Currently periodic fork resolution can conflict with opportunistic sync
-    /// See: analysis/REFACTORING_ROADMAP.md - Phase 3, Step 3.3
+    /// NOTE: This method uses CACHED chain tip data from the peer registry.
+    /// Callers should request fresh chain tips before calling this method.
+    /// See: spawn_sync_coordinator() and start_chain_comparison_task() for examples.
     ///
     /// Benefits over on-demand resolution:
     /// - Queries all peers for complete picture
@@ -4173,23 +4175,14 @@ impl Blockchain {
             connected_peers.len()
         );
 
-        tracing::info!(
-            "🔍 [FORK CHECK] Querying {} connected compatible peers for chain status",
+        tracing::debug!(
+            "🔍 [FORK CHECK] Analyzing chain status from {} connected compatible peers",
             connected_peers.len()
         );
 
-        // Request chain tips (height + hash) from all peers
-        for peer in &connected_peers {
-            let request = NetworkMessage::GetChainTip;
-            if let Err(e) = registry.send_to_peer(peer, request).await {
-                tracing::warn!("⚠️  Failed to send GetChainTip to {}: {}", peer, e);
-            } else {
-                tracing::debug!("📤 Sent GetChainTip request to {}", peer);
-            }
-        }
-
-        // Wait for responses (with timeout)
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // Use cached chain tips from registry (already requested by sync coordinator)
+        // This prevents duplicate GetChainTip spam every 30 seconds
+        // If called outside sync coordinator context, chain tips may be stale (up to 30s old)
 
         // Collect peer chain tips (height + hash) from registry
         let mut peer_tips: std::collections::HashMap<String, (u64, [u8; 32])> =
@@ -4212,13 +4205,13 @@ impl Blockchain {
         }
 
         // DEBUG: Log what we received from peers
-        tracing::info!(
+        tracing::debug!(
             "🔍 [DEBUG] Received chain tips from {}/{} peers:",
             peer_tips.len(),
             connected_peers.len()
         );
         for (peer_ip, (height, hash)) in &peer_tips {
-            tracing::info!(
+            tracing::debug!(
                 "   Peer {}: height {} hash {}",
                 peer_ip,
                 height,
@@ -4474,7 +4467,7 @@ impl Blockchain {
         // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical
         // This can only happen if we have blocks that no peer has yet
         if our_height > consensus_height {
-            tracing::info!(
+            tracing::debug!(
                 "📈 We have the longest chain: height {} > highest peer {} ({} peers at that height)",
                 our_height,
                 consensus_height,
@@ -4491,9 +4484,12 @@ impl Blockchain {
     }
 
     /// Start periodic chain comparison task
+    ///
+    /// This task queries peers every 15 seconds to detect forks and trigger sync.
+    /// Works in coordination with the sync coordinator (which runs every 30s).
     pub fn start_chain_comparison_task(blockchain: Arc<Blockchain>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15)); // Every 15 seconds for immediate sync
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
 
             loop {
                 interval.tick().await;
@@ -4501,7 +4497,38 @@ impl Blockchain {
                 let our_height = blockchain.get_height();
                 tracing::debug!("🔍 Periodic chain check: our height = {}", our_height);
 
-                // Query peers for their heights and check for forks
+                // Get peer registry
+                let peer_registry_opt = blockchain.peer_registry.read().await;
+                let peer_registry = match peer_registry_opt.as_ref() {
+                    Some(pr) => pr,
+                    None => continue,
+                };
+
+                // Request fresh chain tips from all connected compatible peers
+                let connected_peers = peer_registry.get_compatible_peers().await;
+                if connected_peers.is_empty() {
+                    continue;
+                }
+
+                tracing::debug!(
+                    "🔍 Periodic chain check: Requesting chain tips from {} peers",
+                    connected_peers.len()
+                );
+
+                for peer in &connected_peers {
+                    let request = NetworkMessage::GetChainTip;
+                    if let Err(e) = peer_registry.send_to_peer(peer, request).await {
+                        tracing::debug!("Failed to send GetChainTip to {}: {}", peer, e);
+                    }
+                }
+
+                // Wait for responses
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+                // Drop the read lock before calling compare_chain_with_peers
+                drop(peer_registry_opt);
+
+                // Query peers for their heights and check for forks (uses cached data)
                 if let Some((consensus_height, consensus_peer)) =
                     blockchain.compare_chain_with_peers().await
                 {
@@ -5078,7 +5105,7 @@ impl Blockchain {
         start: u64,
         end: u64,
     ) -> Result<(), String> {
-        info!("📤 Requesting blocks {}-{} from {}", start, end, peer_addr);
+        debug!("📤 Requesting blocks {}-{} from {}", start, end, peer_addr);
 
         let registry = self.peer_registry.read().await;
         if let Some(reg) = registry.as_ref() {

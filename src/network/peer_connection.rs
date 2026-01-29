@@ -1515,7 +1515,7 @@ impl PeerConnection {
                     .update_peer_chain_tip(&self.peer_ip, *height, *hash)
                     .await;
 
-                tracing::info!(
+                tracing::debug!(
                     "📥 Received ChainTipResponse from {}: height {} hash {} (our height: {})",
                     self.peer_ip,
                     height,
@@ -1611,7 +1611,7 @@ impl PeerConnection {
                     }
                 } else if *height > our_height {
                     // Peer is ahead - we might need to sync
-                    info!(
+                    debug!(
                         "📈 [{:?}] Peer {} ahead at height {} (we have {}), requesting blocks",
                         self.direction, self.peer_ip, height, our_height
                     );
