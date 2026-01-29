@@ -46,6 +46,7 @@ pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
 
 /// DEPRECATED: Heartbeat system removed - kept for backward compatibility with old blocks
 #[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
+#[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TimeAttestation {
     pub masternode_address: String,
