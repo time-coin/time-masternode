@@ -11,7 +11,11 @@ use crate::block::types::Block;
 use lru::LruCache;
 use parking_lot::RwLock;
 use std::num::NonZeroUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+
+// Cache schema version - increment when Block format changes
+const CACHE_SCHEMA_VERSION: u32 = 2; // Incremented for time_attestations field addition
 
 /// Two-tier block cache manager
 pub struct BlockCacheManager {
@@ -19,6 +23,8 @@ pub struct BlockCacheManager {
     hot: Arc<RwLock<LruCache<u64, Arc<Block>>>>,
     /// Warm cache: Serialized blocks (fast to deserialize)
     warm: Arc<RwLock<LruCache<u64, Vec<u8>>>>,
+    /// Cache schema version for detecting incompatible changes
+    schema_version: std::sync::atomic::AtomicU32,
     /// Statistics
     hot_hits: std::sync::atomic::AtomicU64,
     warm_hits: std::sync::atomic::AtomicU64,
@@ -35,13 +41,20 @@ impl BlockCacheManager {
         let hot_size = NonZeroUsize::new(hot_capacity).unwrap_or(NonZeroUsize::new(50).unwrap());
         let warm_size = NonZeroUsize::new(warm_capacity).unwrap_or(NonZeroUsize::new(500).unwrap());
 
-        Self {
+        let cache = Self {
             hot: Arc::new(RwLock::new(LruCache::new(hot_size))),
             warm: Arc::new(RwLock::new(LruCache::new(warm_size))),
+            schema_version: std::sync::atomic::AtomicU32::new(CACHE_SCHEMA_VERSION),
             hot_hits: std::sync::atomic::AtomicU64::new(0),
             warm_hits: std::sync::atomic::AtomicU64::new(0),
             misses: std::sync::atomic::AtomicU64::new(0),
-        }
+        };
+
+        tracing::info!(
+            "Block cache initialized with schema version {}",
+            CACHE_SCHEMA_VERSION
+        );
+        cache
     }
 
     /// Get a block from cache
@@ -62,6 +75,23 @@ impl BlockCacheManager {
 
         // Try warm cache (deserialize required)
         {
+            // Check schema version before attempting deserialization
+            let current_version = self.schema_version.load(Ordering::Relaxed);
+            if current_version != CACHE_SCHEMA_VERSION {
+                // Schema changed, clear cache
+                tracing::warn!(
+                    "🔄 Cache schema mismatch (v{} != v{}), clearing incompatible cache",
+                    current_version,
+                    CACHE_SCHEMA_VERSION
+                );
+                self.hot.write().clear();
+                self.warm.write().clear();
+                self.schema_version
+                    .store(CACHE_SCHEMA_VERSION, Ordering::Relaxed);
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+
             let mut warm_cache = self.warm.write();
             if let Some(bytes) = warm_cache.get(&height) {
                 match bincode::deserialize::<Block>(bytes) {
@@ -74,8 +104,9 @@ impl BlockCacheManager {
                         return Some(block_arc);
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to deserialize block {} from warm cache: {}",
+                        // Silently remove incompatible cache entries (expected during schema changes)
+                        tracing::debug!(
+                            "Removing incompatible cache entry for block {}: {}",
                             height,
                             e
                         );
