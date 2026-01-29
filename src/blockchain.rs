@@ -2247,23 +2247,24 @@ impl Blockchain {
             return Ok((*cached_block).clone());
         }
 
-        // Cache miss - load from storage
-        let key = format!("block_{}", height);
-        let value = self
-            .storage
-            .get(key.as_bytes())
-            .map_err(|e| e.to_string())?;
-
-        if let Some(v) = value {
+        // Cache miss - try both storage key formats for backward compatibility
+        // Try new format first (block_HEIGHT)
+        let key_new = format!("block_{}", height);
+        if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
             let block: Block = bincode::deserialize(&v).map_err(|e| e.to_string())?;
-
-            // Add to cache for future reads
             self.block_cache.put(height, block.clone());
-
-            Ok(block)
-        } else {
-            Err(format!("Block {} not found", height))
+            return Ok(block);
         }
+
+        // Fallback to old format (block:HEIGHT) for backward compatibility
+        let key_old = format!("block:{}", height);
+        if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
+            let block: Block = bincode::deserialize(&v).map_err(|e| e.to_string())?;
+            self.block_cache.put(height, block.clone());
+            return Ok(block);
+        }
+
+        Err(format!("Block {} not found", height))
     }
 
     /// Get block hash at a height

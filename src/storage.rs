@@ -267,11 +267,19 @@ impl SledBlockStorage {
 impl BlockStorage for SledBlockStorage {
     async fn get_block(&self, height: u64) -> Option<Block> {
         let db = self.db.clone();
-        let key = format!("block_{}", height);
+        let key_new = format!("block_{}", height);
+        let key_old = format!("block:{}", height);
 
         spawn_blocking(move || {
-            let value = db.get(key.as_bytes()).ok()??;
-            bincode::deserialize(&value).ok()
+            // Try new format first
+            if let Ok(Some(value)) = db.get(key_new.as_bytes()) {
+                return bincode::deserialize(&value).ok();
+            }
+            // Fallback to old format for backward compatibility
+            if let Ok(Some(value)) = db.get(key_old.as_bytes()) {
+                return bincode::deserialize(&value).ok();
+            }
+            None
         })
         .await
         .ok()
