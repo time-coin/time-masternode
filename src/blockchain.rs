@@ -2257,40 +2257,63 @@ impl Blockchain {
         // Try new format first (block_HEIGHT)
         let key_new = format!("block_{}", height);
         if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
+            // Try current Block format
             match bincode::deserialize::<Block>(&v) {
                 Ok(block) => {
                     self.block_cache.put(height, block.clone());
                     return Ok(block);
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "⚠️ Failed to deserialize block {} from new storage format: {}",
-                        height,
-                        e
-                    );
-                    // Continue to try old format
+                Err(_) => {
+                    // Try old BlockV1 format (without liveness_recovery field)
+                    match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
+                        Ok(v1_block) => {
+                            let block: Block = v1_block.into();
+                            tracing::debug!("✓ Migrated block {} from V1 format", height);
+                            self.block_cache.put(height, block.clone());
+                            return Ok(block);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "⚠️ Failed to deserialize block {} from new storage (tried both formats): {}",
+                                height,
+                                e
+                            );
+                        }
+                    }
                 }
             }
         }
 
-        // Fallback to old format (block:HEIGHT) for backward compatibility
+        // Fallback to old storage key format (block:HEIGHT)
         let key_old = format!("block:{}", height);
         if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
+            // Try current Block format
             match bincode::deserialize::<Block>(&v) {
                 Ok(block) => {
                     self.block_cache.put(height, block.clone());
                     return Ok(block);
                 }
-                Err(e) => {
-                    tracing::error!(
-                        "⚠️ Failed to deserialize block {} from old storage format: {} - BLOCKCHAIN CORRUPTED",
-                        height,
-                        e
-                    );
-                    return Err(format!(
-                        "Block {} found but deserialization failed (incompatible format): {}",
-                        height, e
-                    ));
+                Err(_) => {
+                    // Try old BlockV1 format
+                    match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
+                        Ok(v1_block) => {
+                            let block: Block = v1_block.into();
+                            tracing::debug!("✓ Migrated block {} from V1 format (old key)", height);
+                            self.block_cache.put(height, block.clone());
+                            return Ok(block);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "⚠️ Failed to deserialize block {} from old storage (tried both formats): {}",
+                                height,
+                                e
+                            );
+                            return Err(format!(
+                                "Block {} found but deserialization failed: {}",
+                                height, e
+                            ));
+                        }
+                    }
                 }
             }
         }

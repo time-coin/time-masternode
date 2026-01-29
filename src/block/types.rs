@@ -78,6 +78,33 @@ pub struct WitnessRecord {
     pub signature: String,
 }
 
+/// Old block format from before liveness_recovery field was added
+/// Used for deserializing legacy blocks from storage
+#[allow(deprecated)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockV1 {
+    pub header: BlockHeader,
+    pub transactions: Vec<Transaction>,
+    pub masternode_rewards: Vec<(String, u64)>,
+    #[serde(default)]
+    pub time_attestations: Vec<TimeAttestation>,
+    #[serde(default)]
+    pub consensus_participants: Vec<String>,
+}
+
+impl From<BlockV1> for Block {
+    fn from(v1: BlockV1) -> Self {
+        Block {
+            header: v1.header,
+            transactions: v1.transactions,
+            masternode_rewards: v1.masternode_rewards,
+            time_attestations: vec![], // Always empty in new blocks
+            consensus_participants: v1.consensus_participants,
+            liveness_recovery: None, // Not present in old blocks
+        }
+    }
+}
+
 #[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
