@@ -6,8 +6,20 @@
 #![allow(dead_code)] // Attestation methods are scaffolding for future integration
 
 use crate::types::{Hash256, Transaction};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
+
+/// Custom deserializer for time_attestations to handle legacy block formats
+/// Old blocks may have: Vec<TimeAttestation>, Option<Vec<TimeAttestation>>, or missing field
+#[allow(deprecated)]
+fn deserialize_time_attestations<'de, D>(deserializer: D) -> Result<Vec<TimeAttestation>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Try to deserialize as Option<Vec> first (handles both Some(vec) and None)
+    let opt: Option<Vec<TimeAttestation>> = Option::deserialize(deserializer).unwrap_or(None);
+    Ok(opt.unwrap_or_default())
+}
 
 /// Build a merkle tree from a list of hashes
 /// Generic merkle root calculator used for transactions, attestations, etc.
@@ -74,7 +86,8 @@ pub struct Block {
     pub masternode_rewards: Vec<(String, u64)>,
     /// DEPRECATED: Heartbeat attestations - kept for deserializing old blocks
     /// Always empty in new blocks but field must exist for backward compatibility
-    #[serde(default, skip_serializing)]
+    /// Uses custom deserializer to handle both Vec and Option<Vec> formats from old blocks
+    #[serde(default, skip_serializing, deserialize_with = "deserialize_time_attestations")]
     pub time_attestations: Vec<TimeAttestation>,
     /// List of masternodes that participated in consensus (voted) for this block
     /// Used to determine eligibility for next block's rewards
