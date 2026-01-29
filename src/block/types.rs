@@ -78,12 +78,56 @@ pub struct WitnessRecord {
     pub signature: String,
 }
 
-/// Old block format from before liveness_recovery field was added
+/// Old block header format from before active_masternodes_bitmap and liveness_recovery fields were added
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
+pub struct BlockHeaderV1 {
+    pub version: u32,
+    pub height: u64,
+    pub previous_hash: Hash256,
+    pub merkle_root: Hash256,
+    pub timestamp: i64,
+    pub block_reward: u64,
+    #[serde(default)]
+    pub leader: String,
+    #[serde(default)]
+    pub attestation_root: Hash256,
+    #[serde(default)]
+    pub masternode_tiers: MasternodeTierCounts,
+    #[serde(default)]
+    pub vrf_proof: Vec<u8>,
+    #[serde(default)]
+    pub vrf_output: Hash256,
+    #[serde(default)]
+    pub vrf_score: u64,
+}
+
+impl From<BlockHeaderV1> for BlockHeader {
+    fn from(v1: BlockHeaderV1) -> Self {
+        BlockHeader {
+            version: v1.version,
+            height: v1.height,
+            previous_hash: v1.previous_hash,
+            merkle_root: v1.merkle_root,
+            timestamp: v1.timestamp,
+            block_reward: v1.block_reward,
+            leader: v1.leader,
+            attestation_root: v1.attestation_root,
+            masternode_tiers: v1.masternode_tiers,
+            vrf_proof: v1.vrf_proof,
+            vrf_output: v1.vrf_output,
+            vrf_score: v1.vrf_score,
+            active_masternodes_bitmap: vec![], // Not present in old blocks
+            liveness_recovery: None,           // Not present in old blocks
+        }
+    }
+}
+
+/// Old block format from before active_masternodes_bitmap and liveness_recovery fields were added
 /// Used for deserializing legacy blocks from storage
 #[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockV1 {
-    pub header: BlockHeader,
+    pub header: BlockHeaderV1,
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
     #[serde(default)]
@@ -95,7 +139,7 @@ pub struct BlockV1 {
 impl From<BlockV1> for Block {
     fn from(v1: BlockV1) -> Self {
         Block {
-            header: v1.header,
+            header: v1.header.into(),
             transactions: v1.transactions,
             masternode_rewards: v1.masternode_rewards,
             time_attestations: vec![], // Always empty in new blocks
@@ -114,7 +158,11 @@ pub struct Block {
     /// DEPRECATED: Heartbeat attestations - kept for deserializing old blocks
     /// Always empty in new blocks but field must exist for backward compatibility
     /// Uses custom deserializer to handle both Vec and Option<Vec> formats from old blocks
-    #[serde(default, skip_serializing, deserialize_with = "deserialize_time_attestations")]
+    #[serde(
+        default,
+        skip_serializing,
+        deserialize_with = "deserialize_time_attestations"
+    )]
     pub time_attestations: Vec<TimeAttestation>,
     /// List of masternodes that participated in consensus (voted) for this block
     /// Used to determine eligibility for next block's rewards

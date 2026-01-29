@@ -2256,62 +2256,91 @@ impl Blockchain {
         // Cache miss - try both storage key formats for backward compatibility
         // Try new format first (block_HEIGHT)
         let key_new = format!("block_{}", height);
-        if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
-            // Try current Block format
-            match bincode::deserialize::<Block>(&v) {
-                Ok(block) => {
-                    self.block_cache.put(height, block.clone());
-                    return Ok(block);
-                }
-                Err(_) => {
-                    // Try old BlockV1 format (without liveness_recovery field)
-                    match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
-                        Ok(v1_block) => {
-                            let block: Block = v1_block.into();
-                            tracing::debug!("✓ Migrated block {} from V1 format", height);
-                            self.block_cache.put(height, block.clone());
-                            return Ok(block);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "⚠️ Failed to deserialize block {} from new storage (tried both formats): {}",
-                                height,
-                                e
-                            );
+        let has_new_key = self
+            .storage
+            .get(key_new.as_bytes())
+            .ok()
+            .flatten()
+            .is_some();
+
+        // Try old format (block:HEIGHT)
+        let key_old = format!("block:{}", height);
+        let has_old_key = self
+            .storage
+            .get(key_old.as_bytes())
+            .ok()
+            .flatten()
+            .is_some();
+
+        if !has_new_key && !has_old_key {
+            // Block truly doesn't exist
+            return Err(format!(
+                "Block {} not found in storage (checked both key formats)",
+                height
+            ));
+        }
+
+        // Try deserializing with new key format
+        if has_new_key {
+            if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
+                // Try current Block format
+                match bincode::deserialize::<Block>(&v) {
+                    Ok(block) => {
+                        self.block_cache.put(height, block.clone());
+                        return Ok(block);
+                    }
+                    Err(e1) => {
+                        // Try old BlockV1 format (without liveness_recovery field)
+                        match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
+                            Ok(v1_block) => {
+                                let block: Block = v1_block.into();
+                                tracing::info!("✓ Migrated block {} from V1 format", height);
+                                self.block_cache.put(height, block.clone());
+                                return Ok(block);
+                            }
+                            Err(e2) => {
+                                tracing::error!(
+                                    "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
+                                    height, key_new, e1, e2
+                                );
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Fallback to old storage key format (block:HEIGHT)
-        let key_old = format!("block:{}", height);
-        if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
-            // Try current Block format
-            match bincode::deserialize::<Block>(&v) {
-                Ok(block) => {
-                    self.block_cache.put(height, block.clone());
-                    return Ok(block);
-                }
-                Err(_) => {
-                    // Try old BlockV1 format
-                    match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
-                        Ok(v1_block) => {
-                            let block: Block = v1_block.into();
-                            tracing::debug!("✓ Migrated block {} from V1 format (old key)", height);
-                            self.block_cache.put(height, block.clone());
-                            return Ok(block);
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                "⚠️ Failed to deserialize block {} from old storage (tried both formats): {}",
-                                height,
-                                e
-                            );
-                            return Err(format!(
-                                "Block {} found but deserialization failed: {}",
-                                height, e
-                            ));
+        // Try deserializing with old key format
+        if has_old_key {
+            if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
+                // Try current Block format
+                match bincode::deserialize::<Block>(&v) {
+                    Ok(block) => {
+                        self.block_cache.put(height, block.clone());
+                        return Ok(block);
+                    }
+                    Err(e1) => {
+                        // Try old BlockV1 format
+                        match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
+                            Ok(v1_block) => {
+                                let block: Block = v1_block.into();
+                                tracing::info!(
+                                    "✓ Migrated block {} from V1 format (old key)",
+                                    height
+                                );
+                                self.block_cache.put(height, block.clone());
+                                return Ok(block);
+                            }
+                            Err(e2) => {
+                                tracing::error!(
+                                    "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
+                                    height, key_old, e1, e2
+                                );
+                                return Err(format!(
+                                    "Block {} found but deserialization failed (incompatible binary format)",
+                                    height
+                                ));
+                            }
                         }
                     }
                 }
