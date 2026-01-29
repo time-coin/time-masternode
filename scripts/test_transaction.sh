@@ -70,17 +70,31 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Extract a connected masternode wallet address (filter for is_connected=true)
-RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes[]? | select(.is_connected == true) | .wallet_address' | head -n 1)
+# Count total and connected masternodes
+TOTAL_MN=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes | length // 0')
+CONNECTED_MN=$(echo "$MASTERNODE_JSON" | jq -r '[.masternodes[]? | select(.is_connected == true)] | length')
 
-if [ -z "$RECIPIENT_ADDRESS" ] || [ "$RECIPIENT_ADDRESS" = "null" ]; then
-    log_error "No connected masternodes found"
+log_info "Total masternodes: $TOTAL_MN"
+log_info "Connected masternodes: $CONNECTED_MN"
+
+if [ "$CONNECTED_MN" -eq 0 ]; then
+    log_error "No connected masternodes found!"
     log_info "Available masternodes:"
     echo "$MASTERNODE_JSON" | jq '.masternodes[]? | {ip: .address, wallet: .wallet_address, connected: .is_connected}'
     exit 1
 fi
 
-log_success "Found connected masternode with address: $RECIPIENT_ADDRESS"
+# Extract a connected masternode wallet address (filter for is_connected=true)
+RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes[]? | select(.is_connected == true) | .wallet_address' | head -n 1)
+
+if [ -z "$RECIPIENT_ADDRESS" ] || [ "$RECIPIENT_ADDRESS" = "null" ]; then
+    log_error "Could not extract wallet address from connected masternode"
+    echo "$MASTERNODE_JSON" | jq '.masternodes[]? | select(.is_connected == true)'
+    exit 1
+fi
+
+log_success "Found $CONNECTED_MN/$TOTAL_MN connected masternode(s)"
+log_success "Using recipient address: $RECIPIENT_ADDRESS"
 echo ""
 
 # Step 2: Check our balance

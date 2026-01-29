@@ -322,6 +322,12 @@ impl MessageHandler {
                 visible_masternodes,
                 timestamp,
             } => {
+                tracing::info!(
+                    "📥 [{:?}] Processing gossip from {}: {} masternodes visible",
+                    self.direction,
+                    reporter,
+                    visible_masternodes.len()
+                );
                 context
                     .masternode_registry
                     .process_status_gossip(

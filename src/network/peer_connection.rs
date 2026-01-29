@@ -1818,35 +1818,27 @@ impl PeerConnection {
                     );
                 }
             }
-            _ => {
-                // Check if it's a gossip message
-                if matches!(message, NetworkMessage::MasternodeStatusGossip { .. }) {
-                    if let NetworkMessage::MasternodeStatusGossip {
-                        reporter,
-                        visible_masternodes,
-                        timestamp,
-                    } = &message
-                    {
-                        info!(
-                            "📥 [{:?}] Received gossip from {}: {} masternodes visible",
-                            self.direction,
-                            self.peer_ip,
-                            visible_masternodes.len()
-                        );
-                        masternode_registry
-                            .process_status_gossip(
-                                reporter.clone(),
-                                visible_masternodes.clone(),
-                                *timestamp,
-                            )
-                            .await;
-                    }
-                } else {
-                    debug!(
-                        "📨 [{:?}] Received other message from {}",
-                        self.direction, self.peer_ip
+            NetworkMessage::MasternodeStatusGossip { .. } => {
+                // Use unified message handler for gossip
+                let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+                let context = MessageContext::minimal(
+                    Arc::clone(blockchain),
+                    Arc::clone(peer_registry),
+                    Arc::clone(masternode_registry),
+                );
+
+                if let Err(e) = handler.handle_message(&message, &context).await {
+                    warn!(
+                        "⚠️ [{:?}] Error handling gossip from {}: {}",
+                        self.direction, self.peer_ip, e
                     );
                 }
+            }
+            _ => {
+                debug!(
+                    "📨 [{:?}] Received other message from {}",
+                    self.direction, self.peer_ip
+                );
             }
         }
 
@@ -2009,25 +2001,13 @@ impl PeerConnection {
                     self.direction, self.peer_ip
                 );
             }
-            NetworkMessage::MasternodeStatusGossip {
-                reporter,
-                visible_masternodes,
-                timestamp,
-            } => {
-                // Process gossip message
-                info!(
-                    "📥 [{:?}] Received gossip from {}: {} masternodes visible",
-                    self.direction,
-                    self.peer_ip,
-                    visible_masternodes.len()
+            NetworkMessage::MasternodeStatusGossip { .. } => {
+                // Gossip messages should be handled by the main message loop, not here
+                // This handler is for simple responses only
+                debug!(
+                    "📥 [{:?}] Gossip message from {} (should be handled by main loop)",
+                    self.direction, self.peer_ip
                 );
-                masternode_registry
-                    .process_status_gossip(
-                        reporter.clone(),
-                        visible_masternodes.clone(),
-                        *timestamp,
-                    )
-                    .await;
             }
             _ => {
                 debug!(
