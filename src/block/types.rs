@@ -43,7 +43,6 @@ pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
 /// Proof-of-Time attestation included in blocks
 /// This proves a masternode was online and witnessed by peers
 ///
-
 /// DEPRECATED: Heartbeat system removed - kept for backward compatibility with old blocks
 #[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
 #[allow(deprecated)]

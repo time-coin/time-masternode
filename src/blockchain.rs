@@ -1421,8 +1421,8 @@ impl Blockchain {
                     }
                 }
 
-                // Wait for responses to arrive
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // Wait for responses to arrive (increased timeout for high-latency networks)
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
                 // Use the fresh chain tip data we just requested (already stored in peer registry)
@@ -4100,7 +4100,10 @@ impl Blockchain {
             if let Some((height, hash)) = registry.get_peer_chain_tip(peer_ip).await {
                 // Ignore peers with zero hash (storage key bug - can't read their own blocks)
                 if hash == [0u8; 32] {
-                    tracing::warn!("⚠️  Ignoring peer {} with zero hash (likely storage issue)", peer_ip);
+                    tracing::warn!(
+                        "⚠️  Ignoring peer {} with zero hash (likely storage issue)",
+                        peer_ip
+                    );
                     continue;
                 }
                 peer_tips.insert(peer_ip.clone(), (height, hash));
@@ -4436,8 +4439,8 @@ impl Blockchain {
                     }
                 }
 
-                // Wait for responses
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                // Wait for responses (increased timeout for high-latency networks)
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
                 // Drop the read lock before calling compare_chain_with_peers
                 drop(peer_registry_opt);
