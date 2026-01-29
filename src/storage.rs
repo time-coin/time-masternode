@@ -267,7 +267,7 @@ impl SledBlockStorage {
 impl BlockStorage for SledBlockStorage {
     async fn get_block(&self, height: u64) -> Option<Block> {
         let db = self.db.clone();
-        let key = format!("block:{}", height);
+        let key = format!("block_{}", height);
 
         spawn_blocking(move || {
             let value = db.get(key.as_bytes()).ok()??;
@@ -281,7 +281,7 @@ impl BlockStorage for SledBlockStorage {
     async fn store_block(&self, block: &Block) -> Result<(), String> {
         let db = self.db.clone();
         let block = block.clone();
-        let key = format!("block:{}", block.header.height);
+        let key = format!("block_{}", block.header.height);
 
         spawn_blocking(move || {
             let value = bincode::serialize(&block)?;

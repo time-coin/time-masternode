@@ -5213,7 +5213,7 @@ impl Blockchain {
 
     /// Remove a block at specific height (helper for rollback)
     async fn remove_block_at_height(&self, height: u64) -> Result<(), String> {
-        let key = format!("block:{}", height);
+        let key = format!("block_{}", height);
         self.storage
             .remove(key.as_bytes())
             .map_err(|e| format!("Failed to remove block at height {}: {}", height, e))?;
