@@ -12,7 +12,6 @@ use crate::block::types::Block;
 use crate::types::MasternodeTier;
 use crate::NetworkType;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 pub struct GenesisBlock;
 
@@ -313,70 +312,6 @@ impl GenesisBlock {
         }
 
         Ok(())
-    }
-
-    /// Export genesis block as JSON
-    #[allow(dead_code)]
-    pub fn export_json(block: &Block, network: NetworkType) -> String {
-        let block_hash = block.hash();
-        let network_str = match network {
-            NetworkType::Mainnet => "mainnet",
-            NetworkType::Testnet => "testnet",
-        };
-
-        json!({
-            "network": network_str,
-            "version": 2,
-            "message": format!(
-                "TIME Coin {} Genesis Block - TSDC + timevote Consensus",
-                if matches!(network, NetworkType::Mainnet) { "Mainnet" } else { "Testnet" }
-            ),
-            "block": {
-                "header": {
-                    "version": block.header.version,
-                    "height": block.header.height,
-                    "timestamp": chrono::DateTime::from_timestamp(block.header.timestamp, 0)
-                        .unwrap()
-                        .format("%Y-%m-%dT%H:%M:%SZ")
-                        .to_string(),
-                    "timestamp_unix": block.header.timestamp,
-                    "previous_hash": hex::encode(block.header.previous_hash),
-                    "merkle_root": hex::encode(block.header.merkle_root),
-                    "block_reward": block.header.block_reward,
-                    "leader": block.header.leader,
-                    "attestation_root": hex::encode(block.header.attestation_root),
-                    "masternode_tiers": {
-                        "free": block.header.masternode_tiers.free,
-                        "bronze": block.header.masternode_tiers.bronze,
-                        "silver": block.header.masternode_tiers.silver,
-                        "gold": block.header.masternode_tiers.gold,
-                    }
-                },
-                "transactions": block.transactions.iter().map(|tx| {
-                    json!({
-                        "txid": hex::encode(tx.txid()),
-                        "version": tx.version,
-                        "inputs": tx.inputs,
-                        "outputs": tx.outputs.iter().map(|o| {
-                            json!({
-                                "value": o.value,
-                                "script_pubkey": hex::encode(&o.script_pubkey),
-                            })
-                        }).collect::<Vec<_>>(),
-                        "lock_time": tx.lock_time,
-                        "timestamp": tx.timestamp,
-                    })
-                }).collect::<Vec<_>>(),
-                "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
-                    json!({
-                        "address": addr,
-                        "amount": amount,
-                    })
-                }).collect::<Vec<_>>(),
-                "hash": hex::encode(block_hash),
-            }
-        })
-        .to_string()
     }
 }
 

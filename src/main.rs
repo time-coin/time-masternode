@@ -1399,10 +1399,24 @@ async fn main() {
                         );
 
                         // Broadcast our prepare vote
+                        // Sign the vote with our masternode key
+                        let signature =
+                            if let Some(signing_key) = block_consensus_engine.get_signing_key() {
+                                use ed25519_dalek::Signer;
+                                let mut msg = Vec::new();
+                                msg.extend_from_slice(&block_hash);
+                                msg.extend_from_slice(our_addr.as_bytes());
+                                msg.extend_from_slice(b"PREPARE"); // Vote type
+                                signing_key.sign(&msg).to_bytes().to_vec()
+                            } else {
+                                tracing::warn!("⚠️ No signing key available for prepare vote");
+                                vec![]
+                            };
+
                         let vote = crate::network::message::NetworkMessage::TimeVotePrepare {
                             block_hash,
                             voter_id: our_addr.clone(),
-                            signature: vec![], // TODO: Sign with masternode key
+                            signature,
                         };
                         block_peer_registry.broadcast(vote).await;
 

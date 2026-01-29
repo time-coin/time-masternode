@@ -703,7 +703,22 @@ impl MessageHandler {
 
         // Broadcast prepare vote to all peers
         if let Some(broadcast_tx) = &context.broadcast_tx {
-            let sig_bytes = vec![]; // TODO: Phase 3E.4: Sign with validator key
+            // Sign the vote with our validator key
+            let sig_bytes = if let Some(signing_key) = consensus.get_signing_key() {
+                use ed25519_dalek::Signer;
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&block_hash);
+                msg.extend_from_slice(validator_id.as_bytes());
+                msg.extend_from_slice(b"PREPARE"); // Vote type
+                signing_key.sign(&msg).to_bytes().to_vec()
+            } else {
+                debug!(
+                    "[{}] No signing key available for prepare vote",
+                    self.direction
+                );
+                vec![]
+            };
+
             let prepare_vote = NetworkMessage::TimeVotePrepare {
                 block_hash,
                 voter_id: validator_id.clone(),
@@ -737,7 +752,7 @@ impl MessageHandler {
         &self,
         block_hash: [u8; 32],
         voter_id: String,
-        _signature: Vec<u8>,
+        signature: Vec<u8>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         debug!(
@@ -759,8 +774,51 @@ impl MessageHandler {
             None => 1u64, // Default to 1 if not found
         };
 
-        // Phase 3E.4: Verify vote signature (stub - TODO: implement Ed25519 verification)
-        // For now, we accept the vote; in production, verify the signature
+        // Verify vote signature if signature is present
+        if !signature.is_empty() {
+            // Get voter's public key from masternode registry
+            if let Some(info) = context.masternode_registry.get(&voter_id).await {
+                use ed25519_dalek::{Signature, Verifier};
+
+                // Reconstruct the signed message
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&block_hash);
+                msg.extend_from_slice(voter_id.as_bytes());
+                msg.extend_from_slice(b"PREPARE");
+
+                // Verify signature
+                let sig_array: [u8; 64] =
+                    match signature.as_slice().try_into() {
+                        Ok(arr) => arr,
+                        Err(_) => {
+                            warn!(
+                            "❌ [{}] Invalid signature length from {} (expected 64 bytes, got {})",
+                            self.direction, voter_id, signature.len()
+                        );
+                            return Ok(None);
+                        }
+                    };
+
+                let sig = Signature::from_bytes(&sig_array);
+                if let Err(e) = info.masternode.public_key.verify(&msg, &sig) {
+                    warn!(
+                        "❌ [{}] Invalid prepare vote signature from {}: {}",
+                        self.direction, voter_id, e
+                    );
+                    return Ok(None); // Reject vote with invalid signature
+                }
+            } else {
+                debug!(
+                    "[{}] Cannot verify signature for unknown voter {}",
+                    self.direction, voter_id
+                );
+            }
+        } else {
+            debug!(
+                "[{}] Accepting unsigned prepare vote from {} (backward compatibility)",
+                self.direction, voter_id
+            );
+        }
 
         consensus
             .timevote
@@ -795,10 +853,26 @@ impl MessageHandler {
 
             // Broadcast precommit vote
             if let Some(broadcast_tx) = &context.broadcast_tx {
+                // Sign the precommit vote
+                let signature = if let Some(signing_key) = consensus.get_signing_key() {
+                    use ed25519_dalek::Signer;
+                    let mut msg = Vec::new();
+                    msg.extend_from_slice(&block_hash);
+                    msg.extend_from_slice(validator_id.as_bytes());
+                    msg.extend_from_slice(b"PRECOMMIT"); // Vote type
+                    signing_key.sign(&msg).to_bytes().to_vec()
+                } else {
+                    debug!(
+                        "[{}] No signing key available for precommit vote",
+                        self.direction
+                    );
+                    vec![]
+                };
+
                 let precommit_vote = NetworkMessage::TimeVotePrecommit {
                     block_hash,
                     voter_id: validator_id,
-                    signature: vec![],
+                    signature,
                 };
 
                 match broadcast_tx.send(precommit_vote) {
@@ -823,7 +897,7 @@ impl MessageHandler {
         &self,
         block_hash: [u8; 32],
         voter_id: String,
-        _signature: Vec<u8>,
+        signature: Vec<u8>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         debug!(
@@ -845,8 +919,47 @@ impl MessageHandler {
             None => 1u64, // Default to 1 if not found
         };
 
-        // Phase 3E.4: Verify vote signature (stub)
-        // In production, verify Ed25519 signature here
+        // Verify precommit vote signature if signature is present
+        if !signature.is_empty() {
+            if let Some(info) = context.masternode_registry.get(&voter_id).await {
+                use ed25519_dalek::{Signature, Verifier};
+
+                let mut msg = Vec::new();
+                msg.extend_from_slice(&block_hash);
+                msg.extend_from_slice(voter_id.as_bytes());
+                msg.extend_from_slice(b"PRECOMMIT");
+
+                let sig_array: [u8; 64] = match signature.as_slice().try_into() {
+                    Ok(arr) => arr,
+                    Err(_) => {
+                        warn!(
+                            "❌ [{}] Invalid precommit signature length from {} (expected 64 bytes, got {})",
+                            self.direction, voter_id, signature.len()
+                        );
+                        return Ok(None);
+                    }
+                };
+
+                let sig = Signature::from_bytes(&sig_array);
+                if let Err(e) = info.masternode.public_key.verify(&msg, &sig) {
+                    warn!(
+                        "❌ [{}] Invalid precommit vote signature from {}: {}",
+                        self.direction, voter_id, e
+                    );
+                    return Ok(None);
+                }
+            } else {
+                debug!(
+                    "[{}] Cannot verify precommit signature for unknown voter {}",
+                    self.direction, voter_id
+                );
+            }
+        } else {
+            debug!(
+                "[{}] Accepting unsigned precommit vote from {} (backward compatibility)",
+                self.direction, voter_id
+            );
+        }
 
         consensus
             .timevote

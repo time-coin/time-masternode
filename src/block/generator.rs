@@ -4,7 +4,6 @@ use chrono::Timelike;
 
 pub struct DeterministicBlockGenerator;
 
-#[allow(dead_code)]
 impl DeterministicBlockGenerator {
     /// Calculate total masternode reward using logarithmic scaling
     /// Formula: BASE * ln(1 + count / SCALE)
@@ -138,7 +137,6 @@ impl DeterministicBlockGenerator {
             header,
             transactions: all_txs,
             masternode_rewards,
-            time_attestations: vec![],
             consensus_participants: vec![], // Attestations added later
             liveness_recovery: Some(false), // Will be set by consensus engine if needed
         }

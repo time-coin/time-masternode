@@ -1,7 +1,5 @@
 //! Blockchain storage and management
 
-#![allow(dead_code)]
-
 use crate::ai::consensus_health::{
     ConsensusHealthConfig, ConsensusHealthMonitor, ConsensusMetrics,
 };
@@ -25,7 +23,6 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 const BLOCK_TIME_SECONDS: i64 = constants::blockchain::BLOCK_TIME_SECONDS;
-const SATOSHIS_PER_TIME: u64 = constants::blockchain::SATOSHIS_PER_TIME;
 const BLOCK_REWARD_SATOSHIS: u64 = constants::blockchain::BLOCK_REWARD_SATOSHIS;
 
 // Security limits (Phase 1)
@@ -36,8 +33,6 @@ const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
 // P2P sync configuration (Phase 3 Step 4: Extended timeouts for masternodes)
 const PEER_SYNC_TIMEOUT_SECS: u64 = 60; // Short timeout for responsive sync (1 min)
-const PEER_SYNC_CHECK_INTERVAL_SECS: u64 = 2;
-const MASTERNODE_SYNC_TIMEOUT_SECS: u64 = 600; // 10 minutes for masternode sync
 const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 30; // Check sync every 30 seconds (reduced from 60s for faster fork detection)
 
 // Chain work constants - each block adds work based on validator count
@@ -1657,36 +1652,17 @@ impl Blockchain {
             }
         }
 
-        // Use blockchain-based masternode eligibility for rewards (consensus-safe)
-        // This ensures all nodes agree on which masternodes get rewards, preventing forks
-        // Masternode eligibility is determined by gossip consensus
-        // NOTE: This MUST use same logic as main.rs leader selection to prevent inconsistency
+        // Require at least 3 active masternodes before producing blocks
+        // (gossip-based consensus for network health)
         let masternodes = self
             .masternode_registry
             .get_masternodes_for_rewards(self)
             .await;
 
-        tracing::info!(
-            "💰 Block {}: distributing rewards to {} active masternodes",
-            next_height,
-            masternodes.len()
-        );
-
-        // Log each masternode receiving rewards to diagnose inconsistent counts
-        for mn in &masternodes {
-            tracing::info!(
-                "   → Masternode {} (tier: {:?}, weight: {})",
-                mn.masternode.address,
-                mn.masternode.tier,
-                mn.masternode.tier.reward_weight()
-            );
-        }
-
         if masternodes.is_empty() {
             return Err("No masternodes available for block production".to_string());
         }
 
-        // Require at least 3 active masternodes before producing blocks
         if masternodes.len() < 3 {
             return Err(format!(
                 "Insufficient masternodes for block production: {} active (minimum 3 required)",
@@ -1703,13 +1679,23 @@ impl Blockchain {
                 finalized_txs.len()
             );
             for (i, tx) in finalized_txs.iter().enumerate() {
+                // Calculate fee for logging (same logic as fee calculation below)
+                let mut input_sum = 0u64;
+                for input in &tx.inputs {
+                    if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                        input_sum = input_sum.saturating_add(utxo.value);
+                    }
+                }
+                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                let fee = input_sum.saturating_sub(output_sum);
+
                 tracing::debug!(
                     "  📝 [{}] TX {} (inputs: {}, outputs: {}, fee: {} satoshis)",
                     i + 1,
                     hex::encode(&tx.txid()[..8]),
                     tx.inputs.len(),
                     tx.outputs.len(),
-                    tx.inputs.iter().map(|_| 0).sum::<u64>() // TODO: Calculate actual fee
+                    fee
                 );
             }
         } else {
@@ -1743,7 +1729,7 @@ impl Blockchain {
         // NEW: All rewards go to the block producer only
         let rewards = if let Some(ref wallet) = producer_wallet {
             tracing::info!(
-                "💰 Block {}: {} satoshis ({} TIME) -> block producer wallet {}",
+                "💰 Block {}: {} satoshis ({} TIME) to block producer {}",
                 next_height,
                 total_reward,
                 total_reward / 100_000_000,
@@ -1766,12 +1752,11 @@ impl Blockchain {
         }
 
         tracing::info!(
-            "💰 Block {}: base {} + fees {} = {} satoshis total to {} masternodes",
+            "💰 Block {}: base reward {} + fees {} = {} satoshis total",
             next_height,
             base_reward,
             finalized_txs_fees,
-            total_reward,
-            rewards.len()
+            total_reward
         );
 
         // No longer storing fees for next block - fees are included immediately
@@ -1939,7 +1924,6 @@ impl Blockchain {
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
-            time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
             consensus_participants: voters.clone(),
             liveness_recovery: Some(false), // Will be set if fallback resolution occurred
@@ -1957,9 +1941,6 @@ impl Blockchain {
                 );
             }
         }
-
-        // Compute attestation root after attestations are set
-        block.header.attestation_root = block.compute_attestation_root();
 
         // Add VRF proof for fork resolution (if we have signing key)
         if let Some(signing_key) = self.consensus.get_signing_key() {
@@ -2319,12 +2300,6 @@ impl Blockchain {
     #[allow(dead_code)]
     pub fn is_syncing(&self) -> bool {
         self.is_syncing.load(Ordering::Acquire)
-    }
-
-    /// Set syncing state (lock-free)
-    #[allow(dead_code)]
-    pub fn set_syncing(&self, syncing: bool) {
-        self.is_syncing.store(syncing, Ordering::Release);
     }
 
     /// Get pending transactions (stub for compatibility)
@@ -2830,78 +2805,6 @@ impl Blockchain {
         vec![(producer.masternode.wallet_address.clone(), total_reward)]
     }
 
-    /// Select masternodes for reward distribution using deterministic rotation
-    /// Returns up to max_recipients masternodes, rotating fairly based on block height
-    /// Phase 3.3: Only selects masternodes with valid locked collateral
-    fn select_reward_recipients(
-        &self,
-        masternodes: &[MasternodeInfo],
-        max_recipients: usize,
-    ) -> Vec<MasternodeInfo> {
-        // Phase 3.3: Filter masternodes by collateral status
-        // NOTE: We're lenient here to prevent network stalls. Masternodes with configured
-        // but unlocked collateral are warned but still allowed to participate.
-        let eligible_masternodes: Vec<MasternodeInfo> = masternodes
-            .iter()
-            .map(|mn| {
-                // Legacy masternodes (no collateral_outpoint) are always eligible
-                if mn.masternode.collateral_outpoint.is_none() {
-                    return mn.clone();
-                }
-
-                // New masternodes should have locked collateral, but we allow participation
-                // even if collateral isn't locked to prevent network stalls
-                if let Some(collateral_outpoint) = &mn.masternode.collateral_outpoint {
-                    if !self.utxo_manager.is_collateral_locked(collateral_outpoint) {
-                        tracing::warn!(
-                            "⚠️ Masternode {} participating without locked collateral {:?} - should lock collateral soon",
-                            mn.masternode.address,
-                            collateral_outpoint
-                        );
-                    }
-                }
-
-                mn.clone()
-            })
-            .collect();
-
-        let total_nodes = eligible_masternodes.len();
-
-        // If we have fewer than max, reward all eligible
-        if total_nodes <= max_recipients {
-            return eligible_masternodes;
-        }
-
-        // Deterministic selection based on block height
-        // This ensures all nodes agree on who gets rewarded
-        let current_height = self.get_height();
-
-        // Sort masternodes by address to ensure consistent ordering across all nodes
-        let mut sorted_masternodes = eligible_masternodes;
-        sorted_masternodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
-
-        // Calculate starting offset based on block height
-        // Each block rotates by max_recipients, so every node gets a turn
-        let offset = (current_height as usize * max_recipients) % total_nodes;
-
-        // Select max_recipients nodes starting from offset, wrapping around if needed
-        let mut selected = Vec::new();
-        for i in 0..max_recipients {
-            let idx = (offset + i) % total_nodes;
-            selected.push(sorted_masternodes[idx].clone());
-        }
-
-        tracing::info!(
-            "🎯 Reward rotation at height {}: selected {} nodes starting from position {} of {} total",
-            current_height,
-            selected.len(),
-            offset,
-            total_nodes
-        );
-
-        selected
-    }
-
     /// Validate block rewards are correct and not double-counted
     /// This prevents the old bug where rewards were added both as metadata AND as transaction outputs
     fn validate_block_rewards(&self, block: &Block) -> Result<(), String> {
@@ -3309,7 +3212,7 @@ impl Blockchain {
         );
 
         // Return non-finalized transactions to mempool for re-mining
-        // TODO: Need to pass transaction pool reference to restore transactions
+        // NOTE: Requires transaction pool integration - architectural change needed
         if !transactions_to_repool.is_empty() {
             tracing::info!(
                 "💡 {} non-finalized transactions need to be returned to mempool (requires transaction pool integration)",
@@ -3408,7 +3311,8 @@ impl Blockchain {
         // Only check schedule drift if block is recent (not historical/catchup)
         // If we're syncing old blocks, they may have catchup timestamps that don't match original schedule
         // Skip the check during sync to avoid blocking - catchup blocks use historical timestamps
-        let is_recent_block = false; // TODO: Use atomic counter for non-blocking height check
+        // NOTE: Hardcoded to false - would need atomic height counter to determine if syncing
+        let is_recent_block = false;
 
         if is_recent_block {
             // Allow some flexibility for network delays and clock drift, but reject if way ahead
@@ -3686,10 +3590,9 @@ impl Blockchain {
     }
 
     /// Calculate work contribution of a single block
-    /// Work = BASE_WORK + (attestation_count * bonus)
-    pub fn calculate_block_work(&self, block: &Block) -> u128 {
-        let attestation_bonus = block.time_attestations.len() as u128 * 10_000;
-        BASE_WORK_PER_BLOCK + attestation_bonus
+    /// Work = BASE_WORK (attestation bonus removed with heartbeat system)
+    pub fn calculate_block_work(&self, _block: &Block) -> u128 {
+        BASE_WORK_PER_BLOCK
     }
 
     /// Get cumulative chain work up to current tip
@@ -5294,7 +5197,7 @@ impl Blockchain {
             common_ancestor,
             blocks_removed: our_height.saturating_sub(common_ancestor),
             blocks_added: new_height.saturating_sub(common_ancestor),
-            txs_to_replay: 0, // TODO: track this
+            txs_to_replay: 0, // NOTE: Would require returning count from rollback_to_height()
             duration_ms: duration.as_millis() as u64,
         };
 
@@ -5318,151 +5221,6 @@ impl Blockchain {
         // Also remove from hash index if we have the block
         // This is a simplified version - full implementation would also revert UTXO changes
         Ok(())
-    }
-
-    /// AI-powered fork resolution with fallback to traditional rules
-    /// Returns true if we should accept the new blocks (they extend a better chain)
-    ///
-    /// **DEPRECATED**: This method creates duplicate fork resolution paths.
-    /// Prefer using the unified fork resolution through periodic chain comparison.
-    /// This method will be removed in a future version.
-    ///
-    /// Current issue: Multiple code paths can trigger fork resolution simultaneously:
-    /// - This method (when receiving blocks)
-    /// - compare_chain_with_peers() (periodic check)
-    /// - Causes race conditions and conflicting decisions
-    #[deprecated(
-        note = "Use unified fork resolution. This creates race conditions with periodic checks."
-    )]
-    pub async fn should_accept_fork(
-        &self,
-        competing_blocks: &[Block],
-        peer_claimed_height: u64,
-        peer_ip: &str,
-    ) -> Result<bool, String> {
-        // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
-        // This prevents race conditions when multiple peers send competing chains simultaneously
-        let _lock = self.fork_resolution_lock.lock().await;
-
-        warn!(
-            "⚠️ DEPRECATED: should_accept_fork called for peer {} (use unified resolution instead)",
-            peer_ip
-        );
-
-        if competing_blocks.is_empty() {
-            return Ok(false);
-        }
-
-        let our_height = self.get_height();
-        let fork_height = competing_blocks.first().unwrap().header.height;
-
-        tracing::info!(
-            "🔀 [LOCKED] Fork resolution: comparing chains at height {} (our height: {}, peer height: {})",
-            fork_height,
-            our_height,
-            peer_claimed_height
-        );
-
-        // Get peer's tip timestamp for future-block validation
-        let peer_tip_timestamp = competing_blocks.last().map(|b| b.header.timestamp);
-
-        // Get tip hashes for deterministic tiebreaker
-        let our_tip_hash = self.get_block_hash(our_height).ok();
-        let peer_tip_hash = competing_blocks.last().map(|b| b.hash());
-
-        // Use simplified fork resolver to make decision
-        let resolution = self
-            .fork_resolver
-            .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
-                our_height,
-                peer_height: peer_claimed_height,
-                peer_ip: peer_ip.to_string(),
-                peer_tip_timestamp,
-                our_tip_hash,
-                peer_tip_hash,
-            })
-            .await;
-
-        // Simple rule: if peer has longer valid chain, accept
-        Ok(resolution.accept_peer_chain)
-    }
-
-    /// Early fork evaluation with minimal information
-    /// Called when we detect a fork but don't have complete block data yet
-    /// Returns: (should_investigate, confidence_message)
-    ///
-    /// **DEPRECATED**: This method makes decisions with incomplete data.
-    /// It can accept/reject forks before having actual block data, leading to
-    /// incorrect decisions. Use unified fork resolution instead.
-    ///
-    /// Issues:
-    /// - Estimates peer work without seeing blocks
-    /// - Can conflict with should_accept_fork() later
-    /// - No tip hash for deterministic tiebreaker
-    #[deprecated(
-        note = "Makes decisions with incomplete data. Use unified resolution with full block data."
-    )]
-    pub async fn should_investigate_fork(
-        &self,
-        fork_height: u64,
-        peer_claimed_height: u64,
-        peer_ip: &str,
-    ) -> (bool, String) {
-        // CRITICAL: Acquire fork resolution lock to prevent concurrent fork resolutions
-        let _lock = self.fork_resolution_lock.lock().await;
-
-        warn!(
-            "⚠️ DEPRECATED: should_investigate_fork called for peer {} (incomplete data)",
-            peer_ip
-        );
-
-        let our_height = self.get_height();
-
-        // If peer has significantly longer chain, investigate
-        if peer_claimed_height > our_height + 10 {
-            return (
-                true,
-                format!(
-                    "Peer chain is significantly longer ({} vs {})",
-                    peer_claimed_height, our_height
-                ),
-            );
-        }
-
-        // If fork is very recent (within last 10 blocks), investigate
-        if our_height - fork_height < 10 {
-            return (
-                true,
-                format!(
-                    "Recent fork at {} (current height {})",
-                    fork_height, our_height
-                ),
-            );
-        }
-
-        // Get tip hashes for tiebreaker (may not be available in early investigation)
-        let our_tip_hash = self.get_block_hash(our_height).ok();
-        let peer_tip_hash = None; // Not available during early investigation
-
-        let resolution = self
-            .fork_resolver
-            .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
-                our_height,
-                peer_height: peer_claimed_height,
-                peer_ip: peer_ip.to_string(),
-                peer_tip_timestamp: None, // Unknown at this stage
-                our_tip_hash,
-                peer_tip_hash,
-            })
-            .await;
-
-        let message = if resolution.accept_peer_chain {
-            "Simplified resolver recommends investigating (longest valid chain)".to_string()
-        } else {
-            "Simplified resolver recommends skipping (our chain is longer)".to_string()
-        };
-
-        (resolution.accept_peer_chain, message)
     }
 
     /// Traditional fork resolution (fallback when AI confidence is low)

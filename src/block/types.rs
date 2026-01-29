@@ -43,53 +43,12 @@ pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
 /// Proof-of-Time attestation included in blocks
 /// This proves a masternode was online and witnessed by peers
 ///
-/// DEPRECATED: Heartbeat system removed - using TCP connection state instead.
-/// This struct remains for backwards compatibility but time_attestations field
-/// in Block is always empty. Will be removed in next protocol version.
-#[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
-#[allow(deprecated)]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct TimeAttestation {
-    /// The masternode address being attested
-    pub masternode_address: String,
-    /// Sequence number of the heartbeat
-    pub sequence_number: u64,
-    /// Timestamp when the heartbeat was created
-    pub heartbeat_timestamp: i64,
-    /// The masternode's public key (32 bytes, hex-encoded for serialization)
-    pub masternode_pubkey: String,
-    /// Signature of the heartbeat by the masternode (64 bytes, hex-encoded)
-    pub heartbeat_signature: String,
-    /// List of witness attestations (address, pubkey, timestamp, signature)
-    pub witnesses: Vec<WitnessRecord>,
-}
 
-/// A witness record proving another node saw the heartbeat
-///
-/// DEPRECATED: Part of removed heartbeat system. Will be removed in protocol v2.
-#[deprecated(note = "Heartbeat system removed - will be removed in protocol v2")]
-#[allow(deprecated)]
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct WitnessRecord {
-    /// Address of the witnessing masternode
-    pub witness_address: String,
-    /// Public key of the witness (hex-encoded)
-    pub witness_pubkey: String,
-    /// Timestamp when the witness saw the heartbeat
-    pub witness_timestamp: i64,
-    /// Witness signature over the heartbeat hash (hex-encoded)
-    pub signature: String,
-}
-
-#[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
     pub transactions: Vec<Transaction>,
     pub masternode_rewards: Vec<(String, u64)>,
-    /// Proof-of-Time: attestations proving masternodes were online
-    #[serde(default)]
-    pub time_attestations: Vec<TimeAttestation>,
     /// List of masternodes that participated in consensus (voted) for this block
     /// Used to determine eligibility for next block's rewards
     #[serde(default)]
@@ -180,24 +139,6 @@ impl Block {
         hasher.finalize().into()
     }
 
-    /// Compute the merkle root of time attestations
-    #[allow(deprecated)]
-    pub fn compute_attestation_root(&self) -> Hash256 {
-        let hashes: Vec<Hash256> = self
-            .time_attestations
-            .iter()
-            .map(|att| {
-                let mut hasher = Sha256::new();
-                hasher.update(att.masternode_address.as_bytes());
-                hasher.update(att.sequence_number.to_le_bytes());
-                hasher.update(att.heartbeat_timestamp.to_le_bytes());
-                hasher.finalize().into()
-            })
-            .collect();
-
-        build_merkle_root(hashes)
-    }
-
     /// Add VRF proof to this block using the block leader's signing key
     ///
     /// This should be called after block creation but before broadcasting.
@@ -246,36 +187,12 @@ impl Block {
 
     /// Get count of masternodes with valid attestations in this block
     pub fn attested_masternode_count(&self) -> usize {
-        self.time_attestations.len()
+        0 // Heartbeat system removed
     }
 
     /// Check if a specific masternode has an attestation in this block
-    #[allow(deprecated)]
-    pub fn has_attestation_for(&self, address: &str) -> bool {
-        self.time_attestations
-            .iter()
-            .any(|a| a.masternode_address == address)
-    }
-}
-
-#[allow(deprecated)]
-impl TimeAttestation {
-    /// Minimum witnesses required for a valid attestation
-    pub const MIN_WITNESSES: usize = 2;
-
-    /// Check if this attestation has enough witnesses
-    pub fn is_valid(&self) -> bool {
-        self.witnesses.len() >= Self::MIN_WITNESSES
-    }
-
-    /// Get unique witness count
-    pub fn unique_witness_count(&self) -> usize {
-        use std::collections::HashSet;
-        self.witnesses
-            .iter()
-            .map(|w| &w.witness_address)
-            .collect::<HashSet<_>>()
-            .len()
+    pub fn has_attestation_for(&self, _address: &str) -> bool {
+        false // Heartbeat system removed
     }
 }
 
@@ -382,7 +299,6 @@ mod tests {
             },
             transactions: vec![],
             masternode_rewards: vec![],
-            time_attestations: vec![],
             consensus_participants: vec![],
             liveness_recovery: Some(false),
         };
@@ -412,7 +328,6 @@ mod tests {
             },
             transactions: vec![tx.clone()],
             masternode_rewards: vec![],
-            time_attestations: vec![],
             consensus_participants: vec![],
             liveness_recovery: Some(false),
         };
