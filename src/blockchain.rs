@@ -4098,6 +4098,11 @@ impl Blockchain {
             std::collections::HashMap::new();
         for peer_ip in &connected_peers {
             if let Some((height, hash)) = registry.get_peer_chain_tip(peer_ip).await {
+                // Ignore peers with zero hash (storage key bug - can't read their own blocks)
+                if hash == [0u8; 32] {
+                    tracing::warn!("⚠️  Ignoring peer {} with zero hash (likely storage issue)", peer_ip);
+                    continue;
+                }
                 peer_tips.insert(peer_ip.clone(), (height, hash));
                 tracing::debug!("✅ Got response from {}: height {}", peer_ip, height);
             } else {
