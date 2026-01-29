@@ -1926,7 +1926,7 @@ impl Blockchain {
             },
             transactions: all_txs,
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
-            time_attestations: None,
+            time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
             consensus_participants: voters.clone(),
             liveness_recovery: Some(false), // Will be set if fallback resolution occurred
