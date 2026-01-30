@@ -1707,6 +1707,11 @@ impl MessageHandler {
             .unwrap_or_default()
             .as_secs();
 
+        // BOOTSTRAP MODE: At genesis (height 0), mark masternodes as active
+        // This allows fresh nodes to discover each other and produce first blocks
+        let current_height = context.blockchain.get_height();
+        let is_bootstrap = current_height == 0;
+
         let mut registered = 0;
         for mn_data in masternodes {
             let masternode = crate::types::Masternode::new_legacy(
@@ -1718,9 +1723,13 @@ impl MessageHandler {
                 now,
             );
 
+            // BOOTSTRAP: Mark as active at genesis to allow block production
+            // NORMAL: Register as inactive (will become active via direct P2P connection)
+            let should_activate = is_bootstrap;
+
             if context
                 .masternode_registry
-                .register_internal(masternode, mn_data.reward_address, false) // Don't activate via gossip - only on connection
+                .register_internal(masternode, mn_data.reward_address, should_activate)
                 .await
                 .is_ok()
             {
@@ -1729,10 +1738,17 @@ impl MessageHandler {
         }
 
         if registered > 0 {
-            info!(
-                "✓ [{}] Registered {} masternode(s) from peer exchange",
-                self.direction, registered
-            );
+            if is_bootstrap {
+                info!(
+                    "✓ [{}] Bootstrap mode: Registered {} masternode(s) as ACTIVE from peer exchange",
+                    self.direction, registered
+                );
+            } else {
+                info!(
+                    "✓ [{}] Registered {} masternode(s) from peer exchange",
+                    self.direction, registered
+                );
+            }
         }
 
         Ok(None)
