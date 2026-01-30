@@ -1191,12 +1191,23 @@ impl MasternodeRegistry {
 
     /// Get blocks without reward for all masternodes (on-chain verifiable)
     /// Scans blockchain history - deterministic across all nodes
+    /// Optimized for bootstrap: returns all zeros at height 0-10
     pub async fn get_verifiable_reward_tracking(
         &self,
         blockchain: &crate::blockchain::Blockchain,
     ) -> std::collections::HashMap<String, u64> {
+        let current_height = blockchain.get_height();
         let masternodes = self.masternodes.read().await;
         let mut tracking = std::collections::HashMap::new();
+
+        // OPTIMIZATION: At genesis/early blocks, skip scanning and return zeros
+        // All masternodes are equal at the start
+        if current_height < 10 {
+            for (address, _) in masternodes.iter() {
+                tracking.insert(address.clone(), 0);
+            }
+            return tracking;
+        }
 
         for (address, _) in masternodes.iter() {
             let blocks_without = self
