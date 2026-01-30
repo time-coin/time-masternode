@@ -684,14 +684,33 @@ async fn main() {
     let sync_complete_signal = sync_complete.clone();
 
     tokio::spawn(async move {
-        // STEP 1: Load genesis from file FIRST (before waiting for peers)
-        // Genesis file is local - no network needed
-        tracing::info!("📥 Initializing genesis block...");
-        if let Err(e) = blockchain_init.initialize_genesis().await {
-            tracing::error!(
-                "❌ Genesis initialization failed: {} - check that genesis.testnet.json exists",
-                e
+        // STEP 1: Check if genesis exists, if not prepare for dynamic generation
+        tracing::info!("📥 Checking for existing genesis block...");
+
+        let has_genesis = blockchain_init.get_height() > 0
+            || blockchain_init.get_block_by_height(0).await.is_ok();
+
+        if !has_genesis {
+            // No genesis exists - wait for masternodes to register then generate dynamically
+            tracing::info!(
+                "🌱 No genesis found - will generate dynamically after masternodes register"
             );
+            tracing::info!("⏳ Waiting 45 seconds for masternodes to discover each other...");
+
+            tokio::time::sleep(tokio::time::Duration::from_secs(45)).await;
+
+            // Generate genesis with all registered masternodes
+            if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
+                tracing::error!("❌ Failed to generate dynamic genesis: {}", e);
+                // Fallback to loading from file
+                tracing::info!("   Falling back to genesis file...");
+                if let Err(e2) = blockchain_init.initialize_genesis().await {
+                    tracing::error!("❌ Genesis initialization also failed: {}", e2);
+                    return;
+                }
+            }
+        } else {
+            tracing::info!("✓ Genesis block already exists");
         }
 
         // Verify we now have genesis
@@ -699,11 +718,11 @@ async fn main() {
             || blockchain_init.get_block_by_height(0).await.is_ok();
 
         if !has_genesis {
-            tracing::error!("❌ Failed to load genesis block - cannot proceed");
+            tracing::error!("❌ Failed to load or generate genesis block - cannot proceed");
             return;
         }
 
-        tracing::info!("✓ Genesis block loaded, now syncing remaining blocks from peers");
+        tracing::info!("✓ Genesis block ready, now syncing remaining blocks from peers");
 
         // STEP 2: Wait for peer connections to sync remaining blocks (reduced for faster startup)
         let mut wait_seconds = 0u64;

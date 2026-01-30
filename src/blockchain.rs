@@ -506,6 +506,162 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Generate genesis block dynamically with registered masternodes
+    /// This is called after masternodes have had time to register via network discovery
+    pub async fn generate_dynamic_genesis(&self) -> Result<(), String> {
+        use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
+        use chrono::TimeZone;
+
+        // Check if genesis already exists
+        if self.get_height() > 0 || self.get_block_by_height(0).await.is_ok() {
+            tracing::info!("✓ Genesis block already exists, skipping dynamic generation");
+            return Ok(());
+        }
+
+        // Fixed genesis timestamp for testnet: December 1, 2025 00:00:00 GMT
+        // For mainnet: use current time
+        let genesis_timestamp = match self.network_type {
+            NetworkType::Testnet => {
+                let fixed_time = chrono::Utc
+                    .with_ymd_and_hms(2025, 12, 1, 0, 0, 0)
+                    .unwrap()
+                    .timestamp();
+                tracing::info!(
+                    "🕐 Using fixed testnet genesis time: December 1, 2025 00:00:00 GMT"
+                );
+                fixed_time
+            }
+            NetworkType::Mainnet => {
+                let current_time = chrono::Utc::now().timestamp();
+                tracing::info!(
+                    "🕐 Using current time for mainnet genesis: {}",
+                    current_time
+                );
+                current_time
+            }
+        };
+
+        // Get all registered masternodes
+        let registered = self.masternode_registry.get_all().await;
+        tracing::info!(
+            "🌱 Generating dynamic genesis block with {} registered masternodes",
+            registered.len()
+        );
+
+        if registered.is_empty() {
+            return Err("Cannot generate genesis: no masternodes registered".to_string());
+        }
+
+        // Create bitmap with all registered masternodes
+        let mut voter_addresses = Vec::new();
+        let mut tier_counts = MasternodeTierCounts::default();
+
+        for info in &registered {
+            voter_addresses.push(info.masternode.address.clone());
+            match info.masternode.tier {
+                crate::types::MasternodeTier::Free => tier_counts.free += 1,
+                crate::types::MasternodeTier::Bronze => tier_counts.bronze += 1,
+                crate::types::MasternodeTier::Silver => tier_counts.silver += 1,
+                crate::types::MasternodeTier::Gold => tier_counts.gold += 1,
+            }
+        }
+
+        tracing::info!(
+            "   Tier distribution: Free={}, Bronze={}, Silver={}, Gold={}",
+            tier_counts.free,
+            tier_counts.bronze,
+            tier_counts.silver,
+            tier_counts.gold
+        );
+
+        // Create compact bitmap for all masternodes (all active in genesis)
+        let (bitmap, bitmap_count) = self
+            .masternode_registry
+            .create_active_bitmap_from_voters(&voter_addresses)
+            .await;
+
+        tracing::info!(
+            "   Active bitmap: {} masternodes marked active",
+            bitmap_count
+        );
+
+        // Calculate total reward for all masternodes (100 TIME per masternode for genesis)
+        const TIME_UNIT: u64 = 100_000_000; // 1 TIME = 100M satoshis
+        let reward_per_mn = 100 * TIME_UNIT; // 100 TIME each
+
+        // Create masternode rewards - distribute evenly to all
+        let mut masternode_rewards = Vec::new();
+        for info in &registered {
+            masternode_rewards.push((info.reward_address.clone(), reward_per_mn));
+            tracing::debug!("   Genesis reward: {} -> 100 TIME", info.masternode.address);
+        }
+
+        let total_reward = reward_per_mn * registered.len() as u64;
+        tracing::info!(
+            "   Total genesis rewards: {} TIME ({} masternodes × 100 TIME)",
+            total_reward / TIME_UNIT,
+            registered.len()
+        );
+
+        // Create genesis header
+        let header = BlockHeader {
+            version: 1,
+            height: 0,
+            timestamp: genesis_timestamp,
+            previous_hash: [0u8; 32], // Genesis has no previous block
+            merkle_root: [0u8; 32],   // No transactions
+            leader: "GENESIS".to_string(),
+            attestation_root: [0u8; 32],
+            masternode_tiers: tier_counts,
+            block_reward: total_reward,
+            active_masternodes_bitmap: bitmap,
+            liveness_recovery: Some(false),
+            vrf_output: [0u8; 32],
+            vrf_proof: vec![],
+            vrf_score: 0,
+        };
+
+        // Create genesis block
+        let genesis = Block {
+            header,
+            transactions: vec![], // No transactions in genesis
+            masternode_rewards,
+            time_attestations: vec![],
+            consensus_participants: vec![],
+            liveness_recovery: Some(false),
+        };
+
+        let genesis_hash = genesis.hash();
+        tracing::info!(
+            "✅ Genesis block generated: hash={}, timestamp={}, masternodes={}",
+            hex::encode(&genesis_hash[..8]),
+            genesis_timestamp,
+            registered.len()
+        );
+
+        // Store genesis block
+        let genesis_bytes = bincode::serialize(&genesis)
+            .map_err(|e| format!("Failed to serialize genesis: {}", e))?;
+
+        self.storage
+            .insert("block_0".as_bytes(), genesis_bytes)
+            .map_err(|e| format!("Failed to store genesis block: {}", e))?;
+
+        self.storage
+            .insert(genesis_hash.as_slice(), &0u64.to_be_bytes())
+            .map_err(|e| format!("Failed to index genesis block: {}", e))?;
+
+        self.storage
+            .flush()
+            .map_err(|e| format!("Failed to flush genesis: {}", e))?;
+
+        self.current_height.store(0, Ordering::Release);
+
+        tracing::info!("🎉 Dynamic genesis block stored successfully");
+
+        Ok(())
+    }
+
     /// Verify chain integrity, find missing blocks
     /// Returns a list of missing block heights that need to be downloaded
     pub async fn verify_chain_integrity(&self) -> Vec<u64> {
