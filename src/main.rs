@@ -1007,6 +1007,34 @@ async fn main() {
 
             let mut masternodes: Vec<Masternode> =
                 eligible.iter().map(|(mn, _)| mn.clone()).collect();
+
+            // DEADLOCK PREVENTION: Progressive fallback when insufficient masternodes
+            // 1. First try: eligible masternodes (from bitmap/participation)
+            // 2. If < 3: fallback to ALL active masternodes
+            // 3. If still < 3: emergency fallback to ALL registered (including inactive)
+            if masternodes.len() < 3 {
+                tracing::warn!(
+                    "⚠️ Only {} eligible masternodes (need 3) - falling back to all active masternodes",
+                    masternodes.len()
+                );
+                let active = block_registry.get_eligible_for_rewards().await;
+                masternodes = active.iter().map(|(mn, _)| mn.clone()).collect();
+
+                // If still insufficient, use ALL registered as last resort
+                if masternodes.len() < 3 {
+                    tracing::error!(
+                        "🚨 Only {} active masternodes (need 3) - EMERGENCY: using ALL registered masternodes (including inactive)",
+                        masternodes.len()
+                    );
+                    let all_registered = block_registry.get_all_for_bootstrap().await;
+                    masternodes = all_registered.iter().map(|(mn, _)| mn.clone()).collect();
+                    tracing::info!(
+                        "🚨 Emergency mode: found {} total registered masternodes",
+                        masternodes.len()
+                    );
+                }
+            }
+
             // Sort deterministically by address for consistent leader election across all nodes
             sort_masternodes_canonical(&mut masternodes);
 
@@ -1014,8 +1042,8 @@ async fn main() {
             let genesis_timestamp = block_blockchain.genesis_timestamp();
             let now_timestamp = chrono::Utc::now().timestamp();
 
-            // Require minimum masternodes for production
-            // Always enforce minimum 3 masternodes for block production
+            // Require minimum masternodes for production after all fallback attempts
+            // If still less than 3, skip block production
             if masternodes.len() < 3 {
                 // Log periodically (every 60s) to avoid spam
                 static LAST_WARN: std::sync::atomic::AtomicI64 =
@@ -1024,8 +1052,8 @@ async fn main() {
                 let last_warn = LAST_WARN.load(Ordering::Relaxed);
                 if now_secs - last_warn >= 60 {
                     LAST_WARN.store(now_secs, Ordering::Relaxed);
-                    tracing::warn!(
-                        "⚠️ Skipping block production: only {} masternodes available (minimum 3 required). Height: {}, Expected: {}",
+                    tracing::error!(
+                        "🚨 CRITICAL: Cannot produce block - only {} registered masternodes (minimum 3 required). Height: {}, Expected: {}",
                         masternodes.len(),
                         current_height,
                         expected_height

@@ -164,6 +164,20 @@ impl MasternodeRegistry {
         reward_address: String,
         should_activate: bool,
     ) -> Result<(), RegistryError> {
+        // Filter out invalid addresses
+        if masternode.address == "0.0.0.0"
+            || masternode.address == "127.0.0.1"
+            || masternode.address.starts_with("127.")
+            || masternode.address.starts_with("0.0.0.")
+            || masternode.address.is_empty()
+        {
+            tracing::warn!(
+                "🚫 Rejected invalid masternode address: {}",
+                masternode.address
+            );
+            return Err(RegistryError::InvalidCollateral);
+        }
+
         // Validate collateral
         let required = match masternode.tier {
             MasternodeTier::Free => 0,
@@ -468,7 +482,7 @@ impl MasternodeRegistry {
             current_height
         );
 
-        // CRITICAL SAFETY: If insufficient eligible masternodes after filtering, fall back to all active
+        // CRITICAL SAFETY: If insufficient eligible masternodes after filtering, fall back progressively
         // This prevents deadlock when participation records are broken or incomplete
         // Minimum 3 masternodes required for block production
         if eligible.len() < 3 {
@@ -491,6 +505,18 @@ impl MasternodeRegistry {
                 "   Registry has {} active masternodes available",
                 active.len()
             );
+
+            // If active is still insufficient, use ALL registered (emergency mode)
+            if active.len() < 3 {
+                let all_registered = self.list_all().await;
+                tracing::error!(
+                    "🚨 EMERGENCY MODE: Only {} active masternodes, using ALL {} registered masternodes to prevent deadlock",
+                    active.len(),
+                    all_registered.len()
+                );
+                return all_registered;
+            }
+
             tracing::warn!("⚠️  Falling back to all active masternodes to prevent deadlock");
             return active;
         }
@@ -971,19 +997,40 @@ impl MasternodeRegistry {
         let masternodes = self.masternodes.read().await;
 
         let mut updated_count = 0;
+        let mut filtered_count = 0;
         for mn_addr in &visible_masternodes {
+            // Filter out invalid addresses
+            if mn_addr == "0.0.0.0"
+                || mn_addr == "127.0.0.1"
+                || mn_addr.starts_with("127.")
+                || mn_addr.starts_with("0.0.0.")
+                || mn_addr.is_empty()
+            {
+                filtered_count += 1;
+                continue;
+            }
+
             if let Some(info) = masternodes.get(mn_addr) {
                 info.peer_reports.insert(reporter.clone(), timestamp);
                 updated_count += 1;
             }
         }
 
-        tracing::info!(
-            "📥 Gossip from {}: reports seeing {} masternodes (updated {} in registry)",
-            reporter,
-            visible_masternodes.len(),
-            updated_count
-        );
+        if filtered_count > 0 {
+            tracing::debug!(
+                "📥 Gossip from {}: filtered {} invalid addresses, updated {} masternodes",
+                reporter,
+                filtered_count,
+                updated_count
+            );
+        } else {
+            tracing::info!(
+                "📥 Gossip from {}: reports seeing {} masternodes (updated {} in registry)",
+                reporter,
+                visible_masternodes.len(),
+                updated_count
+            );
+        }
     }
 
     /// Start cleanup task - runs every 60 seconds

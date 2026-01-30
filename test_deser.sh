@@ -1,0 +1,22 @@
+#!/bin/bash
+# Quick diagnostic script to test block deserialization on peer 69
+
+echo "Testing block deserialization..."
+echo "Run this on peer 69 (LW-Michigan) to diagnose the issue"
+echo ""
+echo "1. Check if blocks exist in storage:"
+echo "   ls -lh /root/.timecoin/blocks/ | head -20"
+echo ""
+echo "2. Get binary size of first few blocks:"
+echo "   for i in {1..5}; do stat -c '%s' /root/.timecoin/blocks/block_\$i 2>/dev/null || stat -c '%s' /root/.timecoin/blocks/block:\$i 2>/dev/null; done"
+echo ""
+echo "3. Check logs for deserialization errors:"
+echo "   journalctl -u timed -n 100 | grep -i 'deserialize\|block.*not found\|failed both'"
+echo ""
+echo "4. Verify the running version has the fix:"
+echo "   cd /root/timecoin && git log --oneline -1"
+echo ""
+echo "5. Restart the service to ensure new code is loaded:"
+echo "   systemctl restart timed"
+echo "   sleep 2"
+echo "   journalctl -u timed -f"

@@ -88,21 +88,38 @@ impl PeerDiscovery {
                 if let Some(colon_pos) = peer_str.rfind(':') {
                     let potential_port = &peer_str[colon_pos + 1..];
                     if let Ok(port) = potential_port.parse::<u16>() {
-                        // Has valid port
-                        return Some(DiscoveredPeer {
-                            address: peer_str[..colon_pos].to_string(),
-                            port,
-                        });
+                        let address = peer_str[..colon_pos].to_string();
+                        // Filter invalid addresses
+                        if Self::is_invalid_address(&address) {
+                            tracing::debug!("🚫 Filtered invalid peer address: {}", address);
+                            return None;
+                        }
+                        return Some(DiscoveredPeer { address, port });
                     }
                 }
 
                 // No port or invalid port - use network default port
+                // Filter invalid addresses
+                if Self::is_invalid_address(peer_str) {
+                    tracing::debug!("🚫 Filtered invalid peer address: {}", peer_str);
+                    return None;
+                }
+
                 Some(DiscoveredPeer {
                     address: peer_str.to_string(),
                     port: self.default_port,
                 })
             })
             .collect()
+    }
+
+    /// Check if an address is invalid (localhost, 0.0.0.0, etc.)
+    fn is_invalid_address(addr: &str) -> bool {
+        addr == "0.0.0.0"
+            || addr == "127.0.0.1"
+            || addr.starts_with("127.")
+            || addr.starts_with("0.0.0.")
+            || addr.is_empty()
     }
 }
 
