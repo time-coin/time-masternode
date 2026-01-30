@@ -526,11 +526,9 @@ async fn main() {
                 // Mark this as our local masternode
                 registry.set_local_masternode(mn.address.clone()).await;
 
-                // Set signing key for consensus engine
-                use ed25519_dalek::SigningKey;
-                use rand::rngs::OsRng;
-                let mut csprng = OsRng;
-                let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
+                // Set signing key for consensus engine - use wallet's signing key
+                // so it matches the public key we announced
+                let signing_key = wallet.signing_key().clone();
                 if let Err(e) =
                     consensus_engine.set_identity(mn.address.clone(), signing_key.clone())
                 {
@@ -538,7 +536,7 @@ async fn main() {
                 }
 
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
-                tracing::info!("✓ Consensus engine identity configured");
+                tracing::info!("✓ Consensus engine identity configured with wallet key");
 
                 // Broadcast masternode announcement will happen after initial sync completes
                 // (see announcement task below)
@@ -694,9 +692,7 @@ async fn main() {
 
         if !has_genesis {
             // No genesis exists - wait for masternodes to register and elect leader
-            tracing::info!(
-                "🌱 No genesis found - waiting for masternode leader election"
-            );
+            tracing::info!("🌱 No genesis found - waiting for masternode leader election");
             tracing::info!("⏳ Waiting 45 seconds for masternodes to discover each other...");
 
             tokio::time::sleep(tokio::time::Duration::from_secs(45)).await;
@@ -714,17 +710,17 @@ async fn main() {
                 // Sort masternodes deterministically by address
                 let mut sorted_mns = registered.clone();
                 sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
-                
+
                 let leader_address = &sorted_mns[0].masternode.address;
-                
+
                 tracing::info!(
                     "🎲 Genesis leader election: {} masternodes registered, leader = {}",
                     sorted_mns.len(),
                     leader_address
                 );
-                
+
                 let are_we_leader = genesis_local_ip.as_deref() == Some(leader_address.as_str());
-                
+
                 if are_we_leader {
                     // We are the leader - generate genesis and broadcast it
                     tracing::info!("👑 We are the genesis leader - generating genesis block");
@@ -732,13 +728,14 @@ async fn main() {
                         tracing::error!("❌ Failed to generate dynamic genesis: {}", e);
                         return;
                     }
-                    
+
                     // Broadcast genesis to all peers
                     if let Ok(genesis) = blockchain_init.get_block_by_height(0).await {
                         tracing::info!("📤 Broadcasting genesis block to all peers");
-                        let proposal = crate::network::message::NetworkMessage::TimeLockBlockProposal {
-                            block: genesis,
-                        };
+                        let proposal =
+                            crate::network::message::NetworkMessage::TimeLockBlockProposal {
+                                block: genesis,
+                            };
                         peer_registry_for_sync.broadcast(proposal).await;
                     }
                 } else {
@@ -747,7 +744,7 @@ async fn main() {
                         "⏳ Waiting to receive genesis from leader ({})",
                         leader_address
                     );
-                    
+
                     // Wait up to 30 seconds for genesis to arrive
                     let mut attempts = 0;
                     while attempts < 30 {
@@ -758,10 +755,12 @@ async fn main() {
                         }
                         attempts += 1;
                     }
-                    
+
                     // If still no genesis, fall back to file
                     if blockchain_init.get_block_by_height(0).await.is_err() {
-                        tracing::warn!("⚠️ Did not receive genesis from leader, falling back to file");
+                        tracing::warn!(
+                            "⚠️ Did not receive genesis from leader, falling back to file"
+                        );
                         if let Err(e2) = blockchain_init.initialize_genesis().await {
                             tracing::error!("❌ Genesis initialization also failed: {}", e2);
                             return;
