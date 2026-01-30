@@ -437,6 +437,27 @@ async fn main() {
         }
     }
 
+    // Check for missing blocks in the chain (continuity check)
+    tracing::info!("🔍 Checking blockchain continuity...");
+    let missing_blocks = blockchain.check_chain_continuity();
+    if !missing_blocks.is_empty() {
+        tracing::warn!(
+            "⚠️ Detected {} missing blocks in chain",
+            missing_blocks.len()
+        );
+
+        // Diagnose first 50 missing blocks in detail
+        if !missing_blocks.is_empty() {
+            let diagnose_end =
+                std::cmp::min(missing_blocks[0] + 50, *missing_blocks.last().unwrap());
+            blockchain.diagnose_missing_blocks(missing_blocks[0], diagnose_end);
+        }
+
+        // Note: Will request missing blocks from peers after network is initialized
+    } else {
+        tracing::info!("✅ Blockchain continuity verified");
+    }
+
     // Cleanup blocks with invalid merkle roots (00000...)
     // This removes blocks produced before the mempool population fix
     match blockchain.cleanup_invalid_merkle_blocks().await {
@@ -922,24 +943,27 @@ async fn main() {
             // CRITICAL: This MUST use the SAME logic as blockchain.rs produce_block_at_height()
             // to ensure selected leader is eligible for rewards (prevents participation chain break)
             let blocks_behind = expected_height.saturating_sub(current_height);
-            let is_bootstrap = current_height <= 3;
-            // During deep catchup, use all active masternodes (participation bitmap may be corrupted from fork)
+            let is_bootstrap = current_height == 0; // Only block 1 (height 0→1) uses bootstrap
+                                                    // During deep catchup, use all active masternodes (participation bitmap may be corrupted from fork)
             let is_deep_catchup = blocks_behind >= 50;
 
             let eligible = if is_bootstrap || is_deep_catchup {
-                // Bootstrap mode (height 0-3) OR deep catchup: use all active masternodes
+                // Bootstrap mode (height 0 ONLY) OR deep catchup
                 if is_bootstrap {
                     tracing::debug!(
-                        "🌱 Bootstrap mode (height {}): using all active masternodes",
+                        "🌱 Bootstrap mode (height {}): using ALL registered masternodes (including inactive, no bitmap yet)",
                         current_height
                     );
+                    // At height 0 (producing block 1), use ALL registered masternodes
+                    // After block 1, the bitmap from block 1 will be used for block 2
+                    block_registry.get_all_for_bootstrap().await
                 } else {
                     tracing::info!(
                         "🔄 Deep catchup mode ({} blocks behind): using all active masternodes (bypassing potentially corrupted bitmap)",
                         blocks_behind
                     );
+                    block_registry.get_eligible_for_rewards().await
                 }
-                block_registry.get_eligible_for_rewards().await
             } else {
                 // Normal/catchup mode (height > 3): use participation-based selection
                 // This matches blockchain.rs get_masternodes_for_rewards() logic
@@ -1001,7 +1025,7 @@ async fn main() {
                 if now_secs - last_warn >= 60 {
                     LAST_WARN.store(now_secs, Ordering::Relaxed);
                     tracing::warn!(
-                        "⚠️ Skipping block production: only {} masternodes active (minimum 3 required). Height: {}, Expected: {}",
+                        "⚠️ Skipping block production: only {} masternodes available (minimum 3 required). Height: {}, Expected: {}",
                         masternodes.len(),
                         current_height,
                         expected_height
@@ -1871,6 +1895,21 @@ async fn main() {
             let sync_coordinator_handle = blockchain.clone().spawn_sync_coordinator();
             shutdown_manager.register_task(sync_coordinator_handle);
             println!("  ✅ Sync coordinator started");
+
+            // Request missing blocks from peers (after network is initialized)
+            if !missing_blocks.is_empty() {
+                let blockchain_clone = blockchain.clone();
+                let missing_clone = missing_blocks.clone();
+                tokio::spawn(async move {
+                    // Wait a bit for peer connections to establish
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                    tracing::info!(
+                        "🔄 Requesting {} missing blocks from peers",
+                        missing_clone.len()
+                    );
+                    blockchain_clone.request_missing_blocks(missing_clone).await;
+                });
+            }
 
             // Start RPC server with access to blacklist
             let rpc_consensus = consensus_engine.clone();

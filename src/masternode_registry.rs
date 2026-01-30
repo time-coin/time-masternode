@@ -257,6 +257,18 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    /// Get all registered masternodes for bootstrap (blocks 0-3)
+    /// Returns ALL masternodes regardless of active status
+    /// Used at genesis when no bitmap exists yet and nodes are still discovering each other
+    pub async fn get_all_for_bootstrap(&self) -> Vec<(Masternode, String)> {
+        let masternodes = self.masternodes.read().await;
+
+        masternodes
+            .values()
+            .map(|info| (info.masternode.clone(), info.reward_address.clone()))
+            .collect()
+    }
+
     pub async fn start_new_block_period(&self) {
         let now = Self::now();
         *self.block_period_start.write().await = now;
@@ -389,24 +401,17 @@ impl MasternodeRegistry {
     ) -> Vec<MasternodeInfo> {
         let current_height = blockchain.get_height();
 
-        // BOOTSTRAP MODE: For first few blocks (0-3), use all active masternodes
-        // - Block 0 (genesis): produced during initialization, no rewards
-        // - Blocks 1-3: bootstrap phase, use all active masternodes since no participation history yet
-        if current_height <= 3 {
-            let active = self.get_active_masternodes().await;
-            if current_height == 0 {
-                tracing::info!(
-                    "💰 Block 1 (first block after genesis): using {} active masternodes for bootstrap",
-                    active.len()
-                );
-            } else {
-                tracing::info!(
-                    "💰 Block {} (bootstrap): using {} active masternodes (no participation history yet)",
-                    current_height + 1,
-                    active.len()
-                );
-            }
-            return active;
+        // BOOTSTRAP MODE: Only for block 1 (height 0 → 1), use ALL registered masternodes
+        // - Block 0 (genesis): already exists
+        // - Block 1: Use all registered masternodes (including inactive) since no bitmap exists yet
+        // - Block 2+: Use bitmap from previous block (normal participation-based selection)
+        if current_height == 0 {
+            let all_masternodes: Vec<MasternodeInfo> = self.list_all().await;
+            tracing::info!(
+                "💰 Block 1 (first block after genesis): using {} registered masternodes for bootstrap (including inactive, no bitmap yet)",
+                all_masternodes.len()
+            );
+            return all_masternodes;
         }
 
         // Get previous block to see who participated

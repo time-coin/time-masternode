@@ -2419,6 +2419,140 @@ impl Blockchain {
         self.get_block_hash(height).ok()
     }
 
+    /// Check chain continuity and detect missing blocks
+    /// Returns a list of missing block heights
+    pub fn check_chain_continuity(&self) -> Vec<u64> {
+        let height = self.get_height();
+        let mut missing = Vec::new();
+
+        tracing::info!("🔍 Checking chain continuity from 0 to {}", height);
+
+        for h in 0..=height {
+            if self.get_block(h).is_err() {
+                missing.push(h);
+            }
+        }
+
+        if !missing.is_empty() {
+            tracing::warn!(
+                "⚠️ Chain has {} missing blocks: {:?}",
+                missing.len(),
+                if missing.len() > 20 {
+                    format!("{:?}...and {} more", &missing[..20], missing.len() - 20)
+                } else {
+                    format!("{:?}", missing)
+                }
+            );
+        } else {
+            tracing::info!("✓ Chain is continuous from 0 to {}", height);
+        }
+
+        missing
+    }
+
+    /// Diagnose storage issues for a range of blocks
+    /// Checks both key formats and deserialization
+    pub fn diagnose_missing_blocks(&self, start: u64, end: u64) {
+        tracing::info!("🔬 Diagnosing blocks {} to {}", start, end);
+
+        for height in start..=end {
+            let key_old = format!("block:{}", height);
+            let key_new = format!("block_{}", height);
+
+            let old_exists = self
+                .storage
+                .get(key_old.as_bytes())
+                .ok()
+                .flatten()
+                .is_some();
+            let new_exists = self
+                .storage
+                .get(key_new.as_bytes())
+                .ok()
+                .flatten()
+                .is_some();
+
+            if !old_exists && !new_exists {
+                tracing::warn!("  Block {}: MISSING (neither key format exists)", height);
+            } else {
+                tracing::debug!(
+                    "  Block {}: old_key={} new_key={}",
+                    height,
+                    old_exists,
+                    new_exists
+                );
+
+                match self.get_block(height) {
+                    Ok(_) => tracing::debug!("    ✓ Deserializes OK"),
+                    Err(e) => tracing::error!("    ✗ Deserialization failed: {}", e),
+                }
+            }
+        }
+    }
+
+    /// Request missing blocks from peers
+    pub async fn request_missing_blocks(&self, missing_heights: Vec<u64>) {
+        if missing_heights.is_empty() {
+            return;
+        }
+
+        tracing::info!(
+            "🔄 Requesting {} missing blocks from peers",
+            missing_heights.len()
+        );
+
+        let peer_registry_opt = self.peer_registry.read().await;
+        let Some(peer_registry) = peer_registry_opt.as_ref() else {
+            tracing::warn!("⚠️ No peer registry available to request missing blocks");
+            return;
+        };
+
+        let peers = peer_registry.get_connected_peers().await;
+
+        if peers.is_empty() {
+            tracing::warn!("⚠️ No peers available to request missing blocks");
+            return;
+        }
+
+        // Group consecutive heights into ranges for efficient requests
+        let mut ranges: Vec<(u64, u64)> = Vec::new();
+        let mut current_start = missing_heights[0];
+        let mut current_end = missing_heights[0];
+
+        for &height in &missing_heights[1..] {
+            if height == current_end + 1 {
+                current_end = height;
+            } else {
+                ranges.push((current_start, current_end));
+                current_start = height;
+                current_end = height;
+            }
+        }
+        ranges.push((current_start, current_end));
+
+        tracing::info!("📦 Requesting {} block ranges: {:?}", ranges.len(), ranges);
+
+        // Request each range from a different peer (round-robin)
+        for (idx, (start, end)) in ranges.iter().enumerate() {
+            let peer_idx = idx % peers.len();
+            let peer_addr = &peers[peer_idx];
+
+            tracing::info!(
+                "📨 Requesting blocks {}-{} from peer {}",
+                start,
+                end,
+                peer_addr
+            );
+
+            // Send GetBlocks message (GetBlockRange doesn't exist in all versions)
+            let message = NetworkMessage::GetBlocks(*start, *end);
+
+            if let Err(e) = peer_registry.send_to_peer(peer_addr, message).await {
+                tracing::warn!("⚠️ Failed to request blocks from {}: {}", peer_addr, e);
+            }
+        }
+    }
+
     // =========================================================================
     // CANONICAL CHAIN SELECTION (Fork Resolution)
     // =========================================================================
@@ -2701,8 +2835,10 @@ impl Blockchain {
         // CRITICAL: Update cache to ensure consistency
         self.block_cache.put(block.header.height, block.clone());
 
-        // Optimize disk I/O: Only flush every 10 blocks
-        if block.header.height % 10 == 0 {
+        // CRITICAL: Always flush early blocks (1-100) to prevent loss on crash
+        // After that, flush every 10 blocks to optimize I/O
+        let should_flush = block.header.height <= 100 || block.header.height % 10 == 0;
+        if should_flush {
             self.storage.flush().map_err(|e| {
                 tracing::error!(
                     "❌ Failed to flush block {} to disk: {}",
@@ -2711,6 +2847,13 @@ impl Blockchain {
                 );
                 e.to_string()
             })?;
+
+            if block.header.height <= 100 {
+                tracing::debug!(
+                    "✓ Critical early block {} flushed to disk",
+                    block.header.height
+                );
+            }
         }
 
         Ok(())
