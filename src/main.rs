@@ -572,6 +572,85 @@ async fn main() {
         });
         shutdown_manager.register_task(peer_exchange_handle);
 
+        // Start masternode health monitoring and reconnection task
+        let health_registry = registry.clone();
+        let health_peer_manager = peer_manager.clone();
+        let health_shutdown = shutdown_token.clone();
+        let health_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Every 2 minutes
+            loop {
+                tokio::select! {
+                    _ = health_shutdown.cancelled() => {
+                        tracing::debug!("🛑 Health monitoring task shutting down gracefully");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // Check network health
+                        let health = health_registry.check_network_health().await;
+
+                        match health.status {
+                            crate::masternode_registry::HealthStatus::Critical => {
+                                tracing::error!(
+                                    "🚨 CRITICAL: {} active / {} total masternodes",
+                                    health.active_masternodes,
+                                    health.total_masternodes
+                                );
+                                for action in &health.actions_needed {
+                                    tracing::error!("   → {}", action);
+                                }
+                            }
+                            crate::masternode_registry::HealthStatus::Warning => {
+                                tracing::warn!(
+                                    "⚠️ WARNING: {} active / {} total masternodes",
+                                    health.active_masternodes,
+                                    health.total_masternodes
+                                );
+                                for action in &health.actions_needed {
+                                    tracing::warn!("   → {}", action);
+                                }
+                            }
+                            crate::masternode_registry::HealthStatus::Degraded => {
+                                tracing::info!(
+                                    "📊 Network degraded: {} active / {} total masternodes ({} inactive)",
+                                    health.active_masternodes,
+                                    health.total_masternodes,
+                                    health.inactive_masternodes
+                                );
+                            }
+                            crate::masternode_registry::HealthStatus::Healthy => {
+                                tracing::debug!(
+                                    "✓ Network healthy: {} active / {} total masternodes",
+                                    health.active_masternodes,
+                                    health.total_masternodes
+                                );
+                            }
+                        }
+
+                        // If unhealthy, attempt reconnection to inactive masternodes
+                        if health.active_masternodes < 5 {
+                            let inactive_addresses = health_registry.get_inactive_masternode_addresses().await;
+                            if !inactive_addresses.is_empty() {
+                                tracing::info!(
+                                    "🔄 Attempting to reconnect to {} inactive masternodes",
+                                    inactive_addresses.len()
+                                );
+
+                                for address in &inactive_addresses {
+                                    // Try to reconnect via peer manager
+                                    if health_peer_manager.add_peer(address.clone()).await {
+                                        tracing::info!("   ✓ Reconnection attempt to {}", address);
+                                    } else {
+                                        tracing::debug!("   ⚠️ Failed to reconnect to {}", address);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        shutdown_manager.register_task(health_handle);
+
         // Start masternode announcement task (waits for sync to complete)
         let mn_for_announcement = mn.clone();
         let peer_registry_for_announcement = peer_connection_registry.clone();
@@ -2049,43 +2128,55 @@ async fn main() {
             );
             network_client.start().await;
 
-            // BOOTSTRAP: At genesis, actively request masternode lists from all peers
+            // BOOTSTRAP: At genesis, aggressively request masternode lists from all peers
             // This ensures nodes discover each other for block production
             let bootstrap_registry = registry.clone();
             let bootstrap_peer_registry = peer_connection_registry.clone();
             let bootstrap_blockchain = blockchain.clone();
+            let bootstrap_shutdown = shutdown_token.clone();
             tokio::spawn(async move {
-                // Wait for peer connections to establish
-                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                // At height 0, periodically request masternodes every 5 seconds
+                // until we have at least 3 active masternodes or height advances
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
 
-                let current_height = bootstrap_blockchain.get_height();
-                if current_height == 0 {
-                    tracing::info!("🌱 Bootstrap mode: Requesting masternode lists from all peers");
+                loop {
+                    tokio::select! {
+                        _ = bootstrap_shutdown.cancelled() => {
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let current_height = bootstrap_blockchain.get_height();
+                            if current_height > 0 {
+                                // No longer at genesis, stop bootstrap discovery
+                                tracing::info!("✓ Bootstrap complete: Height advanced to {}", current_height);
+                                break;
+                            }
 
-                    let connected_peers = bootstrap_peer_registry.get_connected_peers().await;
-                    tracing::info!("   → Found {} connected peers", connected_peers.len());
+                            let active_count = bootstrap_registry.count_active().await;
+                            if active_count >= 3 {
+                                tracing::debug!("✓ Bootstrap satisfied: {} active masternodes", active_count);
+                                continue; // Keep checking in case we drop below 3
+                            }
 
-                    for peer_ip in &connected_peers {
-                        let msg = crate::network::message::NetworkMessage::GetMasternodes;
-                        if let Err(e) = bootstrap_peer_registry.send_to_peer(peer_ip, msg).await {
-                            tracing::debug!(
-                                "   ⚠️ Failed to request masternodes from {}: {}",
-                                peer_ip,
-                                e
-                            );
-                        } else {
-                            tracing::debug!("   → Requested masternodes from {}", peer_ip);
+                            // Still need more masternodes - request from all peers
+                            let connected_peers = bootstrap_peer_registry.get_connected_peers().await;
+                            if !connected_peers.is_empty() {
+                                tracing::info!(
+                                    "🌱 Bootstrap discovery: {} active/{} registered, requesting from {} peers",
+                                    active_count,
+                                    bootstrap_registry.count().await,
+                                    connected_peers.len()
+                                );
+
+                                for peer_ip in &connected_peers {
+                                    let msg = crate::network::message::NetworkMessage::GetMasternodes;
+                                    let _ = bootstrap_peer_registry.send_to_peer(peer_ip, msg).await;
+                                }
+                            } else {
+                                tracing::warn!("⚠️ Bootstrap discovery: No connected peers found");
+                            }
                         }
                     }
-
-                    // Give time for responses
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-                    let registered_count = bootstrap_registry.count().await;
-                    tracing::info!(
-                        "✓ Bootstrap: {} total masternodes registered",
-                        registered_count
-                    );
                 }
             });
 

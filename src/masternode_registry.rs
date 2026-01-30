@@ -21,6 +21,25 @@ const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
 const MIN_PARTICIPATION_SECS: u64 = 600; // 10 minutes minimum participation (prevents reward gaming)
 const AUTO_REMOVE_AFTER_SECS: u64 = 3600; // Auto-remove masternodes with no peer reports for 1 hour
 
+/// Network health status levels
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HealthStatus {
+    Critical, // 0-2 active masternodes (cannot produce blocks)
+    Warning,  // 3-4 active masternodes (minimal operation)
+    Degraded, // 5-9 active masternodes (should have more)
+    Healthy,  // 10+ active masternodes
+}
+
+/// Network health report
+#[derive(Debug, Clone)]
+pub struct NetworkHealth {
+    pub total_masternodes: usize,
+    pub active_masternodes: usize,
+    pub inactive_masternodes: usize,
+    pub status: HealthStatus,
+    pub actions_needed: Vec<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("Masternode not found")]
@@ -1063,6 +1082,16 @@ impl MasternodeRegistry {
         let mut status_changes = 0;
         let mut total_active = 0;
 
+        // Calculate dynamic threshold once before the loop
+        let total_masternodes = masternodes.len();
+        let min_reports = if total_masternodes <= 4 {
+            // Small network: require reports from at least half
+            (total_masternodes / 2).max(1)
+        } else {
+            // Large network: use standard threshold
+            MIN_PEER_REPORTS
+        };
+
         for (addr, info) in masternodes.iter_mut() {
             // Remove expired reports
             let before_count = info.peer_reports.len();
@@ -1080,17 +1109,20 @@ impl MasternodeRegistry {
             }
 
             // Update is_active based on number of recent reports
+            // DYNAMIC THRESHOLD: Lower requirement for small networks to prevent deadlock
             let report_count = info.peer_reports.len();
+
             let was_active = info.is_active;
-            info.is_active = report_count >= MIN_PEER_REPORTS;
+            info.is_active = report_count >= min_reports;
 
             if was_active != info.is_active {
                 status_changes += 1;
                 tracing::info!(
-                    "Masternode {} status changed: {} ({} peer reports)",
+                    "Masternode {} status changed: {} ({} peer reports, {} required)",
                     addr,
                     if info.is_active { "ACTIVE" } else { "INACTIVE" },
-                    report_count
+                    report_count,
+                    min_reports
                 );
             }
 
@@ -1302,6 +1334,63 @@ impl MasternodeRegistry {
         });
 
         list
+    }
+
+    /// Check network health based on masternode counts
+    /// Returns status and recommended actions
+    pub async fn check_network_health(&self) -> NetworkHealth {
+        let masternodes = self.masternodes.read().await;
+        let total = masternodes.len();
+        let active = masternodes.values().filter(|info| info.is_active).count();
+        let inactive = total - active;
+
+        let (status, actions_needed) = match active {
+            0..=2 => (
+                HealthStatus::Critical,
+                vec![
+                    "CRITICAL: Cannot produce blocks with <3 active masternodes".to_string(),
+                    "Emergency: Reconnect masternodes immediately".to_string(),
+                ],
+            ),
+            3..=4 => (
+                HealthStatus::Warning,
+                vec![
+                    "WARNING: Minimal operation with 3-4 masternodes".to_string(),
+                    "Recommend: Check connections and restart inactive nodes".to_string(),
+                ],
+            ),
+            5..=9 => (
+                HealthStatus::Degraded,
+                vec![
+                    "DEGRADED: Network should have more active masternodes".to_string(),
+                    format!(
+                        "{} inactive masternodes - investigate connectivity",
+                        inactive
+                    ),
+                ],
+            ),
+            _ => (HealthStatus::Healthy, vec![]),
+        };
+
+        NetworkHealth {
+            total_masternodes: total,
+            active_masternodes: active,
+            inactive_masternodes: inactive,
+            status,
+            actions_needed,
+        }
+    }
+
+    /// Attempt to reconnect to inactive masternodes
+    /// Returns list of addresses that were attempted
+    pub async fn get_inactive_masternode_addresses(&self) -> Vec<String> {
+        self.masternodes
+            .read()
+            .await
+            .values()
+            .filter(|info| !info.is_active)
+            .map(|info| info.masternode.address.clone())
+            .collect()
     }
 }
 
