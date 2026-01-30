@@ -158,11 +158,7 @@ pub struct Block {
     /// DEPRECATED: Heartbeat attestations - kept for deserializing old blocks
     /// Always empty in new blocks but field must exist for backward compatibility
     /// Uses custom deserializer to handle both Vec and Option<Vec> formats from old blocks
-    #[serde(
-        default,
-        skip_serializing,
-        deserialize_with = "deserialize_time_attestations"
-    )]
+    #[serde(default, deserialize_with = "deserialize_time_attestations")]
     pub time_attestations: Vec<TimeAttestation>,
     /// List of masternodes that participated in consensus (voted) for this block
     /// Used to determine eligibility for next block's rewards
