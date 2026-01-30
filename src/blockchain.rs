@@ -519,7 +519,7 @@ impl Blockchain {
         }
 
         // Fixed genesis timestamp for testnet: December 1, 2025 00:00:00 GMT
-        // For mainnet: use current time
+        // Fixed genesis timestamp for mainnet: January 1, 2026 00:00:00 GMT
         let genesis_timestamp = match self.network_type {
             NetworkType::Testnet => {
                 let fixed_time = chrono::Utc
@@ -532,12 +532,12 @@ impl Blockchain {
                 fixed_time
             }
             NetworkType::Mainnet => {
-                let current_time = chrono::Utc::now().timestamp();
-                tracing::info!(
-                    "🕐 Using current time for mainnet genesis: {}",
-                    current_time
-                );
-                current_time
+                let fixed_time = chrono::Utc
+                    .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+                    .unwrap()
+                    .timestamp();
+                tracing::info!("🕐 Using fixed mainnet genesis time: January 1, 2026 00:00:00 GMT");
+                fixed_time
             }
         };
 
