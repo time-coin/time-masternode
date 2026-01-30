@@ -585,22 +585,22 @@ impl Blockchain {
             bitmap_count
         );
 
-        // Calculate total reward for all masternodes (100 TIME per masternode for genesis)
+        // Genesis reward: Only the leader (lowest address) gets the block reward
+        // This is consistent with normal block production where only the leader gets rewarded
         const TIME_UNIT: u64 = 100_000_000; // 1 TIME = 100M satoshis
-        let reward_per_mn = 100 * TIME_UNIT; // 100 TIME each
+        const GENESIS_REWARD: u64 = 100 * TIME_UNIT; // 100 TIME for the genesis leader
 
-        // Create masternode rewards - distribute evenly to all
-        let mut masternode_rewards = Vec::new();
-        for info in &registered {
-            masternode_rewards.push((info.reward_address.clone(), reward_per_mn));
-            tracing::debug!("   Genesis reward: {} -> 100 TIME", info.masternode.address);
-        }
+        // Sort to find leader (lowest address)
+        let mut sorted_for_reward = registered.clone();
+        sorted_for_reward.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+        let leader = &sorted_for_reward[0];
 
-        let total_reward = reward_per_mn * registered.len() as u64;
+        // Create masternode rewards - only leader receives genesis reward
+        let masternode_rewards = vec![(leader.reward_address.clone(), GENESIS_REWARD)];
+
         tracing::info!(
-            "   Total genesis rewards: {} TIME ({} masternodes × 100 TIME)",
-            total_reward / TIME_UNIT,
-            registered.len()
+            "   Genesis reward: {} -> 100 TIME (genesis leader)",
+            leader.masternode.address
         );
 
         // Create genesis header
@@ -610,10 +610,10 @@ impl Blockchain {
             timestamp: genesis_timestamp,
             previous_hash: [0u8; 32], // Genesis has no previous block
             merkle_root: [0u8; 32],   // No transactions
-            leader: "GENESIS".to_string(),
+            leader: leader.masternode.address.clone(),
             attestation_root: [0u8; 32],
             masternode_tiers: tier_counts,
-            block_reward: total_reward,
+            block_reward: GENESIS_REWARD,
             active_masternodes_bitmap: bitmap,
             liveness_recovery: Some(false),
             vrf_output: [0u8; 32],
