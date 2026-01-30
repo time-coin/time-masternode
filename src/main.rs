@@ -2048,6 +2048,47 @@ async fn main() {
                 config.network.blacklisted_peers.clone(),
             );
             network_client.start().await;
+
+            // BOOTSTRAP: At genesis, actively request masternode lists from all peers
+            // This ensures nodes discover each other for block production
+            let bootstrap_registry = registry.clone();
+            let bootstrap_peer_registry = peer_connection_registry.clone();
+            let bootstrap_blockchain = blockchain.clone();
+            tokio::spawn(async move {
+                // Wait for peer connections to establish
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+                let current_height = bootstrap_blockchain.get_height();
+                if current_height == 0 {
+                    tracing::info!("🌱 Bootstrap mode: Requesting masternode lists from all peers");
+
+                    let connected_peers = bootstrap_peer_registry.get_connected_peers().await;
+                    tracing::info!("   → Found {} connected peers", connected_peers.len());
+
+                    for peer_ip in &connected_peers {
+                        let msg = crate::network::message::NetworkMessage::GetMasternodes;
+                        if let Err(e) = bootstrap_peer_registry.send_to_peer(peer_ip, msg).await {
+                            tracing::debug!(
+                                "   ⚠️ Failed to request masternodes from {}: {}",
+                                peer_ip,
+                                e
+                            );
+                        } else {
+                            tracing::debug!("   → Requested masternodes from {}", peer_ip);
+                        }
+                    }
+
+                    // Give time for responses
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                    let registered_count = bootstrap_registry.count().await;
+                    tracing::info!(
+                        "✓ Bootstrap: {} total masternodes registered",
+                        registered_count
+                    );
+                }
+            });
+
             println!("\n╔═══════════════════════════════════════════════════════╗");
             println!("║  🎉 TIME Coin Daemon is Running!                      ║");
             println!("╠═══════════════════════════════════════════════════════╣");
