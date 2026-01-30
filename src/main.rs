@@ -682,6 +682,8 @@ async fn main() {
     let blockchain_server = blockchain_init.clone();
     let peer_registry_for_sync = peer_connection_registry.clone();
     let sync_complete_signal = sync_complete.clone();
+    let bootstrap_registry = registry.clone();
+    let genesis_local_ip = config.network.external_address.clone();
 
     tokio::spawn(async move {
         // STEP 1: Check if genesis exists, if not prepare for dynamic generation
@@ -691,22 +693,80 @@ async fn main() {
             || blockchain_init.get_block_by_height(0).await.is_ok();
 
         if !has_genesis {
-            // No genesis exists - wait for masternodes to register then generate dynamically
+            // No genesis exists - wait for masternodes to register and elect leader
             tracing::info!(
-                "🌱 No genesis found - will generate dynamically after masternodes register"
+                "🌱 No genesis found - waiting for masternode leader election"
             );
             tracing::info!("⏳ Waiting 45 seconds for masternodes to discover each other...");
 
             tokio::time::sleep(tokio::time::Duration::from_secs(45)).await;
 
-            // Generate genesis with all registered masternodes
-            if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
-                tracing::error!("❌ Failed to generate dynamic genesis: {}", e);
+            // Determine if we are the leader (deterministic: lowest address)
+            let registered = bootstrap_registry.get_all().await;
+            if registered.is_empty() {
+                tracing::error!("❌ No masternodes registered - cannot generate genesis");
                 // Fallback to loading from file
-                tracing::info!("   Falling back to genesis file...");
                 if let Err(e2) = blockchain_init.initialize_genesis().await {
                     tracing::error!("❌ Genesis initialization also failed: {}", e2);
                     return;
+                }
+            } else {
+                // Sort masternodes deterministically by address
+                let mut sorted_mns = registered.clone();
+                sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+                
+                let leader_address = &sorted_mns[0].masternode.address;
+                
+                tracing::info!(
+                    "🎲 Genesis leader election: {} masternodes registered, leader = {}",
+                    sorted_mns.len(),
+                    leader_address
+                );
+                
+                let are_we_leader = genesis_local_ip.as_deref() == Some(leader_address.as_str());
+                
+                if are_we_leader {
+                    // We are the leader - generate genesis and broadcast it
+                    tracing::info!("👑 We are the genesis leader - generating genesis block");
+                    if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
+                        tracing::error!("❌ Failed to generate dynamic genesis: {}", e);
+                        return;
+                    }
+                    
+                    // Broadcast genesis to all peers
+                    if let Ok(genesis) = blockchain_init.get_block_by_height(0).await {
+                        tracing::info!("📤 Broadcasting genesis block to all peers");
+                        let proposal = crate::network::message::NetworkMessage::TimeLockBlockProposal {
+                            block: genesis,
+                        };
+                        peer_registry_for_sync.broadcast(proposal).await;
+                    }
+                } else {
+                    // We are NOT the leader - wait to receive genesis from leader
+                    tracing::info!(
+                        "⏳ Waiting to receive genesis from leader ({})",
+                        leader_address
+                    );
+                    
+                    // Wait up to 30 seconds for genesis to arrive
+                    let mut attempts = 0;
+                    while attempts < 30 {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        if blockchain_init.get_block_by_height(0).await.is_ok() {
+                            tracing::info!("✅ Received genesis block from leader");
+                            break;
+                        }
+                        attempts += 1;
+                    }
+                    
+                    // If still no genesis, fall back to file
+                    if blockchain_init.get_block_by_height(0).await.is_err() {
+                        tracing::warn!("⚠️ Did not receive genesis from leader, falling back to file");
+                        if let Err(e2) = blockchain_init.initialize_genesis().await {
+                            tracing::error!("❌ Genesis initialization also failed: {}", e2);
+                            return;
+                        }
+                    }
                 }
             }
         } else {
