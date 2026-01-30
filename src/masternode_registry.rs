@@ -47,6 +47,13 @@ pub struct MasternodeInfo {
     pub total_uptime: u64,      // Total uptime in seconds
     pub is_active: bool,
 
+    /// Reward tracking for fairness
+    #[serde(default)]
+    pub last_reward_height: u64, // Last block height where this MN received reward (0 = never)
+
+    #[serde(default)]
+    pub blocks_without_reward: u64, // Counter: increments each block, resets when reward received
+
     /// Gossip-based status tracking (not serialized to disk)
     /// Maps peer_address -> last_seen_timestamp
     /// A masternode is active if seen by MIN_PEER_REPORTS different peers recently
@@ -235,6 +242,8 @@ impl MasternodeRegistry {
             uptime_start: now,
             total_uptime: 0,
             is_active: should_activate, // Only active if explicitly activated (true for connections, false for gossip)
+            last_reward_height: 0,
+            blocks_without_reward: 0,
             peer_reports: Arc::new(DashMap::new()),
         };
 
@@ -1148,6 +1157,140 @@ impl MasternodeRegistry {
                 );
             }
         }
+    }
+
+    /// Calculate blocks without reward for a masternode by scanning blockchain
+    /// This is deterministic and verifiable - all nodes get the same result
+    /// Returns number of blocks since this masternode was last the block producer
+    pub async fn calculate_blocks_without_reward(
+        &self,
+        masternode_address: &str,
+        blockchain: &crate::blockchain::Blockchain,
+    ) -> u64 {
+        let current_height = blockchain.get_height();
+
+        // Scan backwards through blockchain to find last time this masternode was leader
+        // Limit scan to reasonable window (e.g., 1000 blocks) to avoid performance issues
+        let scan_limit = 1000u64;
+        let start_height = current_height.saturating_sub(scan_limit);
+
+        for height in (start_height..=current_height).rev() {
+            if let Ok(block) = blockchain.get_block(height) {
+                if block.header.leader == masternode_address {
+                    // Found when this masternode last produced a block
+                    let blocks_since = current_height.saturating_sub(height);
+                    return blocks_since;
+                }
+            }
+        }
+
+        // If not found in recent history, assume it's been > scan_limit blocks
+        // Cap at scan_limit to prevent unbounded growth
+        scan_limit
+    }
+
+    /// Get blocks without reward for all masternodes (on-chain verifiable)
+    /// Scans blockchain history - deterministic across all nodes
+    pub async fn get_verifiable_reward_tracking(
+        &self,
+        blockchain: &crate::blockchain::Blockchain,
+    ) -> std::collections::HashMap<String, u64> {
+        let masternodes = self.masternodes.read().await;
+        let mut tracking = std::collections::HashMap::new();
+
+        for (address, _) in masternodes.iter() {
+            let blocks_without = self
+                .calculate_blocks_without_reward(address, blockchain)
+                .await;
+            tracking.insert(address.clone(), blocks_without);
+        }
+
+        tracking
+    }
+
+    /// Record that a masternode received a reward at the given height
+    /// Resets blocks_without_reward counter
+    pub async fn record_reward(&self, masternode_address: &str, block_height: u64) {
+        let mut masternodes = self.masternodes.write().await;
+        if let Some(info) = masternodes.get_mut(masternode_address) {
+            info.last_reward_height = block_height;
+            info.blocks_without_reward = 0;
+
+            // Persist to disk
+            let key = format!("masternode:{}", masternode_address);
+            if let Ok(data) = bincode::serialize(info) {
+                let _ = self.db.insert(key.as_bytes(), data);
+            }
+
+            tracing::debug!(
+                "💰 Masternode {} received reward at height {} (counter reset)",
+                masternode_address,
+                block_height
+            );
+        }
+    }
+
+    /// Increment blocks_without_reward for all masternodes except the one that just got rewarded
+    /// Should be called after each block is produced
+    pub async fn increment_blocks_without_reward(
+        &self,
+        current_height: u64,
+        rewarded_address: &str,
+    ) {
+        let mut masternodes = self.masternodes.write().await;
+        let mut updated_count = 0;
+
+        for (address, info) in masternodes.iter_mut() {
+            // Skip the masternode that just received reward
+            if address == rewarded_address {
+                continue;
+            }
+
+            info.blocks_without_reward += 1;
+            updated_count += 1;
+
+            // Log masternodes that are falling behind
+            if info.blocks_without_reward % 50 == 0 && info.blocks_without_reward > 0 {
+                tracing::info!(
+                    "📊 Masternode {} has gone {} blocks without reward (last: height {})",
+                    address,
+                    info.blocks_without_reward,
+                    info.last_reward_height
+                );
+            }
+        }
+
+        // Batch persist to disk periodically (every 10 blocks)
+        if current_height % 10 == 0 {
+            for (address, info) in masternodes.iter() {
+                let key = format!("masternode:{}", address);
+                if let Ok(data) = bincode::serialize(info) {
+                    let _ = self.db.insert(key.as_bytes(), data);
+                }
+            }
+            tracing::debug!(
+                "💾 Persisted reward tracking for {} masternodes at height {}",
+                updated_count,
+                current_height
+            );
+        }
+    }
+
+    /// Get masternodes sorted by blocks_without_reward (descending)
+    /// Masternodes that haven't received rewards in longer get prioritized
+    pub async fn get_masternodes_by_reward_priority(&self) -> Vec<MasternodeInfo> {
+        let masternodes = self.masternodes.read().await;
+        let mut list: Vec<MasternodeInfo> = masternodes.values().cloned().collect();
+
+        // Sort by blocks_without_reward descending (highest first = most starved)
+        // Secondary sort by address for determinism when counts are equal
+        list.sort_by(|a, b| {
+            b.blocks_without_reward
+                .cmp(&a.blocks_without_reward)
+                .then_with(|| a.masternode.address.cmp(&b.masternode.address))
+        });
+
+        list
     }
 }
 

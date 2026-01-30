@@ -1017,8 +1017,13 @@ async fn main() {
                     "⚠️ Only {} eligible masternodes (need 3) - falling back to all active masternodes",
                     masternodes.len()
                 );
-                let active = block_registry.get_eligible_for_rewards().await;
-                masternodes = active.iter().map(|(mn, _)| mn.clone()).collect();
+                let active_infos = block_registry
+                    .get_masternodes_for_rewards(&block_blockchain)
+                    .await;
+                masternodes = active_infos
+                    .iter()
+                    .map(|info| info.masternode.clone())
+                    .collect();
 
                 // If still insufficient, use ALL registered as last resort
                 if masternodes.len() < 3 {
@@ -1026,8 +1031,11 @@ async fn main() {
                         "🚨 Only {} active masternodes (need 3) - EMERGENCY: using ALL registered masternodes (including inactive)",
                         masternodes.len()
                     );
-                    let all_registered = block_registry.get_all_for_bootstrap().await;
-                    masternodes = all_registered.iter().map(|(mn, _)| mn.clone()).collect();
+                    let all_registered_infos = block_registry.list_all().await;
+                    masternodes = all_registered_infos
+                        .iter()
+                        .map(|info| info.masternode.clone())
+                        .collect();
                     tracing::info!(
                         "🚨 Emergency mode: found {} total registered masternodes",
                         masternodes.len()
@@ -1280,9 +1288,16 @@ async fn main() {
                 }
             }
 
-            // Deterministic leader selection using TSDC with tier-based weighting
+            // Deterministic leader selection using tier-based weighting + additive fairness bonus
+            // SECURITY: Fairness tracking is ON-CHAIN VERIFIABLE - all nodes scan blockchain history
+            // to calculate blocks_without_reward, preventing local modification attacks
+            //
             // Hash(prev_block_hash || next_height || attempt) determines the leader
-            // Higher tiers get selected more frequently based on reward_weight()
+            // Weight calculation:
+            // - Base tier weight: Free=1, Bronze=2, Silver=5, Gold=10
+            // - Fairness bonus: +1 per 10 blocks without reward (capped at +20)
+            // - Final weight = tier_weight + fairness_bonus
+            // This ensures lower tiers can compete when they've been waiting longer
             use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             hasher.update(prev_block_hash);
@@ -1290,13 +1305,45 @@ async fn main() {
             hasher.update(leader_attempt.to_le_bytes()); // Include attempt for leader rotation
             let selection_hash: [u8; 32] = hasher.finalize().into();
 
+            // Get VERIFIABLE reward tracking by scanning blockchain history
+            // All nodes independently calculate the same values from on-chain data
+            let blocks_without_reward_map = block_registry
+                .get_verifiable_reward_tracking(&block_blockchain)
+                .await;
+
             // Build cumulative weight array for weighted selection
-            // Each masternode's weight = tier.reward_weight()
+            // Weight = tier_weight + fairness_bonus (additive, not multiplicative)
             let mut cumulative_weights: Vec<u64> = Vec::with_capacity(masternodes.len());
             let mut total_weight = 0u64;
+
             for mn in &masternodes {
-                total_weight = total_weight.saturating_add(mn.tier.reward_weight());
+                let tier_weight = mn.tier.reward_weight();
+                let blocks_without = blocks_without_reward_map
+                    .get(&mn.address)
+                    .copied()
+                    .unwrap_or(0);
+
+                // Fairness bonus: +1 per 10 blocks without reward, capped at +20
+                // Examples:
+                // - Free tier (weight 1) waiting 100 blocks: 1 + 10 = 11
+                // - Gold tier (weight 10) with recent reward: 10 + 0 = 10
+                // - Free tier can overtake Gold tier after 100 blocks!
+                let fairness_bonus = (blocks_without / 10).min(20);
+                let final_weight = tier_weight + fairness_bonus;
+
+                total_weight = total_weight.saturating_add(final_weight);
                 cumulative_weights.push(total_weight);
+
+                if blocks_without > 0 {
+                    tracing::debug!(
+                        "🎲 Masternode {} weight: tier={} + fairness={} ({}blocks) = {}",
+                        mn.address,
+                        tier_weight,
+                        fairness_bonus,
+                        blocks_without,
+                        final_weight
+                    );
+                }
             }
 
             // Convert hash to random value in range [0, total_weight)
