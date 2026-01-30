@@ -950,13 +950,15 @@ async fn main() {
             let eligible = if is_bootstrap || is_deep_catchup {
                 // Bootstrap mode (height 0 ONLY) OR deep catchup
                 if is_bootstrap {
-                    tracing::debug!(
-                        "🌱 Bootstrap mode (height {}): using ALL registered masternodes (including inactive, no bitmap yet)",
-                        current_height
+                    let all_nodes = block_registry.get_all_for_bootstrap().await;
+                    tracing::info!(
+                        "🌱 Bootstrap mode (height {}): using ALL {} registered masternodes (including inactive, no bitmap yet)",
+                        current_height,
+                        all_nodes.len()
                     );
                     // At height 0 (producing block 1), use ALL registered masternodes
                     // After block 1, the bitmap from block 1 will be used for block 2
-                    block_registry.get_all_for_bootstrap().await
+                    all_nodes
                 } else {
                     tracing::info!(
                         "🔄 Deep catchup mode ({} blocks behind): using all active masternodes (bypassing potentially corrupted bitmap)",
@@ -1007,6 +1009,11 @@ async fn main() {
 
             let mut masternodes: Vec<Masternode> =
                 eligible.iter().map(|(mn, _)| mn.clone()).collect();
+
+            tracing::debug!(
+                "📋 Got {} eligible masternodes before fallback checks",
+                masternodes.len()
+            );
 
             // DEADLOCK PREVENTION: Progressive fallback when insufficient masternodes
             // 1. First try: eligible masternodes (from bitmap/participation)
