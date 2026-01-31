@@ -1074,7 +1074,7 @@ impl PeerConnection {
                 .masternode_registry
                 .as_ref()
                 .expect("Masternode registry required when blockchain is provided");
-            
+
             // Use from_registry to automatically fetch consensus engine
             MessageContext::from_registry(
                 Arc::clone(blockchain),

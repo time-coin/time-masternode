@@ -3083,10 +3083,29 @@ impl Blockchain {
 
     fn save_block(&self, block: &Block) -> Result<(), String> {
         let key = format!("block_{}", block.header.height);
-        let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
+        let serialized = bincode::serialize(block).map_err(|e| {
+            tracing::error!(
+                "❌ Failed to serialize block {}: {}",
+                block.header.height,
+                e
+            );
+            e.to_string()
+        })?;
+
         self.storage
             .insert(key.as_bytes(), serialized)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                tracing::error!(
+                    "❌ Failed to insert block {} into database: {} (type: {:?})",
+                    block.header.height,
+                    e,
+                    e
+                );
+                tracing::error!(
+                    "   This may indicate database corruption. Try: rm -rf /root/.timecoin/testnet/db/blocks"
+                );
+                format!("Database insert failed: {}", e)
+            })?;
 
         // CRITICAL: Update cache to ensure consistency
         // Without this, cached stale blocks can cause hash mismatches
@@ -3095,9 +3114,10 @@ impl Blockchain {
         // Update chain height
         let height_key = "chain_height".as_bytes();
         let height_bytes = bincode::serialize(&block.header.height).map_err(|e| e.to_string())?;
-        self.storage
-            .insert(height_key, height_bytes)
-            .map_err(|e| e.to_string())?;
+        self.storage.insert(height_key, height_bytes).map_err(|e| {
+            tracing::error!("❌ Failed to update chain_height: {}", e);
+            e.to_string()
+        })?;
 
         // Optimize disk I/O: Only flush every 10 blocks instead of every block
         // Sled handles durability via write-ahead log, so this is safe
@@ -3483,10 +3503,24 @@ impl Blockchain {
     /// Save undo log for a block
     fn save_undo_log(&self, undo_log: &UndoLog) -> Result<(), String> {
         let key = format!("undo_{}", undo_log.height);
-        let data = bincode::serialize(undo_log).map_err(|e| e.to_string())?;
+        let data = bincode::serialize(undo_log).map_err(|e| {
+            tracing::error!(
+                "❌ Failed to serialize undo log for block {}: {}",
+                undo_log.height,
+                e
+            );
+            format!("Serialize undo log failed: {}", e)
+        })?;
+
         self.storage
             .insert(key.as_bytes(), data)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                tracing::error!("❌ CRITICAL: Failed to save undo log for block {}: {}", undo_log.height, e);
+                tracing::error!("   Error details: {:?}", e);
+                tracing::error!("   This indicates database corruption or disk issues");
+                tracing::error!("   Fix: sudo systemctl stop timed && rm -rf /root/.timecoin/testnet/db/blocks && sudo systemctl start timed");
+                format!("DB insert undo_log failed: {:?}", e)
+            })?;
         Ok(())
     }
 
