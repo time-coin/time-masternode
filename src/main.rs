@@ -1295,6 +1295,8 @@ async fn main() {
 
             // Case 1: Next block not due yet (more than grace period away) - wait
             // BUT: Skip this check during catchup mode (when far behind)
+            // CRITICAL: When catching up (>5 blocks behind), produce immediately without time check
+            // This allows fast catchup instead of waiting 10 minutes per block
             if time_past_scheduled < -GRACE_PERIOD_SECS && blocks_behind < SYNC_THRESHOLD_BLOCKS {
                 let wait_secs = (-time_past_scheduled) - GRACE_PERIOD_SECS;
                 tracing::debug!(
@@ -1304,6 +1306,14 @@ async fn main() {
                     GRACE_PERIOD_SECS
                 );
                 continue;
+            }
+
+            // Fast catchup: When far behind, produce as fast as consensus allows
+            if blocks_behind >= SYNC_THRESHOLD_BLOCKS {
+                tracing::debug!(
+                    "⚡ Fast catchup mode: {} blocks behind, producing without time delay",
+                    blocks_behind
+                );
             }
 
             // Case 2: Way behind - try to sync first before producing
@@ -1318,7 +1328,7 @@ async fn main() {
                 let connected_peers = block_peer_registry.get_compatible_peers().await;
 
                 // CRITICAL: If sync coordinator is already syncing, check if it's making progress
-                // If sync is stuck for >30 seconds, override and produce blocks anyway
+                // Use event-driven approach: check status and loop back immediately
                 if block_blockchain.is_syncing() {
                     // Check if bootstrap - all peers at height 0
                     let mut all_at_zero = true;
@@ -1337,9 +1347,8 @@ async fn main() {
                         tracing::warn!("🚨 Bootstrap override: All {} peers at height 0, sync is stuck - forcing block production", connected_peers.len());
                         // Fall through to production logic
                     } else {
-                        tracing::info!("⏳ Sync coordinator is syncing - waiting for progress...");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        continue; // Loop back to re-check height
+                        tracing::debug!("⏳ Sync coordinator is syncing - checking again shortly");
+                        continue; // Loop back immediately via 1-second interval
                     }
                 }
 
@@ -1355,23 +1364,24 @@ async fn main() {
                             // This is a bootstrap scenario - proceed to produce instead of sync
                             if consensus_height == current_height {
                                 tracing::info!(
-                                    "✅ Bootstrap detected: {} peers agree at height {} - proceeding to block production",
+                                    "✅ Bootstrap/Catchup scenario: {} peers agree at height {} - producing immediately without delay",
                                     connected_peers.len(),
                                     current_height
                                 );
-                                // Fall through to production logic below
+                                // Skip sync attempts - fall through to immediate production
                             } else {
-                                // Consensus is ahead of us - try to sync
+                                // Consensus is ahead of us - request blocks and loop back
                                 tracing::info!(
-                                    "📥 Peers have blocks up to height {} - attempting sync",
-                                    consensus_height
+                                    "📥 Peers at height {} (we're at {}) - requesting blocks",
+                                    consensus_height,
+                                    current_height
                                 );
 
                                 // Request blocks from peers
                                 let probe_start = current_height + 1;
                                 let probe_end = consensus_height.min(current_height + 50);
 
-                                tracing::info!(
+                                tracing::debug!(
                                     "📤 Requesting blocks {}-{} from {} peer(s)",
                                     probe_start,
                                     probe_end,
@@ -1383,27 +1393,9 @@ async fn main() {
                                     let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
                                 }
 
-                                // Wait briefly for sync responses
-                                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-                                // Check if we synced
-                                let new_height = block_blockchain.get_height();
-                                if new_height > current_height {
-                                    tracing::info!(
-                                        "✅ Synced {} blocks: {} → {}",
-                                        new_height - current_height,
-                                        current_height,
-                                        new_height
-                                    );
-                                    // Loop back to re-evaluate with new height
-                                    continue;
-                                }
-
-                                // No sync progress - peers don't have blocks either
-                                // Fall through to produce the block ourselves (majority moves forward)
-                                tracing::warn!(
-                                    "⚠️  No sync progress - peers may not have blocks. Majority will produce."
-                                );
+                                // Loop back immediately - blocks will arrive asynchronously
+                                // Message handler adds them to chain, next iteration sees new height
+                                continue;
                             }
                         } else {
                             // No consensus response - try blind sync anyway
@@ -1419,14 +1411,8 @@ async fn main() {
                                 let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
                             }
 
-                            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-
-                            let new_height = block_blockchain.get_height();
-                            if new_height > current_height {
-                                continue;
-                            }
-
-                            tracing::warn!("⚠️  No sync progress - proceeding to production");
+                            // Loop back immediately - blocks arrive asynchronously
+                            continue;
                         }
                     }
                 } else {
