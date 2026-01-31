@@ -98,6 +98,32 @@ impl MessageContext {
             node_masternode_address: None,
         }
     }
+
+    /// Create context and automatically fetch consensus resources from peer registry
+    /// This is the preferred method for creating MessageContext as it ensures
+    /// consensus engine is available for block/vote handling
+    pub async fn from_registry(
+        blockchain: Arc<Blockchain>,
+        peer_registry: Arc<PeerConnectionRegistry>,
+        masternode_registry: Arc<MasternodeRegistry>,
+    ) -> Self {
+        // Fetch consensus resources from peer registry
+        let (consensus, block_cache, broadcast_tx) = peer_registry.get_tsdc_resources().await;
+
+        Self {
+            blockchain,
+            peer_registry,
+            masternode_registry,
+            consensus,
+            block_cache,
+            broadcast_tx,
+            utxo_manager: None,
+            peer_manager: None,
+            seen_blocks: None,
+            seen_transactions: None,
+            node_masternode_address: None,
+        }
+    }
 }
 
 /// Tracks repeated GetBlocks requests to detect loops

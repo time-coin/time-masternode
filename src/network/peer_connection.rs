@@ -1795,25 +1795,20 @@ impl PeerConnection {
             NetworkMessage::TimeLockBlockProposal { .. }
             | NetworkMessage::TimeVotePrepare { .. }
             | NetworkMessage::TimeVotePrecommit { .. } => {
-                // Use unified message handler for TSDC messages with shared resources
+                // Use unified message handler for TimeLock messages with consensus resources
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
 
-                // Get TSDC resources from peer registry
-                let (consensus, block_cache, broadcast_tx) =
-                    peer_registry.get_tsdc_resources().await;
-
-                let mut context = MessageContext::minimal(
+                // Create context with consensus resources from registry
+                let context = MessageContext::from_registry(
                     Arc::clone(blockchain),
                     Arc::clone(peer_registry),
                     Arc::clone(masternode_registry),
-                );
-                context.consensus = consensus;
-                context.block_cache = block_cache;
-                context.broadcast_tx = broadcast_tx;
+                )
+                .await;
 
                 if let Err(e) = handler.handle_message(&message, &context).await {
                     warn!(
-                        "⚠️ [{:?}] Error handling TSDC message from {}: {}",
+                        "⚠️ [{:?}] Error handling TimeLock message from {}: {}",
                         self.direction, self.peer_ip, e
                     );
                 }

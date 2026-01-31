@@ -51,7 +51,6 @@ use std::sync::Arc;
 
 use storage::{InMemoryUtxoStorage, UtxoStorage};
 use time_sync::TimeSync;
-use timelock::TSCDConsensus;
 use types::*;
 use utxo_manager::UTXOStateManager;
 use wallet::WalletManager;
@@ -345,14 +344,7 @@ async fn main() {
     consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
 
     let consensus_engine = Arc::new(consensus_engine);
-    tracing::info!("✓ Consensus engine initialized with AI validation");
-
-    // Initialize TSDC consensus engine with masternode registry
-    let tsdc_consensus =
-        TSCDConsensus::with_masternode_registry(Default::default(), registry.clone());
-    tracing::info!("✓ TSDC consensus engine initialized");
-
-    let tsdc_consensus = Arc::new(tsdc_consensus);
+    tracing::info!("✓ Consensus engine initialized with AI validation and TimeLock voting");
 
     // Initialize blockchain
     let mut blockchain = Blockchain::new(
@@ -1878,9 +1870,6 @@ async fn main() {
     // Also handles responsive catchup checks more frequently than 10-minute block production interval
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
-    let status_tsdc_clone = tsdc_consensus.clone();
-    let status_masternode_addr_clone = masternode_address.clone();
-    let status_config_clone = config.clone();
     let status_catchup_trigger = catchup_trigger.clone(); // Trigger to wake up block production
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
@@ -1939,35 +1928,10 @@ async fn main() {
                                 }
                                 Err(_) => {
                                     // Sync failed - peers don't have blocks
-                                    // Check if we should be the TimeLock catchup leader
-                                    // Use deterministic leader selection based only on expected_height
-                                    if let Ok(tsdc_leader) = status_tsdc_clone.select_leader_for_catchup(0, expected_height).await {
-                                        let is_leader = if let Some(ref our_addr) = status_masternode_addr_clone {
-                                            tsdc_leader.id == *our_addr
-                                        } else {
-                                            false
-                                        };
-
-                                        if is_leader {
-                                            // Check if catchup blocks are enabled
-                                            if status_config_clone.node.enable_catchup_blocks {
-                                                tracing::info!(
-                                                    "🎯 We are TimeLock catchup leader - triggering catchup production immediately"
-                                                );
-                                                // Notify block production task to run catchup immediately
-                                                status_catchup_trigger.notify_one();
-                                            } else {
-                                                tracing::warn!(
-                                                    "⚠️  TimeLock catchup leader but catchup blocks DISABLED in config"
-                                                );
-                                            }
-                                        } else {
-                                            tracing::info!(
-                                                "⏳ Waiting for TimeLock catchup leader {} to produce blocks",
-                                                tsdc_leader.id
-                                            );
-                                        }
-                                    }
+                                    // The main block production loop will handle catchup via TimeLock leader selection
+                                    // Wake up the block production task to check if we should produce
+                                    tracing::debug!("⏰ Responsive sync found no peer blocks - notifying block production to check catchup");
+                                    status_catchup_trigger.notify_one();
                                 }
                             }
                         } else {
