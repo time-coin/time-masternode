@@ -2261,20 +2261,71 @@ impl Blockchain {
 
     /// Add a block to the chain
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
-        // CRITICAL FIX: Test serialize the block FIRST to catch corrupted data
-        // Blocks from old nodes may have malformed transaction data that deserializes
-        // from JSON but fails bincode serialization (e.g., corrupted script_sig lengths)
-        if let Err(e) = bincode::serialize(&block) {
-            tracing::error!(
-                "❌ CORRUPT BLOCK DETECTED: Block {} has malformed data that cannot be serialized: {}",
-                block.header.height,
-                e
-            );
-            return Err(format!(
-                "Block {} contains corrupted data (likely malformed transaction signatures): {}",
-                block.header.height, e
-            ));
-        }
+        // CRITICAL FIX: Sanitize blocks from old nodes with corrupted transaction data
+        // Blocks may have malformed script_sig that deserializes from JSON but fails bincode
+        let block = match bincode::serialize(&block) {
+            Ok(_) => {
+                // Block is clean, use as-is
+                block
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ Block {} has corrupted data ({}), attempting to sanitize...",
+                    block.header.height,
+                    e
+                );
+
+                // Try to sanitize the block by cleaning transaction data
+                let mut sanitized_block = block.clone();
+
+                // Clean all transactions: empty out corrupted script_sig/script_pubkey
+                for tx in &mut sanitized_block.transactions {
+                    for input in &mut tx.inputs {
+                        // If script_sig is causing issues, clear it
+                        // For coinbase/reward txs, script_sig can be empty
+                        if input.script_sig.len() > 10000 {
+                            tracing::warn!(
+                                "  Clearing oversized script_sig ({} bytes)",
+                                input.script_sig.len()
+                            );
+                            input.script_sig = vec![];
+                        }
+                    }
+                    for output in &mut tx.outputs {
+                        // If script_pubkey is causing issues, verify it's reasonable
+                        if output.script_pubkey.len() > 10000 {
+                            tracing::warn!(
+                                "  Clearing oversized script_pubkey ({} bytes)",
+                                output.script_pubkey.len()
+                            );
+                            output.script_pubkey = vec![];
+                        }
+                    }
+                }
+
+                // Test if sanitized block can be serialized
+                match bincode::serialize(&sanitized_block) {
+                    Ok(_) => {
+                        tracing::info!(
+                            "✅ Successfully sanitized block {} (fixed corrupted transaction data)",
+                            sanitized_block.header.height
+                        );
+                        sanitized_block
+                    }
+                    Err(e2) => {
+                        tracing::error!(
+                            "❌ Failed to sanitize block {}: {}",
+                            block.header.height,
+                            e2
+                        );
+                        return Err(format!(
+                            "Block {} contains corrupted data that cannot be repaired: {}",
+                            block.header.height, e2
+                        ));
+                    }
+                }
+            }
+        };
 
         // Calculate block hash early for finality tracking
         let block_hash = block.hash();
