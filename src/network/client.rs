@@ -702,7 +702,7 @@ async fn maintain_peer_connection(
         .with_blockchain(blockchain.clone());
 
     // Subscribe to broadcast channel if available
-    if let (_, _, Some(broadcast_tx)) = peer_registry.get_tsdc_resources().await {
+    if let (_, _, Some(broadcast_tx)) = peer_registry.get_timelock_resources().await {
         let broadcast_rx = broadcast_tx.subscribe();
         config = config.with_broadcast_rx(broadcast_rx);
     }

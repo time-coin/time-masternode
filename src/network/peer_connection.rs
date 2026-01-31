@@ -1710,7 +1710,7 @@ impl PeerConnection {
                 // Use unified message handler with consensus context
                 let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
                 let (consensus, block_cache, broadcast_tx) =
-                    peer_registry.get_tsdc_resources().await;
+                    peer_registry.get_timelock_resources().await;
 
                 let mut context = MessageContext::minimal(
                     Arc::clone(blockchain),

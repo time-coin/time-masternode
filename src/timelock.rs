@@ -1,7 +1,7 @@
-//! Time-Scheduled Deterministic Consensus (TSDC) Protocol
+//! TimeLock Protocol
 //!
-//! TSDC provides deterministic leader election and block production on a fixed 10-minute schedule.
-//! It works in conjunction with timevote for transaction finality.
+//! TimeLock provides deterministic leader election and block production on a fixed 10-minute schedule.
+//! It works in conjunction with TimeVote for transaction finality.
 //!
 //! Key components:
 //! - VRF-based leader selection (deterministic via ECVRF)
@@ -9,7 +9,7 @@
 //! - Fork choice rule (prefer finalized blocks)
 //! - Backup leader mechanism (5-second fallback)
 //!
-//! Note: Many methods are currently unused but form the complete TSDC protocol scaffolding.
+//! Note: Many methods are currently unused but form the complete TimeLock protocol scaffolding.
 
 #![allow(dead_code)]
 
@@ -74,7 +74,7 @@ fn compute_merkle_root(transactions: &[Transaction]) -> Hash256 {
     hashes[0]
 }
 
-/// TSDC errors
+/// TimeLock errors
 #[derive(Error, Debug)]
 #[allow(dead_code)]
 pub enum TSCDError {
@@ -100,7 +100,7 @@ pub enum TSCDError {
     ConfigError(String),
 }
 
-/// Configuration for TSDC
+/// Configuration for TimeLock
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct TSCDConfig {
@@ -119,7 +119,7 @@ impl Default for TSCDConfig {
     }
 }
 
-/// A validator/masternode in the TSDC system
+/// A validator/masternode in the TimeLock system
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct TSCDValidator {
@@ -185,7 +185,7 @@ pub struct TransactionCheckpoint {
     pub slot_range: (u64, u64), // (first_slot, last_slot)
 }
 
-/// TSDC consensus engine
+/// TimeLock consensus engine
 #[allow(dead_code)]
 pub struct TSCDConsensus {
     config: TSCDConfig,
@@ -207,7 +207,7 @@ pub struct TSCDConsensus {
 
 impl TSCDConsensus {
     #[allow(dead_code)]
-    /// Create new TSDC consensus engine
+    /// Create new TimeLock consensus engine
     pub fn new(config: TSCDConfig) -> Self {
         Self {
             config,
@@ -221,7 +221,7 @@ impl TSCDConsensus {
         }
     }
 
-    /// Create new TSDC consensus engine with masternode registry
+    /// Create new TimeLock consensus engine with masternode registry
     pub fn with_masternode_registry(
         config: TSCDConfig,
         registry: Arc<crate::masternode_registry::MasternodeRegistry>,
@@ -578,7 +578,7 @@ impl TSCDConsensus {
             masternode_rewards,
             time_attestations: vec![],
             consensus_participants_bitmap: vec![],
-            liveness_recovery: Some(false), // TSDC blocks don't trigger liveness recovery by default
+            liveness_recovery: Some(false), // TimeLock blocks don't trigger liveness recovery by default
         })
     }
 
@@ -1000,7 +1000,7 @@ impl TSCDConsensus {
         let mut input = Vec::new();
         input.extend_from_slice(&parent_block_hash); // Unpredictable entropy
         input.extend_from_slice(&slot.to_le_bytes()); // Deterministic time
-        input.extend_from_slice(b"TSDC-leader-selection-v2"); // Version bumped
+        input.extend_from_slice(b"TimeLock-leader-selection-v2"); // Version bumped
 
         let mut best_vrf_output = vec![0u8; 32];
         let mut best_leader = validators[0].0.clone();
@@ -1026,22 +1026,22 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_tsdc_initialization() {
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
-        assert_eq!(tsdc.config.slot_duration_secs, 600);
+    async fn test_timelock_initialization() {
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
+        assert_eq!(timelock.config.slot_duration_secs, 600);
     }
 
     #[tokio::test]
     async fn test_current_slot() {
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
-        let slot = tsdc.current_slot();
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
+        let slot = timelock.current_slot();
         assert!(slot > 0);
     }
 
     #[tokio::test]
     async fn test_slot_timestamp() {
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
-        let timestamp = tsdc.slot_timestamp(100);
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
+        let timestamp = timelock.slot_timestamp(100);
         assert_eq!(timestamp, 100 * 600);
     }
 
@@ -1049,15 +1049,15 @@ mod tests {
     async fn test_leader_selection() {
         // Leader selection now requires masternode registry
         // This test verifies that select_leader returns an error without a registry
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
 
-        let leader = tsdc.select_leader(100).await;
+        let leader = timelock.select_leader(100).await;
         assert!(leader.is_err()); // Should fail without registry
     }
 
     #[tokio::test]
     async fn test_fork_choice() {
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
 
         let block1 = Block {
             header: BlockHeader {
@@ -1100,7 +1100,7 @@ mod tests {
         };
 
         let blocks = vec![(block1.clone(), None), (block2.clone(), None)];
-        let chosen = tsdc.fork_choice(blocks).await.unwrap();
+        let chosen = timelock.fork_choice(blocks).await.unwrap();
 
         // Should choose block2 (higher height)
         assert_eq!(chosen.header.height, block2.header.height);
@@ -1110,12 +1110,12 @@ mod tests {
     async fn test_precommit_collection() {
         // Precommit collection now uses masternode registry for stake calculation
         // Without registry, the stake will be 0 and finality won't work
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
 
         let block_hash = Hash256::default();
 
         // Without registry, precommit should still succeed but won't achieve finality
-        let result1 = tsdc
+        let result1 = timelock
             .on_precommit(block_hash, 100, "validator1".to_string(), vec![1, 2, 3])
             .await;
         assert!(result1.is_ok());
@@ -1125,14 +1125,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_slot_timeout() {
-        let tsdc = TSCDConsensus::new(TSCDConfig::default());
+        let timelock = TSCDConsensus::new(TSCDConfig::default());
 
-        let current_slot = tsdc.current_slot();
+        let current_slot = timelock.current_slot();
         let past_slot = current_slot.saturating_sub(10);
 
         // A slot from 10 slots ago should timeout
         // (unless system time just restarted)
-        let timeout = tsdc.is_slot_timeout(past_slot);
+        let timeout = timelock.is_slot_timeout(past_slot);
         assert!(timeout);
     }
 }

@@ -1001,7 +1001,7 @@ impl Blockchain {
     /// 3. Wait for peers to send blocks
     /// 4. Validate each block independently
     ///
-    /// NOTE: If peers don't have blocks, they'll be produced on TSDC schedule
+    /// NOTE: If peers don't have blocks, they'll be produced on TimeLock schedule
     ///
     /// # Arguments
     /// * `target_height` - Optional target height to sync to. If None, uses time-based calculation.
@@ -1795,7 +1795,7 @@ impl Blockchain {
         })
     }
 
-    /// Produce a block for the current TSDC slot
+    /// Produce a block for the current TimeLock slot
     pub async fn produce_block(&self) -> Result<Block, String> {
         self.produce_block_at_height(None, None, None).await
     }
@@ -1829,7 +1829,7 @@ impl Blockchain {
 
         // Note: Previously had a safeguard preventing block production when >50 behind
         // This is no longer needed because:
-        // 1. TSDC leader selection ensures only ONE node produces catchup blocks
+        // 1. TimeLock leader selection ensures only ONE node produces catchup blocks
         // 2. All nodes agree on the leader deterministically
         // 3. Non-leaders wait for leader's blocks
         // This prevents forks while allowing coordinated catchup when network is behind
@@ -1839,7 +1839,7 @@ impl Blockchain {
 
         if blocks_behind > 10 {
             tracing::debug!(
-                "📦 Producing catchup block: {} blocks behind (TSDC leader coordinated)",
+                "📦 Producing catchup block: {} blocks behind (TimeLock leader coordinated)",
                 blocks_behind
             );
         }

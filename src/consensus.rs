@@ -473,7 +473,7 @@ impl QueryRound {
 }
 
 // ============================================================================
-// PHASE 3D/3E: TSDC VOTING ACCUMULATORS
+// PHASE 3D/3E: TIMELOCK VOTING ACCUMULATORS
 // ============================================================================
 
 /// Accumulates prepare votes for a block (Phase 3D)
@@ -3827,7 +3827,7 @@ impl ConsensusEngine {
     ///    a. Increment slot_index (deterministic leader rotation)
     ///    b. Check if round_count < MAX_FALLBACK_ROUNDS
     ///    c. If under limit: retry with new leader
-    ///    d. If exceeded: escalate to TSDC checkpoint sync
+    ///    d. If exceeded: escalate to TimeLock checkpoint sync
     ///
     /// # Arguments
     /// * `masternode_registry` - For computing next leader
@@ -3867,18 +3867,18 @@ impl ConsensusEngine {
         // Handle each timeout
         for (txid, slot_index, round_count, _started_at) in timed_out {
             if round_count >= MAX_FALLBACK_ROUNDS {
-                // Exceeded max rounds - escalate to TSDC
+                // Exceeded max rounds - escalate to TimeLock
                 tracing::error!(
-                    "❌ Transaction {} exceeded MAX_FALLBACK_ROUNDS ({}), escalating to TSDC",
+                    "❌ Transaction {} exceeded MAX_FALLBACK_ROUNDS ({}), escalating to TimeLock",
                     hex::encode(txid),
                     MAX_FALLBACK_ROUNDS
                 );
 
-                // Mark for TSDC escalation
+                // Mark for TimeLock escalation
                 self.transition_to_rejected(
                     txid,
                     format!(
-                        "Fallback failed after {} rounds, awaiting TSDC sync",
+                        "Fallback failed after {} rounds, awaiting TimeLock sync",
                         MAX_FALLBACK_ROUNDS
                     ),
                 );
@@ -4030,7 +4030,7 @@ impl ConsensusEngine {
     ///
     /// # Arguments
     /// * `txid` - Transaction identifier that is stalled
-    /// * `slot_index` - Current TSDC slot index (10-minute epochs)
+    /// * `slot_index` - Current TimeLock slot index (10-minute epochs)
     ///
     /// # Returns
     /// * `Ok(())` - Alert signed and broadcast successfully
@@ -4372,7 +4372,7 @@ impl ConsensusEngine {
     /// See `start_stall_checker()` for automated periodic checking.
     ///
     /// # Arguments
-    /// * `current_slot` - Current TSDC slot index for alert timestamp
+    /// * `current_slot` - Current TimeLock slot index for alert timestamp
     ///
     /// # Returns
     /// * Number of stalled transactions found and alerted
@@ -4524,7 +4524,7 @@ impl ConsensusEngine {
             loop {
                 interval.tick().await;
 
-                // Get current slot index (placeholder - will be integrated with TSDC)
+                // Get current slot index (placeholder - will be integrated with TimeLock)
                 let current_slot = (chrono::Utc::now().timestamp() as u64) / 600; // 10-minute slots
 
                 // Check for stalled transactions and broadcast alerts

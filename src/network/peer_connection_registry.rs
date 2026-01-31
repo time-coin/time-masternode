@@ -64,10 +64,10 @@ pub struct PeerConnectionRegistry {
     peer_chain_tips: Arc<RwLock<HashMap<String, ChainTip>>>,
     // Pending responses for request/response pattern
     pending_responses: Arc<RwLock<HashMap<String, Vec<ResponseSender>>>>,
-    // TSDC consensus resources (shared from server)
-    tsdc_consensus: Arc<RwLock<Option<Arc<ConsensusEngine>>>>,
-    tsdc_block_cache: Arc<RwLock<Option<Arc<crate::network::block_cache::BlockCache>>>>,
-    tsdc_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
+    // TimeLock consensus resources (shared from server)
+    timelock_consensus: Arc<RwLock<Option<Arc<ConsensusEngine>>>>,
+    timelock_block_cache: Arc<RwLock<Option<Arc<crate::network::block_cache::BlockCache>>>>,
+    timelock_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
     // Blacklist reference for checking whitelist status
     blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
     // Discovered peer candidates from peer exchange
@@ -100,9 +100,9 @@ impl PeerConnectionRegistry {
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
             peer_chain_tips: Arc::new(RwLock::new(HashMap::new())),
             pending_responses: Arc::new(RwLock::new(HashMap::new())),
-            tsdc_consensus: Arc::new(RwLock::new(None)),
-            tsdc_block_cache: Arc::new(RwLock::new(None)),
-            tsdc_broadcast: Arc::new(RwLock::new(None)),
+            timelock_consensus: Arc::new(RwLock::new(None)),
+            timelock_block_cache: Arc::new(RwLock::new(None)),
+            timelock_broadcast: Arc::new(RwLock::new(None)),
             blacklist: Arc::new(RwLock::new(None)),
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
@@ -437,20 +437,20 @@ impl PeerConnectionRegistry {
         self.incompatible_peers.read().await.len()
     }
 
-    /// Set TSDC consensus resources (called once after server initialization)
-    pub async fn set_tsdc_resources(
+    /// Set TimeLock consensus resources (called once after server initialization)
+    pub async fn set_timelock_resources(
         &self,
         consensus: Arc<ConsensusEngine>,
         block_cache: Arc<crate::network::block_cache::BlockCache>,
         broadcast_tx: broadcast::Sender<NetworkMessage>,
     ) {
-        *self.tsdc_consensus.write().await = Some(consensus);
-        *self.tsdc_block_cache.write().await = Some(block_cache);
-        *self.tsdc_broadcast.write().await = Some(broadcast_tx);
+        *self.timelock_consensus.write().await = Some(consensus);
+        *self.timelock_block_cache.write().await = Some(block_cache);
+        *self.timelock_broadcast.write().await = Some(broadcast_tx);
     }
 
-    /// Get TSDC consensus resources for message handling
-    pub async fn get_tsdc_resources(
+    /// Get TimeLock consensus resources for message handling
+    pub async fn get_timelock_resources(
         &self,
     ) -> (
         Option<Arc<ConsensusEngine>>,
@@ -458,9 +458,9 @@ impl PeerConnectionRegistry {
         Option<broadcast::Sender<NetworkMessage>>,
     ) {
         (
-            self.tsdc_consensus.read().await.clone(),
-            self.tsdc_block_cache.read().await.clone(),
-            self.tsdc_broadcast
+            self.timelock_consensus.read().await.clone(),
+            self.timelock_block_cache.read().await.clone(),
+            self.timelock_broadcast
                 .read()
                 .await
                 .as_ref()

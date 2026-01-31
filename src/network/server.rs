@@ -65,7 +65,7 @@ pub struct NetworkServer {
     #[allow(dead_code)]
     pub peer_state: Arc<PeerStateManager>,
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
-    pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TSDC voting
+    pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TimeLock voting
     pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
 }
 
@@ -1517,8 +1517,10 @@ async fn handle_peer(
                                 NetworkMessage::TimeLockBlockProposal { .. }
                                 | NetworkMessage::TimeVotePrepare { .. }
                                 | NetworkMessage::TimeVotePrecommit { .. } => {
-                                    // Use unified message handler for TSDC messages
+                                    // Use unified message handler for TimeLock messages
                                     let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
+                                    // Get local masternode address for vote identity
+                                    let local_mn_addr = masternode_registry.get_local_address().await;
                                     let context = MessageContext::with_consensus(
                                         blockchain.clone(),
                                         peer_registry.clone(),
@@ -1526,10 +1528,11 @@ async fn handle_peer(
                                         consensus.clone(),
                                         block_cache.clone(),
                                         broadcast_tx.clone(),
+                                        local_mn_addr,
                                     );
 
                                     if let Err(e) = handler.handle_message(&msg, &context).await {
-                                        tracing::warn!("[Inbound] Error handling TSDC message from {}: {}", peer.addr, e);
+                                        tracing::warn!("[Inbound] Error handling TimeLock message from {}: {}", peer.addr, e);
                                     }
                                 }
                                 NetworkMessage::GetChainWork => {

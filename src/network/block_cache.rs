@@ -1,6 +1,6 @@
-//! Bounded block cache for TSDC voting
+//! Bounded block cache for TimeLock voting
 //!
-//! During TSDC consensus voting, blocks need to be cached temporarily.
+//! During TimeLock consensus voting, blocks need to be cached temporarily.
 //! This module provides a size-bounded cache using LRU eviction to prevent
 //! unbounded memory growth.
 //!

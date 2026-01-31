@@ -1138,7 +1138,7 @@ async fn main() {
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let block_masternode_address = masternode_address.clone(); // For leader comparison
     let shutdown_token_block = shutdown_token.clone();
-    let block_consensus_engine = consensus_engine.clone(); // For TSDC voting
+    let block_consensus_engine = consensus_engine.clone(); // For TimeLock voting
 
     // Guard flag to prevent duplicate block production (P2P best practice #8)
     let is_producing_block = Arc::new(AtomicBool::new(false));
@@ -1415,7 +1415,7 @@ async fn main() {
             // 2. If behind by 1+ blocks and 60s past scheduled: produce the block
             // 3. If way behind (network was down): sync first, then produce together
             // 4. Minority nodes that won't sync don't block majority progress
-            // 5. Use TSDC/timevote consensus for leader election
+            // 5. Use TimeLock/TimeVote consensus for leader election
             // ═══════════════════════════════════════════════════════════════════════════════
 
             let next_height = current_height + 1;
@@ -1498,16 +1498,16 @@ async fn main() {
                             // If consensus height equals our height, no one has blocks ahead
                             // This is a bootstrap scenario - proceed to produce instead of sync
                             if consensus_height == current_height {
-                                tracing::info!(
-                                    "✅ Bootstrap/Catchup scenario: {} peers agree at height {} - producing immediately without delay",
+                                tracing::debug!(
+                                    "Catchup: {} peers agree at height {} - producing",
                                     connected_peers.len(),
                                     current_height
                                 );
                                 // Skip sync attempts - fall through to immediate production
                             } else {
                                 // Consensus is ahead of us - request blocks and loop back
-                                tracing::info!(
-                                    "📥 Peers at height {} (we're at {}) - requesting blocks",
+                                tracing::debug!(
+                                    "Peers at height {} (we're at {}) - requesting blocks",
                                     consensus_height,
                                     current_height
                                 );
@@ -1535,9 +1535,9 @@ async fn main() {
                         } else {
                             // None means: same height, same hash - we're in sync with peers
                             // At bootstrap (height 0), this means everyone has genesis but no block 1
-                            // Fall through to production
-                            tracing::info!(
-                                "✅ In sync with {} peers at height {} - proceeding to block production",
+                            // Fall through to production (debug level to avoid spam during catchup)
+                            tracing::debug!(
+                                "In sync with {} peers at height {} - proceeding to production",
                                 connected_peers.len(),
                                 current_height
                             );
@@ -1549,15 +1549,14 @@ async fn main() {
             }
 
             // Case 3: Within grace period or sync failed - time to produce
-            // Use TSDC consensus for leader election
+            // Use TimeLock consensus for leader election
 
             // First: Verify we're on the consensus chain (prevent fork perpetuation)
             // Use compatible peers only (excludes nodes on incompatible chains like old software)
             let connected_peers = block_peer_registry.get_compatible_peers().await;
-            tracing::info!(
-                "🔌 Compatible peers for consensus: {} peers: {:?}",
-                connected_peers.len(),
-                connected_peers
+            tracing::debug!(
+                "Compatible peers for consensus: {} peers",
+                connected_peers.len()
             );
             let min_peers_for_consensus = (masternodes.len() / 2).max(2); // Majority or at least 2
 
@@ -1743,7 +1742,7 @@ async fn main() {
             // CRITICAL: Check if block already exists in chain
             // This prevents producing a block that's already finalized
             // Note: We don't check the cache because proposals may timeout/fail
-            // and we need to allow retry. TSDC consensus voting prevents duplicates.
+            // and we need to allow retry. TimeLock consensus voting prevents duplicates.
             if block_blockchain.get_height() >= next_height {
                 tracing::debug!(
                     "⏭️  Block {} already exists in chain (height {}), skipping production",
@@ -1782,7 +1781,7 @@ async fn main() {
                         block.masternode_rewards.len()
                     );
 
-                    // TSDC Consensus Flow:
+                    // TimeLock Consensus Flow:
                     // 1. Cache block locally for finalization
                     // 2. Broadcast TimeLockBlockProposal to all peers (NOT add to chain yet)
                     // 3. All nodes (including us) validate and vote
@@ -1790,7 +1789,8 @@ async fn main() {
                     // 5. When >50% precommit votes → block finalized, all add to chain
 
                     // Step 1: Cache the block for finalization (leader must also cache)
-                    let (_, block_cache_opt, _) = block_peer_registry.get_tsdc_resources().await;
+                    let (_, block_cache_opt, _) =
+                        block_peer_registry.get_timelock_resources().await;
                     if let Some(cache) = &block_cache_opt {
                         cache.insert(block_hash, block.clone());
                         tracing::debug!("💾 Leader cached block {} for consensus", block_height);
@@ -2231,9 +2231,9 @@ async fn main() {
             registry.start_report_cleanup();
             tracing::info!("✓ Gossip-based masternode status tracking started");
 
-            // Share TSDC resources with peer connection registry for outbound connections
+            // Share TimeLock resources with peer connection registry for outbound connections
             peer_connection_registry
-                .set_tsdc_resources(
+                .set_timelock_resources(
                     consensus_engine.clone(),
                     server.block_cache.clone(),
                     server.tx_notifier.clone(),
@@ -2395,7 +2395,7 @@ async fn main() {
             println!("║  Storage:    {:<40} ║", config.storage.backend);
             println!("║  P2P Port:   {:<40} ║", p2p_addr);
             println!("║  RPC Port:   {:<40} ║", rpc_addr);
-            println!("║  Consensus:  TSDC + timevote Hybrid                   ║");
+            println!("║  Consensus:  TimeLock + TimeVote Hybrid               ║");
             println!("║  Finality:   Instant (<10 seconds)                    ║");
             println!("╚═══════════════════════════════════════════════════════╝");
             println!("\nPress Ctrl+C to stop\n");

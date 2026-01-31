@@ -83,6 +83,7 @@ impl MessageContext {
         consensus: Arc<ConsensusEngine>,
         block_cache: Arc<crate::network::block_cache::BlockCache>,
         broadcast_tx: broadcast::Sender<NetworkMessage>,
+        node_masternode_address: Option<String>,
     ) -> Self {
         Self {
             blockchain,
@@ -95,7 +96,7 @@ impl MessageContext {
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
-            node_masternode_address: None,
+            node_masternode_address,
         }
     }
 
@@ -108,7 +109,9 @@ impl MessageContext {
         masternode_registry: Arc<MasternodeRegistry>,
     ) -> Self {
         // Fetch consensus resources from peer registry
-        let (consensus, block_cache, broadcast_tx) = peer_registry.get_tsdc_resources().await;
+        let (consensus, block_cache, broadcast_tx) = peer_registry.get_timelock_resources().await;
+        // Get local masternode address for voting identity
+        let node_masternode_address = masternode_registry.get_local_address().await;
 
         Self {
             blockchain,
@@ -121,8 +124,14 @@ impl MessageContext {
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
-            node_masternode_address: None,
+            node_masternode_address,
         }
+    }
+
+    /// Set the node's masternode address for voting identity
+    pub fn with_node_address(mut self, address: Option<String>) -> Self {
+        self.node_masternode_address = address;
+        self
     }
 }
 
@@ -294,9 +303,9 @@ impl MessageHandler {
                 self.handle_get_chain_work_at(*height, context).await
             }
 
-            // === TSDC Consensus Messages ===
+            // === TimeLock Consensus Messages ===
             NetworkMessage::TimeLockBlockProposal { block } => {
-                self.handle_tsdc_block_proposal(block.clone(), context)
+                self.handle_timelock_block_proposal(block.clone(), context)
                     .await
             }
             NetworkMessage::TimeVotePrepare {
@@ -304,7 +313,7 @@ impl MessageHandler {
                 voter_id,
                 signature,
             } => {
-                self.handle_tsdc_prepare_vote(
+                self.handle_timelock_prepare_vote(
                     *block_hash,
                     voter_id.clone(),
                     signature.clone(),
@@ -317,7 +326,7 @@ impl MessageHandler {
                 voter_id,
                 signature,
             } => {
-                self.handle_tsdc_precommit_vote(
+                self.handle_timelock_precommit_vote(
                     *block_hash,
                     voter_id.clone(),
                     signature.clone(),
@@ -660,7 +669,7 @@ impl MessageHandler {
     }
 
     /// Handle TimeLock Block Proposal - cache and vote
-    async fn handle_tsdc_block_proposal(
+    async fn handle_timelock_block_proposal(
         &self,
         block: Block,
         context: &MessageContext,
@@ -773,8 +782,8 @@ impl MessageHandler {
         Ok(None)
     }
 
-    /// Handle TSDC Prepare Vote - accumulate and check consensus
-    async fn handle_tsdc_prepare_vote(
+    /// Handle TimeLock Prepare Vote - accumulate and check consensus
+    async fn handle_timelock_prepare_vote(
         &self,
         block_hash: [u8; 32],
         voter_id: String,
@@ -922,8 +931,8 @@ impl MessageHandler {
         Ok(None)
     }
 
-    /// Handle TSDC Precommit Vote - accumulate and finalize if consensus reached
-    async fn handle_tsdc_precommit_vote(
+    /// Handle TimeLock Precommit Vote - accumulate and finalize if consensus reached
+    async fn handle_timelock_precommit_vote(
         &self,
         block_hash: [u8; 32],
         voter_id: String,
@@ -1039,8 +1048,8 @@ impl MessageHandler {
                     // For now, we proceed without signatures (finality still achieved via consensus)
                     let _signatures: Vec<Vec<u8>> = vec![]; // Placeholder
 
-                    // 3. Phase 3E.3: Call tsdc.finalize_block_complete()
-                    // Note: This would be called through a TSDC module instance
+                    // 3. Phase 3E.3: Call timelock.finalize_block_complete()
+                    // Note: This would be called through a TimeLock module instance
                     // For now, emit finalization event
                     info!(
                         "🎉 [{}] Block {} finalized with consensus!",
