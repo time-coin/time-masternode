@@ -721,7 +721,7 @@ async fn main() {
     let peer_registry_for_sync = peer_connection_registry.clone();
     let sync_complete_signal = sync_complete.clone();
     let bootstrap_registry = registry.clone();
-    let genesis_local_ip = config.network.external_address.clone();
+    let genesis_external_ip = config.network.external_address.clone();
 
     let genesis_sync_handle = tokio::spawn(async move {
         // STEP 1: Check if genesis exists, if not prepare for dynamic generation
@@ -790,8 +790,9 @@ async fn main() {
                         leader_address
                     );
 
+                    // Check if we are the leader using external IP from config
                     let are_we_leader =
-                        genesis_local_ip.as_deref() == Some(leader_address.as_str());
+                        genesis_external_ip.as_deref() == Some(leader_address.as_str());
 
                     if are_we_leader {
                         // We are the leader - generate genesis and broadcast it
