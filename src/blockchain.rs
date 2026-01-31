@@ -957,6 +957,36 @@ impl Blockchain {
             tracing::debug!("⏭️  Sync already in progress, skipping duplicate request");
             return Ok(());
         }
+
+        let mut current = self.current_height.load(Ordering::Acquire);
+
+        // Use provided target height (from consensus) or calculate from time
+        let time_expected = self.calculate_expected_height();
+        let target = target_height.unwrap_or(time_expected);
+
+        // BOOTSTRAP CHECK: If we're behind but all peers are at our height, skip sync
+        // This handles genesis scenario where time-based calculation shows we're behind
+        // but nobody has actually produced blocks yet
+        if self.peer_registry.read().await.is_some() {
+            if let Some((consensus_height, _)) = self.compare_chain_with_peers().await {
+                if consensus_height == current && current < target {
+                    tracing::info!(
+                        "✅ Bootstrap scenario: All peers at height {} but time-based calc shows target {}. Skipping sync - ready for block production.",
+                        current,
+                        target
+                    );
+                    return Ok(()); // Don't sync - proceed to block production
+                }
+            }
+        }
+
+        // If we're already synced, return early
+        if current >= target {
+            tracing::info!("✓ Blockchain synced (height: {})", current);
+            return Ok(());
+        }
+
+        // Now set syncing flag since we actually need to sync
         self.is_syncing.store(true, Ordering::Release);
 
         // Ensure we reset the sync flag when done
@@ -964,12 +994,6 @@ impl Blockchain {
         let _guard = scopeguard::guard((), |_| {
             is_syncing.store(false, Ordering::Release);
         });
-
-        let mut current = self.current_height.load(Ordering::Acquire);
-
-        // Use provided target height (from consensus) or calculate from time
-        let time_expected = self.calculate_expected_height();
-        let target = target_height.unwrap_or(time_expected);
 
         // Debug logging for genesis timestamp issue
         let now = chrono::Utc::now().timestamp();
@@ -989,11 +1013,6 @@ impl Blockchain {
             genesis_ts,
             now - genesis_ts
         );
-
-        if current >= target {
-            tracing::info!("✓ Blockchain synced (height: {})", current);
-            return Ok(());
-        }
 
         let behind = target - current;
         tracing::info!(

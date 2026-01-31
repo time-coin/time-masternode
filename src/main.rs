@@ -2265,7 +2265,7 @@ async fn main() {
             println!("║  Storage:    {:<40} ║", config.storage.backend);
             println!("║  P2P Port:   {:<40} ║", p2p_addr);
             println!("║  RPC Port:   {:<40} ║", rpc_addr);
-            println!("║  Consensus:  TSDC + timevote Hybrid                  ║");
+            println!("║  Consensus:  TSDC + timevote Hybrid                   ║");
             println!("║  Finality:   Instant (<10 seconds)                    ║");
             println!("╚═══════════════════════════════════════════════════════╝");
             println!("\nPress Ctrl+C to stop\n");
