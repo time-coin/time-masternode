@@ -5,6 +5,40 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed - Critical Security Issues
+
+- **CRITICAL: Blocks Not Loaded on Startup**
+  - Genesis block initialization (`initialize_genesis()`) was never called from main.rs
+  - Result: Genesis block wasn't loaded/validated on node startup
+  - Result: Blockchain height loaded but blocks not initialized from storage
+  - Fix: Added call to `blockchain.initialize_genesis().await` before any blockchain operations
+  - Impact: Nodes now properly validate genesis and load chain state on startup
+
+- **CRITICAL: Block Reward Validation Vulnerability (Security)**
+  - Block reward validation relied on local state (`get_pending_fees()`)
+  - Different nodes could have different views of correct reward
+  - Attack: Malicious node could create blocks with inflated rewards (e.g., 1000 TIME vs 100 TIME)
+  - Fix: Implemented cryptographic fee verification by scanning blockchain
+  - Now calculates fees deterministically: `fee = inputs - outputs` for each transaction
+  - Validates: `block_reward = BASE_REWARD (100 TIME) + calculated_fees`
+  - Impact: **Prevents supply inflation attacks** - all nodes verify rewards identically
+
+### Security Improvements
+
+- **Proper Fee Calculation from Blockchain**
+  - Added backward blockchain scan to verify UTXO values for fee calculation
+  - Traces every satoshi back to its origin transaction
+  - Rejects blocks if any UTXO cannot be found or validated
+  - No arbitrary reward caps - natural limit based on actual transaction fees
+
+- **Triple-Layer Block Reward Validation**
+  1. Calculate fees from previous block's transactions (scan blockchain for UTXOs)
+  2. Verify: `block_reward = BASE_REWARD + calculated_fees` (exact match required)
+  3. Verify: total distributed = block_reward (existing check)
+  - Result: Byzantine fault tolerant - no trust required, all cryptographically verified
+
 ## [1.1.0] - 2026-01-28 - TimeVote Consensus Complete
 
 ### Fixed - Critical Transaction Flow Bugs

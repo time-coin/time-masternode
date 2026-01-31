@@ -373,6 +373,13 @@ async fn main() {
 
     let blockchain = Arc::new(blockchain);
 
+    // Initialize genesis block before any other operations
+    tracing::info!("🔧 Initializing genesis block...");
+    if let Err(e) = blockchain.initialize_genesis().await {
+        eprintln!("❌ Failed to initialize genesis block: {}", e);
+        std::process::exit(1);
+    }
+
     // Migrate old-schema blocks before doing anything else
     tracing::info!("🔄 Running schema migration check...");
     match blockchain.migrate_old_schema_blocks().await {

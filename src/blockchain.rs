@@ -3315,15 +3315,6 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Get pending fees from previous block (to add to current block reward)
-    fn get_pending_fees(&self) -> u64 {
-        let key = "pending_fees".as_bytes();
-        match self.storage.get(key) {
-            Ok(Some(bytes)) => bincode::deserialize(&bytes).unwrap_or(0),
-            _ => 0, // No pending fees (genesis or first block after restart)
-        }
-    }
-
     /// Process block UTXOs and create undo log for rollback support
     async fn process_block_utxos(&self, block: &Block) -> Result<UndoLog, String> {
         let block_hash = block.hash();
@@ -3496,9 +3487,97 @@ impl Blockchain {
         }
 
         // CRITICAL: Validate the block_reward is correct (base reward + fees from previous block)
-        // Get fees from previous block (stored during block production)
-        let previous_block_fees = self.get_pending_fees();
-        let expected_reward = BLOCK_REWARD_SATOSHIS + previous_block_fees;
+        // Calculate fees from previous block's transactions (deterministic, not from local state)
+        let calculated_fees = if block.header.height > 0 {
+            match self.get_block(block.header.height - 1) {
+                Ok(prev_block) => {
+                    // Calculate fees from previous block: sum(inputs) - sum(outputs)
+                    // Skip coinbase (first tx) and reward distribution (second tx) as they create new coins
+                    let mut total_fees = 0u64;
+
+                    for tx in prev_block.transactions.iter().skip(2) {
+                        // Calculate output sum (easy - just sum the values)
+                        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+
+                        // Calculate input sum by looking up each spent UTXO value from previous transactions
+                        let mut input_sum: u64 = 0;
+                        for input in &tx.inputs {
+                            // Find the transaction that created this UTXO
+                            let spent_txid = input.previous_output.txid;
+                            let spent_vout = input.previous_output.vout;
+
+                            // Search through previous blocks to find the transaction
+                            let mut found = false;
+                            for search_height in (0..prev_block.header.height).rev() {
+                                if let Ok(search_block) = self.get_block(search_height) {
+                                    for search_tx in &search_block.transactions {
+                                        if search_tx.txid() == spent_txid {
+                                            if let Some(output) =
+                                                search_tx.outputs.get(spent_vout as usize)
+                                            {
+                                                input_sum += output.value;
+                                                found = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if found {
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if !found {
+                                tracing::warn!(
+                                    "Could not find UTXO for input in tx {} (looking for tx {}, vout {})",
+                                    hex::encode(&tx.txid()[..8]),
+                                    hex::encode(&spent_txid[..8]),
+                                    spent_vout
+                                );
+                                // If we can't find the UTXO, we can't validate fees properly
+                                // This could happen during initial sync or with incomplete chain data
+                                return Err(format!(
+                                    "Cannot validate fees for block {}: missing UTXO data for previous block transactions",
+                                    block.header.height
+                                ));
+                            }
+                        }
+
+                        // Fee for this transaction = inputs - outputs
+                        if input_sum >= output_sum {
+                            total_fees += input_sum - output_sum;
+                        } else {
+                            tracing::error!(
+                                "Transaction {} in block {} has outputs ({}) exceeding inputs ({})",
+                                hex::encode(&tx.txid()[..8]),
+                                prev_block.header.height,
+                                output_sum,
+                                input_sum
+                            );
+                            return Err(format!(
+                                "Invalid transaction in previous block {}: outputs exceed inputs",
+                                prev_block.header.height
+                            ));
+                        }
+                    }
+
+                    total_fees
+                }
+                Err(_) => {
+                    // If we can't get previous block, we can't validate fees
+                    return Err(format!(
+                        "Cannot validate block {} reward: previous block {} not found",
+                        block.header.height,
+                        block.header.height - 1
+                    ));
+                }
+            }
+        } else {
+            0 // Genesis has no previous block
+        };
+
+        // Verify block_reward matches base reward + calculated fees
+        let expected_reward = BLOCK_REWARD_SATOSHIS + calculated_fees;
 
         if block.header.block_reward != expected_reward {
             return Err(format!(
@@ -3506,7 +3585,7 @@ impl Blockchain {
                 block.header.height,
                 expected_reward,
                 BLOCK_REWARD_SATOSHIS,
-                previous_block_fees,
+                calculated_fees,
                 block.header.block_reward
             ));
         }

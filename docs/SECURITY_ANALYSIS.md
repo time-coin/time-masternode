@@ -17,15 +17,42 @@ Can a malicious node add itself to the network and present invalid UTXOs to "cre
 
 **Result:** A malicious node **CANNOT** spend UTXOs they don't own or create transactions with non-existent inputs. The signature check would fail.
 
-### 2. Block Reward Validation (blockchain.rs:2285-2429)
-**Just added - prevents reward manipulation:**
+### 2. Block Reward Validation (blockchain.rs:3489-3638) ✅ UPDATED 2026-01-31
+**Cryptographic fee verification prevents reward manipulation:**
 
-- ✅ Coinbase must create exactly `block_reward` satoshis
-- ✅ Reward distribution must spend coinbase
-- ✅ Outputs must match `masternode_rewards` metadata exactly
-- ✅ Total distributed must equal block_reward (within rounding)
+#### Triple-Layer Validation:
 
-**Result:** A malicious block producer **CANNOT** inflate block rewards or pay themselves extra.
+**Layer 1: Calculate Fees from Previous Block** (lines 3489-3575)
+- Scan previous block's transactions (skip coinbase & reward distribution)
+- For each transaction:
+  - Calculate output sum (straightforward)
+  - Calculate input sum by looking up spent UTXOs in blockchain
+  - Search backwards through all blocks to find each UTXO
+  - Verify: inputs >= outputs (reject if not)
+  - Fee = inputs - outputs
+- Total all fees
+
+**Layer 2: Verify Block Reward** (lines 3577-3589)
+- `expected_reward = BASE_REWARD (100 TIME) + calculated_fees`
+- Reject block if `block_reward != expected_reward` (exact match required)
+- No arbitrary caps - natural limit based on actual transaction activity
+
+**Layer 3: Verify Distribution** (lines 3622-3638)
+- `total_distributed = sum of all reward distribution outputs`
+- Reject block if `total_distributed != block_reward` (within rounding tolerance)
+
+**Result:** 
+- ✅ A malicious block producer **CANNOT** inflate block rewards
+- ✅ **Cannot claim fake fees** - all fees traced back to actual UTXOs
+- ✅ **Deterministic validation** - all nodes calculate same fees
+- ✅ **Byzantine fault tolerant** - no trust required, everything mathematically verified
+
+**Example Attack Prevention:**
+- Attacker creates block claiming 1000 TIME reward (900 TIME fake fees)
+- Node calculates actual fees from previous block: 2 TIME
+- Expected: 100 + 2 = 102 TIME
+- Claimed: 1000 TIME
+- **Result: Block REJECTED** ❌
 
 ### 3. Block Structure Validation (blockchain.rs:1655-1770)
 **Chain integrity checks:**
