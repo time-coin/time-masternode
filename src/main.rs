@@ -791,8 +791,39 @@ async fn main() {
                     );
 
                     // Check if we are the leader using external IP from config
+                    tracing::info!(
+                        "🔍 Leader check: our external_address = {:?}, leader = {}",
+                        genesis_external_ip,
+                        leader_address
+                    );
+
                     let are_we_leader =
                         genesis_external_ip.as_deref() == Some(leader_address.as_str());
+
+                    // Fallback: Also check if we're registered as a masternode and match leader
+                    let are_we_leader_by_registry = bootstrap_registry
+                        .get_local_masternode()
+                        .await
+                        .map(|mn| &mn.masternode.address == leader_address)
+                        .unwrap_or(false);
+
+                    let are_we_leader = are_we_leader || are_we_leader_by_registry;
+
+                    if are_we_leader_by_registry
+                        && !genesis_external_ip
+                            .as_deref()
+                            .map(|ip| ip == leader_address)
+                            .unwrap_or(false)
+                    {
+                        tracing::warn!(
+                            "⚠️  Leader identified via registry but external_address mismatch!"
+                        );
+                        tracing::warn!(
+                            "   Config external_address: {:?}, Registered as: {}",
+                            genesis_external_ip,
+                            leader_address
+                        );
+                    }
 
                     if are_we_leader {
                         // We are the leader - generate genesis and broadcast it
@@ -829,12 +860,27 @@ async fn main() {
                             attempts += 1;
                         }
 
-                        // If still no genesis after waiting for leader, fail
+                        // If still no genesis after waiting for leader, generate it ourselves as fallback
                         if blockchain_init.get_block_by_height(0).await.is_err() {
-                            tracing::error!(
-                                "❌ Failed to receive genesis from leader after 30 seconds"
+                            tracing::warn!(
+                                "⚠️  Failed to receive genesis from leader after 30 seconds - generating as fallback"
                             );
-                            return;
+                            if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
+                                tracing::error!("❌ Failed to generate fallback genesis: {}", e);
+                                return;
+                            }
+
+                            // Broadcast our genesis to all peers
+                            if let Ok(genesis) = blockchain_init.get_block_by_height(0).await {
+                                tracing::info!(
+                                    "📤 Broadcasting fallback genesis block to all peers"
+                                );
+                                let proposal =
+                                    crate::network::message::NetworkMessage::TimeLockBlockProposal {
+                                        block: genesis,
+                                    };
+                                peer_registry_for_sync.broadcast(proposal).await;
+                            }
                         }
                     }
                 }
