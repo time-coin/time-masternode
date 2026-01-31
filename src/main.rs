@@ -723,7 +723,7 @@ async fn main() {
     let bootstrap_registry = registry.clone();
     let genesis_local_ip = config.network.external_address.clone();
 
-    tokio::spawn(async move {
+    let genesis_sync_handle = tokio::spawn(async move {
         // STEP 1: Check if genesis exists, if not prepare for dynamic generation
         tracing::info!("📥 Checking for existing genesis block...");
 
@@ -963,6 +963,7 @@ async fn main() {
 
         // Block production is handled by the timer task below
     });
+    shutdown_manager.register_task(genesis_sync_handle);
 
     // Perform initial time check BEFORE starting anything else
     println!("🕐 Checking system time synchronization...");
