@@ -733,12 +733,9 @@ async fn main() {
         // STEP 1: Check if genesis exists, if not prepare for dynamic generation
         tracing::info!("📥 Checking for existing genesis block...");
 
-        let has_genesis = blockchain_init.get_height() > 0
-            || blockchain_init.get_block_by_height(0).await.is_ok();
-
-        if !has_genesis {
-            // No genesis exists locally - try to sync from network first
-            tracing::info!("🌱 No genesis found locally - attempting to sync from network");
+        if !blockchain_init.has_genesis() {
+            // No genesis exists - try to sync from network first
+            tracing::info!("🌱 No genesis found - attempting to sync from network");
 
             // Give peers time to connect
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
@@ -770,7 +767,7 @@ async fn main() {
             }
 
             // If still no genesis, generate it dynamically
-            if blockchain_init.get_block_by_height(0).await.is_err() {
+            if !blockchain_init.has_genesis() {
                 tracing::info!("🌱 No genesis on network - initiating dynamic generation");
                 tracing::info!("⏳ Waiting 60 seconds for masternodes to discover each other...");
 
@@ -867,7 +864,7 @@ async fn main() {
                         }
 
                         // If still no genesis after waiting for leader, generate it ourselves as fallback
-                        if blockchain_init.get_block_by_height(0).await.is_err() {
+                        if !blockchain_init.has_genesis() {
                             tracing::warn!(
                                 "⚠️  Failed to receive genesis from leader after 30 seconds - generating as fallback"
                             );
@@ -892,14 +889,14 @@ async fn main() {
                 }
             }
         } else {
-            tracing::info!("✓ Genesis block already exists");
+            tracing::info!(
+                "✓ Genesis block exists at height {}",
+                blockchain_init.get_height()
+            );
         }
 
         // Verify we now have genesis
-        let has_genesis = blockchain_init.get_height() > 0
-            || blockchain_init.get_block_by_height(0).await.is_ok();
-
-        if !has_genesis {
+        if !blockchain_init.has_genesis() {
             tracing::error!("❌ Failed to load or generate genesis block - cannot proceed");
             return;
         }

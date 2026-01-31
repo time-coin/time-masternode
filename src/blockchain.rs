@@ -597,7 +597,7 @@ impl Blockchain {
         use chrono::TimeZone;
 
         // Check if genesis already exists
-        if self.get_height() > 0 || self.get_block_by_height(0).await.is_ok() {
+        if self.has_genesis() {
             tracing::info!("✓ Genesis block already exists, skipping dynamic generation");
             return Ok(());
         }
@@ -2791,6 +2791,17 @@ impl Blockchain {
     /// Get current blockchain height (lock-free - 100x faster than RwLock)
     pub fn get_height(&self) -> u64 {
         self.current_height.load(Ordering::Acquire)
+    }
+
+    /// Check if genesis block exists
+    /// Returns true if genesis (block 0) is present in storage
+    pub fn has_genesis(&self) -> bool {
+        if self.get_height() > 0 {
+            return true;
+        }
+        // Check if block 0 exists in storage
+        let key = "block_0".as_bytes();
+        self.storage.get(key).ok().flatten().is_some()
     }
 
     /// Get block cache statistics
