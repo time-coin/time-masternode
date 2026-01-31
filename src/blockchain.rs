@@ -398,6 +398,75 @@ impl Blockchain {
         self.genesis_timestamp // Use cached value
     }
 
+    /// Migrate old-schema blocks to new schema
+    /// This fixes blocks that were serialized before time_attestations changes
+    pub async fn migrate_old_schema_blocks(&self) -> Result<u64, String> {
+        use crate::block::types::BlockV1;
+
+        tracing::info!("🔄 Checking for old-schema blocks that need migration...");
+
+        let mut migrated_count = 0u64;
+        let height = match self.load_chain_height() {
+            Ok(h) => h,
+            Err(_) => return Ok(0), // No blocks to migrate
+        };
+
+        // Check blocks 0 through current height
+        for block_height in 0..=height {
+            let key = format!("block_{}", block_height);
+
+            if let Ok(Some(data)) = self.storage.get(key.as_bytes()) {
+                // Try to deserialize with current schema
+                if bincode::deserialize::<Block>(&data).is_err() {
+                    // Current schema failed, try old BlockV1 format
+                    match bincode::deserialize::<BlockV1>(&data) {
+                        Ok(v1_block) => {
+                            // Convert to new format
+                            let migrated_block: Block = v1_block.into();
+
+                            // Re-serialize with new schema
+                            let new_data = bincode::serialize(&migrated_block).map_err(|e| {
+                                format!(
+                                    "Failed to serialize migrated block {}: {}",
+                                    block_height, e
+                                )
+                            })?;
+
+                            // Store the migrated block
+                            self.storage.insert(key.as_bytes(), new_data).map_err(|e| {
+                                format!("Failed to store migrated block {}: {}", block_height, e)
+                            })?;
+
+                            tracing::info!("✅ Migrated block {} from old schema", block_height);
+                            migrated_count += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Block {} failed both deserializations, may need manual recovery: {}",
+                                block_height,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if migrated_count > 0 {
+            self.storage
+                .flush()
+                .map_err(|e| format!("Failed to flush after migration: {}", e))?;
+            tracing::info!(
+                "✅ Schema migration complete: {} blocks migrated",
+                migrated_count
+            );
+        } else {
+            tracing::info!("✅ No blocks needed migration - schema is up to date");
+        }
+
+        Ok(migrated_count)
+    }
+
     /// Initialize blockchain - load local chain or sync from network
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;

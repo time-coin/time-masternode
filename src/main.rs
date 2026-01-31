@@ -373,6 +373,24 @@ async fn main() {
 
     let blockchain = Arc::new(blockchain);
 
+    // Migrate old-schema blocks before doing anything else
+    tracing::info!("🔄 Running schema migration check...");
+    match blockchain.migrate_old_schema_blocks().await {
+        Ok(count) => {
+            if count > 0 {
+                tracing::info!("✅ Migrated {} old-schema blocks", count);
+            }
+        }
+        Err(e) => {
+            tracing::error!("❌ Schema migration failed: {}", e);
+            tracing::error!(
+                "   You may need to clear the database: rm -rf {}/.timecoin/{:?}/db/blocks",
+                std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()),
+                network_type
+            );
+        }
+    }
+
     // Build transaction index if it exists and is empty
     if let Some(ref idx) = tx_index {
         if idx.is_empty() && blockchain.get_height() > 0 {
