@@ -143,9 +143,8 @@ impl From<BlockV1> for Block {
             transactions: v1.transactions,
             masternode_rewards: v1.masternode_rewards,
             time_attestations: vec![], // Always empty in new blocks
-            consensus_participants: v1.consensus_participants,
             consensus_participants_bitmap: vec![], // Not present in old blocks
-            liveness_recovery: None,               // Not present in old blocks
+            liveness_recovery: None,   // Not present in old blocks
         }
     }
 }
@@ -161,11 +160,8 @@ pub struct Block {
     /// Uses custom deserializer to handle both Vec and Option<Vec> formats from old blocks
     #[serde(default, deserialize_with = "deserialize_time_attestations")]
     pub time_attestations: Vec<TimeAttestation>,
-    /// DEPRECATED: List of masternodes that participated in consensus
-    /// Use consensus_participants_bitmap instead for new blocks
-    #[serde(default)]
-    pub consensus_participants: Vec<String>,
     /// Compact bitmap of consensus participants (1 bit per registered masternode)
+    /// Masternodes in deterministic order (sorted by address). Bit=1 means voted.
     /// Space savings: 10,000 masternodes = 1,250 bytes vs ~200KB for address list
     #[serde(default)]
     pub consensus_participants_bitmap: Vec<u8>,
@@ -413,7 +409,6 @@ mod tests {
             },
             transactions: vec![],
             masternode_rewards: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],
@@ -444,7 +439,6 @@ mod tests {
             },
             transactions: vec![tx.clone()],
             masternode_rewards: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],

@@ -478,15 +478,15 @@ impl MasternodeRegistry {
             participants.insert(prev_block.header.leader.clone());
         }
 
-        // Consensus participants (voters) also participated
-        for voter in &prev_block.consensus_participants {
-            if !voter.is_empty() {
-                participants.insert(voter.clone());
-            }
+        // Get consensus participants from bitmap (compact representation)
+        let voters_from_bitmap = self
+            .get_active_from_bitmap(&prev_block.consensus_participants_bitmap)
+            .await;
+        for voter in voters_from_bitmap {
+            participants.insert(voter.masternode.address.clone());
         }
 
         // If no participants recorded, fall back to active masternodes
-        // This handles legacy blocks that don't have consensus_participants populated
         if participants.is_empty() {
             tracing::warn!(
                 "⚠️  No participants recorded in previous block {} - using active masternodes as fallback",

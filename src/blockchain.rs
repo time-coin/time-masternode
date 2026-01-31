@@ -687,7 +687,6 @@ impl Blockchain {
             transactions: vec![], // No transactions in genesis
             masternode_rewards,
             time_attestations: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![], // No consensus voting in genesis
             liveness_recovery: Some(false),
         };
@@ -2207,7 +2206,6 @@ impl Blockchain {
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
             time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
-            consensus_participants: vec![], // Deprecated, use bitmap
             consensus_participants_bitmap: active_bitmap, // Compact representation
             liveness_recovery: Some(false), // Will be set if fallback resolution occurred
         };
@@ -2470,10 +2468,6 @@ impl Blockchain {
         // Deep clone to ensure no shared references and normalize all strings
         let mut block = block.clone();
         block.header.leader = block.header.leader.trim().to_string();
-
-        // Normalize consensus participants (sort and deduplicate)
-        block.consensus_participants.sort();
-        block.consensus_participants.dedup();
 
         // Normalize masternode rewards (sort by address for determinism)
         block.masternode_rewards.sort_by(|a, b| a.0.cmp(&b.0));

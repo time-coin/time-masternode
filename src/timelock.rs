@@ -577,7 +577,6 @@ impl TSCDConsensus {
             transactions,
             masternode_rewards,
             time_attestations: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false), // TSDC blocks don't trigger liveness recovery by default
         })
@@ -1075,7 +1074,6 @@ mod tests {
             },
             transactions: vec![],
             masternode_rewards: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],
@@ -1096,7 +1094,6 @@ mod tests {
             },
             transactions: vec![],
             masternode_rewards: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],

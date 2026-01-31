@@ -1480,14 +1480,14 @@ async fn main() {
 
                     if all_at_zero && current_height == 0 && connected_peers.len() >= 3 {
                         tracing::warn!("🚨 Bootstrap override: All {} peers at height 0, sync is stuck - forcing block production", connected_peers.len());
-                        // Fall through to production logic
+                        // Fall through to production logic - skip consensus check entirely
+                        // Everyone is at height 0, no blocks to sync, time to produce genesis+1
                     } else {
                         tracing::debug!("⏳ Sync coordinator is syncing - checking again shortly");
                         continue; // Loop back immediately via 1-second interval
                     }
-                }
-
-                if !connected_peers.is_empty() {
+                } else if !connected_peers.is_empty() {
+                    // Not in syncing state - check consensus to decide sync vs produce
                     // First, check consensus: are all peers at the same height as us?
                     // This detects bootstrap scenarios where no one has produced blocks yet
                     let min_peers_for_check = connected_peers.len().min(3);
@@ -1533,21 +1533,14 @@ async fn main() {
                                 continue;
                             }
                         } else {
-                            // No consensus response - try blind sync anyway
-                            tracing::warn!(
-                                "⚠️  No consensus response from peers - attempting blind sync"
+                            // None means: same height, same hash - we're in sync with peers
+                            // At bootstrap (height 0), this means everyone has genesis but no block 1
+                            // Fall through to production
+                            tracing::info!(
+                                "✅ In sync with {} peers at height {} - proceeding to block production",
+                                connected_peers.len(),
+                                current_height
                             );
-
-                            let probe_start = current_height + 1;
-                            let probe_end = expected_height.min(current_height + 50);
-
-                            for peer_ip in &connected_peers {
-                                let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
-                                let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
-                            }
-
-                            // Loop back immediately - blocks arrive asynchronously
-                            continue;
                         }
                     }
                 } else {

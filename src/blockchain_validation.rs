@@ -210,7 +210,6 @@ mod tests {
             },
             transactions,
             masternode_rewards: vec![],
-            consensus_participants: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],
