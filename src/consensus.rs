@@ -1410,6 +1410,22 @@ impl TimeVoteConsensus {
     pub fn check_prepare_consensus(&self, block_hash: Hash256) -> bool {
         let validators = self.get_validators();
         let sample_size = validators.len();
+        
+        // BOOTSTRAP FIX: If no active validators, use all registered masternodes
+        // This handles genesis/block 1 where nodes haven't accumulated peer reports yet
+        let sample_size = if sample_size == 0 {
+            let all_registered = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.masternode_registry.list_all())
+            });
+            tracing::warn!(
+                "⚠️ No active validators for consensus check, using all {} registered masternodes (bootstrap mode)",
+                all_registered.len()
+            );
+            all_registered.len()
+        } else {
+            sample_size
+        };
+        
         self.prepare_votes.check_consensus(block_hash, sample_size)
     }
 
@@ -1460,6 +1476,22 @@ impl TimeVoteConsensus {
     pub fn check_precommit_consensus(&self, block_hash: Hash256) -> bool {
         let validators = self.get_validators();
         let sample_size = validators.len();
+        
+        // BOOTSTRAP FIX: If no active validators, use all registered masternodes
+        // This handles genesis/block 1 where nodes haven't accumulated peer reports yet
+        let sample_size = if sample_size == 0 {
+            let all_registered = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(self.masternode_registry.list_all())
+            });
+            tracing::warn!(
+                "⚠️ No active validators for consensus check, using all {} registered masternodes (bootstrap mode)",
+                all_registered.len()
+            );
+            all_registered.len()
+        } else {
+            sample_size
+        };
+        
         self.precommit_votes
             .check_consensus(block_hash, sample_size)
     }
