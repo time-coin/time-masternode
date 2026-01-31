@@ -2261,6 +2261,21 @@ impl Blockchain {
 
     /// Add a block to the chain
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
+        // CRITICAL FIX: Test serialize the block FIRST to catch corrupted data
+        // Blocks from old nodes may have malformed transaction data that deserializes
+        // from JSON but fails bincode serialization (e.g., corrupted script_sig lengths)
+        if let Err(e) = bincode::serialize(&block) {
+            tracing::error!(
+                "❌ CORRUPT BLOCK DETECTED: Block {} has malformed data that cannot be serialized: {}",
+                block.header.height,
+                e
+            );
+            return Err(format!(
+                "Block {} contains corrupted data (likely malformed transaction signatures): {}",
+                block.header.height, e
+            ));
+        }
+
         // Calculate block hash early for finality tracking
         let block_hash = block.hash();
 
