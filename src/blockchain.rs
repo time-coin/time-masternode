@@ -2451,10 +2451,24 @@ impl Blockchain {
         // This prevents AlreadySpent errors when block save fails but UTXO changes persist
         if let Ok(_existing) = self.get_block_by_height(block.header.height).await {
             tracing::warn!(
-                "⚠️ Block {} (hash {}) already exists in database, skipping",
+                "⚠️ Block {} (hash {}) already exists in database, skipping UTXO processing",
                 block.header.height,
                 hex::encode(block_hash)
             );
+
+            // CRITICAL: Still update chain height if we're behind
+            // Block may have been saved but height update failed
+            let current = self.current_height.load(Ordering::Acquire);
+            if block.header.height > current {
+                tracing::info!(
+                    "📈 Updating chain height from {} to {} for existing block",
+                    current,
+                    block.header.height
+                );
+                self.current_height
+                    .store(block.header.height, Ordering::Release);
+            }
+
             return Ok(());
         }
 
