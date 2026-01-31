@@ -689,19 +689,14 @@ async fn main() {
         });
         shutdown_manager.register_task(health_handle);
 
-        // Start masternode announcement task (waits for sync to complete)
+        // Start masternode announcement task
         let mn_for_announcement = mn.clone();
         let peer_registry_for_announcement = peer_connection_registry.clone();
-        let sync_complete_wait = sync_complete.clone();
         let announcement_handle = tokio::spawn(async move {
-            tracing::info!(
-                "⏳ Waiting for blockchain sync to complete before announcing masternode..."
-            );
+            // Wait 10 seconds for initial peer connections
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-            // Wait for sync completion signal
-            sync_complete_wait.notified().await;
-
-            // Sync complete - now broadcast announcement
+            // Broadcast announcement immediately (don't wait for sync)
             let announcement = NetworkMessage::MasternodeAnnouncement {
                 address: mn_for_announcement.address.clone(),
                 reward_address: mn_for_announcement.wallet_address.clone(),
@@ -709,8 +704,19 @@ async fn main() {
                 public_key: mn_for_announcement.public_key,
             };
 
-            peer_registry_for_announcement.broadcast(announcement).await;
-            tracing::info!("📢 Broadcast masternode announcement to network (after sync complete)");
+            peer_registry_for_announcement
+                .broadcast(announcement.clone())
+                .await;
+            tracing::info!("📢 Broadcast masternode announcement to network (immediate)");
+
+            // Continue broadcasting every 60 seconds to ensure visibility
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                peer_registry_for_announcement
+                    .broadcast(announcement.clone())
+                    .await;
+                tracing::debug!("📢 Re-broadcast masternode announcement");
+            }
         });
         shutdown_manager.register_task(announcement_handle);
     }
