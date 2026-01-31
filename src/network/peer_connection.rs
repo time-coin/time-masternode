@@ -1074,11 +1074,14 @@ impl PeerConnection {
                 .masternode_registry
                 .as_ref()
                 .expect("Masternode registry required when blockchain is provided");
-            MessageContext::minimal(
+            
+            // Use from_registry to automatically fetch consensus engine
+            MessageContext::from_registry(
                 Arc::clone(blockchain),
                 Arc::clone(&config.peer_registry),
                 Arc::clone(masternode_registry),
             )
+            .await
         } else if let Some(ref _masternode_registry) = config.masternode_registry {
             // This case should not happen in practice - we always have blockchain when we have masternode_registry
             return Err("Cannot create context without blockchain".to_string());
