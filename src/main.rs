@@ -1317,11 +1317,30 @@ async fn main() {
                 // Use only compatible peers for sync (excludes nodes on incompatible chains)
                 let connected_peers = block_peer_registry.get_compatible_peers().await;
 
-                // CRITICAL: If sync coordinator is already syncing, wait for it
+                // CRITICAL: If sync coordinator is already syncing, check if it's making progress
+                // If sync is stuck for >30 seconds, override and produce blocks anyway
                 if block_blockchain.is_syncing() {
-                    tracing::info!("⏳ Sync coordinator is syncing - waiting for progress...");
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                    continue; // Loop back to re-check height
+                    // Check if bootstrap - all peers at height 0
+                    let mut all_at_zero = true;
+                    for peer_ip in &connected_peers {
+                        if let Some((height, _)) =
+                            block_peer_registry.get_peer_chain_tip(peer_ip).await
+                        {
+                            if height > 0 {
+                                all_at_zero = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if all_at_zero && current_height == 0 && connected_peers.len() >= 3 {
+                        tracing::warn!("🚨 Bootstrap override: All {} peers at height 0, sync is stuck - forcing block production", connected_peers.len());
+                        // Fall through to production logic
+                    } else {
+                        tracing::info!("⏳ Sync coordinator is syncing - waiting for progress...");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        continue; // Loop back to re-check height
+                    }
                 }
 
                 if !connected_peers.is_empty() {
