@@ -264,12 +264,27 @@ impl Blockchain {
         let consensus_health =
             Arc::new(ConsensusHealthMonitor::new(ConsensusHealthConfig::default()));
 
+        // Load chain height from database
+        let loaded_height = storage
+            .get("chain_height".as_bytes())
+            .ok()
+            .and_then(|opt| opt)
+            .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
+            .unwrap_or(0);
+
+        if loaded_height > 0 {
+            tracing::info!(
+                "📊 Loaded blockchain height {} from database",
+                loaded_height
+            );
+        }
+
         Self {
             storage,
             consensus,
             masternode_registry,
             utxo_manager,
-            current_height: Arc::new(AtomicU64::new(0)),
+            current_height: Arc::new(AtomicU64::new(loaded_height)),
             network_type,
             genesis_timestamp: network_type.genesis_timestamp(), // Cache for fast access
             is_syncing: Arc::new(AtomicBool::new(false)),
