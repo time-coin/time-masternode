@@ -374,61 +374,15 @@ async fn main() {
     let blockchain = Arc::new(blockchain);
 
     // Validate existing blockchain on startup
-    // Try to load genesis block - if it exists, validate it regardless of height
     let current_height = blockchain.get_height();
 
     match blockchain.get_block_by_height(0).await {
-        Ok(genesis) => {
-            // We have a genesis block - validate it
+        Ok(_genesis) => {
+            // We have a genesis block
             tracing::info!(
-                "🔍 Validating existing blockchain (height: {})...",
+                "✅ Genesis block exists (current height: {})",
                 current_height
             );
-
-            use crate::block::genesis::GenesisBlock;
-
-            // Check if this is an OLD format genesis (from JSON file)
-            // Old format: empty transactions, no masternode rewards, no active bitmap
-            let is_old_genesis = genesis.masternode_rewards.is_empty()
-                || genesis.header.active_masternodes_bitmap.is_empty();
-
-            if is_old_genesis {
-                tracing::warn!(
-                    "⚠️ Detected OLD format genesis block (incompatible with current network)"
-                );
-                tracing::warn!("   Genesis details:");
-                tracing::warn!(
-                    "     - masternode_rewards: {} entries",
-                    genesis.masternode_rewards.len()
-                );
-                tracing::warn!(
-                    "     - active_masternodes_bitmap: {} bytes",
-                    genesis.header.active_masternodes_bitmap.len()
-                );
-                tracing::warn!("     - timestamp: {}", genesis.header.timestamp);
-                tracing::warn!("     - leader: {}", genesis.header.leader);
-                tracing::warn!("   Clearing blockchain to allow new dynamic genesis generation...");
-
-                // Clear all blocks (this will reset height to 0)
-                blockchain.clear_all_blocks();
-
-                // Verify height was reset
-                let new_height = blockchain.get_height();
-                tracing::info!(
-                    "✅ Old blockchain cleared - height reset from {} to {}",
-                    current_height,
-                    new_height
-                );
-                tracing::info!("   Will generate new dynamic genesis after masternode discovery");
-            } else if let Err(e) = GenesisBlock::verify_structure(&genesis) {
-                eprintln!("❌ CRITICAL: Genesis block is invalid: {}", e);
-                eprintln!("   Your blockchain is corrupted");
-                eprintln!("   Manual fix: Clear blockchain and resync from network");
-                eprintln!("   Command: rm -rf {}/db/blocks", config.storage.data_dir);
-                std::process::exit(1);
-            } else {
-                tracing::info!("✅ Genesis block validated (dynamic format) - will NOT regenerate");
-            }
         }
         Err(_) if current_height > 0 => {
             // Height > 0 but no genesis block - corrupted database
