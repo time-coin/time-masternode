@@ -2677,6 +2677,25 @@ impl Blockchain {
                                     "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
                                     height, key_new, e1, e2
                                 );
+                                // Auto-recovery: Delete corrupted block and reset height so re-sync can work
+                                tracing::warn!(
+                                    "🔧 Deleting corrupted block {} to allow re-sync from peers",
+                                    height
+                                );
+                                let _ = self.storage.remove(key_new.as_bytes());
+                                // Reset chain height to one before corrupted block
+                                if height > 0 {
+                                    let new_height = height - 1;
+                                    let height_key = "chain_height".as_bytes();
+                                    let height_bytes = new_height.to_le_bytes();
+                                    let _ = self.storage.insert(height_key, &height_bytes);
+                                    self.current_height
+                                        .store(new_height, std::sync::atomic::Ordering::SeqCst);
+                                    tracing::warn!(
+                                        "🔧 Reset chain height to {} after deleting corrupted block {}",
+                                        new_height, height
+                                    );
+                                }
                             }
                         }
                     }
@@ -2718,8 +2737,27 @@ impl Blockchain {
                                     "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
                                     height, key_old, e1, e2
                                 );
+                                // Auto-recovery: Delete corrupted block and reset height so re-sync can work
+                                tracing::warn!(
+                                    "🔧 Deleting corrupted block {} (old key) to allow re-sync from peers",
+                                    height
+                                );
+                                let _ = self.storage.remove(key_old.as_bytes());
+                                // Reset chain height to one before corrupted block
+                                if height > 0 {
+                                    let new_height = height - 1;
+                                    let height_key = "chain_height".as_bytes();
+                                    let height_bytes = new_height.to_le_bytes();
+                                    let _ = self.storage.insert(height_key, &height_bytes);
+                                    self.current_height
+                                        .store(new_height, std::sync::atomic::Ordering::SeqCst);
+                                    tracing::warn!(
+                                        "🔧 Reset chain height to {} after deleting corrupted block {}",
+                                        new_height, height
+                                    );
+                                }
                                 return Err(format!(
-                                    "Block {} found but deserialization failed (incompatible binary format)",
+                                    "Block {} was corrupted and deleted - will re-sync from peers",
                                     height
                                 ));
                             }
