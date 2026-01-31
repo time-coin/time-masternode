@@ -1076,6 +1076,7 @@ mod tests {
             masternode_rewards: vec![],
             consensus_participants: vec![],
             liveness_recovery: Some(false),
+            time_attestations: vec![],
         };
 
         let block2 = Block {
@@ -1095,6 +1096,7 @@ mod tests {
             masternode_rewards: vec![],
             consensus_participants: vec![],
             liveness_recovery: Some(false),
+            time_attestations: vec![],
         };
 
         let blocks = vec![(block1.clone(), None), (block2.clone(), None)];

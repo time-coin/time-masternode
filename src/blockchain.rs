@@ -15,7 +15,7 @@ use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -518,18 +518,29 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Fixed genesis timestamp for testnet: December 1, 2025 00:00:00 GMT
-        // Fixed genesis timestamp for mainnet: January 1, 2026 00:00:00 GMT
+        // Genesis timestamp:
+        // - Testnet: Use current time rounded to nearest 10-minute mark
+        // - Mainnet: Fixed January 1, 2026 00:00:00 GMT
         let genesis_timestamp = match self.network_type {
             NetworkType::Testnet => {
-                let fixed_time = chrono::Utc
-                    .with_ymd_and_hms(2025, 12, 1, 0, 0, 0)
+                // Use current time rounded down to nearest 10-minute interval
+                let now = chrono::Utc::now();
+                let minutes = now.minute();
+                let aligned_minute = (minutes / 10) * 10;
+                let aligned_time = now
+                    .with_minute(aligned_minute)
+                    .and_then(|t| t.with_second(0))
+                    .and_then(|t| t.with_nanosecond(0))
                     .unwrap()
                     .timestamp();
+
                 tracing::info!(
-                    "🕐 Using fixed testnet genesis time: December 1, 2025 00:00:00 GMT"
+                    "🕐 Using current time for testnet genesis: {} (aligned to 10-min interval)",
+                    chrono::DateTime::from_timestamp(aligned_time, 0)
+                        .unwrap()
+                        .format("%Y-%m-%d %H:%M:%S UTC")
                 );
-                fixed_time
+                aligned_time
             }
             NetworkType::Mainnet => {
                 let fixed_time = chrono::Utc

@@ -412,6 +412,7 @@ mod tests {
             masternode_rewards: vec![],
             consensus_participants: vec![],
             liveness_recovery: Some(false),
+            time_attestations: vec![],
         };
 
         let merkle = calculate_merkle_root(&block.transactions);
@@ -441,6 +442,7 @@ mod tests {
             masternode_rewards: vec![],
             consensus_participants: vec![],
             liveness_recovery: Some(false),
+            time_attestations: vec![],
         };
 
         let merkle = calculate_merkle_root(&block.transactions);

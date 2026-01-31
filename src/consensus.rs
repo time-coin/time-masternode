@@ -1374,11 +1374,16 @@ impl TimeVoteConsensus {
 
     /// Generate a prepare vote for a block (Phase 3D.1)
     /// Called when a valid block is received
-    pub fn generate_prepare_vote(&self, block_hash: Hash256, voter_id: &str, _voter_weight: u64) {
+    pub fn generate_prepare_vote(&self, block_hash: Hash256, voter_id: &str, voter_weight: u64) {
+        // Add our own vote to the accumulator
+        self.prepare_votes
+            .add_vote(block_hash, voter_id.to_string(), voter_weight);
+
         tracing::debug!(
-            "✅ Generated prepare vote for block {} from {}",
+            "✅ Generated prepare vote for block {} from {} (weight: {})",
             hex::encode(block_hash),
-            voter_id
+            voter_id,
+            voter_weight
         );
     }
 
@@ -1419,11 +1424,16 @@ impl TimeVoteConsensus {
 
     /// Generate a precommit vote for a block (Phase 3E.1)
     /// Called after prepare consensus is reached
-    pub fn generate_precommit_vote(&self, block_hash: Hash256, voter_id: &str, _voter_weight: u64) {
+    pub fn generate_precommit_vote(&self, block_hash: Hash256, voter_id: &str, voter_weight: u64) {
+        // Add our own vote to the accumulator
+        self.precommit_votes
+            .add_vote(block_hash, voter_id.to_string(), voter_weight);
+
         tracing::debug!(
-            "✅ Generated precommit vote for block {} from {}",
+            "✅ Generated precommit vote for block {} from {} (weight: {})",
             hex::encode(block_hash),
-            voter_id
+            voter_id,
+            voter_weight
         );
     }
 

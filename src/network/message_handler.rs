@@ -876,12 +876,16 @@ impl MessageHandler {
                 };
 
                 match broadcast_tx.send(precommit_vote) {
-                    Ok(_) => {
-                        debug!("[{}] Broadcast precommit vote", self.direction);
+                    Ok(receivers) => {
+                        info!(
+                            "📤 [{}] Broadcast precommit vote to {} peers",
+                            self.direction,
+                            receivers.saturating_sub(1)
+                        );
                     }
                     Err(_) => {
-                        debug!(
-                            "[{}] No active peers to broadcast precommit vote (channel closed)",
+                        warn!(
+                            "[{}] ⚠️  No active peers to broadcast precommit vote (channel closed)",
                             self.direction
                         );
                     }
