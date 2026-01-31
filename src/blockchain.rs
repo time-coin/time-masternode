@@ -2447,6 +2447,17 @@ impl Blockchain {
             return Err(format!("Block too large: {} bytes", serialized.len()));
         }
 
+        // CRITICAL: Check if block already exists BEFORE processing UTXOs
+        // This prevents AlreadySpent errors when block save fails but UTXO changes persist
+        if let Ok(_existing) = self.get_block_by_height(block.header.height).await {
+            tracing::warn!(
+                "⚠️ Block {} (hash {}) already exists in database, skipping",
+                block.header.height,
+                hex::encode(block_hash)
+            );
+            return Ok(());
+        }
+
         // Process UTXOs and create undo log
         let undo_log = self.process_block_utxos(&block).await?;
 
