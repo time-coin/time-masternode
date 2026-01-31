@@ -896,10 +896,21 @@ impl Blockchain {
                 }
             }
         }
+
+        // Clear the chain height from storage
+        let _ = self.storage.remove("chain_height".as_bytes());
+
+        // Reset the in-memory height counter to 0
+        self.current_height.store(0, Ordering::Release);
+
         // Also clear the genesis marker so it gets recreated
         let _ = self.storage.remove("genesis_initialized");
+
+        // Flush to ensure all deletions are persisted
+        let _ = self.storage.flush();
+
         tracing::info!(
-            "🗑️  Cleared {} blocks from storage for fresh start",
+            "🗑️  Cleared {} blocks from storage and reset height to 0",
             cleared
         );
     }

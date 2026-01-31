@@ -398,10 +398,19 @@ async fn main() {
                         "   Clearing blockchain to allow new dynamic genesis generation..."
                     );
 
-                    // Clear all blocks
+                    // Clear all blocks (this will reset height to 0)
                     blockchain.clear_all_blocks();
 
-                    tracing::info!("✅ Old blockchain cleared - will generate new dynamic genesis");
+                    // Verify height was reset
+                    let new_height = blockchain.get_height();
+                    tracing::info!(
+                        "✅ Old blockchain cleared - height reset from {} to {}",
+                        current_height,
+                        new_height
+                    );
+                    tracing::info!(
+                        "   Will generate new dynamic genesis after masternode discovery"
+                    );
                 } else if let Err(e) = GenesisBlock::verify_structure(&genesis) {
                     eprintln!("❌ CRITICAL: Genesis block is invalid: {}", e);
                     eprintln!("   Your blockchain is corrupted");
