@@ -772,9 +772,9 @@ async fn main() {
             // If still no genesis, generate it dynamically
             if blockchain_init.get_block_by_height(0).await.is_err() {
                 tracing::info!("🌱 No genesis on network - initiating dynamic generation");
-                tracing::info!("⏳ Waiting 45 seconds for masternodes to discover each other...");
+                tracing::info!("⏳ Waiting 60 seconds for masternodes to discover each other...");
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(45)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
 
                 // Determine if we are the leader (deterministic: lowest address)
                 let registered = bootstrap_registry.get_all().await;
