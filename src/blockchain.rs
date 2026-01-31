@@ -4717,10 +4717,40 @@ impl Blockchain {
         };
 
         // Use only compatible peers (exclude those on incompatible chains)
-        let connected_peers = registry.get_compatible_peers().await;
+        let mut connected_peers = registry.get_compatible_peers().await;
         if connected_peers.is_empty() {
             tracing::debug!("No compatible peers connected");
             return None;
+        }
+
+        // SCALABILITY: With 10,000+ masternodes, sampling is critical
+        // Sample a representative subset instead of querying all peers
+        // Statistical sampling: sqrt(N) provides good confidence with O(sqrt(N)) cost
+        const MAX_PEERS_TO_CHECK: usize = 100; // Hard cap for extreme cases
+        let sample_size = if connected_peers.len() > MAX_PEERS_TO_CHECK {
+            let sqrt_size = (connected_peers.len() as f64).sqrt().ceil() as usize;
+            sqrt_size.min(MAX_PEERS_TO_CHECK)
+        } else {
+            connected_peers.len()
+        };
+
+        if sample_size < connected_peers.len() {
+            // Deterministic sampling based on current time for randomness
+            // This avoids Send issues with thread_rng in async context
+            let now_nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+            // Use Fisher-Yates shuffle with time-based seed
+            for i in 0..sample_size {
+                let j = (now_nanos.wrapping_mul(i as u64 + 1).wrapping_add(i as u64)) as usize
+                    % (connected_peers.len() - i)
+                    + i;
+                connected_peers.swap(i, j);
+            }
+            connected_peers.truncate(sample_size);
+            tracing::info!(
+                "🎲 Sampling {} of {} peers for consensus check (scalability optimization)",
+                sample_size,
+                registry.get_compatible_peers().await.len()
+            );
         }
 
         tracing::debug!(
