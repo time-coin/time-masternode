@@ -403,11 +403,33 @@ impl PeerConnectionRegistry {
         }
 
         let incompatible = self.incompatible_peers.read().await;
-        self.connections
+        let all_connections: Vec<String> =
+            self.connections.iter().map(|e| e.key().clone()).collect();
+        let compatible: Vec<String> = all_connections
             .iter()
-            .map(|e| e.key().clone())
             .filter(|ip| !incompatible.contains_key(extract_ip(ip)))
-            .collect()
+            .cloned()
+            .collect();
+
+        // Debug logging to diagnose connection tracking
+        if !incompatible.is_empty() {
+            tracing::warn!(
+                "⚠️ Incompatible peers: {} marked, {} in connections, {} compatible",
+                incompatible.len(),
+                all_connections.len(),
+                compatible.len()
+            );
+            for (ip, (marked_at, reason)) in incompatible.iter() {
+                tracing::warn!(
+                    "  🚫 {} - {} ({}s ago)",
+                    ip,
+                    reason,
+                    marked_at.elapsed().as_secs()
+                );
+            }
+        }
+
+        compatible
     }
 
     /// Get count of incompatible peers (for monitoring)
