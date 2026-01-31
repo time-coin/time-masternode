@@ -1426,6 +1426,11 @@ async fn main() {
             // First: Verify we're on the consensus chain (prevent fork perpetuation)
             // Use compatible peers only (excludes nodes on incompatible chains like old software)
             let connected_peers = block_peer_registry.get_compatible_peers().await;
+            tracing::info!(
+                "🔌 Compatible peers for consensus: {} peers: {:?}",
+                connected_peers.len(),
+                connected_peers
+            );
             let min_peers_for_consensus = (masternodes.len() / 2).max(2); // Majority or at least 2
 
             if connected_peers.len() >= min_peers_for_consensus {
