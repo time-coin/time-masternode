@@ -4894,17 +4894,17 @@ impl Blockchain {
             if let Some((height, hash)) = registry.get_peer_chain_tip(peer_ip).await {
                 // Ignore peers with zero hash (storage key bug - can't read their own blocks)
                 if hash == [0u8; 32] {
-                    tracing::warn!(
+                    tracing::debug!(
                         "⚠️  Ignoring peer {} with zero hash (likely storage issue)",
                         peer_ip
                     );
                     continue;
                 }
                 peer_tips.insert(peer_ip.clone(), (height, hash));
-                tracing::info!("✅ Got cached response from {}: height {}", peer_ip, height);
+                tracing::debug!("Got cached response from {}: height {}", peer_ip, height);
             } else {
-                tracing::warn!(
-                    "❌ No cached response from {} (not in peer_chain_tips map)",
+                tracing::debug!(
+                    "No cached response from {} (not in peer_chain_tips map)",
                     peer_ip
                 );
             }

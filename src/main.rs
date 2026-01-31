@@ -1272,7 +1272,7 @@ async fn main() {
                     // After block 1, the bitmap from block 1 will be used for block 2
                     all_nodes
                 } else {
-                    tracing::info!(
+                    tracing::debug!(
                         "🔄 Deep catchup mode ({} blocks behind): using all active masternodes (bypassing potentially corrupted bitmap)",
                         blocks_behind
                     );
@@ -1454,7 +1454,7 @@ async fn main() {
             // Case 2: Way behind - try to sync first before producing
             // BUT: Check if we're in a bootstrap scenario (everyone at same height)
             if blocks_behind >= SYNC_THRESHOLD_BLOCKS {
-                tracing::info!(
+                tracing::debug!(
                     "🔄 {} blocks behind - checking if peers have blocks to sync",
                     blocks_behind
                 );

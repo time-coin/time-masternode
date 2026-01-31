@@ -490,8 +490,8 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let our_height = context.blockchain.get_height();
-        info!(
-            "📥 [{}] Received GetBlocks({}-{}) from {} (our height: {})",
+        debug!(
+            "[{}] GetBlocks({}-{}) from {} (our height: {})",
             self.direction, start, end, self.peer_ip, our_height
         );
 
@@ -558,7 +558,7 @@ impl MessageHandler {
                     self.direction, self.peer_ip, start, end, our_height, missing_blocks
                 );
             } else {
-                info!(
+                debug!(
                     "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{}, missing: {})",
                     self.direction,
                     blocks.len(),
@@ -572,8 +572,8 @@ impl MessageHandler {
             }
         } else {
             // Requested blocks are beyond our height - we don't have them yet
-            info!(
-                "⏭️  [{}] Cannot send blocks {}-{} to {} - we only have up to height {} (peer is ahead of us)",
+            debug!(
+                "[{}] Cannot send blocks {}-{} to {} - we only have up to height {}",
                 self.direction, start, end, self.peer_ip, our_height
             );
         }
@@ -614,7 +614,7 @@ impl MessageHandler {
             })
             .collect();
 
-        info!(
+        debug!(
             "📤 [{}] Responded with {} masternode(s) to {}",
             self.direction,
             all_masternodes.len(),
@@ -631,7 +631,7 @@ impl MessageHandler {
         timestamp: u64,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        info!(
+        debug!(
             "📭 [{}] Received masternode inactive notification for {} from {}",
             self.direction, address, self.peer_ip
         );
@@ -643,7 +643,7 @@ impl MessageHandler {
             .await
         {
             Ok(()) => {
-                info!(
+                debug!(
                     "✅ [{}] Marked masternode {} as inactive (timestamp: {})",
                     self.direction, address, timestamp
                 );
@@ -852,7 +852,7 @@ impl MessageHandler {
 
         // Check if prepare consensus reached (>50% majority timevote)
         if consensus.timevote.check_prepare_consensus(block_hash) {
-            info!(
+            debug!(
                 "✅ [{}] Prepare consensus reached for block {}",
                 self.direction,
                 hex::encode(block_hash)
@@ -871,7 +871,7 @@ impl MessageHandler {
             consensus
                 .timevote
                 .generate_precommit_vote(block_hash, &validator_id, validator_weight);
-            info!(
+            debug!(
                 "✅ [{}] Generated precommit vote for block {}",
                 self.direction,
                 hex::encode(block_hash)
@@ -903,7 +903,7 @@ impl MessageHandler {
 
                 match broadcast_tx.send(precommit_vote) {
                     Ok(receivers) => {
-                        info!(
+                        debug!(
                             "📤 [{}] Broadcast precommit vote to {} peers",
                             self.direction,
                             receivers.saturating_sub(1)
@@ -997,7 +997,7 @@ impl MessageHandler {
 
         // Check if precommit consensus reached (>50% majority timevote)
         if consensus.timevote.check_precommit_consensus(block_hash) {
-            info!(
+            debug!(
                 "✅ [{}] Precommit consensus reached for block {}",
                 self.direction,
                 hex::encode(block_hash)
@@ -1047,7 +1047,7 @@ impl MessageHandler {
                         self.direction,
                         hex::encode(block_hash)
                     );
-                    info!(
+                    debug!(
                         "📦 Block height: {}, txs: {}",
                         block.header.height,
                         block.transactions.len()
@@ -1060,7 +1060,7 @@ impl MessageHandler {
                     let tx_fees: u64 = block.transactions.iter().map(|tx| tx.fee_amount()).sum();
                     let total_reward = block_subsidy + tx_fees;
 
-                    info!(
+                    debug!(
                         "💰 [{}] Block {} rewards - subsidy: {}, fees: {}, total: {:.2} TIME",
                         self.direction,
                         block.header.height,
@@ -1108,13 +1108,15 @@ impl MessageHandler {
                                     warn!("Failed to request missing blocks: {}", send_err);
                                 }
                             } else {
-                                warn!(
+                                // Downgrade to debug - often happens due to race conditions
+                                // when multiple peers try to add the same block
+                                debug!(
                                     "[{}] Failed to add finalized block to blockchain: {}",
                                     self.direction, e
                                 );
                             }
                         } else {
-                            info!(
+                            debug!(
                                 "✅ [{}] Added finalized block {} to blockchain",
                                 self.direction,
                                 hex::encode(block_hash)
@@ -1214,12 +1216,22 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let height = context.blockchain.get_height();
-        let hash = context
-            .blockchain
-            .get_block_hash(height)
-            .unwrap_or([0u8; 32]);
-        info!(
-            "📥 [{}] Received GetChainTip from {}, responding with height {} hash {}",
+        let hash = match context.blockchain.get_block_hash(height) {
+            Ok(h) => h,
+            Err(e) => {
+                // Log error but don't spam - this can happen during rapid block production
+                tracing::debug!(
+                    "[{}] Failed to get block hash at height {}: {} - using zero hash",
+                    self.direction,
+                    height,
+                    e
+                );
+                [0u8; 32]
+            }
+        };
+        // Only log at debug level to reduce noise
+        tracing::debug!(
+            "📥 [{}] GetChainTip from {}: height {} hash {}",
             self.direction,
             self.peer_ip,
             height,
@@ -2127,8 +2139,8 @@ impl MessageHandler {
             .update_peer_chain_tip(&self.peer_ip, peer_height, peer_hash)
             .await;
 
-        tracing::info!(
-            "📥 [{}] Received ChainTipResponse from {}: height {} hash {} (our height: {})",
+        tracing::debug!(
+            "[{}] ChainTipResponse from {}: height {} hash {} (our height: {})",
             self.direction,
             self.peer_ip,
             peer_height,
