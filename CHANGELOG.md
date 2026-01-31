@@ -7,16 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed - Critical Security Issues
+### Fixed - Critical Security and Compatibility Issues
 
-- **CRITICAL: Blocks Not Loaded on Startup**
-  - Genesis block initialization (`initialize_genesis()`) was never called from main.rs
-  - Result: Genesis block wasn't loaded/validated on node startup
-  - Result: Blockchain height loaded but blocks not initialized from storage
-  - Fix: Added call to `blockchain.initialize_genesis().await` before any blockchain operations
-  - Impact: Nodes now properly validate genesis and load chain state on startup
+- **CRITICAL: Old Genesis Format Incompatibility**
+  - Nodes with old JSON-based genesis blocks couldn't sync with network
+  - Old format: empty transactions, no masternode rewards, no bitmap
+  - New format: dynamic generation, leader gets 100 TIME reward, has active bitmap
+  - Fix: Auto-detect old genesis on startup and clear it automatically
+  - Result: Nodes seamlessly upgrade to new dynamic genesis format
 
-- **CRITICAL: Block Reward Validation Vulnerability (Security)**
+- **Block Reward Validation Vulnerability (Security)**
   - Block reward validation relied on local state (`get_pending_fees()`)
   - Different nodes could have different views of correct reward
   - Attack: Malicious node could create blocks with inflated rewards (e.g., 1000 TIME vs 100 TIME)

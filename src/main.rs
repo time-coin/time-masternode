@@ -373,11 +373,60 @@ async fn main() {
 
     let blockchain = Arc::new(blockchain);
 
-    // Initialize genesis block before any other operations
-    tracing::info!("🔧 Initializing genesis block...");
-    if let Err(e) = blockchain.initialize_genesis().await {
-        eprintln!("❌ Failed to initialize genesis block: {}", e);
-        std::process::exit(1);
+    // Validate existing blockchain on startup (if any blocks exist)
+    let current_height = blockchain.get_height();
+    if current_height > 0 {
+        tracing::info!(
+            "🔍 Validating existing blockchain (height: {})...",
+            current_height
+        );
+
+        // Verify genesis block exists and is valid
+        match blockchain.get_block_by_height(0).await {
+            Ok(genesis) => {
+                use crate::block::genesis::GenesisBlock;
+
+                // Check if this is an OLD format genesis (from JSON file)
+                let is_old_genesis = genesis.masternode_rewards.is_empty()
+                    || genesis.header.active_masternodes_bitmap.is_empty();
+
+                if is_old_genesis {
+                    tracing::warn!(
+                        "⚠️ Detected OLD format genesis block (incompatible with current network)"
+                    );
+                    tracing::warn!(
+                        "   Clearing blockchain to allow new dynamic genesis generation..."
+                    );
+
+                    // Clear all blocks
+                    blockchain.clear_all_blocks();
+
+                    tracing::info!("✅ Old blockchain cleared - will generate new dynamic genesis");
+                } else if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+                    eprintln!("❌ CRITICAL: Genesis block is invalid: {}", e);
+                    eprintln!("   Your blockchain is corrupted");
+                    eprintln!("   Manual fix: Clear blockchain and resync from network");
+                    eprintln!("   Command: rm -rf {}/db/blocks", config.storage.data_dir);
+                    std::process::exit(1);
+                } else {
+                    tracing::info!(
+                        "✅ Genesis block validated (dynamic format) - will NOT regenerate"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("❌ CRITICAL: Genesis block not found: {}", e);
+                eprintln!(
+                    "   Blockchain height is {} but genesis missing",
+                    current_height
+                );
+                eprintln!("   Manual fix: Clear blockchain data");
+                eprintln!("   Command: rm -rf {}/db/blocks", config.storage.data_dir);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        tracing::info!("📋 No existing blockchain - will participate in dynamic genesis election");
     }
 
     // Migrate old-schema blocks before doing anything else

@@ -882,7 +882,7 @@ impl Blockchain {
     }
 
     /// Clear all block data from storage (for complete reset)
-    fn clear_all_blocks(&self) {
+    pub fn clear_all_blocks(&self) {
         let mut cleared = 0;
         for h in 0..100000 {
             // Clear up to 100k blocks
