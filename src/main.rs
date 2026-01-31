@@ -355,6 +355,9 @@ async fn main() {
         network_type,
     );
 
+    // Configure block compression from config
+    blockchain.set_compress_blocks(config.storage.compress_blocks);
+
     // Initialize transaction index for O(1) lookups
     tracing::info!("🔧 Initializing transaction index...");
     let tx_index_path = format!("{}/txindex", db_dir);

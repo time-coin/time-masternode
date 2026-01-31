@@ -72,6 +72,7 @@ rayon = "1.8"                                       # Data parallelism
 parking_lot = "0.12"                                # Faster locks than std
 arc-swap = "1.7"                                    # Lock-free atomic pointer swapping
 scopeguard = "1.2"                                  # RAII guards for cleanup
+zstd = "0.13"                                       # Fast compression for block storage
 
 # Network
 socket2 = "0.5"                                     # Socket configuration

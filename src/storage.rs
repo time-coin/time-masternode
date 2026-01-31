@@ -11,6 +11,41 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::task::spawn_blocking;
 
+/// Compression level for zstd (1-22, higher = better ratio but slower)
+/// Level 3 is a good balance of speed and compression
+const ZSTD_COMPRESSION_LEVEL: i32 = 3;
+
+/// Magic bytes to identify compressed blocks (to handle mixed storage)
+const COMPRESSED_MAGIC: &[u8; 4] = b"ZSTD";
+
+/// Compress data using zstd
+pub fn compress_block(data: &[u8]) -> Vec<u8> {
+    let compressed =
+        zstd::encode_all(data, ZSTD_COMPRESSION_LEVEL).unwrap_or_else(|_| data.to_vec());
+    // Prepend magic bytes so we can detect compressed vs uncompressed
+    let mut result = Vec::with_capacity(4 + compressed.len());
+    result.extend_from_slice(COMPRESSED_MAGIC);
+    result.extend_from_slice(&compressed);
+    result
+}
+
+/// Decompress data, handling both compressed and uncompressed formats
+pub fn decompress_block(data: &[u8]) -> Result<Vec<u8>, String> {
+    if data.len() > 4 && &data[0..4] == COMPRESSED_MAGIC {
+        // Compressed data - decompress
+        zstd::decode_all(&data[4..]).map_err(|e| format!("Decompression failed: {}", e))
+    } else {
+        // Uncompressed data (legacy) - return as-is
+        Ok(data.to_vec())
+    }
+}
+
+/// Check if compression is beneficial (don't compress if it makes data larger)
+pub fn should_compress(original: &[u8], compressed: &[u8]) -> bool {
+    // Only use compression if it saves at least 10%
+    compressed.len() < (original.len() * 9 / 10)
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum StorageError {
     #[error("Serialization failed: {0}")]

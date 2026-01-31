@@ -177,6 +177,23 @@ pub struct StorageConfig {
     pub backend: String,
     pub data_dir: String,
     pub cache_size_mb: usize,
+    /// Enable zstd compression for block storage (reduces size ~60-70%)
+    #[serde(default = "default_true")]
+    pub compress_blocks: bool,
+    /// Pruning mode: "archive" (keep all), "pruned" (keep recent N blocks + UTXO set)
+    #[serde(default = "default_archive_mode")]
+    pub mode: String,
+    /// Number of recent blocks to keep when mode = "pruned" (default 1000)
+    #[serde(default = "default_prune_keep_blocks")]
+    pub prune_keep_blocks: u64,
+}
+
+fn default_archive_mode() -> String {
+    "archive".to_string()
+}
+
+fn default_prune_keep_blocks() -> u64 {
+    1000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +555,9 @@ impl Config {
                 backend: "sled".to_string(),
                 data_dir: "".to_string(), // Will be auto-configured
                 cache_size_mb: 256,
+                compress_blocks: true,
+                mode: "archive".to_string(),
+                prune_keep_blocks: 1000,
             },
             consensus: ConsensusConfig { min_masternodes: 3 },
             block: BlockConfig {

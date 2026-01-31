@@ -138,7 +138,8 @@ impl DeterministicBlockGenerator {
             transactions: all_txs,
             masternode_rewards,
             time_attestations: vec![],
-            consensus_participants: vec![], // Attestations added later
+            consensus_participants: vec![], // Deprecated, use bitmap
+            consensus_participants_bitmap: vec![], // Set by consensus engine
             liveness_recovery: Some(false), // Will be set by consensus engine if needed
         }
     }

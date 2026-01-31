@@ -50,6 +50,12 @@ backend = "sled"  # Options: "memory", "sled"
 # Override only if you need a custom location
 data_dir = ""  # Leave empty for automatic platform-specific path
 cache_size_mb = 256
+# Enable zstd compression for block storage (saves ~60-70% disk space)
+compress_blocks = true
+# Storage mode: "archive" (keep all blocks) or "pruned" (keep recent blocks only)
+mode = "archive"
+# Number of recent blocks to keep when mode = "pruned"
+prune_keep_blocks = 1000
 
 [consensus]
 # Avalanche consensus settings

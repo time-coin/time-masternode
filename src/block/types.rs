@@ -144,7 +144,8 @@ impl From<BlockV1> for Block {
             masternode_rewards: v1.masternode_rewards,
             time_attestations: vec![], // Always empty in new blocks
             consensus_participants: v1.consensus_participants,
-            liveness_recovery: None, // Not present in old blocks
+            consensus_participants_bitmap: vec![], // Not present in old blocks
+            liveness_recovery: None,               // Not present in old blocks
         }
     }
 }
@@ -160,13 +161,15 @@ pub struct Block {
     /// Uses custom deserializer to handle both Vec and Option<Vec> formats from old blocks
     #[serde(default, deserialize_with = "deserialize_time_attestations")]
     pub time_attestations: Vec<TimeAttestation>,
-    /// List of masternodes that participated in consensus (voted) for this block
-    /// Used to determine eligibility for next block's rewards
+    /// DEPRECATED: List of masternodes that participated in consensus
+    /// Use consensus_participants_bitmap instead for new blocks
     #[serde(default)]
     pub consensus_participants: Vec<String>,
+    /// Compact bitmap of consensus participants (1 bit per registered masternode)
+    /// Space savings: 10,000 masternodes = 1,250 bytes vs ~200KB for address list
+    #[serde(default)]
+    pub consensus_participants_bitmap: Vec<u8>,
     /// §7.6 Liveness Fallback: Flag indicating this block resolved stalled transactions
-    /// When true, this TimeLock block deterministically resolved all pending fallback transactions
-    /// Wrapped in Option for backward compatibility with pre-v6.2 blocks
     #[serde(default)]
     pub liveness_recovery: Option<bool>,
 }
@@ -411,6 +414,7 @@ mod tests {
             transactions: vec![],
             masternode_rewards: vec![],
             consensus_participants: vec![],
+            consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],
         };
@@ -441,6 +445,7 @@ mod tests {
             transactions: vec![tx.clone()],
             masternode_rewards: vec![],
             consensus_participants: vec![],
+            consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
             time_attestations: vec![],
         };

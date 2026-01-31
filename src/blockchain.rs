@@ -214,6 +214,8 @@ pub struct Blockchain {
     consensus_health: Arc<ConsensusHealthMonitor>,
     /// Transaction index for O(1) transaction lookups
     pub tx_index: Option<Arc<crate::tx_index::TransactionIndex>>,
+    /// Whether to compress blocks when storing (saves ~60-70% space)
+    compress_blocks: bool,
 }
 
 impl Blockchain {
@@ -304,7 +306,17 @@ impl Blockchain {
             validator,
             consensus_health,
             tx_index: None, // Initialize without txindex, call build_tx_index() separately
+            compress_blocks: true, // Enable by default, can be configured via config
         }
+    }
+
+    /// Enable or disable block compression
+    pub fn set_compress_blocks(&mut self, compress: bool) {
+        self.compress_blocks = compress;
+        tracing::info!(
+            "📦 Block compression {}",
+            if compress { "enabled" } else { "disabled" }
+        );
     }
 
     /// Set transaction index (called from main.rs after blockchain init)
@@ -676,6 +688,7 @@ impl Blockchain {
             masternode_rewards,
             time_attestations: vec![],
             consensus_participants: vec![],
+            consensus_participants_bitmap: vec![], // No consensus voting in genesis
             liveness_recovery: Some(false),
         };
 
@@ -2186,7 +2199,7 @@ impl Blockchain {
                 leader: producer_address.unwrap_or_default(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
-                active_masternodes_bitmap: active_bitmap,
+                active_masternodes_bitmap: active_bitmap.clone(),
                 liveness_recovery: Some(false), // Will be set below if needed
                 ..Default::default()
             },
@@ -2194,7 +2207,8 @@ impl Blockchain {
             masternode_rewards: rewards.iter().map(|(a, v)| (a.clone(), *v)).collect(),
             time_attestations: vec![],
             // Record masternodes that voted on previous block (active participants)
-            consensus_participants: voters.clone(),
+            consensus_participants: vec![], // Deprecated, use bitmap
+            consensus_participants_bitmap: active_bitmap, // Compact representation
             liveness_recovery: Some(false), // Will be set if fallback resolution occurred
         };
 
@@ -2641,15 +2655,23 @@ impl Blockchain {
         // Try deserializing with new key format
         if has_new_key {
             if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
+                // Decompress if necessary (handles both compressed and uncompressed)
+                let data = match crate::storage::decompress_block(&v) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!("Failed to decompress block {}: {}", height, e);
+                        return Err(format!("Block {} decompression failed: {}", height, e));
+                    }
+                };
                 // Try current Block format
-                match bincode::deserialize::<Block>(&v) {
+                match bincode::deserialize::<Block>(&data) {
                     Ok(block) => {
                         self.block_cache.put(height, block.clone());
                         return Ok(block);
                     }
                     Err(e1) => {
                         // Try old BlockV1 format (without liveness_recovery field)
-                        match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
+                        match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
                             Ok(v1_block) => {
                                 let block: Block = v1_block.into();
                                 tracing::info!("✓ Migrated block {} from V1 format", height);
@@ -2671,15 +2693,23 @@ impl Blockchain {
         // Try deserializing with old key format
         if has_old_key {
             if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
+                // Decompress if necessary (handles both compressed and uncompressed)
+                let data = match crate::storage::decompress_block(&v) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        tracing::error!("Failed to decompress block {}: {}", height, e);
+                        return Err(format!("Block {} decompression failed: {}", height, e));
+                    }
+                };
                 // Try current Block format
-                match bincode::deserialize::<Block>(&v) {
+                match bincode::deserialize::<Block>(&data) {
                     Ok(block) => {
                         self.block_cache.put(height, block.clone());
                         return Ok(block);
                     }
                     Err(e1) => {
                         // Try old BlockV1 format
-                        match bincode::deserialize::<crate::block::types::BlockV1>(&v) {
+                        match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
                             Ok(v1_block) => {
                                 let block: Block = v1_block.into();
                                 tracing::info!(
@@ -3168,8 +3198,27 @@ impl Blockchain {
             e.to_string()
         })?;
 
+        // Compress block data if enabled (typically saves 60-70%)
+        let data_to_store = if self.compress_blocks {
+            let compressed = crate::storage::compress_block(&serialized);
+            if compressed.len() < serialized.len() {
+                tracing::trace!(
+                    "📦 Block {} compressed: {} → {} bytes ({:.1}% reduction)",
+                    block.header.height,
+                    serialized.len(),
+                    compressed.len(),
+                    (1.0 - compressed.len() as f64 / serialized.len() as f64) * 100.0
+                );
+                compressed
+            } else {
+                serialized // Don't compress if it makes data larger
+            }
+        } else {
+            serialized
+        };
+
         self.storage
-            .insert(key.as_bytes(), serialized)
+            .insert(key.as_bytes(), data_to_store)
             .map_err(|e| {
                 tracing::error!(
                     "❌ Failed to insert block {} into database: {} (type: {:?})",
@@ -3217,8 +3266,21 @@ impl Blockchain {
     fn save_block_without_height_update(&self, block: &Block) -> Result<(), String> {
         let key = format!("block_{}", block.header.height);
         let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
+
+        // Compress block data if enabled
+        let data_to_store = if self.compress_blocks {
+            let compressed = crate::storage::compress_block(&serialized);
+            if compressed.len() < serialized.len() {
+                compressed
+            } else {
+                serialized
+            }
+        } else {
+            serialized
+        };
+
         self.storage
-            .insert(key.as_bytes(), serialized)
+            .insert(key.as_bytes(), data_to_store)
             .map_err(|e| e.to_string())?;
 
         // CRITICAL: Update cache to ensure consistency
@@ -6492,6 +6554,7 @@ impl Clone for Blockchain {
             validator: BlockValidator::new(self.network_type),
             consensus_health: self.consensus_health.clone(),
             tx_index: self.tx_index.clone(),
+            compress_blocks: self.compress_blocks,
         }
     }
 }
