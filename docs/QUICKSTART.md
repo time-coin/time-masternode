@@ -67,8 +67,7 @@ data_dir = ""  # Auto-configured: ~/.timecoin/testnet/
 cache_size_mb = 256
 
 [consensus]
-use_genesis_file = true
-genesis_file = "genesis.testnet.json"
+min_masternodes = 3  # Genesis generated dynamically when masternodes register
 
 [logging]
 level = "info"

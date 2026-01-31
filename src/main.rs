@@ -730,23 +730,42 @@ async fn main() {
     let genesis_external_ip = config.network.external_address.clone();
 
     let genesis_sync_handle = tokio::spawn(async move {
-        // STEP 1: Check if genesis exists, if not prepare for dynamic generation
-        tracing::info!("📥 Checking for existing genesis block...");
+        // STEP 1: Verify existing blockchain or prepare for genesis
+        tracing::info!("📥 Initializing blockchain...");
+        if let Err(e) = blockchain_init.initialize_genesis().await {
+            tracing::error!("❌ Failed to initialize blockchain: {}", e);
+            return;
+        }
 
+        // STEP 2: If no genesis, try to obtain one
         if !blockchain_init.has_genesis() {
-            // No genesis exists - try to sync from network first
             tracing::info!("🌱 No genesis found - attempting to sync from network");
 
-            // Give peers time to connect
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            // Phase 1: Wait for peers and try to sync genesis from network
+            // This handles joining an existing network
+            let mut sync_attempts = 0;
+            const MAX_SYNC_ATTEMPTS: u32 = 3;
+            const PEER_WAIT_SECS: u64 = 15;
+            const GENESIS_WAIT_SECS: u64 = 20;
 
-            // Try to sync genesis (block 0) from connected peers
-            let connected = peer_registry_for_sync.get_connected_peers().await;
-            if !connected.is_empty() {
+            while sync_attempts < MAX_SYNC_ATTEMPTS && !blockchain_init.has_genesis() {
+                sync_attempts += 1;
                 tracing::info!(
-                    "📥 Requesting genesis block from {} connected peer(s)",
-                    connected.len()
+                    "📡 Sync attempt {}/{}: waiting {}s for peer connections...",
+                    sync_attempts,
+                    MAX_SYNC_ATTEMPTS,
+                    PEER_WAIT_SECS
                 );
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(PEER_WAIT_SECS)).await;
+
+                let connected = peer_registry_for_sync.get_connected_peers().await;
+                if connected.is_empty() {
+                    tracing::info!("   No peers connected yet");
+                    continue;
+                }
+
+                tracing::info!("📥 Requesting genesis from {} peer(s)", connected.len());
 
                 // Request block 0 from all peers
                 for peer_ip in &connected {
@@ -755,90 +774,99 @@ async fn main() {
                 }
 
                 // Wait for genesis to arrive
-                let mut attempts = 0;
-                while attempts < 30 {
+                let mut wait_secs = 0;
+                while wait_secs < GENESIS_WAIT_SECS {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                     if blockchain_init.has_genesis() {
                         tracing::info!("✅ Successfully synced genesis block from network");
                         break;
                     }
-                    attempts += 1;
+                    wait_secs += 1;
                 }
-
-                tracing::info!(
-                    "📊 After 30s sync wait: has_genesis = {}",
-                    blockchain_init.has_genesis()
-                );
             }
 
-            // If still no genesis, generate it dynamically
+            // Phase 2: If still no genesis, this is a new network - generate dynamically
             if !blockchain_init.has_genesis() {
                 tracing::info!("🌱 No genesis on network - initiating dynamic generation");
-                tracing::info!("⏳ Waiting 60 seconds for masternodes to discover each other...");
 
-                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                // Wait for masternodes to discover each other with exponential backoff
+                // Start with 30s, then 60s, then 90s - total 180s max wait
+                const DISCOVERY_ROUNDS: u32 = 3;
+                const BASE_DISCOVERY_WAIT: u64 = 30;
 
-                // Determine if we are the leader (deterministic: lowest address)
-                let registered = bootstrap_registry.get_all().await;
-                if registered.is_empty() {
-                    tracing::error!(
-                        "❌ No masternodes registered and no genesis on network - cannot proceed"
+                for round in 1..=DISCOVERY_ROUNDS {
+                    if blockchain_init.has_genesis() {
+                        break; // Genesis arrived while waiting
+                    }
+
+                    let wait_time = BASE_DISCOVERY_WAIT * round as u64;
+                    tracing::info!(
+                        "⏳ Discovery round {}/{}: waiting {}s for masternodes...",
+                        round,
+                        DISCOVERY_ROUNDS,
+                        wait_time
                     );
-                    return;
-                } else {
+
+                    tokio::time::sleep(tokio::time::Duration::from_secs(wait_time)).await;
+
+                    // Check again if genesis arrived
+                    if blockchain_init.has_genesis() {
+                        tracing::info!("✅ Genesis block received during discovery wait");
+                        break;
+                    }
+
+                    let registered = bootstrap_registry.get_all().await;
+                    if registered.is_empty() {
+                        tracing::warn!("   No masternodes registered yet (round {})", round);
+                        continue;
+                    }
+
+                    tracing::info!(
+                        "   {} masternodes discovered, proceeding with leader election",
+                        registered.len()
+                    );
+
                     // Sort masternodes deterministically by address
                     let mut sorted_mns = registered.clone();
                     sorted_mns.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
-
-                    let leader_address = &sorted_mns[0].masternode.address;
+                    let leader_address = sorted_mns[0].masternode.address.clone();
 
                     tracing::info!(
-                        "🎲 Genesis leader election: {} masternodes registered, leader = {}",
+                        "🎲 Genesis leader election: {} masternodes, leader = {}",
                         sorted_mns.len(),
                         leader_address
                     );
 
-                    // Check if we are the leader using external IP from config
-                    tracing::info!(
-                        "🔍 Leader check: our external_address = {:?}, leader = {}",
-                        genesis_external_ip,
-                        leader_address
-                    );
-
-                    let are_we_leader =
+                    // Check if we are the leader
+                    let are_we_leader_by_config =
                         genesis_external_ip.as_deref() == Some(leader_address.as_str());
-
-                    // Fallback: Also check if we're registered as a masternode and match leader
                     let are_we_leader_by_registry = bootstrap_registry
                         .get_local_masternode()
                         .await
-                        .map(|mn| &mn.masternode.address == leader_address)
+                        .map(|mn| mn.masternode.address == leader_address)
                         .unwrap_or(false);
+                    let are_we_leader = are_we_leader_by_config || are_we_leader_by_registry;
 
-                    let are_we_leader = are_we_leader || are_we_leader_by_registry;
-
-                    if are_we_leader_by_registry
-                        && !genesis_external_ip
-                            .as_deref()
-                            .map(|ip| ip == leader_address)
-                            .unwrap_or(false)
-                    {
-                        tracing::warn!(
-                            "⚠️  Leader identified via registry but external_address mismatch!"
-                        );
-                        tracing::warn!(
-                            "   Config external_address: {:?}, Registered as: {}",
-                            genesis_external_ip,
-                            leader_address
-                        );
-                    }
+                    tracing::info!(
+                        "🔍 Leader check: external_address={:?}, by_config={}, by_registry={}",
+                        genesis_external_ip,
+                        are_we_leader_by_config,
+                        are_we_leader_by_registry
+                    );
 
                     if are_we_leader {
-                        // We are the leader - generate genesis and broadcast it
+                        // We are the leader - generate genesis
                         tracing::info!("👑 We are the genesis leader - generating genesis block");
+
+                        // Double-check no genesis arrived in the meantime (prevent race)
+                        if blockchain_init.has_genesis() {
+                            tracing::info!("✅ Genesis arrived just before generation - using received genesis");
+                            break;
+                        }
+
                         if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
-                            tracing::error!("❌ Failed to generate dynamic genesis: {}", e);
-                            return;
+                            tracing::error!("❌ Failed to generate genesis: {}", e);
+                            continue; // Try next round
                         }
 
                         // Broadcast genesis to all peers
@@ -850,44 +878,54 @@ async fn main() {
                                 };
                             peer_registry_for_sync.broadcast(proposal).await;
                         }
+                        break;
                     } else {
-                        // We are NOT the leader - wait to receive genesis from leader
-                        tracing::info!(
-                            "⏳ Waiting to receive genesis from leader ({})",
-                            leader_address
-                        );
+                        // We are NOT the leader - wait for genesis from leader
+                        // Use longer timeout and re-request periodically
+                        tracing::info!("⏳ Waiting for genesis from leader ({})", leader_address);
 
-                        // Wait up to 30 seconds for genesis to arrive
-                        let mut attempts = 0;
-                        while attempts < 30 {
+                        const LEADER_WAIT_SECS: u64 = 45;
+                        const REQUEST_INTERVAL: u64 = 10;
+                        let mut waited = 0u64;
+
+                        while waited < LEADER_WAIT_SECS && !blockchain_init.has_genesis() {
                             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                            if blockchain_init.has_genesis() {
-                                tracing::info!("✅ Received genesis block from leader");
-                                break;
+                            waited += 1;
+
+                            // Re-request genesis periodically
+                            if waited % REQUEST_INTERVAL == 0 {
+                                let connected = peer_registry_for_sync.get_connected_peers().await;
+                                for peer_ip in &connected {
+                                    let msg =
+                                        crate::network::message::NetworkMessage::GetBlocks(0, 0);
+                                    let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
+                                }
                             }
-                            attempts += 1;
                         }
 
-                        tracing::info!(
-                            "📊 After waiting for leader: has_genesis = {}",
-                            blockchain_init.has_genesis()
-                        );
+                        if blockchain_init.has_genesis() {
+                            tracing::info!("✅ Received genesis block from leader");
+                            break;
+                        }
 
-                        // If still no genesis after waiting for leader, generate it ourselves as fallback
-                        if !blockchain_init.has_genesis() {
+                        // Only generate fallback on LAST round to prevent race conditions
+                        if round == DISCOVERY_ROUNDS {
                             tracing::warn!(
-                                "⚠️  Failed to receive genesis from leader after 30 seconds - generating as fallback"
+                                "⚠️  Leader timeout after {} rounds - generating fallback genesis",
+                                DISCOVERY_ROUNDS
                             );
-                            if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
-                                tracing::error!("❌ Failed to generate fallback genesis: {}", e);
-                                return;
+
+                            // Final check before fallback generation
+                            if blockchain_init.has_genesis() {
+                                tracing::info!("✅ Genesis arrived just before fallback - using received genesis");
+                                break;
                             }
 
-                            // Broadcast our genesis to all peers
-                            if let Ok(genesis) = blockchain_init.get_block_by_height(0).await {
-                                tracing::info!(
-                                    "📤 Broadcasting fallback genesis block to all peers"
-                                );
+                            if let Err(e) = blockchain_init.generate_dynamic_genesis().await {
+                                tracing::error!("❌ Failed to generate fallback genesis: {}", e);
+                            } else if let Ok(genesis) = blockchain_init.get_block_by_height(0).await
+                            {
+                                tracing::info!("📤 Broadcasting fallback genesis block");
                                 let proposal =
                                     crate::network::message::NetworkMessage::TimeLockBlockProposal {
                                         block: genesis,
@@ -900,14 +938,17 @@ async fn main() {
             }
         } else {
             tracing::info!(
-                "✓ Genesis block exists at height {}",
+                "✓ Genesis block exists (height: {})",
                 blockchain_init.get_height()
             );
         }
 
-        // Verify we now have genesis
+        // Final verification
         if !blockchain_init.has_genesis() {
-            tracing::error!("❌ Failed to load or generate genesis block - cannot proceed");
+            tracing::error!(
+                "❌ Failed to obtain genesis block after all attempts - cannot proceed"
+            );
+            tracing::error!("   Ensure at least one masternode is registered and reachable");
             return;
         }
 

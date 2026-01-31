@@ -63,7 +63,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 
 **Code References:**
 - `src/blockchain.rs:1732-1733` - Checkpoint validation
-- `genesis.mainnet.json` / `genesis.testnet.json` - Genesis checkpoints
+- `src/block/genesis.rs` - Dynamic genesis generation and verification
 
 ---
 

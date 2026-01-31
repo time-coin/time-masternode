@@ -352,8 +352,6 @@ timecoin/
 │   └── (test suites)
 ├── config.toml              # Default config (testnet)
 ├── config.mainnet.toml      # Mainnet configuration
-├── genesis.testnet.json     # Testnet genesis block
-├── genesis.mainnet.json     # Mainnet genesis block
 ├── CHANGELOG.md             # Version history
 ├── CONTRIBUTING.md          # Contribution guidelines
 ├── Cargo.toml               # Rust dependencies

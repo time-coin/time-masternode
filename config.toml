@@ -58,10 +58,6 @@ min_masternodes = 3
 # Avalanche uses simple majority (>50%) of total stake weight for finality
 # Sample quorum within each round: alpha=14 out of k=20 validators (70%)
 quorum_percentage = 51  # Simple majority for Avalanche consensus
-# Use genesis block from file (true = load from file, false = sync from network)
-use_genesis_file = true
-# Genesis block file path (only used if use_genesis_file = true)
-genesis_file = "genesis.testnet.json"
 
 [sync]
 # Phase 3: Sync coordinator settings

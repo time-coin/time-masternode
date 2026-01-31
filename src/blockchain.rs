@@ -482,39 +482,9 @@ impl Blockchain {
         Ok(migrated_count)
     }
 
-    /// Initialize blockchain - load local chain or sync from network
+    /// Initialize blockchain - verify local chain or generate genesis dynamically
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
-
-        // Helper function to load and store canonical genesis from file
-        let load_and_store_genesis =
-            |storage: &sled::Db, network_type: NetworkType| -> Result<Block, String> {
-                tracing::info!("📥 Loading canonical genesis from file...");
-                let genesis = GenesisBlock::load_from_file(network_type)?;
-
-                // Verify it's valid before storing
-                GenesisBlock::verify_structure(&genesis)?;
-
-                // Store the genesis block
-                let genesis_bytes = bincode::serialize(&genesis)
-                    .map_err(|e| format!("Failed to serialize genesis: {}", e))?;
-                storage
-                    .insert("block_0".as_bytes(), genesis_bytes)
-                    .map_err(|e| format!("Failed to store genesis block: {}", e))?;
-                storage
-                    .insert(genesis.hash().as_slice(), &0u64.to_be_bytes())
-                    .map_err(|e| format!("Failed to index genesis block: {}", e))?;
-                storage
-                    .flush()
-                    .map_err(|e| format!("Failed to flush genesis: {}", e))?;
-
-                tracing::info!("✅ Genesis block loaded and stored from file");
-                tracing::info!("   Hash: {}", hex::encode(&genesis.hash()[..8]));
-                tracing::info!("   Timestamp: {}", genesis.header.timestamp);
-                tracing::info!("   Transactions: {}", genesis.transactions.len());
-
-                Ok(genesis)
-            };
 
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
@@ -523,34 +493,20 @@ impl Blockchain {
             if let Ok(genesis) = self.get_block_by_height(0).await {
                 if let Err(e) = GenesisBlock::verify_structure(&genesis) {
                     tracing::error!(
-                        "❌ Local genesis block is invalid: {} - replacing with canonical genesis",
+                        "❌ Local genesis block is invalid: {} - will regenerate dynamically",
                         e
                     );
 
                     // Remove the invalid genesis and all blocks built on it
                     self.clear_all_blocks();
-
-                    // Load canonical genesis from file
-                    load_and_store_genesis(&self.storage, self.network_type)?;
                     self.current_height.store(0, Ordering::Release);
+
+                    // Genesis will be generated dynamically when masternodes register
                     return Ok(());
                 }
             }
             self.current_height.store(height, Ordering::Release);
             tracing::info!("✓ Local blockchain verified (height: {})", height);
-
-            // CRITICAL: Validate genesis hash matches expected canonical hash
-            // This prevents nodes with incompatible chains from connecting
-            if let Err(e) = self.validate_genesis_hash().await {
-                tracing::error!("❌ CRITICAL: Genesis hash validation failed: {}", e);
-                tracing::error!("   This node's blockchain is incompatible with the network");
-                tracing::error!("   Manual intervention required: clear blockchain and resync");
-                return Err(format!(
-                    "Genesis hash mismatch - incompatible blockchain: {}",
-                    e
-                ));
-            }
-
             return Ok(());
         }
 
@@ -563,7 +519,7 @@ impl Blockchain {
             if let Ok(genesis) = self.get_block_by_height(0).await {
                 if let Err(e) = GenesisBlock::verify_structure(&genesis) {
                     tracing::error!(
-                        "❌ Local genesis is invalid: {} - replacing with canonical genesis",
+                        "❌ Local genesis is invalid: {} - will regenerate dynamically",
                         e
                     );
 
@@ -571,9 +527,6 @@ impl Blockchain {
                     let _ = self.storage.remove("block_0".as_bytes());
                     let _ = self.storage.remove(genesis.hash().as_slice());
                     let _ = self.storage.flush();
-
-                    // Load canonical genesis from file
-                    load_and_store_genesis(&self.storage, self.network_type)?;
                     self.current_height.store(0, Ordering::Release);
                     return Ok(());
                 }
@@ -583,10 +536,10 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No local blockchain - load genesis from file
-        load_and_store_genesis(&self.storage, self.network_type)?;
-        self.current_height.store(0, Ordering::Release);
-
+        // No local blockchain - genesis will be generated dynamically via generate_dynamic_genesis()
+        tracing::info!(
+            "📋 No genesis block found - will be generated dynamically when masternodes register"
+        );
         Ok(())
     }
 
@@ -839,8 +792,8 @@ impl Blockchain {
         }
     }
 
-    /// Validate that our genesis block hash matches the expected canonical hash
-    /// This prevents nodes with incompatible blockchains from joining the network
+    /// Validate that our genesis block structure is valid
+    /// Genesis hash validation now happens via peer consensus during sync
     pub async fn validate_genesis_hash(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
 
@@ -850,27 +803,12 @@ impl Blockchain {
             .await
             .map_err(|e| format!("Cannot load genesis block: {}", e))?;
 
-        // Load canonical genesis from file to get expected hash
-        let canonical_genesis = GenesisBlock::load_from_file(self.network_type)
-            .map_err(|e| format!("Cannot load canonical genesis: {}", e))?;
+        // Verify structure is valid
+        GenesisBlock::verify_structure(&local_genesis)?;
 
         let local_hash = local_genesis.hash();
-        let canonical_hash = canonical_genesis.hash();
-
-        if local_hash != canonical_hash {
-            return Err(format!(
-                "Genesis block mismatch!\n\
-                 Local genesis hash:     {}\n\
-                 Canonical genesis hash: {}\n\
-                 This node has an incompatible blockchain database.\n\
-                 Action required: Delete blockchain data directory and resync from network.",
-                hex::encode(local_hash),
-                hex::encode(canonical_hash)
-            ));
-        }
-
         tracing::info!(
-            "✅ Genesis hash validated: {} (network: {:?})",
+            "✅ Genesis structure validated: {} (network: {:?})",
             hex::encode(&local_hash[..8]),
             self.network_type
         );
