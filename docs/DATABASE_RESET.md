@@ -1,14 +1,68 @@
-# Database Reset Instructions
+# Database Reset Instructions (UPDATED)
 
-## Problem
+## Automatic Schema Migration (NEW)
 
-After schema changes (specifically adding `time_attestations` field to Block), nodes with existing databases experience "io error:" when trying to save new blocks. This is because:
+**Good news:** As of commit 09d5619, nodes now **automatically migrate old-schema blocks** on startup. This means:
+
+✅ You can sync genesis from peers running old code
+✅ No more "io error:" crashes from schema mismatches
+✅ Database resets are **optional** - migration happens automatically
+
+## How It Works
+
+When a node starts:
+1. **Migration check runs first** (before any blockchain operations)
+2. Each existing block is checked:
+   - If it deserializes with current schema → OK, skip it
+   - If it fails → try deserializing as BlockV1 (old format)
+   - If BlockV1 works → convert to new format and re-save
+3. All migrated blocks are flushed to disk
+4. Normal blockchain operations continue
+
+You'll see logs like:
+```
+🔄 Checking for old-schema blocks that need migration...
+✅ Migrated block 0 from old schema
+✅ Migrated block 1 from old schema
+✅ Schema migration complete: 2 blocks migrated
+```
+
+## When to Still Reset Database
+
+Schema migration handles **most cases**, but you should still reset if:
+
+1. **Migration fails repeatedly** - indicates severe corruption
+2. **Blocks have invalid data** - migration can't fix logical errors
+3. **Want a clean sync** - faster than migrating thousands of blocks
+4. **Testing/debugging** - need known-good state
+
+## Problem (Historical Context)
+
+After schema changes (specifically adding `time_attestations` field to Block), nodes with existing databases experienced "io error:" when trying to save new blocks. This was because:
 
 1. Old blocks in database were serialized with the old Block schema
 2. New code cannot deserialize them due to schema mismatch
 3. Database operations fail, preventing block storage
 
-## Solution
+## Solution Options
+
+### Option 1: Let Automatic Migration Handle It (Recommended)
+
+Just update to latest code and restart:
+```bash
+cd /path/to/timecoin
+git pull
+cargo build --release
+sudo systemctl restart timed.service
+```
+
+The migration runs automatically on startup. Watch logs to verify:
+```bash
+journalctl -u timed.service -f | grep -i migrat
+```
+
+### Option 2: Manual Database Reset (If Migration Fails)
+
 
 Clear the database on all nodes to remove old-schema blocks. The nodes will then:
 1. Sync genesis block from the network (if it exists)
