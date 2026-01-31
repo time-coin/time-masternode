@@ -373,69 +373,80 @@ async fn main() {
 
     let blockchain = Arc::new(blockchain);
 
-    // Validate existing blockchain on startup (if any blocks exist)
+    // Validate existing blockchain on startup
+    // Try to load genesis block - if it exists, validate it regardless of height
     let current_height = blockchain.get_height();
-    if current_height > 0 {
-        tracing::info!(
-            "🔍 Validating existing blockchain (height: {})...",
-            current_height
-        );
 
-        // Verify genesis block exists and is valid
-        match blockchain.get_block_by_height(0).await {
-            Ok(genesis) => {
-                use crate::block::genesis::GenesisBlock;
+    match blockchain.get_block_by_height(0).await {
+        Ok(genesis) => {
+            // We have a genesis block - validate it
+            tracing::info!(
+                "🔍 Validating existing blockchain (height: {})...",
+                current_height
+            );
 
-                // Check if this is an OLD format genesis (from JSON file)
-                let is_old_genesis = genesis.masternode_rewards.is_empty()
-                    || genesis.header.active_masternodes_bitmap.is_empty();
+            use crate::block::genesis::GenesisBlock;
 
-                if is_old_genesis {
-                    tracing::warn!(
-                        "⚠️ Detected OLD format genesis block (incompatible with current network)"
-                    );
-                    tracing::warn!(
-                        "   Clearing blockchain to allow new dynamic genesis generation..."
-                    );
+            // Check if this is an OLD format genesis (from JSON file)
+            // Old format: empty transactions, no masternode rewards, no active bitmap
+            let is_old_genesis = genesis.masternode_rewards.is_empty()
+                || genesis.header.active_masternodes_bitmap.is_empty();
 
-                    // Clear all blocks (this will reset height to 0)
-                    blockchain.clear_all_blocks();
-
-                    // Verify height was reset
-                    let new_height = blockchain.get_height();
-                    tracing::info!(
-                        "✅ Old blockchain cleared - height reset from {} to {}",
-                        current_height,
-                        new_height
-                    );
-                    tracing::info!(
-                        "   Will generate new dynamic genesis after masternode discovery"
-                    );
-                } else if let Err(e) = GenesisBlock::verify_structure(&genesis) {
-                    eprintln!("❌ CRITICAL: Genesis block is invalid: {}", e);
-                    eprintln!("   Your blockchain is corrupted");
-                    eprintln!("   Manual fix: Clear blockchain and resync from network");
-                    eprintln!("   Command: rm -rf {}/db/blocks", config.storage.data_dir);
-                    std::process::exit(1);
-                } else {
-                    tracing::info!(
-                        "✅ Genesis block validated (dynamic format) - will NOT regenerate"
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("❌ CRITICAL: Genesis block not found: {}", e);
-                eprintln!(
-                    "   Blockchain height is {} but genesis missing",
-                    current_height
+            if is_old_genesis {
+                tracing::warn!(
+                    "⚠️ Detected OLD format genesis block (incompatible with current network)"
                 );
-                eprintln!("   Manual fix: Clear blockchain data");
+                tracing::warn!("   Genesis details:");
+                tracing::warn!(
+                    "     - masternode_rewards: {} entries",
+                    genesis.masternode_rewards.len()
+                );
+                tracing::warn!(
+                    "     - active_masternodes_bitmap: {} bytes",
+                    genesis.header.active_masternodes_bitmap.len()
+                );
+                tracing::warn!("     - timestamp: {}", genesis.header.timestamp);
+                tracing::warn!("     - leader: {}", genesis.header.leader);
+                tracing::warn!("   Clearing blockchain to allow new dynamic genesis generation...");
+
+                // Clear all blocks (this will reset height to 0)
+                blockchain.clear_all_blocks();
+
+                // Verify height was reset
+                let new_height = blockchain.get_height();
+                tracing::info!(
+                    "✅ Old blockchain cleared - height reset from {} to {}",
+                    current_height,
+                    new_height
+                );
+                tracing::info!("   Will generate new dynamic genesis after masternode discovery");
+            } else if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+                eprintln!("❌ CRITICAL: Genesis block is invalid: {}", e);
+                eprintln!("   Your blockchain is corrupted");
+                eprintln!("   Manual fix: Clear blockchain and resync from network");
                 eprintln!("   Command: rm -rf {}/db/blocks", config.storage.data_dir);
                 std::process::exit(1);
+            } else {
+                tracing::info!("✅ Genesis block validated (dynamic format) - will NOT regenerate");
             }
         }
-    } else {
-        tracing::info!("📋 No existing blockchain - will participate in dynamic genesis election");
+        Err(_) if current_height > 0 => {
+            // Height > 0 but no genesis block - corrupted database
+            eprintln!(
+                "❌ CRITICAL: Genesis block not found but height is {}",
+                current_height
+            );
+            eprintln!("   Blockchain database is corrupted");
+            eprintln!("   Manual fix: Clear blockchain data");
+            eprintln!("   Command: rm -rf {}/db/blocks", config.storage.data_dir);
+            std::process::exit(1);
+        }
+        Err(_) => {
+            // No genesis block and height is 0 - fresh start
+            tracing::info!(
+                "📋 No existing blockchain - will participate in dynamic genesis election"
+            );
+        }
     }
 
     // Migrate old-schema blocks before doing anything else

@@ -750,9 +750,19 @@ impl Blockchain {
             .flush()
             .map_err(|e| format!("Failed to flush genesis: {}", e))?;
 
+        // Update chain height in storage so it persists across restarts
+        let height_key = "chain_height".as_bytes();
+        let height_bytes = bincode::serialize(&0u64).map_err(|e| e.to_string())?;
+        self.storage
+            .insert(height_key, height_bytes)
+            .map_err(|e| format!("Failed to save chain_height: {}", e))?;
+        self.storage
+            .flush()
+            .map_err(|e| format!("Failed to flush chain_height: {}", e))?;
+
         self.current_height.store(0, Ordering::Release);
 
-        tracing::info!("🎉 Dynamic genesis block stored successfully");
+        tracing::info!("🎉 Dynamic genesis block stored successfully (height: 0)");
 
         Ok(())
     }
