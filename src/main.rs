@@ -758,12 +758,17 @@ async fn main() {
                 let mut attempts = 0;
                 while attempts < 30 {
                     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    if blockchain_init.get_block_by_height(0).await.is_ok() {
+                    if blockchain_init.has_genesis() {
                         tracing::info!("✅ Successfully synced genesis block from network");
                         break;
                     }
                     attempts += 1;
                 }
+
+                tracing::info!(
+                    "📊 After 30s sync wait: has_genesis = {}",
+                    blockchain_init.has_genesis()
+                );
             }
 
             // If still no genesis, generate it dynamically
@@ -856,12 +861,17 @@ async fn main() {
                         let mut attempts = 0;
                         while attempts < 30 {
                             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                            if blockchain_init.get_block_by_height(0).await.is_ok() {
+                            if blockchain_init.has_genesis() {
                                 tracing::info!("✅ Received genesis block from leader");
                                 break;
                             }
                             attempts += 1;
                         }
+
+                        tracing::info!(
+                            "📊 After waiting for leader: has_genesis = {}",
+                            blockchain_init.has_genesis()
+                        );
 
                         // If still no genesis after waiting for leader, generate it ourselves as fallback
                         if !blockchain_init.has_genesis() {
