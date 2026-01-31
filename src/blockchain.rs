@@ -2203,17 +2203,24 @@ impl Blockchain {
         // Special case: genesis block (height 0)
         let is_genesis = block.header.height == 0;
 
-        // Allow genesis block if:
-        // 1. Chain is at height 0 AND no block exists at height 0, OR
-        // 2. We're at height 0 and trying to add genesis (replace placeholder)
         if is_genesis {
-            if current == 0 {
-                // Allow genesis at height 0
-            } else {
-                return Err(format!(
-                    "Cannot add genesis block at height 0 when chain is at height {}",
-                    current
-                ));
+            // CRITICAL: Only allow genesis if it doesn't already exist
+            // This prevents duplicate genesis blocks even when current_height=0
+            match self.get_block_by_height(0).await {
+                Ok(_existing_genesis) => {
+                    return Err(
+                        "Genesis block already exists - cannot add duplicate genesis".to_string(),
+                    );
+                }
+                Err(_) => {
+                    // No genesis exists - allow adding it
+                    if current != 0 {
+                        return Err(format!(
+                            "Cannot add genesis at height 0 when chain height is {} (chain already advanced)",
+                            current
+                        ));
+                    }
+                }
             }
         } else if block.header.height != current + 1 {
             return Err(format!(
