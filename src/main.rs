@@ -1605,9 +1605,10 @@ async fn main() {
             }
 
             // Produce the block
+            // Pass next_height as target to support catch-up block production
             match block_blockchain
                 .produce_block_at_height(
-                    None,
+                    Some(next_height),
                     Some(selected_producer.wallet_address.clone()),
                     Some(selected_producer.address.clone()),
                 )
