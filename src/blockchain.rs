@@ -4310,6 +4310,19 @@ impl Blockchain {
 
         let block_height = block.header.height;
 
+        // CRITICAL: Validate block can be serialized BEFORE processing
+        // This catches corrupted blocks from peers early
+        if let Err(e) = bincode::serialize(&block) {
+            tracing::warn!(
+                "🚫 Rejecting corrupted block {} from network: serialization failed: {}",
+                block_height, e
+            );
+            return Err(format!(
+                "Block {} is corrupted (serialization failed): {}",
+                block_height, e
+            ));
+        }
+
         // CRITICAL: Reject blocks during active reorg to prevent concurrent fork resolutions
         // Multiple peers sending competing chains simultaneously causes chain corruption
         {
@@ -5707,7 +5720,34 @@ impl Blockchain {
 
                 // Decision: reorg or stay based on simplified resolver
                 if resolution.accept_peer_chain {
+                    // CRITICAL SAFETY CHECK: Double-verify we're not reorging to a shorter chain
+                    // This is the LONGEST VALID CHAIN RULE - we must NEVER accept a shorter chain
+                    if peer_tip_height < our_height {
+                        warn!(
+                            "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}). Fork resolver bug detected!",
+                            peer_tip_height, our_height
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Ok(());
+                    }
+                    
+                    // Also check that the resulting chain would actually be longer
+                    let peer_chain_length = peer_tip_height - common_ancestor;
+                    let our_chain_length = our_height - common_ancestor;
+                    if peer_chain_length <= our_chain_length {
+                        warn!(
+                            "🚫 REJECTED REORG: Peer chain from ancestor {} is not longer ({} <= {}). Keeping our chain.",
+                            common_ancestor, peer_chain_length, our_chain_length
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Ok(());
+                    }
+                    
                     info!("📊 Simplified resolver decided to accept peer chain (longest valid chain rule)");
+                    info!(
+                        "📊 Chain comparison: peer has {} blocks from ancestor {} vs our {} blocks",
+                        peer_chain_length, common_ancestor, our_chain_length
+                    );
 
                     // Filter blocks to only those after common ancestor
                     let reorg_blocks: Vec<Block> = blocks
@@ -6048,6 +6088,15 @@ impl Blockchain {
         let our_height = self.get_height();
         let new_height = common_ancestor + alternate_blocks.len() as u64;
 
+        // CRITICAL SAFETY CHECK: NEVER reorg to a shorter chain
+        // This is the fundamental LONGEST VALID CHAIN rule
+        if new_height <= our_height {
+            return Err(format!(
+                "REJECTED: Cannot reorg to equal or shorter chain! Current: {}, proposed: {} (from ancestor {})",
+                our_height, new_height, common_ancestor
+            ));
+        }
+
         info!(
             "🔄 Starting reorg: current height {} → rolling back to {} → applying {} blocks → new height {}",
             our_height,
@@ -6362,37 +6411,68 @@ impl Blockchain {
             our_height, peer_height, peer_lowest, peer_height
         );
 
-        // Clone what we need for the closure to avoid move issues
-        let blockchain = self.clone();
-        let peer_blocks_for_check = peer_blocks.clone();
-
-        // Check function: returns true if peer has same block hash at height
-        let check_fn = move |height: u64| {
-            let blockchain = blockchain.clone();
-            let peer_blocks = peer_blocks_for_check.clone();
-            async move {
-                // Get our block hash at this height
-                let our_hash = match blockchain.get_block_hash(height) {
-                    Ok(hash) => hash,
-                    Err(_) => return Ok(false), // Can't find our block at this height
-                };
-
-                // Check if peer has a block at this height with matching hash
-                if let Some(peer_hash) = peer_blocks.get(&height) {
-                    Ok(our_hash == *peer_hash)
+        // SIMPLIFIED APPROACH: Instead of binary search (which can fail with incomplete data),
+        // search linearly from the lowest peer block downward to find the common ancestor.
+        // This is more reliable when peers send partial block sets.
+        
+        // Find the lowest height in peer's block set
+        let peer_lowest = sorted_blocks.first().unwrap().header.height;
+        
+        // If peer's lowest block matches ours, that's likely the common ancestor
+        // Search from peer_lowest downward to find where chains match
+        let mut candidate_ancestor = 0u64;
+        
+        for height in (0..=peer_lowest).rev() {
+            // Get our block hash at this height
+            let our_hash = match self.get_block_hash(height) {
+                Ok(hash) => hash,
+                Err(_) => continue, // We don't have this block, try lower
+            };
+            
+            // If peer has this block, check if hashes match
+            if let Some(peer_hash) = peer_blocks.get(&height) {
+                if our_hash == *peer_hash {
+                    // Found matching block - this could be common ancestor
+                    candidate_ancestor = height;
+                    info!(
+                        "✅ Found matching block at height {} (our hash {} == peer hash {})",
+                        height,
+                        hex::encode(&our_hash[..8]),
+                        hex::encode(&peer_hash[..8])
+                    );
+                    break;
                 } else {
-                    // Peer doesn't have this height in provided blocks - need more data
-                    Ok(false)
+                    // Different blocks at same height - fork is below this
+                    info!(
+                        "🔀 Different blocks at height {}: ours {} vs peer {}",
+                        height,
+                        hex::encode(&our_hash[..8]),
+                        hex::encode(&peer_hash[..8])
+                    );
+                    continue;
+                }
+            } else {
+                // Peer doesn't have this block - check if peer's NEXT block builds on our block
+                // This handles the case where common ancestor is below peer's lowest block
+                if let Some(peer_next_block) = sorted_blocks.iter().find(|b| b.header.height == height + 1) {
+                    if peer_next_block.header.previous_hash == our_hash {
+                        // Peer's next block builds on our block at this height - this is the ancestor
+                        candidate_ancestor = height;
+                        info!(
+                            "✅ Found common ancestor at height {} (peer's block {} builds on our block)",
+                            height,
+                            height + 1
+                        );
+                        break;
+                    }
                 }
             }
-        };
-
-        // Use the efficient exponential + binary search algorithm from network resolver
-        let candidate_ancestor = self
-            .network_fork_resolver
-            .find_common_ancestor(our_height, peer_height, check_fn)
-            .await
-            .map_err(|e| format!("Error in common ancestor search: {}", e))?;
+        }
+        
+        info!(
+            "🔍 Common ancestor search complete: found ancestor at height {} (peer lowest: {}, our height: {})",
+            candidate_ancestor, peer_lowest, our_height
+        );
 
         // CRITICAL VALIDATION: Verify that peer's next block actually builds on this ancestor
         // If we say height N is common ancestor, peer's block N+1 must have previous_hash = our block N's hash

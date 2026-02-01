@@ -969,6 +969,21 @@ async fn handle_peer(
                                         Ok(false) => {
                                             tracing::debug!("⏭️ Skipped block {} (already have or invalid)", block_height);
                                         }
+                                        Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
+                                            // SECURITY: Corrupted block from peer - severe violation
+                                            tracing::error!(
+                                                "🚨 CORRUPTED BLOCK {} from {} - recording severe violation: {}",
+                                                block_height, peer.addr, e
+                                            );
+                                            let should_ban = blacklist.write().await.record_severe_violation(
+                                                ip,
+                                                &format!("Sent corrupted block {}: {}", block_height, e)
+                                            );
+                                            if should_ban {
+                                                tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
+                                                break; // Exit the message loop to disconnect
+                                            }
+                                        }
                                         Err(e) => {
                                             tracing::warn!("❌ Failed to add block {}: {}", block_height, e);
                                         }
@@ -1011,6 +1026,21 @@ async fn handle_peer(
                                         }
                                         Ok(false) => {
                                             tracing::debug!("⏭️ Skipped block {} (already have or fork)", block_height);
+                                        }
+                                        Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
+                                            // SECURITY: Corrupted block from peer - severe violation
+                                            tracing::error!(
+                                                "🚨 CORRUPTED BLOCK {} from {} (announcement) - recording severe violation: {}",
+                                                block_height, peer.addr, e
+                                            );
+                                            let should_ban = blacklist.write().await.record_severe_violation(
+                                                ip,
+                                                &format!("Sent corrupted block {}: {}", block_height, e)
+                                            );
+                                            if should_ban {
+                                                tracing::warn!("🚫 Disconnecting {} for sending corrupted block", peer.addr);
+                                                break;
+                                            }
                                         }
                                         Err(e) => {
                                             tracing::warn!("Failed to add announced block: {}", e);

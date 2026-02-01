@@ -170,6 +170,47 @@ impl IPBlacklist {
             self.whitelist.len(),
         )
     }
+    
+    /// Record a SEVERE violation (corrupted blocks, invalid chain data)
+    /// These are treated more harshly - immediate 1-hour ban on first offense,
+    /// permanent ban on second offense
+    /// Returns true if the IP should be disconnected
+    pub fn record_severe_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
+        // Whitelisted IPs are exempt
+        if self.is_whitelisted(ip) {
+            tracing::warn!(
+                "⚠️  SEVERE violation from whitelisted IP {} (not banning): {}",
+                ip,
+                reason
+            );
+            return false;
+        }
+
+        let now = Instant::now();
+
+        // Get or create violation record
+        let (count, _) = self.violations.entry(ip).or_insert((0, now));
+        *count += 5; // Severe violations count as 5 regular violations
+        
+        tracing::error!(
+            "🚨 SEVERE violation from {}: {} (effective count: {})",
+            ip,
+            reason,
+            count
+        );
+
+        // Immediate escalation for severe violations
+        if *count >= 10 {
+            self.add_permanent_ban(ip, &format!("SEVERE: {}", reason));
+            tracing::error!("🚫 PERMANENTLY BANNED {} for severe violation: {}", ip, reason);
+            true
+        } else {
+            // First severe violation: 1 hour ban
+            self.add_temp_ban(ip, Duration::from_secs(3600), &format!("SEVERE: {}", reason));
+            tracing::warn!("🚫 Banned {} for 1 hour (severe violation): {}", ip, reason);
+            true
+        }
+    }
 }
 
 impl Default for IPBlacklist {

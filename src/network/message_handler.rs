@@ -18,7 +18,7 @@ use crate::utxo_manager::UTXOStateManager;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// Direction of the network connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2407,6 +2407,30 @@ impl MessageHandler {
 
                     // Stop processing remaining blocks - let fork resolution handle it
                     break;
+                }
+                Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
+                    // SECURITY: Corrupted block is a SEVERE violation - potential attack
+                    error!(
+                        "🚨 [{}] CORRUPTED BLOCK {} from {} - potential attack: {}",
+                        self.direction, block.header.height, self.peer_ip, e
+                    );
+                    
+                    // Record severe violation and potentially ban the peer
+                    if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
+                        // Get blacklist from context if available (need to add to context)
+                        // For now, mark peer as incompatible
+                        context.peer_registry.mark_incompatible(
+                            &self.peer_ip,
+                            &format!("Sent corrupted block {}: {}", block.header.height, e)
+                        ).await;
+                    }
+                    
+                    // Stop processing ALL blocks from this peer in this batch
+                    warn!(
+                        "🚫 [{}] Rejecting all {} blocks from {} due to corruption",
+                        self.direction, block_count, self.peer_ip
+                    );
+                    return Err(format!("Peer {} sent corrupted block - connection should be terminated", self.peer_ip));
                 }
                 Err(e) => {
                     warn!(
