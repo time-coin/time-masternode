@@ -3356,6 +3356,10 @@ impl Blockchain {
         self.storage
             .insert(height_key, height_bytes)
             .map_err(|e| e.to_string())?;
+        // Flush to ensure height is persisted immediately
+        self.storage
+            .flush()
+            .map_err(|e| format!("Failed to flush chain_height: {}", e))?;
         Ok(())
     }
 
