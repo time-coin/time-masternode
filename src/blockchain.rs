@@ -5520,13 +5520,32 @@ impl Blockchain {
                         blocks.len(),
                         accumulated_blocks.len()
                     );
-                    // Merge: add accumulated blocks that aren't in new blocks
+                    // CRITICAL FIX: Prefer NEW blocks over accumulated blocks when heights match.
+                    // This prevents stale/local blocks from previous attempts from corrupting the reorg.
+                    // Only add accumulated blocks if new blocks don't have that height.
                     for acc_block in accumulated_blocks {
-                        if !all_blocks
-                            .iter()
-                            .any(|b| b.header.height == acc_block.header.height)
-                        {
-                            all_blocks.push(acc_block.clone());
+                        let height = acc_block.header.height;
+                        // Check if new blocks already have this height
+                        let already_have = all_blocks.iter().any(|b| b.header.height == height);
+                        if !already_have {
+                            // Verify this accumulated block forms a valid chain with adjacent blocks
+                            // to catch any corrupted/wrong blocks before adding
+                            let acc_hash = acc_block.hash();
+                            let next_block_valid = all_blocks
+                                .iter()
+                                .find(|b| b.header.height == height + 1)
+                                .map(|next| next.header.previous_hash == acc_hash)
+                                .unwrap_or(true); // OK if no next block to check
+
+                            if next_block_valid {
+                                all_blocks.push(acc_block.clone());
+                            } else {
+                                warn!(
+                                    "🚫 Skipping accumulated block {} (hash {}) - doesn't connect to next block",
+                                    height,
+                                    hex::encode(&acc_hash[..8])
+                                );
+                            }
                         }
                     }
                     info!("📦 Total blocks for fork resolution: {}", all_blocks.len());
@@ -5731,6 +5750,46 @@ impl Blockchain {
                     // Sort blocks by height
                     let mut sorted_reorg_blocks = reorg_blocks.clone();
                     sorted_reorg_blocks.sort_by_key(|b| b.header.height);
+
+                    // DEBUG: Log all blocks in the reorg set to identify data corruption
+                    for (idx, blk) in sorted_reorg_blocks.iter().enumerate() {
+                        let blk_hash = blk.hash();
+                        tracing::debug!(
+                            "🔍 Reorg block {}: height={}, hash={}, prev_hash={}",
+                            idx,
+                            blk.header.height,
+                            hex::encode(&blk_hash[..8]),
+                            hex::encode(&blk.header.previous_hash[..8])
+                        );
+                    }
+
+                    // SANITY CHECK: Ensure we don't have our own (local) blocks mixed in
+                    // This can happen due to bugs in block accumulation
+                    for blk in &sorted_reorg_blocks {
+                        if let Ok(local_block) = self.get_block(blk.header.height) {
+                            let local_hash = local_block.hash();
+                            let peer_hash = blk.hash();
+                            if local_hash == peer_hash {
+                                // This is fine - block matches
+                            } else {
+                                // Verify this is actually the peer's block, not our local one
+                                // by checking that it forms a valid chain with adjacent peer blocks
+                                let is_probably_local = sorted_reorg_blocks.iter().any(|other| {
+                                    other.header.height == blk.header.height + 1
+                                        && other.header.previous_hash != peer_hash
+                                });
+                                if is_probably_local {
+                                    warn!(
+                                        "🚫 Detected local block {} (hash {}) mixed into reorg set! \
+                                        Expected peer block with different hash. \
+                                        This indicates a bug in block accumulation.",
+                                        blk.header.height,
+                                        hex::encode(&peer_hash[..8])
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     // First block must build on common ancestor
                     let our_ancestor_hash = self.get_block_hash(common_ancestor)?;
