@@ -5728,6 +5728,70 @@ impl Blockchain {
                 // Calculate fork depth
                 let fork_depth = our_height.saturating_sub(common_ancestor);
 
+                // CRITICAL SECURITY CHECK: Verify genesis block compatibility
+                // If peer has blocks at height 0, verify it matches our genesis
+                // If common_ancestor is 0, their genesis must match ours
+                if common_ancestor == 0 {
+                    // Check if peer provided a genesis block
+                    if let Some(peer_genesis) = all_blocks.iter().find(|b| b.header.height == 0) {
+                        let peer_genesis_hash = peer_genesis.hash();
+                        if let Ok(our_genesis) = self.get_block_by_height(0).await {
+                            let our_genesis_hash = our_genesis.hash();
+                            if peer_genesis_hash != our_genesis_hash {
+                                warn!(
+                                    "🛡️ SECURITY: REJECTED REORG - DIFFERENT GENESIS BLOCK from peer {}",
+                                    peer_addr
+                                );
+                                warn!(
+                                    "   Our genesis: {}, Peer genesis: {}",
+                                    hex::encode(&our_genesis_hash[..8]),
+                                    hex::encode(&peer_genesis_hash[..8])
+                                );
+                                warn!("   Peer is on a completely different chain - cannot merge");
+
+                                // Mark peer as genesis-incompatible
+                                if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                                    registry
+                                        .mark_genesis_incompatible(
+                                            &peer_addr,
+                                            &hex::encode(&our_genesis_hash[..16]),
+                                            &hex::encode(&peer_genesis_hash[..16]),
+                                        )
+                                        .await;
+                                }
+
+                                *self.fork_state.write().await = ForkResolutionState::None;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
+                // CRITICAL SECURITY CHECK: Reject reorgs that are too deep
+                // Once blocks are more than MAX_REORG_DEPTH deep, they are considered FINAL
+                // This protects against long-range attacks where an attacker creates a fake longer chain
+                if fork_depth > MAX_REORG_DEPTH {
+                    warn!(
+                        "🛡️ SECURITY: REJECTED DEEP REORG from peer {} - fork depth {} exceeds maximum {} blocks",
+                        peer_addr, fork_depth, MAX_REORG_DEPTH
+                    );
+                    warn!(
+                        "   Our height: {}, common ancestor: {}, peer claims height: {}",
+                        our_height, common_ancestor, peer_tip_height
+                    );
+                    warn!(
+                        "   Blocks at depth >{} are considered FINAL and cannot be reorganized",
+                        MAX_REORG_DEPTH
+                    );
+                    warn!(
+                        "   Peer {} is attempting a deep reorg attack - marking as suspicious",
+                        peer_addr
+                    );
+
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Ok(());
+                }
+
                 info!(
                     "🤖 [SIMPLIFIED] Evaluating fork: our={} peer={}, ancestor={}, depth={}",
                     our_height, peer_tip_height, common_ancestor, fork_depth

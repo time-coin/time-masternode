@@ -21,7 +21,10 @@ pub mod blockchain {
     pub const TIMESTAMP_TOLERANCE_SECS: i64 = 60;
 
     /// Maximum depth for blockchain reorganization
-    pub const MAX_REORG_DEPTH: u64 = 1_000;
+    /// SECURITY: Blocks deeper than this are considered FINAL and cannot be reorged
+    /// This protects against long-range attacks where an attacker creates a fake longer chain
+    /// 6 blocks = 1 hour of blocks (at 10 min/block) - provides reasonable finality
+    pub const MAX_REORG_DEPTH: u64 = 6;
 
     /// Maximum depth to search for common ancestor in fork resolution
     pub const MAX_FORK_SEARCH_DEPTH: u64 = 2_000;
