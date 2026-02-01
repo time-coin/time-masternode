@@ -1000,7 +1000,7 @@ impl TSCDConsensus {
         let mut input = Vec::new();
         input.extend_from_slice(&parent_block_hash); // Unpredictable entropy
         input.extend_from_slice(&slot.to_le_bytes()); // Deterministic time
-        input.extend_from_slice(b"TimeLock-leader-selection-v2"); // Version bumped
+        input.extend_from_slice(b"TSDC-leader-selection-v2"); // DO NOT CHANGE - consensus critical
 
         let mut best_vrf_output = vec![0u8; 32];
         let mut best_leader = validators[0].0.clone();
