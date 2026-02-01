@@ -50,13 +50,9 @@ impl IPBlacklist {
     }
 
     /// Check if an IP is currently blacklisted
+    /// SECURITY: Blacklist takes precedence over whitelist
     pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String> {
-        // Whitelisted IPs are never blacklisted
-        if self.is_whitelisted(ip) {
-            return None;
-        }
-
-        // Check permanent blacklist
+        // Check permanent blacklist FIRST (even for whitelisted IPs)
         if let Some(reason) = self.permanent_blacklist.get(&ip) {
             return Some(format!("Permanently banned: {}", reason));
         }
@@ -77,11 +73,13 @@ impl IPBlacklist {
 
     /// Record a violation for an IP
     /// Returns true if the IP should be disconnected (auto-banned)
+    /// Note: Minor violations are still exempt for whitelisted IPs
+    /// Use record_severe_violation for security issues that should apply to everyone
     pub fn record_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
-        // Whitelisted IPs are exempt from violations
+        // Minor violations: whitelisted IPs are exempt
         if self.is_whitelisted(ip) {
             tracing::debug!(
-                "⚪ Ignoring violation for whitelisted IP {}: {}",
+                "⚪ Ignoring minor violation for whitelisted IP {}: {}",
                 ip,
                 reason
             );
@@ -171,19 +169,20 @@ impl IPBlacklist {
         )
     }
 
-    /// Record a SEVERE violation (corrupted blocks, invalid chain data)
+    /// Record a SEVERE violation (corrupted blocks, invalid chain data, reorg attacks)
     /// These are treated more harshly - immediate 1-hour ban on first offense,
     /// permanent ban on second offense
+    /// SECURITY: Severe violations apply even to whitelisted peers (blacklist overrides whitelist)
     /// Returns true if the IP should be disconnected
     pub fn record_severe_violation(&mut self, ip: IpAddr, reason: &str) -> bool {
-        // Whitelisted IPs are exempt
-        if self.is_whitelisted(ip) {
+        let is_whitelisted = self.is_whitelisted(ip);
+
+        if is_whitelisted {
             tracing::warn!(
-                "⚠️  SEVERE violation from whitelisted IP {} (not banning): {}",
+                "🛡️ SECURITY: Recording severe violation for WHITELISTED peer {} - blacklist will override: {}",
                 ip,
                 reason
             );
-            return false;
         }
 
         let now = Instant::now();

@@ -1713,6 +1713,30 @@ impl Blockchain {
 
         if common_ancestor == 0 && our_height > 0 {
             tracing::warn!("⚠️ Could not find common ancestor via hash comparison, using genesis");
+            // SECURITY: Reject rollback to genesis - this would wipe our entire chain
+            tracing::warn!(
+                "🛡️ SECURITY: REJECTED rollback to genesis from peer {} - cannot wipe entire chain",
+                peer_ip
+            );
+            return Err(format!(
+                "Security: Rejected rollback to genesis from peer {} - chains are incompatible",
+                peer_ip
+            ));
+        }
+
+        // SECURITY: Check reorg depth limit
+        let fork_depth = our_height.saturating_sub(common_ancestor);
+        if fork_depth > MAX_REORG_DEPTH {
+            tracing::warn!(
+                "🛡️ SECURITY: REJECTED deep rollback from peer {} - depth {} exceeds max {}",
+                peer_ip,
+                fork_depth,
+                MAX_REORG_DEPTH
+            );
+            return Err(format!(
+                "Security: Rejected deep rollback (depth {} > max {}) from peer {}",
+                fork_depth, MAX_REORG_DEPTH, peer_ip
+            ));
         }
 
         tracing::warn!(
@@ -5187,19 +5211,43 @@ impl Blockchain {
         // The longest valid chain is canonical, regardless of peer count
         // Shorter chains must sync to the longest chain
 
-        // Log all detected chains
-        tracing::info!(
-            "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
-            chain_counts.len()
-        );
-        for ((height, hash), peers) in &chain_counts {
-            tracing::info!(
-                "   📊 Chain @ height {}, hash {}: {} peers {:?}",
-                height,
-                hex::encode(&hash[..8]),
-                peers.len(),
-                peers
-            );
+        // Log chain analysis - rate limited for single chain, always log for forks
+        let num_chains = chain_counts.len();
+        static LAST_SINGLE_CHAIN_LOG: std::sync::atomic::AtomicI64 =
+            std::sync::atomic::AtomicI64::new(0);
+        let now_secs = chrono::Utc::now().timestamp();
+        let should_log = if num_chains == 1 {
+            // For single chain: log at most once per 5 minutes
+            let last_log = LAST_SINGLE_CHAIN_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs - last_log >= 300 {
+                LAST_SINGLE_CHAIN_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        } else {
+            // Always log when multiple chains detected (potential fork)
+            true
+        };
+
+        if should_log {
+            if num_chains == 1 {
+                tracing::info!("🔍 [CHAIN ANALYSIS] Network consensus: 1 chain detected");
+            } else {
+                tracing::info!(
+                    "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
+                    num_chains
+                );
+            }
+            for ((height, hash), peers) in &chain_counts {
+                tracing::info!(
+                    "   📊 Chain @ height {}, hash {}: {} peers {:?}",
+                    height,
+                    hex::encode(&hash[..8]),
+                    peers.len(),
+                    peers
+                );
+            }
         }
 
         // Find the LONGEST chain (highest height)
@@ -5728,43 +5776,52 @@ impl Blockchain {
                 // Calculate fork depth
                 let fork_depth = our_height.saturating_sub(common_ancestor);
 
-                // CRITICAL SECURITY CHECK: Verify genesis block compatibility
-                // If peer has blocks at height 0, verify it matches our genesis
-                // If common_ancestor is 0, their genesis must match ours
-                if common_ancestor == 0 {
-                    // Check if peer provided a genesis block
-                    if let Some(peer_genesis) = all_blocks.iter().find(|b| b.header.height == 0) {
-                        let peer_genesis_hash = peer_genesis.hash();
-                        if let Ok(our_genesis) = self.get_block_by_height(0).await {
-                            let our_genesis_hash = our_genesis.hash();
-                            if peer_genesis_hash != our_genesis_hash {
-                                warn!(
-                                    "🛡️ SECURITY: REJECTED REORG - DIFFERENT GENESIS BLOCK from peer {}",
-                                    peer_addr
-                                );
-                                warn!(
-                                    "   Our genesis: {}, Peer genesis: {}",
-                                    hex::encode(&our_genesis_hash[..8]),
-                                    hex::encode(&peer_genesis_hash[..8])
-                                );
-                                warn!("   Peer is on a completely different chain - cannot merge");
+                // CRITICAL SECURITY CHECK: Reject reorgs that go back to genesis
+                // If common_ancestor == 0, this means the chains diverged at or before genesis
+                // This is ALWAYS suspicious - either different genesis blocks or an attack
+                if common_ancestor == 0 && our_height > 0 {
+                    // We have blocks, but ancestor search went all the way to genesis
+                    // This means peer's chain doesn't share our history - REJECT
 
-                                // Mark peer as genesis-incompatible
-                                if let Some(registry) = self.peer_registry.read().await.as_ref() {
-                                    registry
-                                        .mark_genesis_incompatible(
-                                            &peer_addr,
-                                            &hex::encode(&our_genesis_hash[..16]),
-                                            &hex::encode(&peer_genesis_hash[..16]),
-                                        )
-                                        .await;
-                                }
+                    // Check if peer provided a genesis block for comparison
+                    let peer_genesis_info = all_blocks
+                        .iter()
+                        .find(|b| b.header.height == 0)
+                        .map(|b| hex::encode(&b.hash()[..8]));
 
-                                *self.fork_state.write().await = ForkResolutionState::None;
-                                return Ok(());
-                            }
-                        }
+                    let our_genesis_info = self
+                        .get_block_by_height(0)
+                        .await
+                        .map(|b| hex::encode(&b.hash()[..8]))
+                        .unwrap_or_else(|_| "unknown".to_string());
+
+                    let peer_genesis_str = peer_genesis_info
+                        .clone()
+                        .unwrap_or_else(|| "not provided".to_string());
+
+                    warn!(
+                        "🛡️ SECURITY: REJECTED REORG TO GENESIS from peer {} - chains diverged at genesis level",
+                        peer_addr
+                    );
+                    warn!(
+                        "   Our height: {}, our genesis: {}, peer genesis: {}",
+                        our_height, our_genesis_info, peer_genesis_str
+                    );
+                    warn!("   Peer is on a completely different chain - cannot reorg to genesis");
+
+                    // Mark peer as genesis-incompatible
+                    if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                        registry
+                            .mark_genesis_incompatible(
+                                &peer_addr,
+                                &our_genesis_info,
+                                &peer_genesis_info.unwrap_or_else(|| "unknown".to_string()),
+                            )
+                            .await;
                     }
+
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Ok(());
                 }
 
                 // CRITICAL SECURITY CHECK: Reject reorgs that are too deep
