@@ -425,6 +425,108 @@ impl Blockchain {
         self.genesis_timestamp // Use cached value
     }
 
+    /// Verify chain integrity on startup and fix height if needed
+    /// This handles cases where blocks were written but height update was not flushed
+    pub fn verify_and_fix_chain_height(&self) -> Result<bool, String> {
+        let stored_height = self
+            .current_height
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        // Scan forward from stored height to find actual highest block
+        let mut actual_height = stored_height;
+        for h in (stored_height + 1)..=(stored_height + 1000) {
+            let key = format!("block_{}", h);
+            if self.storage.get(key.as_bytes()).ok().flatten().is_some() {
+                // Verify block is not corrupted
+                if self.get_block(h).is_ok() {
+                    actual_height = h;
+                } else {
+                    // Block exists but is corrupted - stop here
+                    tracing::warn!("🔧 Block {} exists but is corrupted, stopping scan", h);
+                    break;
+                }
+            } else {
+                // No more blocks found
+                break;
+            }
+        }
+
+        if actual_height > stored_height {
+            tracing::warn!(
+                "🔧 Chain height inconsistency detected: stored={}, actual={}",
+                stored_height,
+                actual_height
+            );
+            tracing::info!(
+                "🔧 Updating chain height from {} to {}",
+                stored_height,
+                actual_height
+            );
+
+            // Update height in storage
+            let height_key = "chain_height".as_bytes();
+            let height_bytes = bincode::serialize(&actual_height).map_err(|e| e.to_string())?;
+            self.storage
+                .insert(height_key, height_bytes)
+                .map_err(|e| e.to_string())?;
+            self.storage.flush().map_err(|e| e.to_string())?;
+
+            // Update in-memory height
+            self.current_height
+                .store(actual_height, std::sync::atomic::Ordering::Release);
+
+            tracing::info!(
+                "✅ Chain height corrected to {} (found {} additional blocks)",
+                actual_height,
+                actual_height - stored_height
+            );
+            return Ok(true); // Height was fixed
+        }
+
+        // Also verify that the block at stored_height actually exists
+        if stored_height > 0 {
+            let key = format!("block_{}", stored_height);
+            if self.storage.get(key.as_bytes()).ok().flatten().is_none() {
+                // Height is set but block doesn't exist - need to find actual height
+                tracing::warn!(
+                    "🔧 Block {} (stored height) doesn't exist, scanning for actual height",
+                    stored_height
+                );
+
+                let mut found_height = 0u64;
+                for h in (0..stored_height).rev() {
+                    let key = format!("block_{}", h);
+                    if self.storage.get(key.as_bytes()).ok().flatten().is_some()
+                        && self.get_block(h).is_ok()
+                    {
+                        found_height = h;
+                        break;
+                    }
+                }
+
+                tracing::info!(
+                    "🔧 Correcting chain height from {} to {}",
+                    stored_height,
+                    found_height
+                );
+
+                let height_key = "chain_height".as_bytes();
+                let height_bytes = bincode::serialize(&found_height).map_err(|e| e.to_string())?;
+                self.storage
+                    .insert(height_key, height_bytes)
+                    .map_err(|e| e.to_string())?;
+                self.storage.flush().map_err(|e| e.to_string())?;
+
+                self.current_height
+                    .store(found_height, std::sync::atomic::Ordering::Release);
+
+                return Ok(true);
+            }
+        }
+
+        Ok(false) // No fix needed
+    }
+
     /// Migrate old-schema blocks to new schema
     /// This fixes blocks that were serialized before time_attestations changes
     pub async fn migrate_old_schema_blocks(&self) -> Result<u64, String> {
@@ -2690,6 +2792,8 @@ impl Blockchain {
                                     let height_bytes =
                                         bincode::serialize(&new_height).unwrap_or_default();
                                     let _ = self.storage.insert(height_key, height_bytes);
+                                    // CRITICAL: Flush to ensure height change persists across restarts
+                                    let _ = self.storage.flush();
                                     self.current_height
                                         .store(new_height, std::sync::atomic::Ordering::SeqCst);
                                     tracing::warn!(
@@ -2756,6 +2860,8 @@ impl Blockchain {
                                     let height_bytes =
                                         bincode::serialize(&new_height).unwrap_or_default();
                                     let _ = self.storage.insert(height_key, height_bytes);
+                                    // CRITICAL: Flush to ensure height change persists across restarts
+                                    let _ = self.storage.flush();
                                     self.current_height
                                         .store(new_height, std::sync::atomic::Ordering::SeqCst);
                                     tracing::warn!(

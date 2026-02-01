@@ -376,6 +376,20 @@ async fn main() {
 
     let blockchain = Arc::new(blockchain);
 
+    // Verify chain height integrity on startup (fix inconsistencies from crashes)
+    tracing::info!("🔍 Verifying chain height integrity...");
+    match blockchain.verify_and_fix_chain_height() {
+        Ok(true) => {
+            tracing::info!("✅ Chain height was corrected during startup verification");
+        }
+        Ok(false) => {
+            tracing::debug!("✓ Chain height is consistent");
+        }
+        Err(e) => {
+            tracing::warn!("⚠️ Chain height verification failed: {}", e);
+        }
+    }
+
     // Validate existing blockchain on startup
     let current_height = blockchain.get_height();
 
