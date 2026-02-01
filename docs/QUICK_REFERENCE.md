@@ -82,6 +82,10 @@ AVS:
   HEARTBEAT_PERIOD: 60 s
   HEARTBEAT_TTL:    180 s
   WITNESS_MIN:      3           # minimum witness attestations
+
+Fork Resolution:
+  Rule 1:          Longer chain wins (higher height)
+  Rule 2:          Lower hash wins (lexicographic tiebreaker)
 ```
 
 ---

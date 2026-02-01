@@ -2999,18 +2999,22 @@ impl Blockchain {
     ///
     /// Rules (in order of precedence):
     /// 1. Longer chain wins (most work)
-    /// 2. Higher cumulative VRF score wins (when equal length)
-    /// 3. Lower tip hash wins (deterministic tiebreaker when equal scores)
+    /// 2. Lower tip hash wins (deterministic tiebreaker - consistent with all fork resolution)
+    ///
+    /// NOTE: VRF scores are NOT used for fork resolution tiebreaking because:
+    /// - VRF scores are derived from hashes, so they're redundant
+    /// - "Lower hash wins" is the standard blockchain convention (Bitcoin, Ethereum)
+    /// - Consistency across all fork resolution code paths is critical
     ///
     /// This function MUST be deterministic - all nodes must make the same decision
     /// given the same inputs.
     pub fn choose_canonical_chain(
         our_height: u64,
         our_tip_hash: [u8; 32],
-        our_cumulative_score: u128,
+        _our_cumulative_score: u128,
         peer_height: u64,
         peer_tip_hash: [u8; 32],
-        peer_cumulative_score: u128,
+        _peer_cumulative_score: u128,
     ) -> (CanonicalChoice, String) {
         // Rule 1: Longer chain wins (most work)
         if peer_height > our_height {
@@ -3032,34 +3036,14 @@ impl Blockchain {
             );
         }
 
-        // Heights are equal - use Rule 2: Higher cumulative VRF score wins
-        if peer_cumulative_score > our_cumulative_score {
-            return (
-                CanonicalChoice::AdoptPeers,
-                format!(
-                    "Equal height {}, but peer has higher VRF score: {} > {}",
-                    our_height, peer_cumulative_score, our_cumulative_score
-                ),
-            );
-        }
-        if our_cumulative_score > peer_cumulative_score {
-            return (
-                CanonicalChoice::KeepOurs,
-                format!(
-                    "Equal height {}, our VRF score is higher: {} > {}",
-                    our_height, our_cumulative_score, peer_cumulative_score
-                ),
-            );
-        }
-
-        // Scores are equal - use Rule 3: Lexicographically smaller hash wins
-        // This is a deterministic tiebreaker that all nodes will agree on
+        // Rule 2: Lexicographically smaller hash wins (deterministic tiebreaker)
+        // This is consistent with fork_resolver.rs and masternode_authority.rs
         if peer_tip_hash < our_tip_hash {
             return (
                 CanonicalChoice::AdoptPeers,
                 format!(
-                    "Equal height {} and score {}, peer has smaller tip hash",
-                    our_height, our_cumulative_score
+                    "Equal height {}, peer has lower hash (canonical tiebreaker)",
+                    our_height
                 ),
             );
         }
@@ -3067,8 +3051,8 @@ impl Blockchain {
             return (
                 CanonicalChoice::KeepOurs,
                 format!(
-                    "Equal height {} and score {}, our tip hash is smaller",
-                    our_height, our_cumulative_score
+                    "Equal height {}, our hash is lower (canonical tiebreaker)",
+                    our_height
                 ),
             );
         }
@@ -5168,48 +5152,9 @@ impl Blockchain {
                     &consensus_hash,
                 );
 
-            // VRF-BASED TIEBREAKER: When masternode authority reaches hash tiebreaker,
-            // use VRF scores instead for cryptographically fair selection
-            let (final_should_switch, final_reason) = if reason.contains("deterministic tiebreaker")
-            {
-                // Calculate VRF scores for both chains
-                let our_vrf_score = self.calculate_chain_vrf_score(0, our_height).await;
-
-                // For peer chain, we estimate score based on their tip hash
-                // (full VRF comparison would require requesting peer blocks)
-                // Use first 16 bytes of hash as proxy for peer VRF score
-                let peer_vrf_score =
-                    u128::from_be_bytes(consensus_hash[0..16].try_into().unwrap_or([0u8; 16]));
-
-                let (vrf_choice, vrf_reason) = Self::choose_canonical_chain(
-                    our_height,
-                    our_hash,
-                    our_vrf_score,
-                    consensus_height,
-                    consensus_hash,
-                    peer_vrf_score,
-                );
-
-                match vrf_choice {
-                    CanonicalChoice::AdoptPeers => (
-                        true,
-                        format!(
-                            "SWITCH (VRF): {} | Our VRF: {}, Peer VRF: {}",
-                            vrf_reason, our_vrf_score, peer_vrf_score
-                        ),
-                    ),
-                    CanonicalChoice::KeepOurs => (
-                        false,
-                        format!(
-                            "KEEP (VRF): {} | Our VRF: {}, Peer VRF: {}",
-                            vrf_reason, our_vrf_score, peer_vrf_score
-                        ),
-                    ),
-                    CanonicalChoice::Identical => (should_switch, reason),
-                }
-            } else {
-                (should_switch, reason)
-            };
+            // Fork resolution uses "lower hash wins" consistently across all code paths
+            // No VRF override needed - masternode_authority already uses hash tiebreaker
+            let (final_should_switch, final_reason) = (should_switch, reason);
 
             warn!(
                 "   Decision: {} - {}",

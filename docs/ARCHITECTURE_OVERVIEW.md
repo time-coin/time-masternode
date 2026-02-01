@@ -1,13 +1,20 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-01-28  
-**Version:** 1.1.0 (TimeVote Complete, Critical Bugs Fixed)
+**Last Updated:** 2026-02-01  
+**Version:** 1.1.0 (Fork Resolution Consistency Fix)
 
 ---
 
-## Recent Updates (v1.1.0 - January 28, 2026)
+## Recent Updates (v1.1.0 - February 1, 2026)
 
 ### Critical Bug Fixes
+
+**Bug #4: Fork Resolution Inconsistency (Feb 1, 2026)**
+- **Issue**: VRF tiebreaker used "higher score wins" but hash tiebreaker used "lower hash wins"
+- **Impact**: Network fragmentation - nodes on same-height fork couldn't agree on canonical chain
+- **Root Cause**: `choose_canonical_chain()` had VRF score comparison that contradicted hash tiebreaker
+- **Fix**: Removed VRF score from fork resolution; now uses "lower hash wins" consistently everywhere
+- **Result**: All fork resolution paths (blockchain.rs, fork_resolver.rs, masternode_authority.rs) now agree
 
 **Bug #1: Broadcast Callback Not Wired**
 - **Issue**: Consensus engine had no way to broadcast TimeVote requests
@@ -163,6 +170,29 @@ pub struct TimeLockConsensus {
     finalized_height: AtomicU64,                       // Last finalized block
 }
 ```
+
+---
+
+### 2.1 Fork Resolution Rules
+
+**Canonical Chain Selection** (deterministic, all nodes agree):
+
+1. **Longer chain wins** - Higher block height is always canonical
+2. **Lower hash wins** - At equal height, lexicographically smaller block hash is canonical
+
+**Consistency:** This "lower hash wins" rule is applied uniformly across:
+- `blockchain.rs` - `choose_canonical_chain()`
+- `ai/fork_resolver.rs` - AI-assisted fork decisions
+- `masternode_authority.rs` - Masternode chain authority analysis
+- `network/peer_connection.rs` - Peer chain comparison
+
+**Why lower hash?**
+- Deterministic: All nodes compute same result
+- Simple: No external dependencies
+- Standard: Follows Bitcoin/Ethereum convention
+- Verifiable: Anyone can check the comparison
+
+**Note:** VRF is used for **leader selection** (who produces blocks), NOT for fork resolution tiebreaking.
 
 ---
 
