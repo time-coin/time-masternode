@@ -448,10 +448,7 @@ impl Blockchain {
                     highest_contiguous = h;
                 } else {
                     // Block exists but corrupted - chain breaks here
-                    tracing::warn!(
-                        "🔧 Block {} exists but is corrupted - chain breaks here",
-                        h
-                    );
+                    tracing::warn!("🔧 Block {} exists but is corrupted - chain breaks here", h);
                     break;
                 }
             } else {
@@ -4315,7 +4312,8 @@ impl Blockchain {
         if let Err(e) = bincode::serialize(&block) {
             tracing::warn!(
                 "🚫 Rejecting corrupted block {} from network: serialization failed: {}",
-                block_height, e
+                block_height,
+                e
             );
             return Err(format!(
                 "Block {} is corrupted (serialization failed): {}",
@@ -5730,7 +5728,7 @@ impl Blockchain {
                         *self.fork_state.write().await = ForkResolutionState::None;
                         return Ok(());
                     }
-                    
+
                     // Also check that the resulting chain would actually be longer
                     let peer_chain_length = peer_tip_height - common_ancestor;
                     let our_chain_length = our_height - common_ancestor;
@@ -5742,7 +5740,7 @@ impl Blockchain {
                         *self.fork_state.write().await = ForkResolutionState::None;
                         return Ok(());
                     }
-                    
+
                     info!("📊 Simplified resolver decided to accept peer chain (longest valid chain rule)");
                     info!(
                         "📊 Chain comparison: peer has {} blocks from ancestor {} vs our {} blocks",
@@ -6414,21 +6412,21 @@ impl Blockchain {
         // SIMPLIFIED APPROACH: Instead of binary search (which can fail with incomplete data),
         // search linearly from the lowest peer block downward to find the common ancestor.
         // This is more reliable when peers send partial block sets.
-        
+
         // Find the lowest height in peer's block set
         let peer_lowest = sorted_blocks.first().unwrap().header.height;
-        
+
         // If peer's lowest block matches ours, that's likely the common ancestor
         // Search from peer_lowest downward to find where chains match
         let mut candidate_ancestor = 0u64;
-        
+
         for height in (0..=peer_lowest).rev() {
             // Get our block hash at this height
             let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,
                 Err(_) => continue, // We don't have this block, try lower
             };
-            
+
             // If peer has this block, check if hashes match
             if let Some(peer_hash) = peer_blocks.get(&height) {
                 if our_hash == *peer_hash {
@@ -6454,7 +6452,9 @@ impl Blockchain {
             } else {
                 // Peer doesn't have this block - check if peer's NEXT block builds on our block
                 // This handles the case where common ancestor is below peer's lowest block
-                if let Some(peer_next_block) = sorted_blocks.iter().find(|b| b.header.height == height + 1) {
+                if let Some(peer_next_block) =
+                    sorted_blocks.iter().find(|b| b.header.height == height + 1)
+                {
                     if peer_next_block.header.previous_hash == our_hash {
                         // Peer's next block builds on our block at this height - this is the ancestor
                         candidate_ancestor = height;
@@ -6468,7 +6468,7 @@ impl Blockchain {
                 }
             }
         }
-        
+
         info!(
             "🔍 Common ancestor search complete: found ancestor at height {} (peer lowest: {}, our height: {})",
             candidate_ancestor, peer_lowest, our_height

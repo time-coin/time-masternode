@@ -1552,7 +1552,8 @@ async fn main() {
                             let mut max_peer_height = current_height;
                             let mut peer_heights_available = 0;
                             for peer_ip in &connected_peers {
-                                if let Some(h) = block_peer_registry.get_peer_height(peer_ip).await {
+                                if let Some(h) = block_peer_registry.get_peer_height(peer_ip).await
+                                {
                                     peer_heights_available += 1;
                                     if h > max_peer_height {
                                         max_peer_height = h;
@@ -1568,7 +1569,10 @@ async fn main() {
                                     current_height
                                 );
                                 for peer_ip in &connected_peers {
-                                    let msg = NetworkMessage::GetBlocks(current_height + 1, max_peer_height.min(current_height + 50));
+                                    let msg = NetworkMessage::GetBlocks(
+                                        current_height + 1,
+                                        max_peer_height.min(current_height + 50),
+                                    );
                                     let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
                                 }
                                 continue;
@@ -1594,7 +1598,10 @@ async fn main() {
                 } else {
                     // No compatible peers available
                     if blocks_behind > 10 {
-                        tracing::warn!("⚠️  {} blocks behind but no peers available - waiting", blocks_behind);
+                        tracing::warn!(
+                            "⚠️  {} blocks behind but no peers available - waiting",
+                            blocks_behind
+                        );
                         continue;
                     }
                     tracing::warn!("⚠️  No peers available for sync - proceeding to production");

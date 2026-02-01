@@ -2414,23 +2414,28 @@ impl MessageHandler {
                         "🚨 [{}] CORRUPTED BLOCK {} from {} - potential attack: {}",
                         self.direction, block.header.height, self.peer_ip, e
                     );
-                    
+
                     // Record severe violation and potentially ban the peer
-                    if let Ok(ip) = self.peer_ip.parse::<std::net::IpAddr>() {
-                        // Get blacklist from context if available (need to add to context)
-                        // For now, mark peer as incompatible
-                        context.peer_registry.mark_incompatible(
-                            &self.peer_ip,
-                            &format!("Sent corrupted block {}: {}", block.header.height, e)
-                        ).await;
+                    if self.peer_ip.parse::<std::net::IpAddr>().is_ok() {
+                        // Mark peer as incompatible - they have corrupted data
+                        context
+                            .peer_registry
+                            .mark_incompatible(
+                                &self.peer_ip,
+                                &format!("Sent corrupted block {}: {}", block.header.height, e),
+                            )
+                            .await;
                     }
-                    
+
                     // Stop processing ALL blocks from this peer in this batch
                     warn!(
                         "🚫 [{}] Rejecting all {} blocks from {} due to corruption",
                         self.direction, block_count, self.peer_ip
                     );
-                    return Err(format!("Peer {} sent corrupted block - connection should be terminated", self.peer_ip));
+                    return Err(format!(
+                        "Peer {} sent corrupted block - connection should be terminated",
+                        self.peer_ip
+                    ));
                 }
                 Err(e) => {
                     warn!(
