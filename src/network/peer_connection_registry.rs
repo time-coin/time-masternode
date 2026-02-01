@@ -411,21 +411,31 @@ impl PeerConnectionRegistry {
             .cloned()
             .collect();
 
-        // Debug logging to diagnose connection tracking
+        // Rate-limited logging for incompatible peers (once per 60 seconds)
         if !incompatible.is_empty() {
-            tracing::warn!(
-                "⚠️ Incompatible peers: {} marked, {} in connections, {} compatible",
-                incompatible.len(),
-                all_connections.len(),
-                compatible.len()
-            );
-            for (ip, (marked_at, reason)) in incompatible.iter() {
+            static LAST_INCOMPATIBLE_LOG: std::sync::atomic::AtomicI64 =
+                std::sync::atomic::AtomicI64::new(0);
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let last_log = LAST_INCOMPATIBLE_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs - last_log >= 60 {
+                LAST_INCOMPATIBLE_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
                 tracing::warn!(
-                    "  🚫 {} - {} ({}s ago)",
-                    ip,
-                    reason,
-                    marked_at.elapsed().as_secs()
+                    "⚠️ Incompatible peers: {} marked, {} in connections, {} compatible",
+                    incompatible.len(),
+                    all_connections.len(),
+                    compatible.len()
                 );
+                for (ip, (marked_at, reason)) in incompatible.iter() {
+                    tracing::warn!(
+                        "  🚫 {} - {} ({}s ago)",
+                        ip,
+                        reason,
+                        marked_at.elapsed().as_secs()
+                    );
+                }
             }
         }
 
