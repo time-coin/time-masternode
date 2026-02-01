@@ -5772,6 +5772,16 @@ impl Blockchain {
 
                 // Decision: reorg or stay based on simplified resolver
                 if resolution.accept_peer_chain {
+                    // CRITICAL SAFETY CHECK: Common ancestor cannot be higher than our chain
+                    if common_ancestor > our_height {
+                        warn!(
+                            "🚫 REJECTED REORG: Common ancestor {} > our height {} - bug in ancestor search!",
+                            common_ancestor, our_height
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Ok(());
+                    }
+
                     // CRITICAL SAFETY CHECK: Double-verify we're not reorging to a shorter chain
                     // This is the LONGEST VALID CHAIN RULE - we must NEVER accept a shorter chain
                     if peer_tip_height < our_height {
@@ -5784,8 +5794,9 @@ impl Blockchain {
                     }
 
                     // Also check that the resulting chain would actually be longer
-                    let peer_chain_length = peer_tip_height - common_ancestor;
-                    let our_chain_length = our_height - common_ancestor;
+                    // Use saturating_sub to prevent underflow bugs
+                    let peer_chain_length = peer_tip_height.saturating_sub(common_ancestor);
+                    let our_chain_length = our_height.saturating_sub(common_ancestor);
                     if peer_chain_length <= our_chain_length {
                         warn!(
                             "🚫 REJECTED REORG: Peer chain from ancestor {} is not longer ({} <= {}). Keeping our chain.",
@@ -6474,7 +6485,11 @@ impl Blockchain {
         // Search from peer_lowest downward to find where chains match
         let mut candidate_ancestor = 0u64;
 
-        for height in (0..=peer_lowest).rev() {
+        // CRITICAL: Common ancestor cannot be higher than our chain height
+        // Only search up to min(our_height, peer_lowest)
+        let search_ceiling = our_height.min(peer_lowest);
+
+        for height in (0..=search_ceiling).rev() {
             // Get our block hash at this height
             let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,
@@ -6521,6 +6536,15 @@ impl Blockchain {
                     }
                 }
             }
+        }
+
+        // SANITY CHECK: Common ancestor cannot be higher than our height
+        if candidate_ancestor > our_height {
+            warn!(
+                "🚫 BUG DETECTED: Common ancestor {} > our height {}. Capping to our height.",
+                candidate_ancestor, our_height
+            );
+            candidate_ancestor = our_height;
         }
 
         info!(
