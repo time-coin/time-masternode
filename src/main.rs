@@ -1547,9 +1547,23 @@ async fn main() {
                                 continue;
                             }
                         } else {
-                            // None means: same height, same hash - we're in sync with peers
-                            // At bootstrap (height 0), this means everyone has genesis but no block 1
-                            // Fall through to production (debug level to avoid spam during catchup)
+                            // None means we couldn't determine peer consensus
+                            // This could be: no peer responses, all peers have zero hash, or other issues
+                            // BE CONSERVATIVE: If we're far behind expected height, don't produce
+                            // Only proceed to production if we're at expected height (not catching up)
+                            if blocks_behind > 10 {
+                                tracing::warn!(
+                                    "⚠️  {} blocks behind but couldn't determine peer consensus - waiting for sync",
+                                    blocks_behind
+                                );
+                                // Request blocks from all peers to try to get unstuck
+                                for peer_ip in &connected_peers {
+                                    let msg = NetworkMessage::GetBlocks(current_height + 1, current_height + 50);
+                                    let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                                }
+                                continue;
+                            }
+                            // Close to expected height - safe to proceed
                             tracing::debug!(
                                 "In sync with {} peers at height {} - proceeding to production",
                                 connected_peers.len(),
@@ -1558,6 +1572,11 @@ async fn main() {
                         }
                     }
                 } else {
+                    // No compatible peers available
+                    if blocks_behind > 10 {
+                        tracing::warn!("⚠️  {} blocks behind but no peers available - waiting", blocks_behind);
+                        continue;
+                    }
                     tracing::warn!("⚠️  No peers available for sync - proceeding to production");
                 }
             }
