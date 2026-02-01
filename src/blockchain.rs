@@ -3340,11 +3340,13 @@ impl Blockchain {
                 serialized // Don't compress if it makes data larger
             }
         } else {
-            serialized
+            serialized.clone()
         };
 
+        let data_len = data_to_store.len();
+
         self.storage
-            .insert(key.as_bytes(), data_to_store)
+            .insert(key.as_bytes(), data_to_store.clone())
             .map_err(|e| {
                 tracing::error!(
                     "❌ Failed to insert block {} into database: {} (type: {:?})",
@@ -3370,19 +3372,71 @@ impl Blockchain {
             e.to_string()
         })?;
 
-        // Optimize disk I/O: Only flush every 10 blocks instead of every block
-        // Sled handles durability via write-ahead log, so this is safe
-        // Reduces I/O pressure while maintaining data integrity
-        if block.header.height % 10 == 0 {
-            self.storage.flush().map_err(|e| {
+        // CRITICAL: Flush EVERY block to ensure durability
+        // Previous optimization (flush every 10 blocks) was causing corruption
+        // when nodes restart between flushes. Data integrity > performance.
+        self.storage.flush().map_err(|e| {
+            tracing::error!(
+                "❌ Failed to flush block {} to disk: {}",
+                block.header.height,
+                e
+            );
+            e.to_string()
+        })?;
+
+        // VERIFICATION: Read back and verify block was stored correctly
+        // This catches storage corruption immediately instead of later
+        match self.storage.get(key.as_bytes()) {
+            Ok(Some(stored_data)) => {
+                if stored_data.len() != data_len {
+                    tracing::error!(
+                        "🚨 STORAGE CORRUPTION: Block {} wrote {} bytes but read back {} bytes!",
+                        block.header.height,
+                        data_len,
+                        stored_data.len()
+                    );
+                    return Err(format!(
+                        "Block {} storage verification failed: size mismatch ({} vs {})",
+                        block.header.height,
+                        data_len,
+                        stored_data.len()
+                    ));
+                }
+                // Verify we can deserialize what we stored
+                let decompressed = crate::storage::decompress_block(&stored_data).map_err(|e| {
+                    format!(
+                        "Block {} verification failed on decompress: {}",
+                        block.header.height, e
+                    )
+                })?;
+                let _: Block = bincode::deserialize(&decompressed).map_err(|e| {
+                    format!(
+                        "Block {} verification failed on deserialize: {}",
+                        block.header.height, e
+                    )
+                })?;
+            }
+            Ok(None) => {
                 tracing::error!(
-                    "❌ Failed to flush block {} to disk: {}",
+                    "🚨 STORAGE CORRUPTION: Block {} not found after save!",
+                    block.header.height
+                );
+                return Err(format!(
+                    "Block {} disappeared after save!",
+                    block.header.height
+                ));
+            }
+            Err(e) => {
+                tracing::error!(
+                    "🚨 STORAGE ERROR: Failed to verify block {}: {}",
                     block.header.height,
                     e
                 );
-                e.to_string()
-            })?;
-            tracing::debug!("💾 Flushed blocks up to height {}", block.header.height);
+                return Err(format!(
+                    "Block {} verification read failed: {}",
+                    block.header.height, e
+                ));
+            }
         }
 
         Ok(())
