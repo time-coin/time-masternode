@@ -1165,9 +1165,33 @@ async fn main() {
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
 
-        // Give time for initial blockchain sync to complete before starting block production
-        // Reduced to 10s for faster catchup startup
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        // CRITICAL: Wait for genesis block before starting block production
+        // Without genesis, we cannot produce any blocks (block 1 needs block 0's hash)
+        let mut genesis_wait = 0;
+        const MAX_GENESIS_WAIT_SECS: u64 = 300; // 5 minutes max wait for genesis
+        while !block_blockchain.has_genesis() && genesis_wait < MAX_GENESIS_WAIT_SECS {
+            if genesis_wait % 30 == 0 {
+                tracing::info!(
+                    "⏳ Waiting for genesis block before starting block production ({}s elapsed)...",
+                    genesis_wait
+                );
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            genesis_wait += 1;
+        }
+
+        if !block_blockchain.has_genesis() {
+            tracing::error!(
+                "❌ No genesis block after {}s - cannot start block production",
+                MAX_GENESIS_WAIT_SECS
+            );
+            return;
+        }
+
+        tracing::info!("✅ Genesis block ready - starting block production loop");
+
+        // Give a little more time for initial blockchain sync to complete
+        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
         // Time-based catchup trigger: Check if we're behind schedule
         // Use time rather than block count to determine when to trigger catchup
