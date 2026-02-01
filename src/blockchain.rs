@@ -426,46 +426,83 @@ impl Blockchain {
     }
 
     /// Verify chain integrity on startup and fix height if needed
-    /// This handles cases where blocks were written but height update was not flushed
+    /// This handles cases where blocks were written but height update was not flushed,
+    /// or where gaps exist in the chain due to corruption
     pub fn verify_and_fix_chain_height(&self) -> Result<bool, String> {
         let stored_height = self
             .current_height
             .load(std::sync::atomic::Ordering::Acquire);
 
-        // Scan forward from stored height to find actual highest block
-        let mut actual_height = stored_height;
-        for h in (stored_height + 1)..=(stored_height + 1000) {
+        tracing::info!(
+            "🔍 Verifying chain integrity: stored height = {}",
+            stored_height
+        );
+
+        // First, find the highest contiguous chain from genesis
+        // This handles gaps in the middle of the chain
+        let mut highest_contiguous = 0u64;
+        for h in 0..=stored_height {
             let key = format!("block_{}", h);
             if self.storage.get(key.as_bytes()).ok().flatten().is_some() {
-                // Verify block is not corrupted
                 if self.get_block(h).is_ok() {
-                    actual_height = h;
+                    highest_contiguous = h;
                 } else {
-                    // Block exists but is corrupted - stop here
-                    tracing::warn!("🔧 Block {} exists but is corrupted, stopping scan", h);
+                    // Block exists but corrupted - chain breaks here
+                    tracing::warn!(
+                        "🔧 Block {} exists but is corrupted - chain breaks here",
+                        h
+                    );
                     break;
                 }
             } else {
-                // No more blocks found
+                // Gap found - chain breaks here
+                if h > 0 {
+                    tracing::warn!(
+                        "🔧 Gap detected: block {} missing (highest contiguous: {})",
+                        h,
+                        highest_contiguous
+                    );
+                }
                 break;
             }
         }
 
-        if actual_height > stored_height {
+        // Also scan forward from stored height for blocks that exist beyond it
+        let mut actual_height = highest_contiguous;
+        for h in (stored_height + 1)..=(stored_height + 1000) {
+            let key = format!("block_{}", h);
+            if self.storage.get(key.as_bytes()).ok().flatten().is_some() {
+                if self.get_block(h).is_ok() {
+                    actual_height = h;
+                } else {
+                    tracing::warn!("🔧 Block {} exists but is corrupted, stopping scan", h);
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Use the highest contiguous chain as our actual height
+        // (blocks beyond a gap are orphaned and will need to be re-synced)
+        let correct_height = highest_contiguous;
+
+        if correct_height != stored_height {
             tracing::warn!(
-                "🔧 Chain height inconsistency detected: stored={}, actual={}",
+                "🔧 Chain height inconsistency: stored={}, highest_contiguous={}, scanned_high={}",
                 stored_height,
+                highest_contiguous,
                 actual_height
             );
             tracing::info!(
-                "🔧 Updating chain height from {} to {}",
+                "🔧 Correcting chain height from {} to {}",
                 stored_height,
-                actual_height
+                correct_height
             );
 
             // Update height in storage
             let height_key = "chain_height".as_bytes();
-            let height_bytes = bincode::serialize(&actual_height).map_err(|e| e.to_string())?;
+            let height_bytes = bincode::serialize(&correct_height).map_err(|e| e.to_string())?;
             self.storage
                 .insert(height_key, height_bytes)
                 .map_err(|e| e.to_string())?;
@@ -473,57 +510,20 @@ impl Blockchain {
 
             // Update in-memory height
             self.current_height
-                .store(actual_height, std::sync::atomic::Ordering::Release);
+                .store(correct_height, std::sync::atomic::Ordering::Release);
 
             tracing::info!(
-                "✅ Chain height corrected to {} (found {} additional blocks)",
-                actual_height,
-                actual_height - stored_height
+                "✅ Chain height corrected to {} (will re-sync {} blocks)",
+                correct_height,
+                stored_height.saturating_sub(correct_height)
             );
-            return Ok(true); // Height was fixed
+            return Ok(true);
         }
 
-        // Also verify that the block at stored_height actually exists
-        if stored_height > 0 {
-            let key = format!("block_{}", stored_height);
-            if self.storage.get(key.as_bytes()).ok().flatten().is_none() {
-                // Height is set but block doesn't exist - need to find actual height
-                tracing::warn!(
-                    "🔧 Block {} (stored height) doesn't exist, scanning for actual height",
-                    stored_height
-                );
-
-                let mut found_height = 0u64;
-                for h in (0..stored_height).rev() {
-                    let key = format!("block_{}", h);
-                    if self.storage.get(key.as_bytes()).ok().flatten().is_some()
-                        && self.get_block(h).is_ok()
-                    {
-                        found_height = h;
-                        break;
-                    }
-                }
-
-                tracing::info!(
-                    "🔧 Correcting chain height from {} to {}",
-                    stored_height,
-                    found_height
-                );
-
-                let height_key = "chain_height".as_bytes();
-                let height_bytes = bincode::serialize(&found_height).map_err(|e| e.to_string())?;
-                self.storage
-                    .insert(height_key, height_bytes)
-                    .map_err(|e| e.to_string())?;
-                self.storage.flush().map_err(|e| e.to_string())?;
-
-                self.current_height
-                    .store(found_height, std::sync::atomic::Ordering::Release);
-
-                return Ok(true);
-            }
-        }
-
+        tracing::info!(
+            "✅ Chain integrity verified: height {} with all blocks present",
+            stored_height
+        );
         Ok(false) // No fix needed
     }
 
