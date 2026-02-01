@@ -2696,6 +2696,11 @@ impl Blockchain {
                                         new_height, height
                                     );
                                 }
+                                // Return error immediately - caller should retry sync
+                                return Err(format!(
+                                    "Block {} was corrupted and deleted - restart sync from height {}",
+                                    height, height.saturating_sub(1)
+                                ));
                             }
                         }
                     }
@@ -3361,7 +3366,9 @@ impl Blockchain {
             .map_err(|e| e.to_string())?;
 
         if let Some(v) = value {
-            let block: Block = bincode::deserialize(&v).map_err(|e| e.to_string())?;
+            // Decompress if necessary (handles both compressed and uncompressed)
+            let data = crate::storage::decompress_block(&v).map_err(|e| e.to_string())?;
+            let block: Block = bincode::deserialize(&data).map_err(|e| e.to_string())?;
             Ok(block)
         } else {
             Err(format!("Block {} not found in storage", height))
