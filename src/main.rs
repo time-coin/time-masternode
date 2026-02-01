@@ -1547,28 +1547,48 @@ async fn main() {
                                 continue;
                             }
                         } else {
-                            // None means we couldn't determine peer consensus
-                            // This could be: no peer responses, all peers have zero hash, or other issues
-                            // BE CONSERVATIVE: If we're far behind expected height, don't produce
-                            // Only proceed to production if we're at expected height (not catching up)
-                            if blocks_behind > 10 {
-                                tracing::warn!(
-                                    "⚠️  {} blocks behind but couldn't determine peer consensus - waiting for sync",
-                                    blocks_behind
+                            // None means we couldn't determine peer consensus (no cached chain tips with hash)
+                            // Check raw peer heights from pong responses to avoid deadlock
+                            let mut max_peer_height = current_height;
+                            let mut peer_heights_available = 0;
+                            for peer_ip in &connected_peers {
+                                if let Some(h) = block_peer_registry.get_peer_height(peer_ip).await {
+                                    peer_heights_available += 1;
+                                    if h > max_peer_height {
+                                        max_peer_height = h;
+                                    }
+                                }
+                            }
+
+                            // If peers have significantly higher height, sync first
+                            if max_peer_height > current_height + 5 {
+                                tracing::info!(
+                                    "📡 Peers ahead: max peer height {} > our height {} - syncing",
+                                    max_peer_height,
+                                    current_height
                                 );
-                                // Request blocks from all peers to try to get unstuck
                                 for peer_ip in &connected_peers {
-                                    let msg = NetworkMessage::GetBlocks(current_height + 1, current_height + 50);
+                                    let msg = NetworkMessage::GetBlocks(current_height + 1, max_peer_height.min(current_height + 50));
                                     let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
                                 }
                                 continue;
                             }
-                            // Close to expected height - safe to proceed
-                            tracing::debug!(
-                                "In sync with {} peers at height {} - proceeding to production",
-                                connected_peers.len(),
-                                current_height
-                            );
+
+                            // Peers are at similar height - check if we're all catching up together
+                            if peer_heights_available > 0 {
+                                tracing::info!(
+                                    "📊 All {} peers at similar height (~{}) - proceeding to production",
+                                    peer_heights_available,
+                                    max_peer_height
+                                );
+                            } else if blocks_behind > 10 {
+                                // No peer height info and far behind - wait a bit for pongs
+                                tracing::debug!(
+                                    "⏳ {} blocks behind, waiting for peer height info",
+                                    blocks_behind
+                                );
+                                continue;
+                            }
                         }
                     }
                 } else {
