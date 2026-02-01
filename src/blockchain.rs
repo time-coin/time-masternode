@@ -2687,8 +2687,9 @@ impl Blockchain {
                                 if height > 0 {
                                     let new_height = height - 1;
                                     let height_key = "chain_height".as_bytes();
-                                    let height_bytes = new_height.to_le_bytes();
-                                    let _ = self.storage.insert(height_key, &height_bytes);
+                                    let height_bytes =
+                                        bincode::serialize(&new_height).unwrap_or_default();
+                                    let _ = self.storage.insert(height_key, height_bytes);
                                     self.current_height
                                         .store(new_height, std::sync::atomic::Ordering::SeqCst);
                                     tracing::warn!(
@@ -2752,8 +2753,9 @@ impl Blockchain {
                                 if height > 0 {
                                     let new_height = height - 1;
                                     let height_key = "chain_height".as_bytes();
-                                    let height_bytes = new_height.to_le_bytes();
-                                    let _ = self.storage.insert(height_key, &height_bytes);
+                                    let height_bytes =
+                                        bincode::serialize(&new_height).unwrap_or_default();
+                                    let _ = self.storage.insert(height_key, height_bytes);
                                     self.current_height
                                         .store(new_height, std::sync::atomic::Ordering::SeqCst);
                                     tracing::warn!(
