@@ -306,7 +306,7 @@ impl Blockchain {
             validator,
             consensus_health,
             tx_index: None, // Initialize without txindex, call build_tx_index() separately
-            compress_blocks: true, // Enable by default, can be configured via config
+            compress_blocks: false, // Disabled temporarily to debug block corruption issues
         }
     }
 
