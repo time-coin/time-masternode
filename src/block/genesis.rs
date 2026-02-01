@@ -47,31 +47,26 @@ impl GenesisBlock {
     }
 
     /// Verify genesis timestamp matches network template
+    /// CRITICAL: Both testnet and mainnet use FIXED timestamps for deterministic genesis
     pub fn verify_timestamp(block: &Block, network: NetworkType) -> Result<(), String> {
         let expected_timestamp = Self::genesis_timestamp(network);
-        // For testnet, allow dynamic timestamps (aligned to 10-min intervals)
-        if matches!(network, NetworkType::Testnet) {
-            // Just verify it's a valid timestamp (positive)
-            if block.header.timestamp <= 0 {
-                return Err("Genesis timestamp must be positive".to_string());
-            }
-            return Ok(());
-        }
-        // For mainnet, verify exact timestamp
+        // Both testnet and mainnet require exact timestamp match for deterministic genesis
         if block.header.timestamp != expected_timestamp {
             return Err(format!(
-                "Genesis timestamp mismatch: expected {}, got {}",
-                expected_timestamp, block.header.timestamp
+                "Genesis timestamp mismatch: expected {}, got {} (network: {:?})",
+                expected_timestamp, block.header.timestamp, network
             ));
         }
         Ok(())
     }
 
     /// Get genesis timestamp for network
+    /// CRITICAL: These are FIXED values - all nodes must use the same timestamp
+    /// to produce identical genesis blocks and be on the same chain
     pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
-            NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z (reference only, testnet uses dynamic)
-            NetworkType::Mainnet => 1767225600, // 2026-01-01T00:00:00Z
+            NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z - FIXED for determinism
+            NetworkType::Mainnet => 1767225600, // 2026-01-01T00:00:00Z - FIXED for determinism
         }
     }
 

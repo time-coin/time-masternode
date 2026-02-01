@@ -15,7 +15,7 @@ use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
-use chrono::{Timelike, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -658,7 +658,6 @@ impl Blockchain {
     /// This is called after masternodes have had time to register via network discovery
     pub async fn generate_dynamic_genesis(&self) -> Result<(), String> {
         use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
-        use chrono::TimeZone;
 
         // Check if genesis already exists
         if self.has_genesis() {
@@ -666,39 +665,22 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Genesis timestamp:
-        // - Testnet: Use current time rounded to nearest 10-minute mark
-        // - Mainnet: Fixed January 1, 2026 00:00:00 GMT
-        let genesis_timestamp = match self.network_type {
-            NetworkType::Testnet => {
-                // Use current time rounded down to nearest 10-minute interval
-                let now = chrono::Utc::now();
-                let minutes = now.minute();
-                let aligned_minute = (minutes / 10) * 10;
-                let aligned_time = now
-                    .with_minute(aligned_minute)
-                    .and_then(|t| t.with_second(0))
-                    .and_then(|t| t.with_nanosecond(0))
-                    .unwrap()
-                    .timestamp();
-
-                tracing::info!(
-                    "🕐 Using current time for testnet genesis: {} (aligned to 10-min interval)",
-                    chrono::DateTime::from_timestamp(aligned_time, 0)
-                        .unwrap()
-                        .format("%Y-%m-%d %H:%M:%S UTC")
-                );
-                aligned_time
-            }
-            NetworkType::Mainnet => {
-                let fixed_time = chrono::Utc
-                    .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
-                    .unwrap()
-                    .timestamp();
-                tracing::info!("🕐 Using fixed mainnet genesis time: January 1, 2026 00:00:00 GMT");
-                fixed_time
-            }
-        };
+        // Genesis timestamp: Use FIXED timestamps for deterministic genesis hash
+        // All nodes MUST produce identical genesis blocks to be on the same chain
+        // - Testnet: December 1, 2025 00:00:00 UTC (1764547200)
+        // - Mainnet: January 1, 2026 00:00:00 UTC (1767225600)
+        let genesis_timestamp = self.network_type.genesis_timestamp();
+        tracing::info!(
+            "🕐 Using fixed {} genesis timestamp: {} ({})",
+            match self.network_type {
+                NetworkType::Testnet => "testnet",
+                NetworkType::Mainnet => "mainnet",
+            },
+            genesis_timestamp,
+            chrono::DateTime::from_timestamp(genesis_timestamp, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "invalid".to_string())
+        );
 
         // Get all registered masternodes
         let registered = self.masternode_registry.get_all().await;
