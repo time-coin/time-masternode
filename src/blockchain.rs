@@ -4477,14 +4477,58 @@ impl Blockchain {
                 ));
             }
 
-            // We don't have a block at this height - fill the gap
-            // This shouldn't normally happen if chain is consistent
+            // We don't have a block at this height - this means our chain has a gap
+            // This can happen if the database is corrupted or height metadata is ahead of actual blocks
+            // Try to fill the gap by accepting this block
             tracing::warn!(
-                "⚠️  Received block {} but we're at height {} with gap",
+                "⚠️  Gap detected: height {} missing at chain height {} - attempting to fill",
                 block_height,
                 current
             );
-            return Ok(false);
+
+            // Check if we have the previous block to validate against
+            if block_height > 0 {
+                match self.get_block(block_height - 1) {
+                    Ok(prev_block) => {
+                        // Validate that this block connects to the previous
+                        if block.header.previous_hash != prev_block.hash() {
+                            tracing::warn!(
+                                "❌ Cannot fill gap: block {} prev_hash {} doesn't match block {} hash {}",
+                                block_height,
+                                hex::encode(&block.header.previous_hash[..8]),
+                                block_height - 1,
+                                hex::encode(&prev_block.hash()[..8])
+                            );
+                            return Ok(false);
+                        }
+                        // Validate and add the block
+                        self.validate_block(&block, Some(prev_block.hash()))?;
+                        tracing::info!(
+                            "✅ Filling gap: adding block {} (hash: {})",
+                            block_height,
+                            hex::encode(&block.hash()[..8])
+                        );
+                        // Use save_block to store without updating height (height is already >= this)
+                        self.save_block(&block)?;
+                        return Ok(true);
+                    }
+                    Err(_) => {
+                        // Previous block also missing - we have a bigger gap
+                        tracing::warn!(
+                            "⚠️  Cannot fill gap at {}: previous block {} also missing",
+                            block_height,
+                            block_height - 1
+                        );
+                        return Ok(false);
+                    }
+                }
+            } else {
+                // Genesis block (height 0) - validate and add
+                self.validate_block(&block, None)?;
+                tracing::info!("✅ Filling gap: adding genesis block");
+                self.save_block(&block)?;
+                return Ok(true);
+            }
         }
 
         // Case 3: Block is too far in the future
