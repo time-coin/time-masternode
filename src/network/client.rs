@@ -14,6 +14,7 @@
 use crate::ai::adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionConfig};
 use crate::blockchain::Blockchain;
 use crate::masternode_registry::MasternodeRegistry;
+use crate::network::blacklist::IPBlacklist;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::peer_connection::{PeerConnection, PeerStateManager};
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
@@ -21,6 +22,7 @@ use crate::peer_manager::PeerManager;
 use crate::NetworkType;
 use std::collections::HashSet;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
 pub struct NetworkClient {
@@ -35,6 +37,8 @@ pub struct NetworkClient {
     reserved_masternode_slots: usize,
     local_ip: Option<String>,
     blacklisted_peers: HashSet<String>,
+    /// Real-time blacklist for rejecting messages from banned peers
+    ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     /// AI-powered adaptive reconnection
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
 }
@@ -52,6 +56,7 @@ impl NetworkClient {
         connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
         local_ip: Option<String>,
         blacklisted_peers: Vec<String>,
+        ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     ) -> Self {
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
 
@@ -70,6 +75,7 @@ impl NetworkClient {
             reserved_masternode_slots,
             local_ip,
             blacklisted_peers: blacklisted_peers.into_iter().collect(),
+            ip_blacklist,
             reconnection_ai,
         }
     }
@@ -86,6 +92,7 @@ impl NetworkClient {
         let reserved_masternode_slots = self.reserved_masternode_slots;
         let local_ip = self.local_ip.clone();
         let blacklisted_peers = self.blacklisted_peers.clone();
+        let ip_blacklist = self.ip_blacklist.clone();
         let reconnection_ai = self.reconnection_ai.clone();
 
         tokio::spawn(async move {
@@ -160,6 +167,7 @@ impl NetworkClient {
                 let peer_reg = peer_registry.clone();
                 let local_ip_clone = local_ip.clone();
                 let recon_ai = reconnection_ai.clone();
+                let blacklist = ip_blacklist.clone();
 
                 // Spawn task without waiting for it to complete
                 let task = tokio::spawn(async move {
@@ -174,6 +182,7 @@ impl NetworkClient {
                         true, // is_masternode flag
                         local_ip_clone,
                         recon_ai,
+                        blacklist,
                     );
                 });
 
@@ -285,6 +294,7 @@ impl NetworkClient {
                     let peer_reg = peer_registry.clone();
                     let local_ip_clone = local_ip.clone();
                     let recon_ai = reconnection_ai.clone();
+                    let blacklist = ip_blacklist.clone();
 
                     // Spawn task without waiting
                     let task = tokio::spawn(async move {
@@ -299,6 +309,7 @@ impl NetworkClient {
                             is_registered_masternode, // treat registered masternodes as whitelisted
                             local_ip_clone,
                             recon_ai,
+                            blacklist,
                         );
                     });
 
@@ -382,6 +393,7 @@ impl NetworkClient {
                             true,
                             local_ip.clone(),
                             reconnection_ai.clone(),
+                            ip_blacklist.clone(),
                         );
                     }
                 }
@@ -467,6 +479,7 @@ impl NetworkClient {
                             false,
                             local_ip.clone(),
                             reconnection_ai.clone(),
+                            ip_blacklist.clone(),
                         );
 
                         sleep(Duration::from_millis(100)).await;
@@ -515,6 +528,7 @@ fn spawn_connection_task(
     is_masternode: bool,
     local_ip: Option<String>,
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
+    ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
 ) {
     let tag = if is_masternode { "[MASTERNODE]" } else { "" };
     tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
@@ -548,6 +562,7 @@ fn spawn_connection_task(
                 peer_registry.clone(),
                 local_ip.clone(),
                 is_masternode,
+                ip_blacklist.clone(),
             )
             .await
             {
@@ -659,6 +674,7 @@ async fn maintain_peer_connection(
     peer_registry: Arc<PeerConnectionRegistry>,
     _local_ip: Option<String>,
     is_masternode: bool,
+    ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
 ) -> Result<(), String> {
     // Mark in peer_registry BEFORE attempting connection to prevent race with inbound
     if !peer_registry.mark_connecting(ip) {
@@ -700,6 +716,11 @@ async fn maintain_peer_connection(
     let mut config = crate::network::peer_connection::MessageLoopConfig::new(peer_registry.clone())
         .with_masternode_registry(masternode_registry.clone())
         .with_blockchain(blockchain.clone());
+
+    // Add blacklist for message filtering
+    if let Some(blacklist) = ip_blacklist {
+        config = config.with_blacklist(blacklist);
+    }
 
     // Subscribe to broadcast channel if available
     if let (_, _, Some(broadcast_tx)) = peer_registry.get_timelock_resources().await {

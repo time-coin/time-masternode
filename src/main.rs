@@ -2417,6 +2417,7 @@ async fn main() {
                 connection_manager.clone(),
                 local_ip.clone(),
                 config.network.blacklisted_peers.clone(),
+                Some(server.blacklist.clone()),
             );
             network_client.start().await;
 

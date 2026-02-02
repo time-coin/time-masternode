@@ -86,7 +86,6 @@ fn extract_ip(addr: &str) -> &str {
     addr.split(':').next().unwrap_or(addr)
 }
 
-
 /// Information about an incompatible peer
 /// (marked_timestamp, incompatibility_reason, is_permanent)
 type IncompatiblePeerInfo = (std::time::Instant, String, bool);

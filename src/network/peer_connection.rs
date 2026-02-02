@@ -13,6 +13,7 @@ use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
 use crate::blockchain::Blockchain;
+use crate::network::blacklist::IPBlacklist;
 use crate::network::message::NetworkMessage;
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
 
@@ -256,6 +257,9 @@ pub struct MessageLoopConfig {
     /// Optional: Broadcast receiver for forwarding gossip and other broadcasts
     pub broadcast_rx:
         Option<tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>>,
+
+    /// Optional: Blacklist for rejecting messages from banned peers
+    pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
 }
 
 impl MessageLoopConfig {
@@ -268,6 +272,7 @@ impl MessageLoopConfig {
             masternode_registry: None,
             blockchain: None,
             broadcast_rx: None,
+            blacklist: None,
         }
     }
 
@@ -292,6 +297,12 @@ impl MessageLoopConfig {
         rx: tokio::sync::broadcast::Receiver<crate::network::message::NetworkMessage>,
     ) -> Self {
         self.broadcast_rx = Some(rx);
+        self
+    }
+
+    /// Add blacklist (builder pattern)
+    pub fn with_blacklist(mut self, blacklist: Arc<RwLock<IPBlacklist>>) -> Self {
+        self.blacklist = Some(blacklist);
         self
     }
 }
@@ -1076,12 +1087,19 @@ impl PeerConnection {
                 .expect("Masternode registry required when blockchain is provided");
 
             // Use from_registry to automatically fetch consensus engine
-            MessageContext::from_registry(
+            let mut ctx = MessageContext::from_registry(
                 Arc::clone(blockchain),
                 Arc::clone(&config.peer_registry),
                 Arc::clone(masternode_registry),
             )
-            .await
+            .await;
+
+            // Add blacklist if available
+            if let Some(ref blacklist) = config.blacklist {
+                ctx = ctx.with_blacklist(Arc::clone(blacklist));
+            }
+
+            ctx
         } else if let Some(ref _masternode_registry) = config.masternode_registry {
             // This case should not happen in practice - we always have blockchain when we have masternode_registry
             return Err("Cannot create context without blockchain".to_string());

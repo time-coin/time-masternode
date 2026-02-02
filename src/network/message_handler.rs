@@ -9,12 +9,14 @@ use crate::block::types::Block;
 use crate::blockchain::Blockchain;
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::MasternodeRegistry;
+use crate::network::blacklist::IPBlacklist;
 use crate::network::dedup_filter::DeduplicationFilter;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::peer_manager::PeerManager;
 use crate::types::{OutPoint, UTXOState}; // Add explicit imports
 use crate::utxo_manager::UTXOStateManager;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
@@ -51,6 +53,8 @@ pub struct MessageContext {
     pub seen_transactions: Option<Arc<DeduplicationFilter>>,
     // Node identity for voting
     pub node_masternode_address: Option<String>,
+    // Blacklist for rejecting messages from banned peers
+    pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
 }
 
 impl MessageContext {
@@ -72,6 +76,7 @@ impl MessageContext {
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address: None,
+            blacklist: None,
         }
     }
 
@@ -97,6 +102,7 @@ impl MessageContext {
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address,
+            blacklist: None,
         }
     }
 
@@ -125,12 +131,19 @@ impl MessageContext {
             seen_blocks: None,
             seen_transactions: None,
             node_masternode_address,
+            blacklist: None,
         }
     }
 
     /// Set the node's masternode address for voting identity
     pub fn with_node_address(mut self, address: Option<String>) -> Self {
         self.node_masternode_address = address;
+        self
+    }
+
+    /// Set the blacklist for rejecting messages from banned peers
+    pub fn with_blacklist(mut self, blacklist: Arc<RwLock<IPBlacklist>>) -> Self {
+        self.blacklist = Some(blacklist);
         self
     }
 }
@@ -175,6 +188,20 @@ impl MessageHandler {
         msg: &NetworkMessage,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
+        // SECURITY: Check blacklist before processing ANY message
+        if let Some(blacklist) = &context.blacklist {
+            if let Ok(ip) = self.peer_ip.parse::<IpAddr>() {
+                let mut bl = blacklist.write().await;
+                if let Some(reason) = bl.is_blacklisted(ip) {
+                    warn!(
+                        "🚫 [{:?}] REJECTING message from blacklisted peer {}: {}",
+                        self.direction, self.peer_ip, reason
+                    );
+                    return Err(format!("Peer {} is blacklisted: {}", self.peer_ip, reason));
+                }
+            }
+        }
+
         match msg {
             // === Health Check Messages ===
             NetworkMessage::Ping {
@@ -2418,11 +2445,13 @@ impl MessageHandler {
                     // Record severe violation and potentially ban the peer
                     if self.peer_ip.parse::<std::net::IpAddr>().is_ok() {
                         // Mark peer as incompatible - they have corrupted data
+                        // Corrupted blocks are temporary (might be software bug, not permanent)
                         context
                             .peer_registry
                             .mark_incompatible(
                                 &self.peer_ip,
                                 &format!("Sent corrupted block {}: {}", block.header.height, e),
+                                false, // temporary - will be rechecked
                             )
                             .await;
                     }

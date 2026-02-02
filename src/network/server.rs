@@ -936,6 +936,19 @@ async fn handle_peer(
                                     check_message_size!(MAX_BLOCK_SIZE, "Block");
                                     check_rate_limit!("block");
 
+                                    // SECURITY: Check blacklist before processing ANY block
+                                    {
+                                        let mut bl = blacklist.write().await;
+                                        if let Some(reason) = bl.is_blacklisted(ip) {
+                                            tracing::warn!(
+                                                "🚫 REJECTING BlockResponse from blacklisted peer {}: {}",
+                                                peer.addr, reason
+                                            );
+                                            line.clear();
+                                            continue;
+                                        }
+                                    }
+
                                     let block_height = block.header.height;
 
                                     // Check if we've already seen this block using Bloom filter
@@ -993,6 +1006,19 @@ async fn handle_peer(
                                     // Legacy full block announcement (for backward compatibility)
                                     check_message_size!(MAX_BLOCK_SIZE, "Block");
                                     check_rate_limit!("block");
+
+                                    // SECURITY: Check blacklist before processing ANY block
+                                    {
+                                        let mut bl = blacklist.write().await;
+                                        if let Some(reason) = bl.is_blacklisted(ip) {
+                                            tracing::warn!(
+                                                "🚫 REJECTING BlockAnnouncement from blacklisted peer {}: {}",
+                                                peer.addr, reason
+                                            );
+                                            line.clear();
+                                            continue;
+                                        }
+                                    }
 
                                     let block_height = block.header.height;
 
@@ -1547,6 +1573,19 @@ async fn handle_peer(
                                 NetworkMessage::TimeLockBlockProposal { .. }
                                 | NetworkMessage::TimeVotePrepare { .. }
                                 | NetworkMessage::TimeVotePrecommit { .. } => {
+                                    // SECURITY: Check blacklist before processing ANY consensus messages
+                                    {
+                                        let mut bl = blacklist.write().await;
+                                        if let Some(reason) = bl.is_blacklisted(ip) {
+                                            tracing::warn!(
+                                                "🚫 REJECTING TimeLock message from blacklisted peer {}: {}",
+                                                peer.addr, reason
+                                            );
+                                            line.clear();
+                                            continue;
+                                        }
+                                    }
+
                                     // Use unified message handler for TimeLock messages
                                     let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
                                     // Get local masternode address for vote identity
@@ -1559,7 +1598,7 @@ async fn handle_peer(
                                         block_cache.clone(),
                                         broadcast_tx.clone(),
                                         local_mn_addr,
-                                    );
+                                    ).with_blacklist(Arc::clone(&blacklist));
 
                                     if let Err(e) = handler.handle_message(&msg, &context).await {
                                         tracing::warn!("[Inbound] Error handling TimeLock message from {}: {}", peer.addr, e);
