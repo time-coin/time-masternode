@@ -5,7 +5,6 @@ use crate::ai::consensus_health::{
 };
 use crate::block::types::{Block, BlockHeader};
 use crate::block_cache::BlockCacheManager;
-use crate::blockchain_validation::BlockValidator;
 use crate::consensus::ConsensusEngine;
 use crate::constants;
 use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
@@ -96,15 +95,6 @@ impl UndoLog {
     pub fn add_finalized_tx(&mut self, txid: [u8; 32]) {
         self.finalized_txs.push(txid);
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct GenesisBlock {
-    pub network: String,
-    pub version: u32,
-    pub message: String,
-    pub block: Block,
 }
 
 /// Chain work metadata for fork resolution
@@ -207,10 +197,7 @@ pub struct Blockchain {
     consensus_peers: Arc<RwLock<Vec<String>>>,
     /// Two-tier block cache for efficient memory usage (10-50x faster reads)
     block_cache: Arc<BlockCacheManager>,
-    /// Block validator for validation logic
-    #[allow(dead_code)]
-    validator: BlockValidator,
-    /// AI-powered consensus health monitoring
+    /// Block validator for validation logic    /// AI-powered consensus health monitoring
     consensus_health: Arc<ConsensusHealthMonitor>,
     /// Transaction index for O(1) transaction lookups
     pub tx_index: Option<Arc<crate::tx_index::TransactionIndex>>,
@@ -258,10 +245,6 @@ impl Blockchain {
         let hot_capacity = constants::blockchain::BLOCK_CACHE_SIZE / 10; // 10% hot
         let warm_capacity = constants::blockchain::BLOCK_CACHE_SIZE; // 100% warm
         let block_cache = Arc::new(BlockCacheManager::new(hot_capacity, warm_capacity));
-
-        // Initialize block validator
-        let validator = BlockValidator::new(network_type);
-
         // Initialize AI consensus health monitor
         let consensus_health =
             Arc::new(ConsensusHealthMonitor::new(ConsensusHealthConfig::default()));
@@ -303,7 +286,6 @@ impl Blockchain {
             fork_resolution_lock: Arc::new(tokio::sync::Mutex::new(())),
             consensus_peers: Arc::new(RwLock::new(Vec::new())),
             block_cache,
-            validator,
             consensus_health,
             tx_index: None, // Initialize without txindex, call build_tx_index() separately
             compress_blocks: false, // Disabled temporarily to debug block corruption issues
@@ -394,12 +376,6 @@ impl Blockchain {
             let height = self.get_height();
             (tx_count, height)
         })
-    }
-
-    /// Set peer manager for block requests
-    #[allow(dead_code)]
-    pub async fn set_peer_manager(&self, peer_manager: Arc<crate::peer_manager::PeerManager>) {
-        *self.peer_manager.write().await = Some(peer_manager);
     }
 
     /// Set peer registry for P2P communication
@@ -861,28 +837,6 @@ impl Blockchain {
         }
 
         missing_blocks
-    }
-
-    /// Clear all blocks above a given height from storage
-    #[allow(dead_code)]
-    fn clear_blocks_above(&self, height: u64) {
-        let mut cleared = 0;
-        for h in (height + 1)..=(height + 10000) {
-            // Check up to 10k blocks above
-            let key = format!("block_{}", h);
-            if self.storage.remove(key.as_bytes()).is_ok() {
-                cleared += 1;
-            } else {
-                break; // No more blocks
-            }
-        }
-        if cleared > 0 {
-            tracing::info!(
-                "🗑️  Cleared {} corrupted blocks above height {}",
-                cleared,
-                height
-            );
-        }
     }
 
     /// Validate that our genesis block structure is valid
@@ -2909,6 +2863,11 @@ impl Blockchain {
         self.current_height.load(Ordering::Acquire)
     }
 
+    /// Check if currently syncing
+    pub fn is_syncing(&self) -> bool {
+        self.is_syncing.load(Ordering::Acquire)
+    }
+
     /// Check if genesis block exists
     /// Returns true if genesis (block 0) is present in storage
     pub fn has_genesis(&self) -> bool {
@@ -2928,12 +2887,6 @@ impl Blockchain {
     /// Get estimated block cache memory usage in bytes
     pub fn get_cache_memory_usage(&self) -> usize {
         self.block_cache.estimated_memory_usage()
-    }
-
-    /// Check if currently syncing (lock-free)
-    #[allow(dead_code)]
-    pub fn is_syncing(&self) -> bool {
-        self.is_syncing.load(Ordering::Acquire)
     }
 
     /// Get pending transactions (stub for compatibility)
@@ -3528,17 +3481,6 @@ impl Blockchain {
         }
     }
 
-    /// Store pending fees to be added to next block reward
-    #[allow(dead_code)]
-    fn store_pending_fees(&self, fees: u64) -> Result<(), String> {
-        let key = "pending_fees".as_bytes();
-        let fee_bytes = bincode::serialize(&fees).map_err(|e| e.to_string())?;
-        self.storage
-            .insert(key, fee_bytes)
-            .map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     /// Process block UTXOs and create undo log for rollback support
     async fn process_block_utxos(&self, block: &Block) -> Result<UndoLog, String> {
         let block_hash = block.hash();
@@ -3633,19 +3575,6 @@ impl Blockchain {
         }
 
         Ok(undo_log)
-    }
-
-    #[allow(dead_code)]
-    fn calculate_rewards_from_info(&self, masternodes: &[MasternodeInfo]) -> Vec<(String, u64)> {
-        if masternodes.is_empty() {
-            return vec![];
-        }
-
-        let per_masternode = BLOCK_REWARD_SATOSHIS / masternodes.len() as u64;
-        masternodes
-            .iter()
-            .map(|mn| (mn.masternode.wallet_address.clone(), per_masternode))
-            .collect()
     }
 
     fn calculate_rewards_with_amount(
@@ -5297,7 +5226,7 @@ impl Blockchain {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            height: consensus_height,
+            height: our_height, // Use OUR actual height, not peer consensus height
             peer_agreement_ratio,
             height_variance,
             fork_count,
@@ -5799,25 +5728,36 @@ impl Blockchain {
                         .clone()
                         .unwrap_or_else(|| "not provided".to_string());
 
-                    warn!(
+                    // ONLY reject if genesis hashes are DIFFERENT
+                    if peer_genesis_info.as_ref() != Some(&our_genesis_info) {
+                        warn!(
                         "🛡️ SECURITY: REJECTED REORG TO GENESIS from peer {} - chains diverged at genesis level",
                         peer_addr
                     );
-                    warn!(
-                        "   Our height: {}, our genesis: {}, peer genesis: {}",
-                        our_height, our_genesis_info, peer_genesis_str
-                    );
-                    warn!("   Peer is on a completely different chain - cannot reorg to genesis");
+                        warn!(
+                            "   Our height: {}, our genesis: {}, peer genesis: {}",
+                            our_height, our_genesis_info, peer_genesis_str
+                        );
+                        warn!(
+                            "   Peer is on a completely different chain - cannot reorg to genesis"
+                        );
 
-                    // Mark peer as genesis-incompatible
-                    if let Some(registry) = self.peer_registry.read().await.as_ref() {
-                        registry
-                            .mark_genesis_incompatible(
-                                &peer_addr,
-                                &our_genesis_info,
-                                &peer_genesis_info.unwrap_or_else(|| "unknown".to_string()),
-                            )
-                            .await;
+                        // Mark peer as genesis-incompatible
+                        if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                            registry
+                                .mark_genesis_incompatible(
+                                    &peer_addr,
+                                    &our_genesis_info,
+                                    &peer_genesis_info.unwrap_or_else(|| "unknown".to_string()),
+                                )
+                                .await;
+                        } else {
+                            // Genesis blocks match - this is a normal fork, allow it
+                            info!(
+                                "✓ Genesis blocks match with peer {}, allowing reorg from genesis",
+                                peer_addr
+                            );
+                        }
                     }
 
                     *self.fork_state.write().await = ForkResolutionState::None;
@@ -6442,114 +6382,6 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Remove a block at specific height (helper for rollback)
-    #[allow(dead_code)]
-    async fn remove_block_at_height(&self, height: u64) -> Result<(), String> {
-        let key = format!("block_{}", height);
-        self.storage
-            .remove(key.as_bytes())
-            .map_err(|e| format!("Failed to remove block at height {}: {}", height, e))?;
-
-        // Also remove from hash index if we have the block
-        // This is a simplified version - full implementation would also revert UTXO changes
-        Ok(())
-    }
-
-    /// Traditional fork resolution (fallback when AI confidence is low)
-    #[allow(dead_code)]
-    async fn traditional_fork_resolution(
-        &self,
-        our_height: u64,
-        peer_claimed_height: u64,
-        competing_blocks: &[Block],
-    ) -> Result<bool, String> {
-        // Rule 1: Longest chain wins
-        if peer_claimed_height > our_height {
-            tracing::info!(
-                "✅ Accepting fork: peer has longer chain ({} > {})",
-                peer_claimed_height,
-                our_height
-            );
-            return Ok(true);
-        } else if peer_claimed_height < our_height {
-            tracing::info!(
-                "❌ Rejecting fork: our chain is longer ({} > {})",
-                our_height,
-                peer_claimed_height
-            );
-            return Ok(false);
-        }
-
-        // Rule 2: Same length - compare hashes (deterministic tiebreaker)
-        if let Ok(our_tip_block) = self.get_block(our_height) {
-            let peer_tip_block = competing_blocks.last().unwrap();
-            let our_tip_hash = our_tip_block.hash();
-            let peer_tip_hash = peer_tip_block.hash();
-
-            // Use lexicographic comparison of hashes as tiebreaker
-            if peer_tip_hash < our_tip_hash {
-                tracing::info!(
-                    "✅ Accepting fork: same length but peer has lower hash (tiebreaker)"
-                );
-                return Ok(true);
-            } else {
-                tracing::info!("❌ Rejecting fork: same length but our hash is lower (tiebreaker)");
-                return Ok(false);
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Estimate peer's chain work based on blocks we've seen
-    #[allow(dead_code)]
-    async fn estimate_peer_chain_work(&self, blocks: &[Block], peer_height: u64) -> u128 {
-        // Start with our common work up to the fork point
-        let fork_point = if !blocks.is_empty() {
-            blocks.first().unwrap().header.height
-        } else {
-            peer_height
-        };
-
-        let mut work = if fork_point > 0 {
-            self.get_chain_work_at_height(fork_point - 1)
-                .await
-                .unwrap_or(0)
-        } else {
-            0
-        };
-
-        // Add work for peer's chain
-        let blocks_on_peer_chain = peer_height - fork_point + 1;
-        work += BASE_WORK_PER_BLOCK * blocks_on_peer_chain as u128;
-
-        work
-    }
-
-    /// Gather information about which peers support which chain
-    #[allow(dead_code)]
-    async fn gather_supporting_peers(
-        &self,
-        _our_height: u64,
-        _peer_height: u64,
-    ) -> Vec<(String, u64, u128)> {
-        let mut supporting_peers = Vec::new();
-
-        // Get peer information from registry
-        if let Some(registry) = self.peer_registry.read().await.as_ref() {
-            let peers = registry.get_connected_peers().await;
-            for peer in peers {
-                if let Some(height) = registry.get_peer_height(&peer).await {
-                    // Estimate chain work for this peer
-                    let chain_work = BASE_WORK_PER_BLOCK * height as u128;
-                    supporting_peers.push((peer, height, chain_work));
-                }
-            }
-        }
-
-        supporting_peers
-    }
-
     /// Find common ancestor between our chain and competing blocks (for fork resolution)
     /// Uses exponential + binary search algorithm for efficiency (O(log n) vs O(n))
     /// Returns error if peer blocks don't go back far enough to find true common ancestor
@@ -6737,14 +6569,6 @@ impl Blockchain {
 
         info!("✓ Found common ancestor at height {}", candidate_ancestor);
         Ok(candidate_ancestor)
-    }
-
-    /// Get chain work at a specific height
-    #[allow(dead_code)]
-    async fn get_chain_work_at_height(&self, height: u64) -> Result<u128, String> {
-        // For now, estimate based on height
-        // In the future, this could store actual cumulative work
-        Ok(BASE_WORK_PER_BLOCK * height as u128)
     }
 
     /// Update fork outcome for AI learning
@@ -7011,7 +6835,6 @@ impl Clone for Blockchain {
             fork_resolution_lock: self.fork_resolution_lock.clone(),
             consensus_peers: self.consensus_peers.clone(),
             block_cache: self.block_cache.clone(),
-            validator: BlockValidator::new(self.network_type),
             consensus_health: self.consensus_health.clone(),
             tx_index: self.tx_index.clone(),
             compress_blocks: self.compress_blocks,

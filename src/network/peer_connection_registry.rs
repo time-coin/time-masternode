@@ -73,9 +73,10 @@ pub struct PeerConnectionRegistry {
     // Discovered peer candidates from peer exchange
     discovered_peers: Arc<RwLock<HashSet<String>>>,
     // Peers on incompatible chains (different hash calculation)
-    // Maps peer IP -> (marked_at_timestamp, reason)
-    // These peers are temporarily ignored for consensus but periodically re-checked
-    incompatible_peers: Arc<RwLock<HashMap<String, (std::time::Instant, String)>>>,
+    // Maps peer IP -> (marked_at_timestamp, reason, is_permanent)
+    // Permanent incompatibility (genesis mismatch) is never rechecked
+    // Temporary incompatibility (hash mismatch) is rechecked after timeout
+    incompatible_peers: Arc<RwLock<HashMap<String, IncompatiblePeerInfo>>>,
     // Persistent fork error counter per peer (tracks errors across multiple block requests)
     // Maps peer IP -> error count (resets on successful block add)
     fork_error_counts: DashMap<String, u32>,
@@ -85,6 +86,10 @@ fn extract_ip(addr: &str) -> &str {
     addr.split(':').next().unwrap_or(addr)
 }
 
+
+/// Information about an incompatible peer
+/// (marked_timestamp, incompatibility_reason, is_permanent)
+type IncompatiblePeerInfo = (std::time::Instant, String, bool);
 /// Type alias for shared writer that can be cloned and registered
 pub type SharedPeerWriter = Arc<tokio::sync::Mutex<PeerWriter>>;
 
@@ -130,11 +135,13 @@ impl PeerConnectionRegistry {
     }
 
     /// Duration after which incompatible peers are re-checked (5 minutes)
+    /// Note: Genesis mismatch is PERMANENT and never rechecked
     const INCOMPATIBLE_RECHECK_SECS: u64 = 300;
 
-    /// Mark a peer as temporarily incompatible (different chain/hash calculation)
-    /// Incompatible peers are ignored for consensus but periodically re-checked
-    pub async fn mark_incompatible(&self, peer_ip: &str, reason: &str) {
+    /// Mark a peer as incompatible (different chain/hash calculation)
+    /// If `permanent` is true (genesis mismatch), peer is never rechecked
+    /// If `permanent` is false, peer is rechecked after INCOMPATIBLE_RECHECK_SECS
+    pub async fn mark_incompatible(&self, peer_ip: &str, reason: &str, permanent: bool) {
         let ip_only = extract_ip(peer_ip).to_string();
         let mut incompatible = self.incompatible_peers.write().await;
 
@@ -152,24 +159,38 @@ impl PeerConnectionRegistry {
             tracing::error!("🚫 RECOMMENDATION: The peer should update to the latest version");
             tracing::error!("🚫 and clear their blockchain to resync.");
             tracing::error!("🚫 ");
-            tracing::error!(
-                "🚫 This peer will be temporarily ignored for {} minutes, then re-checked.",
-                Self::INCOMPATIBLE_RECHECK_SECS / 60
-            );
+            if permanent {
+                tracing::error!(
+                    "🚫 This is a GENESIS MISMATCH - peer will be PERMANENTLY ignored."
+                );
+            } else {
+                tracing::error!(
+                    "🚫 This peer will be temporarily ignored for {} minutes, then re-checked.",
+                    Self::INCOMPATIBLE_RECHECK_SECS / 60
+                );
+            }
             tracing::error!(
                 "🚫 ═══════════════════════════════════════════════════════════════════"
             );
         }
 
-        incompatible.insert(ip_only, (std::time::Instant::now(), reason.to_string()));
+        incompatible.insert(
+            ip_only,
+            (std::time::Instant::now(), reason.to_string(), permanent),
+        );
     }
 
-    /// Check if a peer is marked as incompatible (with automatic expiry)
+    /// Check if a peer is marked as incompatible (with automatic expiry for non-permanent)
     pub async fn is_incompatible(&self, peer_ip: &str) -> bool {
         let ip_only = extract_ip(peer_ip);
         let incompatible = self.incompatible_peers.read().await;
 
-        if let Some((marked_at, _)) = incompatible.get(ip_only) {
+        if let Some((marked_at, _reason, permanent)) = incompatible.get(ip_only) {
+            // Permanent incompatibility (genesis mismatch) - NEVER expires
+            if *permanent {
+                return true;
+            }
+
             // Check if enough time has passed to re-check
             if marked_at.elapsed().as_secs() >= Self::INCOMPATIBLE_RECHECK_SECS {
                 // Time to re-check - return false to allow retry
@@ -272,6 +293,8 @@ impl PeerConnectionRegistry {
             tracing::error!("🚫 ");
             tracing::error!("🚫 RECOMMENDATION: The peer should update to the latest version");
             tracing::error!("🚫 and clear their blockchain to resync.");
+            tracing::error!("🚫 ");
+            tracing::error!("🚫 Genesis mismatch is PERMANENT - peer will NEVER be rechecked.");
             tracing::error!(
                 "🚫 ═══════════════════════════════════════════════════════════════════"
             );
@@ -281,7 +304,8 @@ impl PeerConnectionRegistry {
             "Genesis hash mismatch: ours={}, theirs={}",
             our_genesis, their_genesis
         );
-        incompatible.insert(ip_only, (std::time::Instant::now(), reason));
+        // Genesis mismatch is PERMANENT - these peers will never sync correctly
+        incompatible.insert(ip_only, (std::time::Instant::now(), reason, true));
     }
 
     /// Verify genesis hash compatibility with a peer
@@ -390,10 +414,14 @@ impl PeerConnectionRegistry {
 
     /// Get list of compatible connected peers (excludes currently incompatible ones)
     pub async fn get_compatible_peers(&self) -> Vec<String> {
-        // First, clean up expired incompatible entries
+        // First, clean up expired incompatible entries (but NOT permanent ones)
         {
             let mut incompatible = self.incompatible_peers.write().await;
-            incompatible.retain(|ip, (marked_at, _)| {
+            incompatible.retain(|ip, (marked_at, _reason, permanent)| {
+                // Permanent entries (genesis mismatch) are NEVER cleaned up
+                if *permanent {
+                    return true;
+                }
                 let expired = marked_at.elapsed().as_secs() >= Self::INCOMPATIBLE_RECHECK_SECS;
                 if expired {
                     tracing::info!("🔄 Incompatible timeout expired for {}, will re-check", ip);
@@ -428,11 +456,13 @@ impl PeerConnectionRegistry {
                     all_connections.len(),
                     compatible.len()
                 );
-                for (ip, (marked_at, reason)) in incompatible.iter() {
+                for (ip, (marked_at, reason, permanent)) in incompatible.iter() {
+                    let status = if *permanent { "PERMANENT" } else { "temporary" };
                     tracing::warn!(
-                        "  🚫 {} - {} ({}s ago)",
+                        "  🚫 {} - {} [{}] ({}s ago)",
                         ip,
                         reason,
+                        status,
                         marked_at.elapsed().as_secs()
                     );
                 }
