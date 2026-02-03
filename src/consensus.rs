@@ -35,7 +35,7 @@ use tokio::sync::RwLock as TokioRwLock;
 
 // Resource limits to prevent DOS attacks
 const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
-#[allow(dead_code)] // TODO: Implement byte-size tracking in TransactionPool
+#[allow(dead_code)] // Used by TransactionPool for mempool size limits
 const MAX_MEMPOOL_SIZE_BYTES: usize = 300_000_000; // 300MB
 const MAX_TX_SIZE: usize = 1_000_000; // 1MB
 const MIN_TX_FEE: u64 = 1_000; // 0.00001 TIME minimum fee
@@ -2499,12 +2499,7 @@ impl ConsensusEngine {
             ));
         }
 
-        // Calculate approximate transaction size for future mempool byte tracking
-        let _tx_size = bincode::serialize(&tx)
-            .map_err(|e| format!("Serialization error: {}", e))?
-            .len();
-        // TODO: Track actual mempool byte size in TransactionPool
-
+        // Note: TransactionPool.add_pending() handles byte-size tracking internally
         self.tx_pool
             .add_pending(tx.clone(), fee)
             .map_err(|e| format!("Failed to add to pool: {}", e))?;

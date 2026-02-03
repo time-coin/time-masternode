@@ -5418,63 +5418,70 @@ impl Blockchain {
                 {
                     // Check if this is a same-height fork or we're behind
                     if consensus_height == our_height {
-                        // Same height fork - need to reorg
+                        // Same height fork - request blocks but DO NOT rollback yet!
+                        // The rollback will happen atomically when blocks arrive via process_peer_blocks
+                        // This prevents the race condition where we rollback to a lower height
+                        // and then get stuck there if blocks don't arrive
                         tracing::warn!(
-                            "🔀 Periodic fork detection: same-height fork at {}, rolling back and resyncing from {}",
+                            "🔀 Periodic fork detection: same-height fork at {}, requesting blocks from {}",
                             consensus_height,
                             consensus_peer
                         );
 
-                        // Rollback the incorrect block
-                        let rollback_to = consensus_height.saturating_sub(1);
-                        match blockchain.rollback_to_height(rollback_to).await {
-                            Ok(_) => {
-                                tracing::info!("✅ Rolled back to height {}", rollback_to);
+                        // Request blocks from peer - reorg will happen atomically when they arrive
+                        if let Some(peer_registry) = blockchain.peer_registry.read().await.as_ref()
+                        {
+                            // Request from 20 blocks back to find common ancestor
+                            let request_from = consensus_height.saturating_sub(20).max(1);
 
-                                // CRITICAL FIX: Request a range of earlier blocks to find common ancestor
-                                // A fork at the same height likely means the fork is deeper
-                                // Request from 20 blocks back to ensure we find the true common ancestor
-                                if let Some(peer_registry) =
-                                    blockchain.peer_registry.read().await.as_ref()
-                                {
-                                    let request_from = consensus_height.saturating_sub(20).max(1);
-
-                                    // ✅ Check with sync coordinator before requesting
-                                    match blockchain.sync_coordinator.request_sync(
-                                        consensus_peer.clone(),
-                                        request_from,
-                                        consensus_height,
-                                        crate::network::sync_coordinator::SyncSource::ForkResolution,
-                                    ).await {
-                                        Ok(true) => {
-                                            let req = NetworkMessage::GetBlocks(request_from, consensus_height);
-                                            if let Err(e) = peer_registry.send_to_peer(&consensus_peer, req).await {
-                                                blockchain.sync_coordinator.cancel_sync(&consensus_peer).await;
-                                                tracing::warn!(
-                                                    "⚠️  Failed to request blocks from {}: {}",
-                                                    consensus_peer,
-                                                    e
-                                                );
-                                            } else {
-                                                tracing::info!(
-                                                    "📤 Requested blocks {}-{} from {} to find common ancestor",
-                                                    request_from,
-                                                    consensus_height,
-                                                    consensus_peer
-                                                );
-                                            }
-                                        }
-                                        Ok(false) => {
-                                            tracing::debug!("⏸️ Fork resolution sync queued with {}", consensus_peer);
-                                        }
-                                        Err(e) => {
-                                            tracing::debug!("⏱️ Fork resolution sync throttled with {}: {}", consensus_peer, e);
-                                        }
+                            // ✅ Check with sync coordinator before requesting
+                            match blockchain
+                                .sync_coordinator
+                                .request_sync(
+                                    consensus_peer.clone(),
+                                    request_from,
+                                    consensus_height,
+                                    crate::network::sync_coordinator::SyncSource::ForkResolution,
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    let req =
+                                        NetworkMessage::GetBlocks(request_from, consensus_height);
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&consensus_peer, req).await
+                                    {
+                                        blockchain
+                                            .sync_coordinator
+                                            .cancel_sync(&consensus_peer)
+                                            .await;
+                                        tracing::warn!(
+                                            "⚠️  Failed to request blocks from {}: {}",
+                                            consensus_peer,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "📤 Requested blocks {}-{} from {} for fork resolution (no premature rollback)",
+                                            request_from,
+                                            consensus_height,
+                                            consensus_peer
+                                        );
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ Failed to rollback for fork resolution: {}", e);
+                                Ok(false) => {
+                                    tracing::debug!(
+                                        "⏸️ Fork resolution sync queued with {}",
+                                        consensus_peer
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "⏱️ Fork resolution sync throttled with {}: {}",
+                                        consensus_peer,
+                                        e
+                                    );
+                                }
                             }
                         }
                     } else if consensus_height > our_height {
