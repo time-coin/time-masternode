@@ -319,6 +319,10 @@ impl MessageHandler {
             }
 
             // === Genesis Messages ===
+            NetworkMessage::GetGenesisHash => self.handle_get_genesis_hash(context).await,
+            NetworkMessage::GenesisHashResponse(hash) => {
+                self.handle_genesis_hash_response(*hash, context).await
+            }
             NetworkMessage::RequestGenesis => self.handle_request_genesis(context).await,
             NetworkMessage::GenesisAnnouncement(block) => {
                 self.handle_genesis_announcement(block.clone(), context)
@@ -1441,6 +1445,78 @@ impl MessageHandler {
     ) -> Result<Option<NetworkMessage>, String> {
         // Same logic as BlockResponse
         self.handle_block_response(block, context).await
+    }
+
+    /// Handle GetGenesisHash - respond with our genesis block hash
+    async fn handle_get_genesis_hash(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received GetGenesisHash from {}",
+            self.direction, self.peer_ip
+        );
+
+        let genesis_hash = context.blockchain.genesis_hash();
+        Ok(Some(NetworkMessage::GenesisHashResponse(genesis_hash)))
+    }
+
+    /// Handle GenesisHashResponse - verify peer's genesis matches ours
+    async fn handle_genesis_hash_response(
+        &self,
+        peer_genesis_hash: [u8; 32],
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let our_genesis_hash = context.blockchain.genesis_hash();
+
+        // If we don't have genesis yet (all zeros), we can't compare
+        if our_genesis_hash == [0u8; 32] {
+            debug!(
+                "[{}] We don't have genesis yet, cannot verify peer {} genesis hash",
+                self.direction, self.peer_ip
+            );
+            return Ok(None);
+        }
+
+        // If peer doesn't have genesis (all zeros), skip check
+        if peer_genesis_hash == [0u8; 32] {
+            debug!(
+                "[{}] Peer {} doesn't have genesis yet, skipping verification",
+                self.direction, self.peer_ip
+            );
+            return Ok(None);
+        }
+
+        // Compare genesis hashes
+        if our_genesis_hash == peer_genesis_hash {
+            info!(
+                "✅ [{}] Genesis hash verified with peer {} - compatible ({})",
+                self.direction,
+                self.peer_ip,
+                hex::encode(&our_genesis_hash[..8])
+            );
+            // Mark peer as genesis-compatible by resetting any fork errors
+            context.peer_registry.reset_fork_errors(&self.peer_ip);
+        } else {
+            warn!(
+                "🚫 [{}] Genesis hash MISMATCH with peer {} - INCOMPATIBLE!",
+                self.direction, self.peer_ip
+            );
+            warn!("   Our genesis:   {}", hex::encode(&our_genesis_hash[..8]));
+            warn!("   Their genesis: {}", hex::encode(&peer_genesis_hash[..8]));
+
+            // Mark peer as permanently incompatible
+            context
+                .peer_registry
+                .mark_genesis_incompatible(
+                    &self.peer_ip,
+                    &hex::encode(&our_genesis_hash[..8]),
+                    &hex::encode(&peer_genesis_hash[..8]),
+                )
+                .await;
+        }
+
+        Ok(None)
     }
 
     /// Handle RequestGenesis

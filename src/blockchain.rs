@@ -2879,6 +2879,12 @@ impl Blockchain {
         self.storage.get(key).ok().flatten().is_some()
     }
 
+    /// Get genesis block hash
+    /// Returns the hash of block 0, or all zeros if no genesis exists
+    pub fn genesis_hash(&self) -> [u8; 32] {
+        self.get_block_hash(0).unwrap_or_default()
+    }
+
     /// Get block cache statistics
     pub fn get_cache_stats(&self) -> crate::block_cache::CacheStats {
         self.block_cache.stats()

@@ -518,6 +518,28 @@ async fn handle_peer(
                                         let get_mn_msg = NetworkMessage::GetMasternodes;
                                         let _ = peer_registry.send_to_peer(&ip_str, get_mn_msg).await;
 
+                                        // CRITICAL: Verify genesis hash compatibility EARLY
+                                        // This prevents nodes with different genesis from exchanging blocks
+                                        if blockchain.has_genesis() {
+                                            let our_genesis_hash = blockchain.genesis_hash();
+                                            // Request peer's genesis hash for verification
+                                            let get_genesis_msg = NetworkMessage::GetGenesisHash;
+                                            let _ = peer_registry.send_to_peer(&ip_str, get_genesis_msg).await;
+                                            tracing::debug!(
+                                                "📤 Requesting genesis hash from {} for compatibility check (our genesis: {})",
+                                                ip_str,
+                                                hex::encode(&our_genesis_hash[..8])
+                                            );
+                                        } else {
+                                            // We don't have a genesis yet - request one from peer
+                                            tracing::info!(
+                                                "🌱 No local genesis - requesting genesis block from {}",
+                                                ip_str
+                                            );
+                                            let request_genesis_msg = NetworkMessage::RequestGenesis;
+                                            let _ = peer_registry.send_to_peer(&ip_str, request_genesis_msg).await;
+                                        }
+
                                         line.clear();
                                         continue;
                                     }
