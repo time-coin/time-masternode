@@ -1499,25 +1499,95 @@ impl Blockchain {
             // Try to detect and resolve deeper fork by finding common ancestor
             match self.find_and_resolve_fork(peer_ip, registry).await {
                 Ok(common_ancestor) => {
-                    tracing::warn!(
-                        "✅ Found common ancestor at height {}, but peer {} may be on wrong chain",
-                        common_ancestor,
-                        peer_ip
-                    );
-
-                    tracing::warn!(
-                        "⏸️  Not re-syncing from same peer - letting sync coordinator pick best chain"
-                    );
-
-                    // DON'T re-sync from the same peer that caused the fork!
-                    // Instead, mark this sync as failed and let the sync coordinator
-                    // request blocks from OTHER peers (who may have the correct chain)
-                    self.sync_coordinator.complete_sync(peer_ip).await;
-
-                    Err(format!(
-                        "Fork resolved by rolling back to {}, but need to sync from different peer",
+                    tracing::info!(
+                        "✅ Rolled back to common ancestor at height {}",
                         common_ancestor
-                    ))
+                    );
+
+                    // After rollback, check if peer still has blocks we need
+                    let our_new_height = self.current_height.load(Ordering::Acquire);
+                    let (peer_height_after_rollback, _) = registry
+                        .get_peer_chain_tip(peer_ip)
+                        .await
+                        .ok_or_else(|| format!("No chain tip data for peer {}", peer_ip))?;
+
+                    if peer_height_after_rollback > our_new_height {
+                        tracing::info!(
+                            "📥 After rollback to {}, peer {} has blocks up to {} - requesting new blocks",
+                            our_new_height,
+                            peer_ip,
+                            peer_height_after_rollback
+                        );
+
+                        // Request blocks from our new height to peer's height
+                        let new_batch_start = our_new_height + 1;
+                        let new_batch_end = peer_height_after_rollback;
+
+                        tracing::info!(
+                            "📤 Requesting blocks {}-{} from {} after rollback",
+                            new_batch_start,
+                            new_batch_end,
+                            peer_ip
+                        );
+
+                        let req = NetworkMessage::GetBlocks(new_batch_start, new_batch_end);
+                        if let Err(e) = registry.send_to_peer(peer_ip, req).await {
+                            self.sync_coordinator.cancel_sync(peer_ip).await;
+                            return Err(format!(
+                                "Failed to request blocks after rollback from {}: {}",
+                                peer_ip, e
+                            ));
+                        }
+
+                        // Wait for new blocks to arrive
+                        let post_rollback_start = std::time::Instant::now();
+                        let post_rollback_timeout = std::time::Duration::from_secs(30);
+
+                        while post_rollback_start.elapsed() < post_rollback_timeout {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            let current_height = self.current_height.load(Ordering::Acquire);
+
+                            if current_height >= peer_height_after_rollback {
+                                tracing::info!(
+                                    "✅ Successfully synced to height {} after rollback",
+                                    current_height
+                                );
+                                self.sync_coordinator.complete_sync(peer_ip).await;
+                                return Ok(());
+                            }
+
+                            if current_height > our_new_height {
+                                tracing::debug!(
+                                    "📈 Post-rollback sync progress: {} → {}",
+                                    our_new_height,
+                                    current_height
+                                );
+                            }
+                        }
+
+                        // Timeout after rollback
+                        let final_height_after_rollback =
+                            self.current_height.load(Ordering::Acquire);
+                        self.sync_coordinator.complete_sync(peer_ip).await;
+                        return Err(format!(
+                            "Timeout after rollback: reached {} but peer has {}",
+                            final_height_after_rollback, peer_height_after_rollback
+                        ));
+                    } else {
+                        tracing::warn!(
+                            "⏸️  After rollback to {}, peer {} only has {} blocks - no new blocks to sync",
+                            our_new_height,
+                            peer_ip,
+                            peer_height_after_rollback
+                        );
+
+                        self.sync_coordinator.complete_sync(peer_ip).await;
+
+                        return Err(format!(
+                            "Fork resolved by rolling back to {}, but peer doesn't have newer blocks",
+                            common_ancestor
+                        ));
+                    }
                 }
                 Err(e) => Err(format!(
                     "Failed to find common ancestor with {}: {}",
