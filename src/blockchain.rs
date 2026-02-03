@@ -1399,16 +1399,25 @@ impl Blockchain {
     /// Now includes automatic fork detection and rollback to common ancestor
     pub async fn sync_from_specific_peer(&self, peer_ip: &str) -> Result<(), String> {
         let current = self.current_height.load(Ordering::Acquire);
-        let time_expected = self.calculate_expected_height();
 
-        if current >= time_expected {
-            tracing::info!("✓ Already synced to expected height {}", current);
+        // Get peer registry to check peer's actual height
+        let peer_registry = self.peer_registry.read().await;
+        let registry = peer_registry.as_ref().ok_or("No peer registry available")?;
+
+        // Get peer's actual chain tip to avoid requesting blocks they don't have
+        let (peer_height, _peer_hash) = registry
+            .get_peer_chain_tip(peer_ip)
+            .await
+            .ok_or_else(|| format!("No chain tip data for peer {}", peer_ip))?;
+
+        if current >= peer_height {
+            tracing::info!("✓ Already synced to peer {} height {}", peer_ip, current);
             return Ok(());
         }
 
-        // Request blocks from the specific peer
+        // Request blocks from current+1 to peer's actual height (not time_expected)
         let batch_start = current + 1;
-        let batch_end = time_expected;
+        let batch_end = peer_height;
 
         // ✅ Check with sync coordinator before requesting
         let sync_approved = self
@@ -1444,9 +1453,6 @@ impl Blockchain {
             }
         }
 
-        let peer_registry = self.peer_registry.read().await;
-        let registry = peer_registry.as_ref().ok_or("No peer registry available")?;
-
         let req = NetworkMessage::GetBlocks(batch_start, batch_end);
         if let Err(e) = registry.send_to_peer(peer_ip, req).await {
             // Cancel sync on failure
@@ -1463,7 +1469,7 @@ impl Blockchain {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             let now_height = self.current_height.load(Ordering::Acquire);
 
-            if now_height >= time_expected {
+            if now_height >= peer_height {
                 tracing::info!("✓ Synced from consensus peer to height {}", now_height);
                 // Mark sync as complete
                 self.sync_coordinator.complete_sync(peer_ip).await;
@@ -1522,8 +1528,8 @@ impl Blockchain {
             // Mark sync as complete even if partial - let it be retried later
             self.sync_coordinator.complete_sync(peer_ip).await;
             Err(format!(
-                "Partial sync from {}: reached {} but expected {}",
-                peer_ip, final_height, time_expected
+                "Partial sync from {}: reached {} but peer has {}",
+                peer_ip, final_height, peer_height
             ))
         }
     }
@@ -1666,16 +1672,81 @@ impl Blockchain {
         }
 
         if common_ancestor == 0 && our_height > 0 {
-            tracing::warn!("⚠️ Could not find common ancestor via hash comparison, using genesis");
-            // SECURITY: Reject rollback to genesis - this would wipe our entire chain
-            tracing::warn!(
-                "🛡️ SECURITY: REJECTED rollback to genesis from peer {} - cannot wipe entire chain",
-                peer_ip
-            );
-            return Err(format!(
-                "Security: Rejected rollback to genesis from peer {} - chains are incompatible",
-                peer_ip
-            ));
+            tracing::warn!("⚠️ Could not find common ancestor via hash comparison, fork may start at genesis");
+
+            // Request genesis block from peer to verify compatibility
+            tracing::info!("📥 Requesting genesis block from peer {} to verify chain compatibility", peer_ip);
+
+            let req = NetworkMessage::BlockRequest(0);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            registry.register_response_handler(peer_ip, tx).await;
+
+            if let Err(e) = registry.send_to_peer(peer_ip, req).await {
+                tracing::warn!("⚠️ Failed to request genesis block from {}: {}", peer_ip, e);
+                return Err(format!("Failed to request genesis from peer {}: {}", peer_ip, e));
+            }
+
+            // Wait for genesis block response
+            let peer_genesis = match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+                Ok(Ok(NetworkMessage::BlockResponse(block))) => {
+                    if block.header.height == 0 {
+                        block
+                    } else {
+                        tracing::warn!("⚠️ Got block at wrong height {} (expected 0)", block.header.height);
+                        return Err(format!("Peer {} sent wrong block (expected genesis)", peer_ip));
+                    }
+                }
+                Ok(Ok(_)) => {
+                    tracing::warn!("⚠️ Got unexpected response type for genesis request");
+                    return Err(format!("Peer {} sent invalid genesis response", peer_ip));
+                }
+                Ok(Err(_)) => {
+                    tracing::warn!("⚠️ Response channel closed for genesis request");
+                    return Err(format!("Peer {} closed genesis request channel", peer_ip));
+                }
+                Err(_) => {
+                    tracing::warn!("⏱️ Timeout waiting for genesis block from {}", peer_ip);
+                    return Err(format!("Timeout waiting for genesis from peer {}", peer_ip));
+                }
+            };
+
+            // Get our genesis block
+            let our_genesis = match self.get_block(0) {
+                Ok(block) => block,
+                Err(e) => {
+                    tracing::error!("❌ Failed to get our genesis block: {}", e);
+                    return Err(format!("Failed to get our genesis block: {}", e));
+                }
+            };
+
+            // Compare genesis hashes
+            let our_genesis_hash = our_genesis.hash();
+            let peer_genesis_hash = peer_genesis.hash();
+
+            if our_genesis_hash == peer_genesis_hash {
+                // Genesis blocks match - this is a legitimate fork from the same genesis
+                tracing::info!(
+                    "✅ Genesis blocks match (hash: {}) - allowing reorganization from genesis",
+                    hex::encode(&our_genesis_hash[..8])
+                );
+                // Allow reorganization to proceed from genesis (common_ancestor = 0)
+            } else {
+                // Genesis blocks differ - these are incompatible chains
+                tracing::error!(
+                    "🛡️ SECURITY: Genesis mismatch! Our genesis: {}, Peer genesis: {}",
+                    hex::encode(&our_genesis_hash[..8]),
+                    hex::encode(&peer_genesis_hash[..8])
+                );
+                tracing::error!(
+                    "💡 Peer {} is on a completely different chain - cannot reconcile",
+                    peer_ip
+                );
+                return Err(format!(
+                    "Genesis mismatch: incompatible chains (our: {}, peer: {})",
+                    hex::encode(&our_genesis_hash[..8]),
+                    hex::encode(&peer_genesis_hash[..8])
+                ));
+            }
         }
 
         // SECURITY: Check reorg depth limit
