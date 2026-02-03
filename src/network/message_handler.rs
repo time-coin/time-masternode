@@ -173,6 +173,80 @@ impl MessageHandler {
         }
     }
 
+    /// Get voter weight from masternode registry, defaulting to 1 if not found
+    async fn get_voter_weight(registry: &MasternodeRegistry, voter_id: &str) -> u64 {
+        match registry.get(voter_id).await {
+            Some(info) => info.masternode.collateral,
+            None => 1u64,
+        }
+    }
+
+    /// Verify a vote signature (PREPARE or PRECOMMIT)
+    /// Returns Ok(true) if valid, Ok(false) if invalid/rejected, Err on missing signature with backward compat
+    async fn verify_vote_signature(
+        &self,
+        registry: &MasternodeRegistry,
+        block_hash: &[u8; 32],
+        voter_id: &str,
+        vote_type: &[u8], // b"PREPARE" or b"PRECOMMIT"
+        signature: &[u8],
+    ) -> Result<bool, ()> {
+        if signature.is_empty() {
+            debug!(
+                "[{}] Accepting unsigned {} vote from {} (backward compatibility)",
+                self.direction,
+                String::from_utf8_lossy(vote_type),
+                voter_id
+            );
+            return Ok(true); // Accept unsigned for backward compatibility
+        }
+
+        let Some(info) = registry.get(voter_id).await else {
+            debug!(
+                "[{}] Cannot verify signature for unknown voter {}",
+                self.direction, voter_id
+            );
+            return Ok(true); // Accept if we don't know the voter
+        };
+
+        use ed25519_dalek::{Signature, Verifier};
+
+        // Reconstruct the signed message
+        let mut msg = Vec::new();
+        msg.extend_from_slice(block_hash);
+        msg.extend_from_slice(voter_id.as_bytes());
+        msg.extend_from_slice(vote_type);
+
+        // Parse signature
+        let sig_array: [u8; 64] = match signature.try_into() {
+            Ok(arr) => arr,
+            Err(_) => {
+                warn!(
+                    "❌ [{}] Invalid {} signature length from {} (expected 64 bytes, got {})",
+                    self.direction,
+                    String::from_utf8_lossy(vote_type),
+                    voter_id,
+                    signature.len()
+                );
+                return Ok(false); // Reject
+            }
+        };
+
+        let sig = Signature::from_bytes(&sig_array);
+        if let Err(e) = info.masternode.public_key.verify(&msg, &sig) {
+            warn!(
+                "❌ [{}] Invalid {} vote signature from {}: {}",
+                self.direction,
+                String::from_utf8_lossy(vote_type),
+                voter_id,
+                e
+            );
+            return Ok(false); // Reject
+        }
+
+        Ok(true) // Valid signature
+    }
+
     /// Handle a network message and optionally return a response message
     ///
     /// # Arguments
@@ -831,55 +905,21 @@ impl MessageHandler {
             .ok_or_else(|| "Consensus engine not available".to_string())?;
 
         // Phase 3E.2: Look up voter weight from masternode registry
-        let voter_weight = match context.masternode_registry.get(&voter_id).await {
-            Some(info) => info.masternode.collateral,
-            None => 1u64, // Default to 1 if not found
-        };
+        let voter_weight = Self::get_voter_weight(&context.masternode_registry, &voter_id).await;
 
-        // Verify vote signature if signature is present
-        if !signature.is_empty() {
-            // Get voter's public key from masternode registry
-            if let Some(info) = context.masternode_registry.get(&voter_id).await {
-                use ed25519_dalek::{Signature, Verifier};
-
-                // Reconstruct the signed message
-                let mut msg = Vec::new();
-                msg.extend_from_slice(&block_hash);
-                msg.extend_from_slice(voter_id.as_bytes());
-                msg.extend_from_slice(b"PREPARE");
-
-                // Verify signature
-                let sig_array: [u8; 64] =
-                    match signature.as_slice().try_into() {
-                        Ok(arr) => arr,
-                        Err(_) => {
-                            warn!(
-                            "❌ [{}] Invalid signature length from {} (expected 64 bytes, got {})",
-                            self.direction, voter_id, signature.len()
-                        );
-                            return Ok(None);
-                        }
-                    };
-
-                let sig = Signature::from_bytes(&sig_array);
-                if let Err(e) = info.masternode.public_key.verify(&msg, &sig) {
-                    warn!(
-                        "❌ [{}] Invalid prepare vote signature from {}: {}",
-                        self.direction, voter_id, e
-                    );
-                    return Ok(None); // Reject vote with invalid signature
-                }
-            } else {
-                debug!(
-                    "[{}] Cannot verify signature for unknown voter {}",
-                    self.direction, voter_id
-                );
-            }
-        } else {
-            debug!(
-                "[{}] Accepting unsigned prepare vote from {} (backward compatibility)",
-                self.direction, voter_id
-            );
+        // Verify vote signature
+        if !self
+            .verify_vote_signature(
+                &context.masternode_registry,
+                &block_hash,
+                &voter_id,
+                b"PREPARE",
+                &signature,
+            )
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(None); // Reject invalid signature
         }
 
         consensus
@@ -899,10 +939,10 @@ impl MessageHandler {
                 .node_masternode_address
                 .clone()
                 .unwrap_or_else(|| format!("node_{}", self.peer_ip));
-            let validator_weight = match context.masternode_registry.get(&validator_id).await {
-                Some(info) => info.masternode.collateral.max(1),
-                None => 1u64,
-            };
+            let validator_weight =
+                Self::get_voter_weight(&context.masternode_registry, &validator_id)
+                    .await
+                    .max(1);
 
             consensus
                 .timevote
@@ -980,51 +1020,21 @@ impl MessageHandler {
             .ok_or_else(|| "Consensus engine not available".to_string())?;
 
         // Phase 3E.2: Look up voter weight from masternode registry
-        let voter_weight = match context.masternode_registry.get(&voter_id).await {
-            Some(info) => info.masternode.collateral,
-            None => 1u64, // Default to 1 if not found
-        };
+        let voter_weight = Self::get_voter_weight(&context.masternode_registry, &voter_id).await;
 
-        // Verify precommit vote signature if signature is present
-        if !signature.is_empty() {
-            if let Some(info) = context.masternode_registry.get(&voter_id).await {
-                use ed25519_dalek::{Signature, Verifier};
-
-                let mut msg = Vec::new();
-                msg.extend_from_slice(&block_hash);
-                msg.extend_from_slice(voter_id.as_bytes());
-                msg.extend_from_slice(b"PRECOMMIT");
-
-                let sig_array: [u8; 64] = match signature.as_slice().try_into() {
-                    Ok(arr) => arr,
-                    Err(_) => {
-                        warn!(
-                            "❌ [{}] Invalid precommit signature length from {} (expected 64 bytes, got {})",
-                            self.direction, voter_id, signature.len()
-                        );
-                        return Ok(None);
-                    }
-                };
-
-                let sig = Signature::from_bytes(&sig_array);
-                if let Err(e) = info.masternode.public_key.verify(&msg, &sig) {
-                    warn!(
-                        "❌ [{}] Invalid precommit vote signature from {}: {}",
-                        self.direction, voter_id, e
-                    );
-                    return Ok(None);
-                }
-            } else {
-                debug!(
-                    "[{}] Cannot verify precommit signature for unknown voter {}",
-                    self.direction, voter_id
-                );
-            }
-        } else {
-            debug!(
-                "[{}] Accepting unsigned precommit vote from {} (backward compatibility)",
-                self.direction, voter_id
-            );
+        // Verify vote signature
+        if !self
+            .verify_vote_signature(
+                &context.masternode_registry,
+                &block_hash,
+                &voter_id,
+                b"PRECOMMIT",
+                &signature,
+            )
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(None); // Reject invalid signature
         }
 
         consensus

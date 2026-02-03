@@ -170,6 +170,16 @@ impl MasternodeRegistry {
             .as_secs()
     }
 
+    /// Helper to serialize and store a masternode to disk
+    fn store_masternode(&self, address: &str, info: &MasternodeInfo) -> Result<(), RegistryError> {
+        let key = format!("masternode:{}", address);
+        let value = bincode::serialize(info).map_err(|e| RegistryError::Storage(e.to_string()))?;
+        self.db
+            .insert(key.as_bytes(), value)
+            .map_err(|e| RegistryError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     pub async fn register(
         &self,
         masternode: Masternode,
@@ -245,12 +255,7 @@ impl MasternodeRegistry {
             }
 
             // Update on disk
-            let key = format!("masternode:{}", masternode.address);
-            let value =
-                bincode::serialize(&existing).map_err(|e| RegistryError::Storage(e.to_string()))?;
-            self.db
-                .insert(key.as_bytes(), value)
-                .map_err(|e| RegistryError::Storage(e.to_string()))?;
+            self.store_masternode(&masternode.address, existing)?;
 
             return Ok(());
         }
@@ -267,12 +272,7 @@ impl MasternodeRegistry {
         };
 
         // Persist to disk
-        let key = format!("masternode:{}", masternode.address);
-        let value = bincode::serialize(&info).map_err(|e| RegistryError::Storage(e.to_string()))?;
-
-        self.db
-            .insert(key.as_bytes(), value)
-            .map_err(|e| RegistryError::Storage(e.to_string()))?;
+        self.store_masternode(&masternode.address, &info)?;
 
         nodes.insert(masternode.address.clone(), info);
         let total_masternodes = nodes.len();
@@ -344,12 +344,7 @@ impl MasternodeRegistry {
                 }
 
                 // Persist to disk
-                let key = format!("masternode:{}", address);
-                let value =
-                    bincode::serialize(&info).map_err(|e| RegistryError::Storage(e.to_string()))?;
-                self.db
-                    .insert(key.as_bytes(), value)
-                    .map_err(|e| RegistryError::Storage(e.to_string()))?;
+                self.store_masternode(address, info)?;
             }
             Ok(())
         } else {

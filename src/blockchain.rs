@@ -5731,39 +5731,68 @@ impl Blockchain {
                         .map(|b| hex::encode(&b.hash()[..8]))
                         .unwrap_or_else(|_| "unknown".to_string());
 
-                    let peer_genesis_str = peer_genesis_info
-                        .clone()
-                        .unwrap_or_else(|| "not provided".to_string());
-
-                    // ONLY reject if genesis hashes are DIFFERENT
-                    if peer_genesis_info.as_ref() != Some(&our_genesis_info) {
-                        warn!(
-                        "🛡️ SECURITY: REJECTED REORG TO GENESIS from peer {} - chains diverged at genesis level",
-                        peer_addr
-                    );
-                        warn!(
-                            "   Our height: {}, our genesis: {}, peer genesis: {}",
-                            our_height, our_genesis_info, peer_genesis_str
-                        );
-                        warn!(
-                            "   Peer is on a completely different chain - cannot reorg to genesis"
-                        );
-
-                        // Mark peer as genesis-incompatible
-                        if let Some(registry) = self.peer_registry.read().await.as_ref() {
-                            registry
-                                .mark_genesis_incompatible(
-                                    &peer_addr,
-                                    &our_genesis_info,
-                                    &peer_genesis_info.unwrap_or_else(|| "unknown".to_string()),
-                                )
-                                .await;
-                        } else {
-                            // Genesis blocks match - this is a normal fork, allow it
-                            info!(
-                                "✓ Genesis blocks match with peer {}, allowing reorg from genesis",
+                    // ONLY reject if genesis hashes are CONFIRMED DIFFERENT
+                    // If peer didn't provide genesis block, we can't determine compatibility
+                    match &peer_genesis_info {
+                        Some(peer_genesis) if peer_genesis != &our_genesis_info => {
+                            // Peer provided genesis and it's DIFFERENT - mark incompatible
+                            warn!(
+                                "🛡️ SECURITY: REJECTED REORG TO GENESIS from peer {} - chains diverged at genesis level",
                                 peer_addr
                             );
+                            warn!(
+                                "   Our height: {}, our genesis: {}, peer genesis: {}",
+                                our_height, our_genesis_info, peer_genesis
+                            );
+                            warn!(
+                                "   Peer is on a completely different chain - cannot reorg to genesis"
+                            );
+
+                            // Mark peer as genesis-incompatible
+                            if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                                registry
+                                    .mark_genesis_incompatible(
+                                        &peer_addr,
+                                        &our_genesis_info,
+                                        peer_genesis,
+                                    )
+                                    .await;
+                            }
+                        }
+                        Some(peer_genesis) => {
+                            // Genesis blocks match - this is a normal fork, allow it
+                            info!(
+                                "✓ Genesis blocks match with peer {} ({}), allowing reorg from genesis",
+                                peer_addr, peer_genesis
+                            );
+                        }
+                        None => {
+                            // Peer didn't provide genesis block - can't determine compatibility
+                            // Don't mark as incompatible, but also don't allow the reorg yet
+                            warn!(
+                                "⚠️ Peer {} didn't provide genesis block for comparison - requesting verification",
+                                peer_addr
+                            );
+                            // Request explicit genesis verification
+                            if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                                let our_genesis_hash = self
+                                    .get_block_by_height(0)
+                                    .await
+                                    .map(|b| b.hash())
+                                    .unwrap_or([0u8; 32]);
+                                let compatible = registry
+                                    .verify_genesis_compatibility(&peer_addr, our_genesis_hash)
+                                    .await;
+                                if !compatible {
+                                    // verify_genesis_compatibility already marks as incompatible
+                                    *self.fork_state.write().await = ForkResolutionState::None;
+                                    return Ok(());
+                                }
+                                info!(
+                                    "✓ Genesis verification passed for peer {}, allowing reorg from genesis",
+                                    peer_addr
+                                );
+                            }
                         }
                     }
 
