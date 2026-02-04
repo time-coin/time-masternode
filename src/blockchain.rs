@@ -2892,32 +2892,34 @@ impl Blockchain {
                                     "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
                                     height, key_new, e1, e2
                                 );
-                                // Auto-recovery: Delete corrupted block and reset height so re-sync can work
-                                tracing::warn!(
-                                    "🔧 Deleting corrupted block {} to allow re-sync from peers",
-                                    height
+
+                                // CRITICAL: DO NOT auto-delete blocks - this causes cascade failures
+                                // When a block is corrupted in local storage (from old flush bug),
+                                // automatically deleting it causes the node to reset its chain height,
+                                // then re-sync from peers, hit the same corrupted block, and loop forever.
+                                //
+                                // Instead: Return error and let the calling code decide what to do.
+                                // The node should:
+                                // 1. Mark this block as corrupted (don't serve it to peers)
+                                // 2. Request re-sync of just this block from peers
+                                // 3. Only reset to genesis as absolute last resort via manual intervention
+
+                                tracing::error!("🛑 CORRUPTED BLOCK DETECTED at height {}", height);
+                                tracing::error!(
+                                    "   This block cannot be deserialized and should not be served to peers"
                                 );
-                                let _ = self.storage.remove(key_new.as_bytes());
-                                // Reset chain height to one before corrupted block
-                                if height > 0 {
-                                    let new_height = height - 1;
-                                    let height_key = "chain_height".as_bytes();
-                                    let height_bytes =
-                                        bincode::serialize(&new_height).unwrap_or_default();
-                                    let _ = self.storage.insert(height_key, height_bytes);
-                                    // CRITICAL: Flush to ensure height change persists across restarts
-                                    let _ = self.storage.flush();
-                                    self.current_height
-                                        .store(new_height, std::sync::atomic::Ordering::SeqCst);
-                                    tracing::warn!(
-                                        "🔧 Reset chain height to {} after deleting corrupted block {}",
-                                        new_height, height
-                                    );
-                                }
-                                // Return error immediately - caller should retry sync
+                                tracing::error!(
+                                    "   Node will refuse to advance past this point until block is fixed"
+                                );
+                                tracing::error!(
+                                    "   MANUAL INTERVENTION REQUIRED: Use clean_restart script to wipe corrupted data"
+                                );
+
+                                // Return error WITHOUT deleting the block or resetting height
+                                // This prevents cascade failures and makes the problem visible
                                 return Err(format!(
-                                    "Block {} was corrupted and deleted - restart sync from height {}",
-                                    height, height.saturating_sub(1)
+                                    "Block {} is corrupted and cannot be deserialized - manual cleanup required",
+                                    height
                                 ));
                             }
                         }
