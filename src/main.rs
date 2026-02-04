@@ -1382,22 +1382,39 @@ async fn main() {
                     .map(|info| info.masternode.clone())
                     .collect();
 
-                // If still insufficient, use ALL registered as last resort
+                // CRITICAL: If still insufficient, REFUSE to produce blocks (fork prevention)
+                // Using inconsistent masternode sets creates competing forks
                 if masternodes.len() < 3 {
                     tracing::error!(
-                        "🚨 Only {} active masternodes (need 3) - EMERGENCY: using ALL registered masternodes (including inactive)",
+                        "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required)",
                         masternodes.len()
                     );
-                    let all_registered_infos = block_registry.list_all().await;
-                    masternodes = all_registered_infos
-                        .iter()
-                        .map(|info| info.masternode.clone())
-                        .collect();
-                    tracing::info!(
-                        "🚨 Emergency mode: found {} total registered masternodes",
-                        masternodes.len()
+                    tracing::error!(
+                        "   Refusing to produce blocks - node will sync from network instead"
                     );
+                    tracing::error!(
+                        "   This prevents emergency mode from creating competing forks"
+                    );
+                    // Skip this production cycle - continue to next iteration
+                    continue;
                 }
+            }
+
+            // Double-check we have enough masternodes after fallback logic
+            if masternodes.len() < 3 {
+                tracing::warn!(
+                    "⚠️ Insufficient masternodes ({}) for block production - skipping",
+                    masternodes.len()
+                );
+                continue;
+            }
+
+            // Additional safety: check masternodes is not empty to prevent panic
+            if masternodes.is_empty() {
+                tracing::error!(
+                    "🛡️ FORK PREVENTION: Empty masternode set - refusing block production"
+                );
+                continue;
             }
 
             // Sort deterministically by address for consistent leader election across all nodes
@@ -1585,10 +1602,11 @@ async fn main() {
                                 }
                             }
 
-                            // If peers have significantly higher height, sync first
-                            if max_peer_height > current_height + 5 {
+                            // CRITICAL: If ANY peer has a longer chain, sync first to prevent forks
+                            // Never produce blocks if there's a longer valid chain available
+                            if max_peer_height > current_height {
                                 tracing::info!(
-                                    "📡 Peers ahead: max peer height {} > our height {} - syncing",
+                                    "📡 Peers ahead: max peer height {} > our height {} - syncing before production",
                                     max_peer_height,
                                     current_height
                                 );
@@ -1820,6 +1838,32 @@ async fn main() {
                     "⚠️ Only {} peer(s) connected - waiting for more peers before producing",
                     connected_peers.len()
                 );
+                continue;
+            }
+
+            // CRITICAL: Final check - verify peers don't have a longer chain
+            // This prevents emergency mode from creating forks when network has progressed
+            let mut max_peer_height_final = current_height;
+            for peer_ip in &connected_peers {
+                if let Some(h) = block_peer_registry.get_peer_height(peer_ip).await {
+                    if h > max_peer_height_final {
+                        max_peer_height_final = h;
+                    }
+                }
+            }
+            if max_peer_height_final > current_height {
+                tracing::warn!(
+                    "🛡️ FORK PREVENTION: Peers have height {} > our height {} - syncing instead of producing",
+                    max_peer_height_final,
+                    current_height
+                );
+                for peer_ip in &connected_peers {
+                    let msg = NetworkMessage::GetBlocks(
+                        current_height + 1,
+                        max_peer_height_final.min(current_height + 50),
+                    );
+                    let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                }
                 continue;
             }
 

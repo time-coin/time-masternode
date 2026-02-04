@@ -529,18 +529,24 @@ impl MasternodeRegistry {
                 active.len()
             );
 
-            // If active is still insufficient, use ALL registered (emergency mode)
+            // CRITICAL: If still insufficient active masternodes, return empty to prevent block production
+            // This forces the node to sync from network instead of creating competing forks
             if active.len() < 3 {
-                let all_registered = self.list_all().await;
                 tracing::error!(
-                    "🚨 EMERGENCY MODE: Only {} active masternodes, using ALL {} registered masternodes to prevent deadlock",
-                    active.len(),
-                    all_registered.len()
+                    "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
+                    active.len()
                 );
-                return all_registered;
+                tracing::error!(
+                    "   Node will sync from network instead of producing blocks with inconsistent masternode set"
+                );
+                // Return empty vector to signal block production should be skipped
+                return Vec::new();
             }
 
-            tracing::warn!("⚠️  Falling back to all active masternodes to prevent deadlock");
+            tracing::warn!(
+                "⚠️  Falling back to {} active masternodes (participation tracking incomplete)",
+                active.len()
+            );
             return active;
         }
 
