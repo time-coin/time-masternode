@@ -1569,10 +1569,10 @@ impl Blockchain {
                         let final_height_after_rollback =
                             self.current_height.load(Ordering::Acquire);
                         self.sync_coordinator.complete_sync(peer_ip).await;
-                        return Err(format!(
+                        Err(format!(
                             "Timeout after rollback: reached {} but peer has {}",
                             final_height_after_rollback, peer_height_after_rollback
-                        ));
+                        ))
                     } else {
                         tracing::warn!(
                             "⏸️  After rollback to {}, peer {} only has {} blocks - no new blocks to sync",
@@ -1583,10 +1583,10 @@ impl Blockchain {
 
                         self.sync_coordinator.complete_sync(peer_ip).await;
 
-                        return Err(format!(
+                        Err(format!(
                             "Fork resolved by rolling back to {}, but peer doesn't have newer blocks",
                             common_ancestor
-                        ));
+                        ))
                     }
                 }
                 Err(e) => Err(format!(
@@ -1742,10 +1742,15 @@ impl Blockchain {
         }
 
         if common_ancestor == 0 && our_height > 0 {
-            tracing::warn!("⚠️ Could not find common ancestor via hash comparison, fork may start at genesis");
+            tracing::warn!(
+                "⚠️ Could not find common ancestor via hash comparison, fork may start at genesis"
+            );
 
             // Request genesis block from peer to verify compatibility
-            tracing::info!("📥 Requesting genesis block from peer {} to verify chain compatibility", peer_ip);
+            tracing::info!(
+                "📥 Requesting genesis block from peer {} to verify chain compatibility",
+                peer_ip
+            );
 
             let req = NetworkMessage::BlockRequest(0);
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1753,32 +1758,42 @@ impl Blockchain {
 
             if let Err(e) = registry.send_to_peer(peer_ip, req).await {
                 tracing::warn!("⚠️ Failed to request genesis block from {}: {}", peer_ip, e);
-                return Err(format!("Failed to request genesis from peer {}: {}", peer_ip, e));
+                return Err(format!(
+                    "Failed to request genesis from peer {}: {}",
+                    peer_ip, e
+                ));
             }
 
             // Wait for genesis block response
-            let peer_genesis = match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
-                Ok(Ok(NetworkMessage::BlockResponse(block))) => {
-                    if block.header.height == 0 {
-                        block
-                    } else {
-                        tracing::warn!("⚠️ Got block at wrong height {} (expected 0)", block.header.height);
-                        return Err(format!("Peer {} sent wrong block (expected genesis)", peer_ip));
+            let peer_genesis =
+                match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+                    Ok(Ok(NetworkMessage::BlockResponse(block))) => {
+                        if block.header.height == 0 {
+                            block
+                        } else {
+                            tracing::warn!(
+                                "⚠️ Got block at wrong height {} (expected 0)",
+                                block.header.height
+                            );
+                            return Err(format!(
+                                "Peer {} sent wrong block (expected genesis)",
+                                peer_ip
+                            ));
+                        }
                     }
-                }
-                Ok(Ok(_)) => {
-                    tracing::warn!("⚠️ Got unexpected response type for genesis request");
-                    return Err(format!("Peer {} sent invalid genesis response", peer_ip));
-                }
-                Ok(Err(_)) => {
-                    tracing::warn!("⚠️ Response channel closed for genesis request");
-                    return Err(format!("Peer {} closed genesis request channel", peer_ip));
-                }
-                Err(_) => {
-                    tracing::warn!("⏱️ Timeout waiting for genesis block from {}", peer_ip);
-                    return Err(format!("Timeout waiting for genesis from peer {}", peer_ip));
-                }
-            };
+                    Ok(Ok(_)) => {
+                        tracing::warn!("⚠️ Got unexpected response type for genesis request");
+                        return Err(format!("Peer {} sent invalid genesis response", peer_ip));
+                    }
+                    Ok(Err(_)) => {
+                        tracing::warn!("⚠️ Response channel closed for genesis request");
+                        return Err(format!("Peer {} closed genesis request channel", peer_ip));
+                    }
+                    Err(_) => {
+                        tracing::warn!("⏱️ Timeout waiting for genesis block from {}", peer_ip);
+                        return Err(format!("Timeout waiting for genesis from peer {}", peer_ip));
+                    }
+                };
 
             // Get our genesis block
             let our_genesis = match self.get_block(0) {
@@ -5939,12 +5954,11 @@ impl Blockchain {
                                     "✓ Genesis verification passed for peer {}, allowing reorg from genesis",
                                     peer_addr
                                 );
+                                // CONTINUE to fork resolution logic below - don't return early
                             }
                         }
                     }
-
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Ok(());
+                    // If we reach here, genesis is compatible - proceed to fork resolution
                 }
 
                 // CRITICAL SECURITY CHECK: Reject reorgs that are too deep

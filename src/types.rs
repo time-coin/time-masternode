@@ -1322,7 +1322,7 @@ mod tests {
         };
 
         // Create validator lookup
-        let validators = vec![
+        let validators = [
             ("TIME0voter0".to_string(), signing_key1.verifying_key()),
             ("TIME0voter1".to_string(), signing_key2.verifying_key()),
             ("TIME0voter2".to_string(), signing_key3.verifying_key()),
