@@ -3587,26 +3587,19 @@ impl Blockchain {
         // CRITICAL: Update cache to ensure consistency
         self.block_cache.put(block.header.height, block.clone());
 
-        // CRITICAL: Always flush early blocks (1-100) to prevent loss on crash
-        // After that, flush every 10 blocks to optimize I/O
-        let should_flush = block.header.height <= 100 || block.header.height % 10 == 0;
-        if should_flush {
-            self.storage.flush().map_err(|e| {
-                tracing::error!(
-                    "❌ Failed to flush block {} to disk: {}",
-                    block.header.height,
-                    e
-                );
-                e.to_string()
-            })?;
+        // CRITICAL: ALWAYS flush to disk after writing a block
+        // This prevents "unexpected end of file" errors when reading back immediately
+        // The previous conditional flush caused corruption during read-after-write verification
+        self.storage.flush().map_err(|e| {
+            tracing::error!(
+                "❌ Failed to flush block {} to disk: {}",
+                block.header.height,
+                e
+            );
+            e.to_string()
+        })?;
 
-            if block.header.height <= 100 {
-                tracing::debug!(
-                    "✓ Critical early block {} flushed to disk",
-                    block.header.height
-                );
-            }
-        }
+        tracing::debug!("✓ Block {} flushed to disk", block.header.height);
 
         Ok(())
     }
