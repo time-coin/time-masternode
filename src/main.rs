@@ -1521,6 +1521,7 @@ async fn main() {
                 // Use event-driven approach: check status and loop back immediately
                 if block_blockchain.is_syncing() {
                     // Check if bootstrap - all peers at height 0
+                    // CRITICAL: Only do this if we're actually at bootstrap height, not if time-based expected height is far ahead
                     let mut all_at_zero = true;
                     for peer_ip in &connected_peers {
                         if let Some((height, _)) =
@@ -1533,12 +1534,19 @@ async fn main() {
                         }
                     }
 
-                    if all_at_zero && current_height == 0 && connected_peers.len() >= 3 {
+                    // CRITICAL FIX: Don't override if we're significantly behind expected height
+                    // If blocks_behind > 10, peers might actually have blocks - trust time-based height, not cached tips
+                    let can_bootstrap_override = all_at_zero
+                        && current_height == 0
+                        && connected_peers.len() >= 3
+                        && blocks_behind <= 10;
+
+                    if can_bootstrap_override {
                         tracing::warn!("🚨 Bootstrap override: All {} peers at height 0, sync is stuck - forcing block production", connected_peers.len());
                         // Fall through to production logic - skip consensus check entirely
                         // Everyone is at height 0, no blocks to sync, time to produce genesis+1
                     } else {
-                        tracing::debug!("⏳ Sync coordinator is syncing - checking again shortly");
+                        tracing::debug!("⏳ Sync coordinator is syncing - checking again shortly (blocks_behind: {})", blocks_behind);
                         continue; // Loop back immediately via 1-second interval
                     }
                 } else if !connected_peers.is_empty() {
