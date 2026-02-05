@@ -732,7 +732,7 @@ async fn maintain_peer_connection(
 
     // Clean up on disconnect in both managers
     connection_manager.mark_disconnected(&peer_ip);
-    peer_registry.mark_inbound_disconnected(&peer_ip);
+    peer_registry.mark_disconnected(&peer_ip); // Use mark_disconnected for both inbound and outbound
     peer_registry.unregister_peer(&peer_ip).await;
 
     // If this peer is a registered masternode, mark it as inactive on disconnect
