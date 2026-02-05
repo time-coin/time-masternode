@@ -1,8 +1,2 @@
 /target
 /analysis/
-
-# Temporary analysis files (old)
-IMPLEMENTATION_ROADMAP.md
-IMPLEMENTATION_TASKS.md
-PRODUCTION_READINESS_ANALYSIS.md
-SESSION_SUMMARY.md

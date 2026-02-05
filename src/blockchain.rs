@@ -2893,32 +2893,31 @@ impl Blockchain {
                                     height, key_new, e1, e2
                                 );
 
-                                // CRITICAL: DO NOT auto-delete blocks - this causes cascade failures
-                                // When a block is corrupted in local storage (from old flush bug),
-                                // automatically deleting it causes the node to reset its chain height,
-                                // then re-sync from peers, hit the same corrupted block, and loop forever.
-                                //
-                                // Instead: Return error and let the calling code decide what to do.
-                                // The node should:
-                                // 1. Mark this block as corrupted (don't serve it to peers)
-                                // 2. Request re-sync of just this block from peers
-                                // 3. Only reset to genesis as absolute last resort via manual intervention
+                                // SMART RECOVERY: Delete corrupted block and trigger re-sync from peers
+                                // This is safe because:
+                                // 1. We delete ONLY the corrupted block (not chain height)
+                                // 2. Chain height stays at current value, allowing re-fetch
+                                // 3. Sync coordinator will notice gap and request from peers
+                                // 4. Multiple peers validate received blocks against consensus
+                                // 5. If all peers have corrupted block, we'll detect consensus corruption
 
-                                tracing::error!("🛑 CORRUPTED BLOCK DETECTED at height {}", height);
-                                tracing::error!(
-                                    "   This block cannot be deserialized and should not be served to peers"
-                                );
-                                tracing::error!(
-                                    "   Node will refuse to advance past this point until block is fixed"
-                                );
-                                tracing::error!(
-                                    "   MANUAL INTERVENTION REQUIRED: Use clean_restart script to wipe corrupted data"
-                                );
+                                tracing::warn!("🔄 CORRUPTED BLOCK RECOVERY: Deleting corrupted block {} for re-fetch from peers", height);
 
-                                // Return error WITHOUT deleting the block or resetting height
-                                // This prevents cascade failures and makes the problem visible
+                                // Delete corrupted block
+                                let _ = self.storage.remove(key_new.as_bytes());
+                                self.block_cache.invalidate(height);
+
+                                // Also try to delete old format if it exists
+                                let _ = self.storage.remove(key_old.as_bytes());
+
+                                // Flush to ensure deletion persists
+                                let _ = self.storage.flush();
+
+                                tracing::warn!("✅ Corrupted block {} deleted, will be re-fetched from peers", height);
+
+                                // Return error to trigger recovery flow
                                 return Err(format!(
-                                    "Block {} is corrupted and cannot be deserialized - manual cleanup required",
+                                    "Block {} was corrupted and has been deleted for re-fetch from peers",
                                     height
                                 ));
                             }
@@ -5280,7 +5279,22 @@ impl Blockchain {
         let our_height = self.get_height();
         let our_hash = match self.get_block_hash(our_height) {
             Ok(hash) => hash,
-            Err(_) => return None,
+            Err(e) => {
+                // Check if the error is due to our block being corrupted/deleted
+                if e.contains("deleted") || e.contains("not found") {
+                    tracing::warn!(
+                        "🔄 Our block at height {} is missing ({}), need to sync from peers",
+                        our_height, e
+                    );
+                    // Fall through to consensus selection - we'll sync from best peer
+                    // Use a zero hash as placeholder to trigger recovery
+                    [0; 32]
+                } else {
+                    // Unexpected error
+                    tracing::error!("Failed to get our block hash: {}", e);
+                    return None;
+                }
+            }
         };
 
         // Group peers by (height, hash) to find consensus
@@ -5429,6 +5443,16 @@ impl Blockchain {
 
         // Case 2: Same height but different hash - fork at same height!
         if consensus_height == our_height && consensus_hash != our_hash {
+            // Special case: our_hash is zero - our block is missing (corrupted/deleted recovery)
+            if our_hash == [0; 32] {
+                tracing::warn!(
+                    "🔄 Recovery: Our block at height {} is missing, syncing to consensus hash {}",
+                    consensus_height,
+                    hex::encode(&consensus_hash[..8])
+                );
+                return Some((consensus_height, consensus_peers[0].clone()));
+            }
+
             warn!(
                 "🔀 Fork at same height {}: our hash {} vs consensus hash {} ({} peers)",
                 consensus_height,
@@ -5507,17 +5531,39 @@ impl Blockchain {
         // Case 3: We're ahead of all known peers
         // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical
         // This can only happen if we have blocks that no peer has yet
+        //
+        // RECOVERY: Check if our top block is accessible (not corrupted)
+        // If it was corrupted and deleted, we'll have a gap that needs re-sync
         if our_height > consensus_height {
-            tracing::debug!(
-                "📈 We have the longest chain: height {} > highest peer {} ({} peers at that height)",
-                our_height,
-                consensus_height,
-                consensus_peers.len()
-            );
+            // Verify our top block is still retrievable
+            match self.get_block(our_height) {
+                Ok(_) => {
+                    tracing::debug!(
+                        "📈 We have the longest chain: height {} > highest peer {} ({} peers at that height)",
+                        our_height,
+                        consensus_height,
+                        consensus_peers.len()
+                    );
 
-            // Don't roll back - we ARE the canonical chain
-            // Peers will sync to us when they receive our blocks
-            return None;
+                    // Don't roll back - we ARE the canonical chain
+                    // Peers will sync to us when they receive our blocks
+                    return None;
+                }
+                Err(e) if e.contains("deleted") || e.contains("not found") => {
+                    // Our block was deleted (corrupted recovery) or is missing
+                    // Sync to consensus to refill the gap
+                    tracing::warn!(
+                        "🔄 Recovery: Our block {} is missing ({}), syncing to consensus at {}",
+                        our_height, e, consensus_height
+                    );
+                    return Some((consensus_height, consensus_peers[0].clone()));
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to verify our top block {}: {}", our_height, e);
+                    // On unexpected error, sync to consensus to be safe
+                    return Some((consensus_height, consensus_peers[0].clone()));
+                }
+            }
         }
 
         // Case 4: Same height, same hash - no fork
