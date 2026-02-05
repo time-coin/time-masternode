@@ -485,10 +485,45 @@ impl Blockchain {
             self.current_height
                 .store(correct_height, std::sync::atomic::Ordering::Release);
 
+            // Delete orphaned blocks above the corrected height
+            // This prevents GetBlocks from returning partial block sets
+            let orphaned_count = stored_height.saturating_sub(correct_height);
+            if orphaned_count > 0 {
+                tracing::info!(
+                    "🧹 Deleting {} orphaned blocks (heights {} to {})",
+                    orphaned_count,
+                    correct_height + 1,
+                    stored_height
+                );
+
+                let mut deleted = 0;
+                for h in (correct_height + 1)..=stored_height {
+                    let block_key = format!("block_{}", h);
+                    match self.storage.remove(block_key.as_bytes()) {
+                        Ok(_) => {
+                            deleted += 1;
+                            if deleted % 10 == 0 || deleted == orphaned_count {
+                                tracing::debug!(
+                                    "  Deleted {}/{} orphaned blocks",
+                                    deleted,
+                                    orphaned_count
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to delete orphaned block {}: {}", h, e);
+                        }
+                    }
+                }
+
+                self.storage.flush().map_err(|e| e.to_string())?;
+                tracing::info!("✅ Deleted {} orphaned blocks", deleted);
+            }
+
             tracing::info!(
                 "✅ Chain height corrected to {} (will re-sync {} blocks)",
                 correct_height,
-                stored_height.saturating_sub(correct_height)
+                orphaned_count
             );
             return Ok(true);
         }
