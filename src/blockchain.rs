@@ -3582,10 +3582,10 @@ impl Blockchain {
             if compressed.len() < serialized.len() {
                 compressed
             } else {
-                serialized
+                serialized.clone()
             }
         } else {
-            serialized
+            serialized.clone()
         };
 
         self.storage
