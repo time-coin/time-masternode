@@ -792,8 +792,8 @@ impl Blockchain {
             bitmap_count
         );
 
-        // Genesis reward: Only the leader (lowest address) gets the block reward
-        // This is consistent with normal block production where only the leader gets rewarded
+        // Genesis reward: Only the leader gets the block reward
+        // But ALL masternodes in the bitmap are listed as eligible for future block rewards
         const TIME_UNIT: u64 = 100_000_000; // 1 TIME = 100M satoshis
         const GENESIS_REWARD: u64 = 100 * TIME_UNIT; // 100 TIME for the genesis leader
 
@@ -802,12 +802,29 @@ impl Blockchain {
         sorted_for_reward.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
         let leader = &sorted_for_reward[0];
 
-        // Create masternode rewards - only leader receives genesis reward
-        let masternode_rewards = vec![(leader.reward_address.clone(), GENESIS_REWARD)];
+        // Create masternode rewards - list all masternodes who are eligible going forward
+        // This establishes the reward list for future blocks based on genesis bitmap
+        let mut masternode_rewards: Vec<(String, u64)> = Vec::new();
+        for info in &registered {
+            // Include all eligible masternodes in the reward list
+            // Amount is 0 for non-leaders (they didn't produce this block)
+            // This documents who is eligible for rewards in future blocks
+            let reward_amount = if info.masternode.address == leader.masternode.address {
+                GENESIS_REWARD // Leader gets the block reward
+            } else {
+                0 // Other masternodes are listed as eligible but receive 0 in genesis
+            };
+            // Use the actual masternode address, not reward_address (which may be unset)
+            masternode_rewards.push((info.masternode.address.clone(), reward_amount));
+        }
 
         tracing::info!(
-            "   Genesis reward: {} -> 100 TIME (genesis leader)",
+            "   Genesis block reward: {} -> 100 TIME (leader)",
             leader.masternode.address
+        );
+        tracing::info!(
+            "   {} masternodes listed as eligible for future rewards",
+            registered.len()
         );
 
         // Create genesis header
