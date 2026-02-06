@@ -126,14 +126,12 @@ impl BlockCacheManager {
     /// Put a block into cache
     ///
     /// The block is stored in both hot cache (deserialized) and warm cache (serialized)
-    pub fn put(&self, height: u64, block: Block) {
-        let block_arc = Arc::new(block);
-
+    pub fn put(&self, height: u64, block: Arc<Block>) {
         // Add to hot cache
-        self.hot.write().put(height, Arc::clone(&block_arc));
+        self.hot.write().put(height, Arc::clone(&block));
 
         // Serialize for warm cache
-        match bincode::serialize(&*block_arc) {
+        match bincode::serialize(&*block) {
             Ok(bytes) => {
                 self.warm.write().put(height, bytes);
             }
