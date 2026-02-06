@@ -3174,8 +3174,9 @@ impl Blockchain {
                 // Try current Block format
                 match bincode::deserialize::<Block>(&data) {
                     Ok(block) => {
-                        self.block_cache.put(height, block.clone());
-                        return Ok(block);
+                        let block_arc = Arc::new(block);
+                        self.block_cache.put(height, block_arc.clone());
+                        return Ok((*block_arc).clone());
                     }
                     Err(e1) => {
                         // Try old BlockV1 format (without liveness_recovery field)
@@ -3183,8 +3184,9 @@ impl Blockchain {
                             Ok(v1_block) => {
                                 let block: Block = v1_block.into();
                                 tracing::info!("✓ Migrated block {} from V1 format", height);
-                                self.block_cache.put(height, block.clone());
-                                return Ok(block);
+                                let block_arc = Arc::new(block);
+                                self.block_cache.put(height, block_arc.clone());
+                                return Ok((*block_arc).clone());
                             }
                             Err(e2) => {
                                 tracing::error!(
@@ -3243,8 +3245,9 @@ impl Blockchain {
                 // Try current Block format
                 match bincode::deserialize::<Block>(&data) {
                     Ok(block) => {
-                        self.block_cache.put(height, block.clone());
-                        return Ok(block);
+                        let block_arc = Arc::new(block);
+                        self.block_cache.put(height, block_arc.clone());
+                        return Ok((*block_arc).clone());
                     }
                     Err(e1) => {
                         // Try old BlockV1 format
@@ -3255,8 +3258,9 @@ impl Blockchain {
                                     "✓ Migrated block {} from V1 format (old key)",
                                     height
                                 );
-                                self.block_cache.put(height, block.clone());
-                                return Ok(block);
+                                let block_arc = Arc::new(block);
+                                self.block_cache.put(height, block_arc.clone());
+                                return Ok((*block_arc).clone());
                             }
                             Err(e2) => {
                                 tracing::error!(
@@ -3786,7 +3790,8 @@ impl Blockchain {
 
         // CRITICAL: Update cache to ensure consistency
         // Without this, cached stale blocks can cause hash mismatches
-        self.block_cache.put(block.header.height, block.clone());
+        let block_arc = Arc::new(block.clone());
+        self.block_cache.put(block.header.height, block_arc);
 
         // Update chain height
         let height_key = "chain_height".as_bytes();
@@ -3888,7 +3893,8 @@ impl Blockchain {
             .map_err(|e| e.to_string())?;
 
         // CRITICAL: Update cache to ensure consistency
-        self.block_cache.put(block.header.height, block.clone());
+        let block_arc = Arc::new(block.clone());
+        self.block_cache.put(block.header.height, block_arc);
 
         // CRITICAL: ALWAYS flush to disk after writing a block
         // This prevents "unexpected end of file" errors when reading back immediately
