@@ -2138,6 +2138,13 @@ impl Blockchain {
             return Err(format!("Cannot produce blocks: invalid genesis - {}", e));
         }
 
+        // Check 2/3 consensus requirement for block production
+        // Requirement: 2/3+ of connected peers must agree on the current chain (height, hash)
+        // Exception: Allow production with 0 peers (bootstrap mode)
+        if !self.check_2_3_consensus_for_production().await {
+            return Err("Cannot produce block: no 2/3 consensus on current chain state. Waiting for network consensus.".to_string());
+        }
+
         // Get previous block hash
         let mut current_height = self.current_height.load(Ordering::Acquire);
 
@@ -2559,6 +2566,85 @@ impl Blockchain {
         Ok(block)
     }
 
+    /// Check if 2/3 of connected peers agree on the current chain state (height, hash)
+    /// Returns true if:
+    /// - We have 0 connected peers (bootstrap mode allowed), OR
+    /// - 2/3+ of peers agree on our current (height, hash)
+    ///
+    /// Returns false if:
+    /// - We have 1+ connected peers AND less than 2/3 agree on our chain
+    async fn check_2_3_consensus_for_production(&self) -> bool {
+        let peer_registry_guard = self.peer_registry.read().await;
+        let peer_registry = match peer_registry_guard.as_ref() {
+            Some(registry) => registry,
+            None => return true, // No registry = bootstrap mode allowed
+        };
+
+        let connected_peers = peer_registry.get_connected_peers().await;
+        
+        // Bootstrap mode: allow production with 0 peers
+        if connected_peers.is_empty() {
+            tracing::debug!("✅ Block production allowed in bootstrap mode (0 connected peers)");
+            return true;
+        }
+
+        let our_height = self.current_height.load(Ordering::Acquire);
+        
+        // Get our current block hash
+        let our_hash = match self.get_block_hash(our_height) {
+            Ok(hash) => hash,
+            Err(_) => {
+                // If we can't get our own hash, something is wrong - don't produce
+                tracing::warn!(
+                    "⚠️ Block production blocked: cannot determine our current block hash at height {}",
+                    our_height
+                );
+                return false;
+            }
+        };
+
+        // Collect peer chain tips for our height
+        let mut peers_on_our_chain = 0;
+        let mut peers_responding = 0;
+
+        for peer_ip in &connected_peers {
+            if let Some((peer_height, peer_hash)) = peer_registry.get_peer_chain_tip(peer_ip).await {
+                peers_responding += 1;
+                
+                // Check if peer agrees on our (height, hash)
+                if peer_height == our_height && peer_hash == our_hash {
+                    peers_on_our_chain += 1;
+                }
+            }
+        }
+
+        // Require 2/3 of ALL connected peers to agree on our chain
+        let required_agreement = (connected_peers.len() * 2 + 2) / 3; // Ceiling division for 2/3
+        let has_consensus = peers_on_our_chain >= required_agreement;
+
+        if has_consensus {
+            tracing::debug!(
+                "✅ Block production allowed: {}/{} peers agree on height {} (need {} for 2/3)",
+                peers_on_our_chain,
+                connected_peers.len(),
+                our_height,
+                required_agreement
+            );
+        } else {
+            tracing::warn!(
+                "⚠️ Block production blocked: {}/{} peers agree on height {} (need {} for 2/3). Peer responses: {}/{}",
+                peers_on_our_chain,
+                connected_peers.len(),
+                our_height,
+                required_agreement,
+                peers_responding,
+                connected_peers.len()
+            );
+        }
+
+        has_consensus
+    }
+
     /// Add a block to the chain
     pub async fn add_block(&self, block: Block) -> Result<(), String> {
         // CRITICAL FIX: Sanitize blocks from old nodes with corrupted transaction data
@@ -2666,8 +2752,24 @@ impl Blockchain {
                     }
                 }
                 Err(e) => {
-                    // RECOVERY: Previous block is missing/corrupted
-                    // If we're in network consensus, accept the block and allow gaps
+                    // RECOVERY: Previous block is missing
+                    // During sync: DON'T accept blocks with missing parents - we need sequential chain
+                    // After sync: Accept if from consensus peer (network validated it)
+                    let is_syncing = self.is_syncing.load(Ordering::Acquire);
+                    let current_height = self.current_height.load(Ordering::Acquire);
+                    
+                    if is_syncing {
+                        // During sync, reject blocks with missing parents
+                        // This prevents gaps in the chain
+                        return Err(format!(
+                            "Block {} has missing parent at height {} - need sequential blocks during sync (currently at height {})",
+                            block.header.height,
+                            block.header.height - 1,
+                            current_height
+                        ));
+                    }
+                    
+                    // After sync: Accept blocks from consensus peers (they've been validated)
                     // The block's previous_hash field serves as proof of parent validity
                     tracing::warn!(
                         "⚠️ Previous block {} not found ({}), but accepting block {} - network in consensus",
@@ -2678,7 +2780,7 @@ impl Blockchain {
 
                     // NOTE: We're accepting this block even though we can't verify the previous hash
                     // This is safe because:
-                    // 1. The block came from a consensus peer
+                    // 1. The block came from a consensus peer (not during sync)
                     // 2. Other nodes with valid chains have validated it
                     // 3. The previous_hash field in the block header proves parent validity
                     // 4. If this breaks consensus, peers will fork-resolve and reject the bad chain
@@ -2717,38 +2819,11 @@ impl Blockchain {
             use crate::block::genesis::GenesisBlock;
             GenesisBlock::verify_timestamp(&block, self.network_type)?;
         } else if block.header.height != current + 1 {
-            // During sync, allow out-of-order blocks if we're syncing and have the parent
-            let is_syncing = self.is_syncing.load(Ordering::Acquire);
-            if is_syncing {
-                // Check if parent block exists (even if we're ahead of parent)
-                match self.get_block(block.header.height - 1) {
-                    Ok(_parent_block) => {
-                        // Parent exists - we can add this block even if out of order
-                        tracing::debug!(
-                            "📦 Accepting out-of-order block {} during sync (current height: {}, parent exists)",
-                            block.header.height,
-                            current
-                        );
-                        // Continue processing
-                    }
-                    Err(_) => {
-                        // Parent doesn't exist - we need to wait for it
-                        return Err(format!(
-                            "Block {} missing parent at height {} (syncing from height {}, cannot add yet)",
-                            block.header.height,
-                            block.header.height - 1,
-                            current
-                        ));
-                    }
-                }
-            } else {
-                // Not syncing - enforce strict ordering
-                return Err(format!(
-                    "Block height mismatch: expected {}, got {}",
-                    current + 1,
-                    block.header.height
-                ));
-            }
+            return Err(format!(
+                "Block height mismatch: expected {}, got {}",
+                current + 1,
+                block.header.height
+            ));
         }
 
         // Checkpoint validation: verify block hash matches checkpoint if this is a checkpoint height
