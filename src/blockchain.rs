@@ -414,50 +414,90 @@ impl Blockchain {
             stored_height
         );
 
+        // Helper: check if a block exists under either key format
+        let block_key_exists = |h: u64| -> bool {
+            let key_new = format!("block_{}", h);
+            let key_old = format!("block:{}", h);
+            self.storage
+                .get(key_new.as_bytes())
+                .ok()
+                .flatten()
+                .is_some()
+                || self
+                    .storage
+                    .get(key_old.as_bytes())
+                    .ok()
+                    .flatten()
+                    .is_some()
+        };
+
         // First, find the highest contiguous chain from genesis
         // This handles gaps in the middle of the chain
+        // CRITICAL: Use get_block() which checks BOTH key formats (block_ and block:)
         let mut highest_contiguous = 0u64;
+        let mut gap_heights: Vec<u64> = Vec::new();
         for h in 0..=stored_height {
-            let key = format!("block_{}", h);
-            if self.storage.get(key.as_bytes()).ok().flatten().is_some() {
+            if block_key_exists(h) {
                 if self.get_block(h).is_ok() {
                     highest_contiguous = h;
                 } else {
-                    // Block exists but corrupted - chain breaks here
-                    tracing::warn!("🔧 Block {} exists but is corrupted - chain breaks here", h);
-                    break;
+                    // Block exists but corrupted - record gap, don't break
+                    tracing::warn!("🔧 Block {} exists but is corrupted - recording as gap", h);
+                    gap_heights.push(h);
+                    break; // Chain breaks at corruption
                 }
             } else {
-                // Gap found - chain breaks here
+                // Gap found - record it but DON'T delete blocks above
                 if h > 0 {
                     tracing::warn!(
                         "🔧 Gap detected: block {} missing (highest contiguous: {})",
                         h,
                         highest_contiguous
                     );
+                    gap_heights.push(h);
                 }
                 break;
+            }
+        }
+
+        // Scan above the gap to find how many valid blocks exist beyond it
+        // These should NOT be deleted — they'll be needed after the gap is filled
+        if !gap_heights.is_empty() {
+            let gap_start = gap_heights[0];
+            let mut blocks_above_gap = 0u64;
+            let mut highest_above_gap = 0u64;
+            for h in (gap_start + 1)..=stored_height.max(stored_height + 100) {
+                if block_key_exists(h) && self.get_block(h).is_ok() {
+                    blocks_above_gap += 1;
+                    highest_above_gap = h;
+                } else if !block_key_exists(h) {
+                    break; // No more blocks
+                }
+            }
+            if blocks_above_gap > 0 {
+                tracing::info!(
+                    "📊 Found {} valid blocks above gap (heights {} to {}) - PRESERVING for re-sync",
+                    blocks_above_gap,
+                    gap_start + 1,
+                    highest_above_gap
+                );
             }
         }
 
         // Also scan forward from stored height for blocks that exist beyond it
         let mut actual_height = highest_contiguous;
         for h in (stored_height + 1)..=(stored_height + 1000) {
-            let key = format!("block_{}", h);
-            if self.storage.get(key.as_bytes()).ok().flatten().is_some() {
-                if self.get_block(h).is_ok() {
-                    actual_height = h;
-                } else {
-                    tracing::warn!("🔧 Block {} exists but is corrupted, stopping scan", h);
-                    break;
-                }
-            } else {
+            if block_key_exists(h) && self.get_block(h).is_ok() {
+                actual_height = h;
+            } else if !block_key_exists(h) {
                 break;
             }
         }
 
         // Use the highest contiguous chain as our actual height
-        // (blocks beyond a gap are orphaned and will need to be re-synced)
+        // CRITICAL: Do NOT delete blocks above the gap — they will be needed
+        // after the missing blocks are re-synced from peers. Only adjust the
+        // reported height so sync knows to request the gap blocks.
         let correct_height = highest_contiguous;
 
         if correct_height != stored_height {
@@ -468,7 +508,7 @@ impl Blockchain {
                 actual_height
             );
             tracing::info!(
-                "🔧 Correcting chain height from {} to {}",
+                "🔧 Correcting chain height from {} to {} (gap blocks will be re-synced from peers)",
                 stored_height,
                 correct_height
             );
@@ -485,45 +525,48 @@ impl Blockchain {
             self.current_height
                 .store(correct_height, std::sync::atomic::Ordering::Release);
 
-            // Delete orphaned blocks above the corrected height
-            // This prevents GetBlocks from returning partial block sets
-            let orphaned_count = stored_height.saturating_sub(correct_height);
-            if orphaned_count > 0 {
-                tracing::info!(
-                    "🧹 Deleting {} orphaned blocks (heights {} to {})",
-                    orphaned_count,
-                    correct_height + 1,
-                    stored_height
-                );
-
-                let mut deleted = 0;
-                for h in (correct_height + 1)..=stored_height {
+            // DO NOT delete blocks above the gap!
+            // Previously this code deleted all blocks above highest_contiguous,
+            // which was catastrophic: a single missing block caused the entire
+            // chain above it to be wiped. Instead, we preserve blocks above the
+            // gap so that once the missing block(s) are re-synced, the chain can
+            // be reconstructed without re-downloading everything.
+            //
+            // Only delete genuinely corrupted blocks (blocks that exist but fail
+            // deserialization) — these can't be used anyway.
+            let mut corrupted_deleted = 0u64;
+            for h in (correct_height + 1)..=stored_height {
+                if block_key_exists(h) && self.get_block(h).is_err() {
+                    // Block exists but is corrupted — safe to delete
                     let block_key = format!("block_{}", h);
-                    match self.storage.remove(block_key.as_bytes()) {
-                        Ok(_) => {
-                            deleted += 1;
-                            if deleted % 10 == 0 || deleted == orphaned_count {
-                                tracing::debug!(
-                                    "  Deleted {}/{} orphaned blocks",
-                                    deleted,
-                                    orphaned_count
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to delete orphaned block {}: {}", h, e);
-                        }
-                    }
+                    let _ = self.storage.remove(block_key.as_bytes());
+                    let block_key_old = format!("block:{}", h);
+                    let _ = self.storage.remove(block_key_old.as_bytes());
+                    corrupted_deleted += 1;
+                    tracing::warn!(
+                        "🧹 Deleted corrupted block {} (will re-fetch from peers)",
+                        h
+                    );
                 }
-
-                self.storage.flush().map_err(|e| e.to_string())?;
-                tracing::info!("✅ Deleted {} orphaned blocks", deleted);
             }
 
+            if corrupted_deleted > 0 {
+                self.storage.flush().map_err(|e| e.to_string())?;
+                tracing::info!("🧹 Deleted {} corrupted blocks (preserved {} valid blocks above gap for re-sync)",
+                    corrupted_deleted,
+                    stored_height.saturating_sub(correct_height).saturating_sub(corrupted_deleted).saturating_sub(gap_heights.len() as u64)
+                );
+            }
+
+            let gap_count = if gap_heights.is_empty() {
+                0
+            } else {
+                gap_heights.len()
+            };
             tracing::info!(
-                "✅ Chain height corrected to {} (will re-sync {} blocks)",
+                "✅ Chain height corrected to {} ({} gap(s) detected, blocks above gap preserved for re-sync)",
                 correct_height,
-                orphaned_count
+                gap_count
             );
             return Ok(true);
         }
@@ -1089,57 +1132,72 @@ impl Blockchain {
         let time_expected = self.calculate_expected_height();
         let target = target_height.unwrap_or(time_expected);
 
-        // BOOTSTRAP CHECK: If we're behind but all peers are at our height, skip sync
-        // This handles genesis scenario where time-based calculation shows we're behind
-        // but nobody has actually produced blocks yet
-        // CRITICAL FIX: Only skip sync if we have responses from MOST peers confirming they're at our height
-        // This prevents the bug where cache is empty and we incorrectly skip sync to a longer chain
-        if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
-            let connected_peers = peer_registry.get_connected_peers().await;
-            if !connected_peers.is_empty() {
-                // Manually check peer heights from cache (more reliable than consensus check at startup)
-                let mut peer_heights = Vec::new();
-                for peer_ip in &connected_peers {
-                    if let Some((height, _)) = peer_registry.get_peer_chain_tip(peer_ip).await {
-                        peer_heights.push(height);
+        // BOOTSTRAP CHECK: If we're behind but all peers are CONFIRMED at our height, skip sync.
+        // This handles genuine genesis scenario where time-based calculation shows we're behind
+        // but nobody has actually produced blocks yet.
+        //
+        // CRITICAL: Only trust this shortcut when:
+        // 1. We have POSITIVE confirmation from a minimum number of peers (not just missing data)
+        // 2. The time-based expected height is not too far ahead (prevents trusting stale cache
+        //    when the network has been running for a long time)
+        let blocks_behind_target = target.saturating_sub(current);
+        // Only allow bootstrap shortcut when expected height is close to 0 (genuine new network)
+        // If expected height is far ahead, peer cache is likely stale — don't skip sync
+        const MAX_BOOTSTRAP_SHORTCUT_BEHIND: u64 = 10;
+
+        if blocks_behind_target <= MAX_BOOTSTRAP_SHORTCUT_BEHIND {
+            if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                let connected_peers = peer_registry.get_connected_peers().await;
+                if !connected_peers.is_empty() {
+                    // Try to get consensus - if available, check if everyone is at our height
+                    if let Some((consensus_height, _)) = self.compare_chain_with_peers().await {
+                        if consensus_height == current && current < target {
+                            tracing::info!(
+                                "✅ Bootstrap scenario detected via consensus: All peers at height {} but time-based calc shows target {} (only {} behind). Skipping sync - ready for block production.",
+                                current,
+                                target,
+                                blocks_behind_target
+                            );
+                            return Ok(()); // Don't sync - proceed to block production
+                        }
+                    } else {
+                        // If compare_chain_with_peers returns None (incomplete responses),
+                        // manually check peer heights from cache — require positive confirmation
+                        tracing::debug!(
+                            "🔍 Bootstrap check: Consensus unavailable, checking peer heights manually"
+                        );
+                        let mut peer_heights = Vec::new();
+                        for peer_ip in &connected_peers {
+                            if let Some((height, _)) =
+                                peer_registry.get_peer_chain_tip(peer_ip).await
+                            {
+                                peer_heights.push(height);
+                            }
+                        }
+
+                        // Require POSITIVE confirmation from at least 2 peers (not just empty cache)
+                        if peer_heights.len() >= 2
+                            && peer_heights.iter().all(|&h| h == current)
+                            && current < target
+                        {
+                            tracing::info!(
+                                "✅ Bootstrap scenario detected via manual check: {}/{} peers confirmed at height {} but time-based calc shows target {} (only {} behind). Skipping sync - ready for block production.",
+                                peer_heights.len(),
+                                connected_peers.len(),
+                                current,
+                                target,
+                                blocks_behind_target
+                            );
+                            return Ok(()); // Don't sync - proceed to block production
+                        }
                     }
                 }
-
-                // Only skip sync if:
-                // 1. We have responses from MAJORITY of peers (>50%)
-                // 2. ALL responding peers report height = our height
-                // 3. Our height < time-expected height
-                let response_ratio = if !peer_heights.is_empty() {
-                    peer_heights.len() as f64 / connected_peers.len() as f64
-                } else {
-                    0.0
-                };
-
-                if response_ratio > 0.5
-                    && !peer_heights.is_empty()
-                    && peer_heights.iter().all(|&h| h == current)
-                    && current < target
-                {
-                    tracing::info!(
-                        "✅ Bootstrap scenario detected: {}/{} peers ({}%) at height {} but time-based calc shows target {}. Skipping sync - ready for block production.",
-                        peer_heights.len(),
-                        connected_peers.len(),
-                        (response_ratio * 100.0) as u32,
-                        current,
-                        target
-                    );
-                    return Ok(()); // Don't sync - proceed to block production
-                } else if !peer_heights.is_empty() {
-                    // Log why we're NOT skipping sync
-                    let all_at_current = peer_heights.iter().all(|&h| h == current);
-                    tracing::debug!(
-                        "🔍 Not skipping sync: response_ratio={:.1}%, all_at_current={}, heights={:?}",
-                        response_ratio * 100.0,
-                        all_at_current,
-                        peer_heights
-                    );
-                }
             }
+        } else {
+            tracing::info!(
+                "🔒 Bootstrap shortcut SKIPPED: {} blocks behind target ({} vs {}) exceeds threshold {} - will sync from peers",
+                blocks_behind_target, current, target, MAX_BOOTSTRAP_SHORTCUT_BEHIND
+            );
         }
 
         // If we're already synced, return early
@@ -2815,6 +2873,25 @@ impl Blockchain {
 
         // Hash verified - NOW update chain height
         self.update_chain_height(block.header.height)?;
+
+        // SCAN FORWARD: After filling a gap, check if blocks above already exist in storage.
+        // This handles the case where verify_and_fix_chain_height preserved blocks above a gap.
+        // When the gap is filled, we should advance the height past all already-stored blocks.
+        let mut scan_height = block.header.height + 1;
+        let mut advanced = 0u64;
+        while self.get_block(scan_height).is_ok() {
+            self.update_chain_height(scan_height)?;
+            self.current_height.store(scan_height, Ordering::Release);
+            advanced += 1;
+            scan_height += 1;
+        }
+        if advanced > 0 {
+            tracing::info!(
+                "📈 Gap fill: advanced chain height past {} pre-existing blocks (now at height {})",
+                advanced,
+                scan_height - 1
+            );
+        }
 
         tracing::debug!(
             "✓ Block {} hash verified after storage: {}",
