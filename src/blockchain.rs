@@ -2647,6 +2647,11 @@ impl Blockchain {
                     }
                 }
             }
+
+            // CRITICAL: Validate genesis timestamp matches network template
+            // This ensures all nodes use the same genesis and don't fork at genesis level
+            use crate::block::genesis::GenesisBlock;
+            GenesisBlock::verify_timestamp(&block, self.network_type)?;
         } else if block.header.height != current + 1 {
             return Err(format!(
                 "Block height mismatch: expected {}, got {}",
