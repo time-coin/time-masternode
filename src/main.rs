@@ -990,6 +990,26 @@ async fn main() {
             }
         }
 
+        // STEP 2.5: Actively request chain tips from all peers BEFORE making any sync decisions.
+        // This ensures we have fresh data instead of relying on stale/empty cache.
+        // Without this, restarted nodes may see empty peer caches and incorrectly enter bootstrap mode.
+        {
+            let connected = peer_registry_for_sync.get_connected_peers().await;
+            if !connected.is_empty() {
+                tracing::info!(
+                    "📡 Requesting chain tips from {} peer(s) for fresh sync data",
+                    connected.len()
+                );
+                for peer_ip in &connected {
+                    let msg = crate::network::message::NetworkMessage::GetChainTip;
+                    let _ = peer_registry_for_sync.send_to_peer(peer_ip, msg).await;
+                }
+                // Wait briefly for chain tip responses to arrive and be processed
+                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                tracing::info!("✓ Chain tip request round complete");
+            }
+        }
+
         // STEP 3: Start fork detection BEFORE syncing (run immediately then every 15 seconds for immediate sync)
         Blockchain::start_chain_comparison_task(blockchain_init.clone());
         tracing::info!("✓ Fork detection task started (checks immediately, then every 15 seconds)");
@@ -1190,8 +1210,93 @@ async fn main() {
 
         tracing::info!("✅ Genesis block ready - starting block production loop");
 
-        // Give a little more time for initial blockchain sync to complete
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        // SYNC GATE: Before producing any blocks, ensure we have fresh peer data.
+        // If we're significantly behind expected height, we MUST sync first.
+        // This prevents restarted nodes from entering bootstrap mode and forking.
+        let gate_height = block_blockchain.get_height();
+        let gate_expected = block_blockchain.calculate_expected_height();
+        let gate_behind = gate_expected.saturating_sub(gate_height);
+
+        if gate_behind > 2 {
+            tracing::info!(
+                "🔒 Sync gate: {} blocks behind expected height ({} vs {}) - waiting for fresh peer data before block production",
+                gate_behind, gate_height, gate_expected
+            );
+
+            // Wait for at least one peer to report a chain tip (confirms fresh data, not stale cache)
+            let mut gate_wait = 0u64;
+            const MAX_GATE_WAIT_SECS: u64 = 60; // Wait up to 60 seconds for peer data
+            const MIN_CONFIRMED_PEERS: usize = 1;
+
+            loop {
+                if gate_wait >= MAX_GATE_WAIT_SECS {
+                    tracing::warn!(
+                        "⚠️ Sync gate timeout after {}s - proceeding with caution",
+                        gate_wait
+                    );
+                    break;
+                }
+
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                gate_wait += 2;
+
+                // Check if any peer has reported a height via pong or chain tip
+                let peers = block_peer_registry.get_compatible_peers().await;
+                let mut peers_with_data = 0usize;
+                let mut max_reported_height = 0u64;
+                for peer_ip in &peers {
+                    if let Some(h) = block_peer_registry.get_peer_height(peer_ip).await {
+                        peers_with_data += 1;
+                        if h > max_reported_height {
+                            max_reported_height = h;
+                        }
+                    } else if let Some((h, _)) =
+                        block_peer_registry.get_peer_chain_tip(peer_ip).await
+                    {
+                        peers_with_data += 1;
+                        if h > max_reported_height {
+                            max_reported_height = h;
+                        }
+                    }
+                }
+
+                if peers_with_data >= MIN_CONFIRMED_PEERS {
+                    tracing::info!(
+                        "🔓 Sync gate passed: {} peer(s) reporting data, max height {} (waited {}s)",
+                        peers_with_data, max_reported_height, gate_wait
+                    );
+
+                    // If peers have a longer chain, request sync before proceeding
+                    if max_reported_height > block_blockchain.get_height() {
+                        tracing::info!(
+                            "📥 Sync gate: peers ahead at height {} - requesting sync before production",
+                            max_reported_height
+                        );
+                        for peer_ip in &peers {
+                            let current = block_blockchain.get_height();
+                            let msg = crate::network::message::NetworkMessage::GetBlocks(
+                                current + 1,
+                                max_reported_height.min(current + 50),
+                            );
+                            let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                        }
+                        // Give sync some time to process incoming blocks
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    }
+                    break;
+                }
+
+                if gate_wait % 10 == 0 {
+                    tracing::info!(
+                        "⏳ Sync gate: waiting for peer data ({}/{}s, {} peers connected, {} with data)",
+                        gate_wait, MAX_GATE_WAIT_SECS, peers.len(), peers_with_data
+                    );
+                }
+            }
+        } else {
+            // Not far behind - short delay for sync to settle
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
 
         // Time-based catchup trigger: Check if we're behind schedule
         // Use time rather than block count to determine when to trigger catchup
@@ -1520,29 +1625,34 @@ async fn main() {
                 // CRITICAL: If sync coordinator is already syncing, check if it's making progress
                 // Use event-driven approach: check status and loop back immediately
                 if block_blockchain.is_syncing() {
-                    // Check if bootstrap - all peers at height 0
-                    // CRITICAL: Only do this if we're actually at bootstrap height, not if time-based expected height is far ahead
-                    let mut all_at_zero = true;
+                    // Check if bootstrap - all peers CONFIRMED at height 0
+                    // CRITICAL: Require positive confirmation from peers, not just absence of data.
+                    // Peers with no cached chain tip are "unknown", NOT "at zero".
+                    let mut confirmed_at_zero = 0u32;
+                    let mut confirmed_higher = 0u32;
                     for peer_ip in &connected_peers {
                         if let Some((height, _)) =
                             block_peer_registry.get_peer_chain_tip(peer_ip).await
                         {
                             if height > 0 {
-                                all_at_zero = false;
-                                break;
+                                confirmed_higher += 1;
+                            } else {
+                                confirmed_at_zero += 1;
                             }
                         }
+                        // Peers with no cached tip are not counted at all (unknown state)
                     }
+                    let all_confirmed_at_zero = confirmed_at_zero >= 3 && confirmed_higher == 0;
 
                     // CRITICAL FIX: Don't override if we're significantly behind expected height
                     // If blocks_behind > 10, peers might actually have blocks - trust time-based height, not cached tips
-                    let can_bootstrap_override = all_at_zero
+                    let can_bootstrap_override = all_confirmed_at_zero
                         && current_height == 0
                         && connected_peers.len() >= 3
                         && blocks_behind <= 10;
 
                     if can_bootstrap_override {
-                        tracing::warn!("🚨 Bootstrap override: All {} peers at height 0, sync is stuck - forcing block production", connected_peers.len());
+                        tracing::warn!("🚨 Bootstrap override: {} peers confirmed at height 0 (of {} connected), sync is stuck - forcing block production", confirmed_at_zero, connected_peers.len());
                         // Fall through to production logic - skip consensus check entirely
                         // Everyone is at height 0, no blocks to sync, time to produce genesis+1
                     } else {
@@ -1559,8 +1669,24 @@ async fn main() {
                             block_blockchain.compare_chain_with_peers().await
                         {
                             // If consensus height equals our height, no one has blocks ahead
-                            // This is a bootstrap scenario - proceed to produce instead of sync
+                            // But ONLY trust this if we're not far behind expected height.
+                            // If time says we should be at height 100 but consensus says 0,
+                            // the peer cache is likely stale — request fresh data first.
                             if consensus_height == current_height {
+                                if blocks_behind > 10 {
+                                    // Far behind expected height — consensus data is likely stale.
+                                    // Request fresh chain tips and wait for updated data.
+                                    tracing::info!(
+                                        "🔒 Consensus says height {} but {} blocks behind expected - requesting fresh chain tips before producing",
+                                        consensus_height, blocks_behind
+                                    );
+                                    for peer_ip in &connected_peers {
+                                        let msg = NetworkMessage::GetChainTip;
+                                        let _ =
+                                            block_peer_registry.send_to_peer(peer_ip, msg).await;
+                                    }
+                                    continue;
+                                }
                                 tracing::debug!(
                                     "Catchup: {} peers agree at height {} - producing",
                                     connected_peers.len(),
@@ -1630,6 +1756,20 @@ async fn main() {
 
                             // Peers are at similar height - check if we're all catching up together
                             if peer_heights_available > 0 {
+                                if blocks_behind > 10 {
+                                    // Peer pong heights show similar height but we're far behind expected.
+                                    // Pong heights may be stale — request explicit chain tips.
+                                    tracing::info!(
+                                        "🔒 {} peers report similar height (~{}) but {} blocks behind expected - requesting fresh chain tips",
+                                        peer_heights_available, max_peer_height, blocks_behind
+                                    );
+                                    for peer_ip in &connected_peers {
+                                        let msg = NetworkMessage::GetChainTip;
+                                        let _ =
+                                            block_peer_registry.send_to_peer(peer_ip, msg).await;
+                                    }
+                                    continue;
+                                }
                                 tracing::info!(
                                     "📊 All {} peers at similar height (~{}) - proceeding to production",
                                     peer_heights_available,
