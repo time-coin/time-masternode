@@ -17,6 +17,5 @@ pub mod rate_limiter;
 pub mod secure_transport;
 pub mod server;
 pub mod signed_message;
-pub mod state_sync;
 pub mod sync_coordinator;
 pub mod tls;

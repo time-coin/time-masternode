@@ -2659,11 +2659,38 @@ impl Blockchain {
             use crate::block::genesis::GenesisBlock;
             GenesisBlock::verify_timestamp(&block, self.network_type)?;
         } else if block.header.height != current + 1 {
-            return Err(format!(
-                "Block height mismatch: expected {}, got {}",
-                current + 1,
-                block.header.height
-            ));
+            // During sync, allow out-of-order blocks if we're syncing and have the parent
+            let is_syncing = self.is_syncing.load(Ordering::Acquire);
+            if is_syncing {
+                // Check if parent block exists (even if we're ahead of parent)
+                match self.get_block(block.header.height - 1) {
+                    Ok(_parent_block) => {
+                        // Parent exists - we can add this block even if out of order
+                        tracing::debug!(
+                            "📦 Accepting out-of-order block {} during sync (current height: {}, parent exists)",
+                            block.header.height,
+                            current
+                        );
+                        // Continue processing
+                    }
+                    Err(_) => {
+                        // Parent doesn't exist - we need to wait for it
+                        return Err(format!(
+                            "Block {} missing parent at height {} (syncing from height {}, cannot add yet)",
+                            block.header.height,
+                            block.header.height - 1,
+                            current
+                        ));
+                    }
+                }
+            } else {
+                // Not syncing - enforce strict ordering
+                return Err(format!(
+                    "Block height mismatch: expected {}, got {}",
+                    current + 1,
+                    block.header.height
+                ));
+            }
         }
 
         // Checkpoint validation: verify block hash matches checkpoint if this is a checkpoint height
