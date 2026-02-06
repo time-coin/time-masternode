@@ -3900,6 +3900,12 @@ impl Blockchain {
         self.storage
             .flush()
             .map_err(|e| format!("Failed to flush chain_height: {}", e))?;
+        
+        // CRITICAL: Update in-memory atomic to keep current_height in sync with storage
+        // Without this, blocks are saved to disk but current_height stays stale,
+        // causing nodes to think they're still at height 0 and reject new blocks
+        self.current_height.store(height, Ordering::Release);
+        
         Ok(())
     }
 
