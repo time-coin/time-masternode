@@ -1092,46 +1092,52 @@ impl Blockchain {
         // BOOTSTRAP CHECK: If we're behind but all peers are at our height, skip sync
         // This handles genesis scenario where time-based calculation shows we're behind
         // but nobody has actually produced blocks yet
+        // CRITICAL FIX: Only skip sync if we have responses from MOST peers confirming they're at our height
+        // This prevents the bug where cache is empty and we incorrectly skip sync to a longer chain
         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
             let connected_peers = peer_registry.get_connected_peers().await;
             if !connected_peers.is_empty() {
-                // Try to get consensus - if available, check if everyone is at our height
-                if let Some((consensus_height, _)) = self.compare_chain_with_peers().await {
-                    if consensus_height == current && current < target {
-                        tracing::info!(
-                            "✅ Bootstrap scenario detected via consensus: All peers at height {} but time-based calc shows target {}. Skipping sync - ready for block production.",
-                            current,
-                            target
-                        );
-                        return Ok(()); // Don't sync - proceed to block production
+                // Manually check peer heights from cache (more reliable than consensus check at startup)
+                let mut peer_heights = Vec::new();
+                for peer_ip in &connected_peers {
+                    if let Some((height, _)) = peer_registry.get_peer_chain_tip(peer_ip).await {
+                        peer_heights.push(height);
                     }
-                } else {
-                    // If compare_chain_with_peers returns None (incomplete responses),
-                    // manually check peer heights from cache
-                    tracing::debug!(
-                        "🔍 Bootstrap check: Consensus unavailable, checking peer heights manually"
-                    );
-                    let mut peer_heights = Vec::new();
-                    for peer_ip in &connected_peers {
-                        if let Some((height, _)) = peer_registry.get_peer_chain_tip(peer_ip).await {
-                            peer_heights.push(height);
-                        }
-                    }
+                }
 
-                    // If we have responses and ALL peers are at our height, it's a bootstrap scenario
-                    if !peer_heights.is_empty()
-                        && peer_heights.iter().all(|&h| h == current)
-                        && current < target
-                    {
-                        tracing::info!(
-                            "✅ Bootstrap scenario detected via manual check: {}/{} peers at height {} but time-based calc shows target {}. Skipping sync - ready for block production.",
-                            peer_heights.len(),
-                            connected_peers.len(),
-                            current,
-                            target
-                        );
-                        return Ok(()); // Don't sync - proceed to block production
-                    }
+                // Only skip sync if:
+                // 1. We have responses from MAJORITY of peers (>50%)
+                // 2. ALL responding peers report height = our height
+                // 3. Our height < time-expected height
+                let response_ratio = if !peer_heights.is_empty() {
+                    peer_heights.len() as f64 / connected_peers.len() as f64
+                } else {
+                    0.0
+                };
+
+                if response_ratio > 0.5
+                    && !peer_heights.is_empty()
+                    && peer_heights.iter().all(|&h| h == current)
+                    && current < target
+                {
+                    tracing::info!(
+                        "✅ Bootstrap scenario detected: {}/{} peers ({}%) at height {} but time-based calc shows target {}. Skipping sync - ready for block production.",
+                        peer_heights.len(),
+                        connected_peers.len(),
+                        (response_ratio * 100.0) as u32,
+                        current,
+                        target
+                    );
+                    return Ok(()); // Don't sync - proceed to block production
+                } else if !peer_heights.is_empty() {
+                    // Log why we're NOT skipping sync
+                    let all_at_current = peer_heights.iter().all(|&h| h == current);
+                    tracing::debug!(
+                        "🔍 Not skipping sync: response_ratio={:.1}%, all_at_current={}, heights={:?}",
+                        response_ratio * 100.0,
+                        all_at_current,
+                        peer_heights
+                    );
                 }
             }
         }
