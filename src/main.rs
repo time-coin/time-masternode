@@ -1369,6 +1369,11 @@ async fn main() {
         let mut waiting_since: Option<std::time::Instant> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
 
+        // CRITICAL: Periodic GetChainTip requests to keep peer_chain_tips cache fresh
+        // This ensures block production can always verify 2/3 consensus on peer heights
+        let mut last_chain_tip_request = std::time::Instant::now();
+        const CHAIN_TIP_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
         loop {
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
@@ -1381,6 +1386,25 @@ async fn main() {
                 }
                 _ = interval.tick() => {
                     // Regular 1-second check
+                }
+            }
+
+            // CRITICAL BOOTSTRAP FIX: Periodically request chain tips from peers
+            // This keeps peer_chain_tips cache fresh so block production can verify 2/3 consensus
+            // Without this, nodes get stuck at bootstrap because check_2_3_consensus_for_production()
+            // has no peer data to work with
+            if last_chain_tip_request.elapsed() >= CHAIN_TIP_REQUEST_INTERVAL {
+                let connected = block_peer_registry.get_connected_peers().await;
+                if !connected.is_empty() {
+                    tracing::debug!(
+                        "📡 Periodic chain tip refresh: requesting from {} peer(s)",
+                        connected.len()
+                    );
+                    for peer_ip in &connected {
+                        let msg = crate::network::message::NetworkMessage::GetChainTip;
+                        let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                    }
+                    last_chain_tip_request = std::time::Instant::now();
                 }
             }
 

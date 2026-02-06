@@ -2587,7 +2587,7 @@ impl Blockchain {
     /// Saves 5-10ms per check by avoiding redundant peer queries
     async fn check_2_3_consensus_cached(&self) -> bool {
         const CONSENSUS_CACHE_TTL: Duration = Duration::from_secs(30);
-        
+
         // Check cache first
         {
             let cache = self.consensus_cache.read().await;
@@ -2601,11 +2601,11 @@ impl Blockchain {
                 }
             }
         }
-        
+
         // Cache miss or expired - perform full check
         tracing::debug!("🔄 2/3 consensus check cache MISS - recalculating");
         let result = self.check_2_3_consensus_for_production().await;
-        
+
         // Update cache
         {
             let mut cache = self.consensus_cache.write().await;
@@ -2614,7 +2614,7 @@ impl Blockchain {
                 timestamp: Instant::now(),
             });
         }
-        
+
         result
     }
 
@@ -2633,7 +2633,7 @@ impl Blockchain {
         };
 
         let connected_peers = peer_registry.get_connected_peers().await;
-        
+
         // Bootstrap mode: allow production with 0 peers
         if connected_peers.is_empty() {
             tracing::debug!("✅ Block production allowed in bootstrap mode (0 connected peers)");
@@ -2641,7 +2641,7 @@ impl Blockchain {
         }
 
         let our_height = self.current_height.load(Ordering::Acquire);
-        
+
         // Get our current block hash
         let our_hash = match self.get_block_hash(our_height) {
             Ok(hash) => hash,
@@ -2660,9 +2660,10 @@ impl Blockchain {
         let mut peers_responding = 0;
 
         for peer_ip in &connected_peers {
-            if let Some((peer_height, peer_hash)) = peer_registry.get_peer_chain_tip(peer_ip).await {
+            if let Some((peer_height, peer_hash)) = peer_registry.get_peer_chain_tip(peer_ip).await
+            {
                 peers_responding += 1;
-                
+
                 // Check if peer agrees on our (height, hash)
                 if peer_height == our_height && peer_hash == our_hash {
                     peers_on_our_chain += 1;
@@ -2809,7 +2810,7 @@ impl Blockchain {
                     // After sync: Accept if from consensus peer (network validated it)
                     let is_syncing = self.is_syncing.load(Ordering::Acquire);
                     let current_height = self.current_height.load(Ordering::Acquire);
-                    
+
                     if is_syncing {
                         // During sync, reject blocks with missing parents
                         // This prevents gaps in the chain
@@ -2820,7 +2821,7 @@ impl Blockchain {
                             current_height
                         ));
                     }
-                    
+
                     // After sync: Accept blocks from consensus peers (they've been validated)
                     // The block's previous_hash field serves as proof of parent validity
                     tracing::warn!(
@@ -3900,12 +3901,12 @@ impl Blockchain {
         self.storage
             .flush()
             .map_err(|e| format!("Failed to flush chain_height: {}", e))?;
-        
+
         // CRITICAL: Update in-memory atomic to keep current_height in sync with storage
         // Without this, blocks are saved to disk but current_height stays stale,
         // causing nodes to think they're still at height 0 and reject new blocks
         self.current_height.store(height, Ordering::Release);
-        
+
         Ok(())
     }
 
