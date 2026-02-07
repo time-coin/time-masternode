@@ -652,36 +652,43 @@ impl MessageHandler {
             .min(our_height);
 
         if start <= our_height {
-            let mut missing_blocks = Vec::new();
+            // CRITICAL: Only send contiguous blocks starting from requested start
+            // Stop at first missing block to avoid sending incomplete ranges with gaps
             for h in start..=effective_end {
                 match context.blockchain.get_block_by_height(h).await {
                     Ok(block) => blocks.push(block),
                     Err(e) => {
+                        // Stop at first missing block - don't send partial ranges with gaps
                         warn!(
-                            "⚠️ [{}] Failed to retrieve block {} for {}: {}",
-                            self.direction, h, self.peer_ip, e
+                            "⚠️ [{}] Missing block {} (stopping send to {} at height {}): {}",
+                            self.direction,
+                            h,
+                            self.peer_ip,
+                            h.saturating_sub(1),
+                            e
                         );
-                        missing_blocks.push(h);
+                        break;
                     }
                 }
             }
 
             if blocks.is_empty() && start <= our_height {
                 warn!(
-                    "⚠️ [{}] No blocks available to send to {} (requested {}-{}, our height: {}, missing: {:?})",
-                    self.direction, self.peer_ip, start, end, our_height, missing_blocks
+                    "⚠️ [{}] No blocks available to send to {} (requested {}-{}, our height: {}, missing block {})",
+                    self.direction, self.peer_ip, start, end, our_height, start
                 );
-            } else {
+            } else if !blocks.is_empty() {
+                let actual_start = blocks.first().unwrap().header.height;
+                let actual_end = blocks.last().unwrap().header.height;
                 debug!(
-                    "📤 [{}] Sending {} blocks to {} (requested {}-{}, effective {}-{}, missing: {})",
+                    "📤 [{}] Sending {} blocks to {} (requested {}-{}, sending {}-{})",
                     self.direction,
                     blocks.len(),
                     self.peer_ip,
                     start,
                     end,
-                    start,
-                    effective_end,
-                    missing_blocks.len()
+                    actual_start,
+                    actual_end
                 );
             }
         } else {
@@ -2479,6 +2486,10 @@ impl MessageHandler {
                 }
                 Ok(false) => {
                     // Block already exists or is not next in chain
+                    debug!(
+                        "⏭️ [{}] Skipped block {} from {} (already exists or not sequential)",
+                        self.direction, block.header.height, self.peer_ip
+                    );
                     skipped += 1;
                 }
                 Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
@@ -2566,6 +2577,14 @@ impl MessageHandler {
             info!(
                 "✅ [{}] Added {} blocks from {} (skipped {})",
                 self.direction, added, self.peer_ip, skipped
+            );
+        } else if skipped > 0 && !fork_detected {
+            warn!(
+                "⚠️ [{}] No blocks added from {} - all {} blocks skipped (likely not sequential with our chain at height {})",
+                self.direction,
+                self.peer_ip,
+                skipped,
+                context.blockchain.get_height()
             );
         }
 

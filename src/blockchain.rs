@@ -1999,6 +1999,16 @@ impl Blockchain {
             ));
         }
 
+        // CRITICAL FIX: If we're already at the common ancestor height, no rollback needed
+        // This prevents unnecessary deletion of genesis block or existing blocks
+        if our_height == common_ancestor {
+            tracing::info!(
+                "✓ Already at common ancestor height {} - no rollback needed",
+                common_ancestor
+            );
+            return Ok(common_ancestor);
+        }
+
         tracing::warn!(
             "🔄 Rolling back from height {} to {} to find common ancestor",
             our_height,
