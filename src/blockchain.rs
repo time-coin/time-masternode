@@ -2640,6 +2640,13 @@ impl Blockchain {
     /// Returns false if:
     /// - We have 1+ connected peers AND less than 2/3 of weighted stake agrees on our chain
     async fn check_2_3_consensus_for_production(&self) -> bool {
+        // Rate limit detailed logging to once per 60 seconds
+        static LAST_DETAILED_LOG: std::sync::atomic::AtomicI64 =
+            std::sync::atomic::AtomicI64::new(0);
+        let now_secs = chrono::Utc::now().timestamp();
+        let should_log_details =
+            now_secs - LAST_DETAILED_LOG.load(std::sync::atomic::Ordering::Relaxed) >= 60;
+
         let peer_registry_guard = self.peer_registry.read().await;
         let peer_registry = match peer_registry_guard.as_ref() {
             Some(registry) => registry,
@@ -2673,6 +2680,7 @@ impl Blockchain {
         let mut weight_on_our_chain = 0u64;
         let mut total_weight = 0u64;
         let mut peers_responding = 0;
+        let mut peer_states: Vec<(String, u64, [u8; 32], u64)> = Vec::new(); // (ip, height, hash, weight)
 
         for peer_ip in &connected_peers {
             if let Some((peer_height, peer_hash)) = peer_registry.get_peer_chain_tip(peer_ip).await
@@ -2692,6 +2700,9 @@ impl Blockchain {
                 };
 
                 total_weight += peer_weight;
+
+                // Track peer state for diagnostics
+                peer_states.push((peer_ip.clone(), peer_height, peer_hash, peer_weight));
 
                 // Check if peer agrees on our (height, hash)
                 if peer_height == our_height && peer_hash == our_hash {
@@ -2727,6 +2738,30 @@ impl Blockchain {
                 peers_responding,
                 connected_peers.len()
             );
+            // Log detailed peer state for diagnostics (rate limited to once per minute)
+            if should_log_details {
+                LAST_DETAILED_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    "📊 Peer chain states (our height: {}, our hash: {}):",
+                    our_height,
+                    hex::encode(&our_hash[..8])
+                );
+                for (peer_ip, peer_height, peer_hash, peer_weight) in &peer_states {
+                    let agrees = if *peer_height == our_height && peer_hash == &our_hash {
+                        "✅ AGREES"
+                    } else {
+                        "❌ DIFFERS"
+                    };
+                    tracing::warn!(
+                        "   {} @ height {} hash {} weight {} {}",
+                        peer_ip,
+                        peer_height,
+                        hex::encode(&peer_hash[..8]),
+                        peer_weight,
+                        agrees
+                    );
+                }
+            }
         }
 
         has_consensus
