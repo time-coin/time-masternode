@@ -115,7 +115,7 @@ async fn main() {
     }
 
     // Load or create config with network-specific data directory
-    let config = match Config::load_or_create(&args.config, &network_type) {
+    let mut config = match Config::load_or_create(&args.config, &network_type) {
         Ok(cfg) => {
             println!("✓ Loaded configuration from {}", args.config);
             cfg
@@ -125,6 +125,18 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // CRITICAL FIX: Force disable compression if enabled (causes block corruption)
+    if config.storage.compress_blocks {
+        tracing::warn!("⚠️  Compression is enabled in config but causes corruption - forcing OFF");
+        config.storage.compress_blocks = false;
+        // Update the config file to prevent re-enabling on next restart
+        if let Err(e) = config.save_to_file(&args.config) {
+            tracing::error!("❌ Failed to save updated config: {}", e);
+        } else {
+            tracing::info!("✅ Updated config file: compression disabled");
+        }
+    }
 
     setup_logging(&config.logging, args.verbose);
 

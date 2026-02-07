@@ -319,9 +319,7 @@ impl Blockchain {
         // TEMPORARY: Force compression OFF due to corruption issues
         // Re-enable after root cause is found
         self.compress_blocks = false;
-        tracing::info!(
-            "📦 Block compression disabled (forced off for debugging)"
-        );
+        tracing::info!("📦 Block compression disabled (forced off for debugging)");
     }
 
     /// Set transaction index (called from main.rs after blockchain init)
@@ -3997,8 +3995,7 @@ impl Blockchain {
         self.block_cache.put(block.header.height, block_arc);
 
         // CRITICAL: ALWAYS flush to disk after writing a block
-        // This prevents "unexpected end of file" errors when reading back immediately
-        // The previous conditional flush caused corruption during read-after-write verification
+        // sled's flush() is synchronous and calls fsync - it should block until complete
         self.storage.flush().map_err(|e| {
             tracing::error!(
                 "❌ Failed to flush block {} to disk: {}",
@@ -4007,10 +4004,6 @@ impl Blockchain {
             );
             e.to_string()
         })?;
-
-        // WORKAROUND: Sleep briefly to allow OS kernel to complete disk write
-        // Sled's flush() may return before fsync() completes
-        std::thread::sleep(std::time::Duration::from_millis(50));
 
         // VERIFICATION: Read back immediately to ensure block was written completely
         let readback = self.storage.get(key.as_bytes()).map_err(|e| {
