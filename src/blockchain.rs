@@ -2199,8 +2199,10 @@ impl Blockchain {
         }
 
         // Verify the current height block actually exists
-        // If not, find the actual highest block
-        while current_height > 0 {
+        // If not, find the actual highest block, but NEVER walk back more than MAX_REORG_DEPTH
+        // SECURITY: Unbounded walk-back could be exploited to reset chain to genesis
+        let safe_floor = current_height.saturating_sub(MAX_REORG_DEPTH);
+        while current_height > safe_floor {
             match self.get_block(current_height) {
                 Ok(_) => break, // Found a valid block
                 Err(_) => {
@@ -2213,13 +2215,25 @@ impl Blockchain {
             }
         }
 
+        if current_height == safe_floor && current_height > 0 {
+            // We walked back to the safe floor without finding a valid block
+            // Don't walk back further - this requires manual intervention
+            if self.get_block(current_height).is_err() {
+                return Err(format!(
+                    "Cannot find valid block between heights {} and {}. Chain may be corrupted beyond finality depth. Manual intervention required.",
+                    safe_floor, self.current_height.load(Ordering::Acquire)
+                ));
+            }
+        }
+
         // Update stored height if we found a gap
         let stored_height = self.current_height.load(Ordering::Acquire);
         if current_height != stored_height {
             tracing::warn!(
-                "⚠️  Correcting chain height from {} to {}",
+                "⚠️  Correcting chain height from {} to {} (safe floor: {})",
                 stored_height,
-                current_height
+                current_height,
+                safe_floor
             );
             self.current_height.store(current_height, Ordering::Release);
         }
@@ -2689,7 +2703,7 @@ impl Blockchain {
         }
 
         // Require 2/3 of ALL connected peers to agree on our chain
-        let required_agreement = (connected_peers.len() * 2 + 2) / 3; // Ceiling division for 2/3
+        let required_agreement = (connected_peers.len() * 2).div_ceil(3); // Ceiling division for 2/3
         let has_consensus = peers_on_our_chain >= required_agreement;
 
         if has_consensus {
@@ -3268,26 +3282,39 @@ impl Blockchain {
                                     height, key_old, e1, e2
                                 );
                                 // Auto-recovery: Delete corrupted block and reset height so re-sync can work
-                                tracing::warn!(
-                                    "🔧 Deleting corrupted block {} (old key) to allow re-sync from peers",
-                                    height
-                                );
-                                let _ = self.storage.remove(key_old.as_bytes());
-                                // Reset chain height to one before corrupted block
-                                if height > 0 {
-                                    let new_height = height - 1;
-                                    let height_key = "chain_height".as_bytes();
-                                    let height_bytes =
-                                        bincode::serialize(&new_height).unwrap_or_default();
-                                    let _ = self.storage.insert(height_key, height_bytes);
-                                    // CRITICAL: Flush to ensure height change persists across restarts
-                                    let _ = self.storage.flush();
-                                    self.current_height
-                                        .store(new_height, std::sync::atomic::Ordering::SeqCst);
-                                    tracing::warn!(
-                                        "🔧 Reset chain height to {} after deleting corrupted block {}",
-                                        new_height, height
+                                // SECURITY: Enforce MAX_REORG_DEPTH - never roll back beyond finality depth
+                                let current = self
+                                    .current_height
+                                    .load(std::sync::atomic::Ordering::Acquire);
+                                let safe_floor = current.saturating_sub(MAX_REORG_DEPTH);
+                                if height < safe_floor {
+                                    tracing::error!(
+                                        "❌ CRITICAL: Corrupted block {} is below finality depth (safe floor {}). \
+                                         Cannot auto-recover. Manual intervention required.",
+                                        height, safe_floor
                                     );
+                                } else {
+                                    tracing::warn!(
+                                        "🔧 Deleting corrupted block {} (old key) to allow re-sync from peers",
+                                        height
+                                    );
+                                    let _ = self.storage.remove(key_old.as_bytes());
+                                    // Reset chain height to one before corrupted block, but never below safe_floor
+                                    if height > 0 {
+                                        let new_height = (height - 1).max(safe_floor);
+                                        let height_key = "chain_height".as_bytes();
+                                        let height_bytes =
+                                            bincode::serialize(&new_height).unwrap_or_default();
+                                        let _ = self.storage.insert(height_key, height_bytes);
+                                        // CRITICAL: Flush to ensure height change persists across restarts
+                                        let _ = self.storage.flush();
+                                        self.current_height
+                                            .store(new_height, std::sync::atomic::Ordering::SeqCst);
+                                        tracing::warn!(
+                                            "🔧 Reset chain height to {} after deleting corrupted block {} (safe floor {})",
+                                            new_height, height, safe_floor
+                                        );
+                                    }
                                 }
                                 return Err(format!(
                                     "Block {} was corrupted and deleted - will re-sync from peers",
@@ -7185,17 +7212,36 @@ impl Blockchain {
 
     /// Validate blockchain integrity and detect corrupt blocks
     /// Returns list of corrupt block heights that need resyncing
+    /// SECURITY: Only validates blocks within MAX_REORG_DEPTH of the chain tip.
+    /// Blocks below the finality depth are considered FINAL and are not subject to auto-deletion.
     pub async fn validate_chain_integrity(&self) -> Result<Vec<u64>, String> {
         let current_height = self.get_height();
         let mut corrupt_blocks = Vec::new();
 
+        // Only validate blocks within reorg depth of the tip (plus genesis)
+        // Blocks deeper than MAX_REORG_DEPTH are FINAL and should not be auto-deleted
+        let scan_start = current_height.saturating_sub(MAX_REORG_DEPTH);
+
         tracing::info!(
-            "🔍 Validating blockchain integrity (0-{})...",
+            "🔍 Validating blockchain integrity ({}-{})...",
+            scan_start,
             current_height
         );
 
-        // Check each block for basic integrity
-        for height in 0..=current_height {
+        // Always validate genesis block exists
+        if scan_start > 0 {
+            if let Err(e) = self.get_block(0) {
+                tracing::error!(
+                    "❌ Genesis block missing or corrupt: {}. Manual intervention required.",
+                    e
+                );
+                // Do NOT add genesis to corrupt_blocks - it's below finality depth and
+                // auto-deleting it would be catastrophic
+            }
+        }
+
+        // Check recent blocks for basic integrity
+        for height in scan_start..=current_height {
             match self.get_block(height) {
                 Ok(block) => {
                     // Check 1: Non-genesis blocks must have non-zero previous_hash
@@ -7282,17 +7328,56 @@ impl Blockchain {
     }
 
     /// Delete corrupt blocks to trigger re-sync from peers
+    /// SECURITY: Enforces MAX_REORG_DEPTH to prevent unbounded rollbacks
     pub async fn delete_corrupt_blocks(&self, corrupt_heights: &[u64]) -> Result<(), String> {
         if corrupt_heights.is_empty() {
             return Ok(());
         }
 
+        let current_height = self.get_height();
+
+        // SECURITY: Only delete corrupt blocks within MAX_REORG_DEPTH of the chain tip.
+        // Blocks deeper than MAX_REORG_DEPTH are considered FINAL and must not be rolled back.
+        // An attacker could exploit unbounded rollback to reset the chain to genesis.
+        let safe_floor = current_height.saturating_sub(MAX_REORG_DEPTH);
+        let deletable: Vec<u64> = corrupt_heights
+            .iter()
+            .copied()
+            .filter(|&h| h >= safe_floor)
+            .collect();
+
+        let deep_corrupt: Vec<u64> = corrupt_heights
+            .iter()
+            .copied()
+            .filter(|&h| h < safe_floor)
+            .collect();
+
+        if !deep_corrupt.is_empty() {
+            tracing::error!(
+                "❌ CRITICAL: {} corrupt blocks found below finality depth (heights {:?}). \
+                 These blocks are FINAL and cannot be auto-deleted. Manual intervention required.",
+                deep_corrupt.len(),
+                deep_corrupt
+            );
+        }
+
+        if deletable.is_empty() {
+            if !deep_corrupt.is_empty() {
+                return Err(format!(
+                    "All {} corrupt blocks are below finality depth (safe_floor={}). Manual intervention required.",
+                    corrupt_heights.len(),
+                    safe_floor
+                ));
+            }
+            return Ok(());
+        }
+
         tracing::warn!(
-            "🔧 Deleting {} corrupt blocks to trigger re-sync",
-            corrupt_heights.len()
+            "🔧 Deleting {} corrupt blocks to trigger re-sync (within reorg depth)",
+            deletable.len()
         );
 
-        for height in corrupt_heights {
+        for height in &deletable {
             let key = format!("block_{}", height);
             if let Err(e) = self.storage.remove(key.as_bytes()) {
                 tracing::warn!("Failed to delete corrupt block {}: {}", height, e);
@@ -7301,15 +7386,16 @@ impl Blockchain {
             }
         }
 
-        // Update chain height to lowest deleted block - 1
-        if let Some(&min_height) = corrupt_heights.iter().min() {
+        // Update chain height to lowest deleted block - 1, but never below safe_floor
+        if let Some(&min_height) = deletable.iter().min() {
             if min_height > 0 {
-                let new_height = min_height - 1;
+                let new_height = (min_height - 1).max(safe_floor);
                 self.current_height.store(new_height, Ordering::Release);
                 tracing::info!(
-                    "📉 Rolled back chain height to {} (lowest corrupt block was {})",
+                    "📉 Rolled back chain height to {} (lowest corrupt block was {}, safe floor {})",
                     new_height,
-                    min_height
+                    min_height,
+                    safe_floor
                 );
             }
         }

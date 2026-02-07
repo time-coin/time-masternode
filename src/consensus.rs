@@ -411,8 +411,10 @@ impl VotingState {
     }
 
     /// Check if finalized
-    pub fn is_finalized(&self, threshold: u32) -> bool {
-        self.snowflake.is_finalized(threshold) || self.has_finality_threshold()
+    /// Per Protocol §7.5: Finality requires accumulated_weight >= Q_finality (67% of AVS weight)
+    /// Snowflake confidence is used for preference tracking only, NOT for finality determination
+    pub fn is_finalized(&self, _threshold: u32) -> bool {
+        self.has_finality_threshold()
     }
 }
 
