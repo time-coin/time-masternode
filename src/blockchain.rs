@@ -2680,11 +2680,23 @@ impl Blockchain {
         let mut weight_on_our_chain = 0u64;
         let mut total_weight = 0u64;
         let mut peers_responding = 0;
+        let mut peers_ignored = 0;
         let mut peer_states: Vec<(String, u64, [u8; 32], u64)> = Vec::new(); // (ip, height, hash, weight)
 
         for peer_ip in &connected_peers {
             if let Some((peer_height, peer_hash)) = peer_registry.get_peer_chain_tip(peer_ip).await
             {
+                // CRITICAL: Ignore peers with zero hash (corrupted/missing blocks)
+                // Same logic as compare_chain_with_peers() at line 5560
+                if peer_hash == [0u8; 32] {
+                    peers_ignored += 1;
+                    tracing::debug!(
+                        "Ignoring peer {} with zero hash (corrupted blocks) for consensus check",
+                        peer_ip
+                    );
+                    continue;
+                }
+
                 peers_responding += 1;
 
                 // Get peer's tier weight (default to Bronze if not found)
@@ -2712,7 +2724,14 @@ impl Blockchain {
         }
 
         if total_weight == 0 {
-            tracing::warn!("⚠️ Block production blocked: no responding peers with weight");
+            if peers_ignored > 0 {
+                tracing::warn!(
+                    "⚠️ Block production blocked: {} peers with corrupted blocks (zero hash) ignored, no healthy peers available",
+                    peers_ignored
+                );
+            } else {
+                tracing::warn!("⚠️ Block production blocked: no responding peers with weight");
+            }
             return false;
         }
 
@@ -2728,15 +2747,19 @@ impl Blockchain {
                 required_weight,
                 total_weight
             );
+            if peers_ignored > 0 {
+                tracing::debug!("   ({} peers with corrupted blocks ignored)", peers_ignored);
+            }
         } else {
             tracing::warn!(
-                "⚠️ Block production blocked: {} weight agrees on height {} (need {} for 2/3 of {} total). Peer responses: {}/{}",
+                "⚠️ Block production blocked: {} weight agrees on height {} (need {} for 2/3 of {} total). Peer responses: {}/{}{}",
                 weight_on_our_chain,
                 our_height,
                 required_weight,
                 total_weight,
                 peers_responding,
-                connected_peers.len()
+                connected_peers.len(),
+                if peers_ignored > 0 { format!(", {} corrupted peers ignored", peers_ignored) } else { String::new() }
             );
             // Log detailed peer state for diagnostics (rate limited to once per minute)
             if should_log_details {
