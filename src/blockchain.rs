@@ -315,11 +315,12 @@ impl Blockchain {
         self.block_added_signal.clone()
     }
 
-    pub fn set_compress_blocks(&mut self, compress: bool) {
-        self.compress_blocks = compress;
+    pub fn set_compress_blocks(&mut self, _compress: bool) {
+        // TEMPORARY: Force compression OFF due to corruption issues
+        // Re-enable after root cause is found
+        self.compress_blocks = false;
         tracing::info!(
-            "📦 Block compression {}",
-            if compress { "enabled" } else { "disabled" }
+            "📦 Block compression disabled (forced off for debugging)"
         );
     }
 
@@ -3955,10 +3956,24 @@ impl Blockchain {
         // Compress block data if enabled
         let data_to_store = if self.compress_blocks {
             let compressed = crate::storage::compress_block(&serialized);
+            // compress_block() adds magic header, so only use if actually smaller
             if compressed.len() < serialized.len() {
+                tracing::debug!(
+                    "Block {} compressed: {} → {} bytes ({:.1}% reduction)",
+                    block.header.height,
+                    serialized.len(),
+                    compressed.len(),
+                    100.0 * (1.0 - compressed.len() as f64 / serialized.len() as f64)
+                );
                 compressed
             } else {
-                serialized.clone()
+                tracing::debug!(
+                    "Block {} compression skipped: not beneficial ({} → {} bytes)",
+                    block.header.height,
+                    serialized.len(),
+                    compressed.len()
+                );
+                serialized.clone() // Store uncompressed (no magic header)
             }
         } else {
             serialized.clone()
@@ -3993,6 +4008,10 @@ impl Blockchain {
             e.to_string()
         })?;
 
+        // WORKAROUND: Sleep briefly to allow OS kernel to complete disk write
+        // Sled's flush() may return before fsync() completes
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
         // VERIFICATION: Read back immediately to ensure block was written completely
         let readback = self.storage.get(key.as_bytes()).map_err(|e| {
             format!(
@@ -4014,12 +4033,46 @@ impl Blockchain {
                 // Try to deserialize to ensure it's valid
                 let decompressed =
                     crate::storage::decompress_block(&readback_data).map_err(|e| {
+                        tracing::error!(
+                            "🚨 Block {} DECOMPRESS FAILED: {} (readback size: {}, has ZSTD magic: {})",
+                            block.header.height,
+                            e,
+                            readback_data.len(),
+                            readback_data.len() > 4 && &readback_data[0..4] == b"ZSTD"
+                        );
                         format!(
                             "Failed to decompress readback block {}: {}",
                             block.header.height, e
                         )
                     })?;
+
+                tracing::debug!(
+                    "Block {} decompressed: readback {} bytes → {} bytes (original serialized: {} bytes)",
+                    block.header.height,
+                    readback_data.len(),
+                    decompressed.len(),
+                    serialized.len()
+                );
+
                 bincode::deserialize::<Block>(&decompressed).map_err(|e| {
+                    tracing::error!(
+                        "🚨 Block {} BINCODE DESERIALIZE FAILED: {} (decompressed size: {}, expected: {})",
+                        block.header.height,
+                        e,
+                        decompressed.len(),
+                        serialized.len()
+                    );
+                    // Dump first/last bytes for debugging
+                    if decompressed.len() > 16 {
+                        tracing::error!(
+                            "   First 16 bytes: {:02x?}",
+                            &decompressed[0..16]
+                        );
+                        tracing::error!(
+                            "   Last 16 bytes: {:02x?}",
+                            &decompressed[decompressed.len()-16..]
+                        );
+                    }
                     format!(
                         "Failed to deserialize readback block {}: {}",
                         block.header.height, e
