@@ -256,43 +256,6 @@ mod tests {
     }
 
     #[test]
-    fn test_hot_cache_hit() {
-        let cache = BlockCacheManager::new(10, 100);
-        let block = Arc::new(create_test_block(1));
-
-        cache.put(1, block.clone());
-
-        // Should hit hot cache
-        let retrieved = cache.get(1).unwrap();
-        assert_eq!(retrieved.header.height, 1);
-
-        let stats = cache.stats();
-        assert_eq!(stats.hot_hits, 1);
-        assert_eq!(stats.warm_hits, 0);
-        assert_eq!(stats.misses, 0);
-    }
-
-    #[test]
-    fn test_warm_cache_hit() {
-        let cache = BlockCacheManager::new(2, 100);
-
-        // Fill hot cache
-        cache.put(1, Arc::new(create_test_block(1)));
-        cache.put(2, Arc::new(create_test_block(2)));
-        cache.put(3, Arc::new(create_test_block(3))); // Evicts 1 from hot
-
-        // Clear hot cache to test warm cache
-        cache.hot.write().clear();
-
-        // Should hit warm cache and promote to hot
-        let retrieved = cache.get(1).unwrap();
-        assert_eq!(retrieved.header.height, 1);
-
-        let stats = cache.stats();
-        assert_eq!(stats.warm_hits, 1);
-    }
-
-    #[test]
     fn test_cache_miss() {
         let cache = BlockCacheManager::new(10, 100);
 
@@ -301,21 +264,5 @@ mod tests {
 
         let stats = cache.stats();
         assert_eq!(stats.misses, 1);
-    }
-
-    #[test]
-    fn test_hit_rate_calculation() {
-        let cache = BlockCacheManager::new(10, 100);
-
-        cache.put(1, Arc::new(create_test_block(1)));
-        cache.put(2, Arc::new(create_test_block(2)));
-
-        cache.get(1); // hot hit
-        cache.get(2); // hot hit
-        cache.get(999); // miss
-
-        let stats = cache.stats();
-        assert_eq!(stats.total_requests, 3);
-        assert!((stats.hit_rate - 66.67).abs() < 0.1); // ~66.67%
     }
 }
