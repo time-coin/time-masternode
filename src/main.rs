@@ -2155,102 +2155,45 @@ async fn main() {
                         );
                     }
 
-                    // Step 4: Wait for consensus to finalize the block
-                    // The message_handler will add the block when precommit consensus is reached
-                    // During catchup, check if peers have synced instead of waiting for timeout
+                    // Step 4: Wait for consensus — EVENT-DRIVEN via block_added_signal.
+                    // The message handler adds the block when precommit consensus is reached,
+                    // which signals block_added_signal. We await that signal with a timeout
+                    // instead of polling, so consensus completes instantly when votes arrive.
 
                     let consensus_timeout = if blocks_behind > 0 {
-                        std::time::Duration::from_secs(10) // Catchup: 10 second max wait
+                        std::time::Duration::from_secs(10) // Catchup: shorter timeout
                     } else {
-                        std::time::Duration::from_secs(30) // Normal: 30 second max wait
+                        std::time::Duration::from_secs(30) // Normal: full timeout
                     };
-                    let consensus_start = std::time::Instant::now();
-                    let check_interval = std::time::Duration::from_millis(100); // Check frequently
 
-                    loop {
-                        tokio::time::sleep(check_interval).await;
+                    let block_signal = block_blockchain.block_added_signal();
 
-                        // Check if block was added (consensus reached via message handler)
-                        let new_height = block_blockchain.get_height();
-                        if new_height >= block_height {
-                            tracing::info!("✅ Block {} finalized via consensus!", block_height);
-                            break;
-                        }
-
-                        // During catchup: Check if most peers have synced to this height
-                        // This is much faster than waiting for full consensus timeout
-                        if blocks_behind > 0 && consensus_start.elapsed().as_millis() > 500 {
-                            let connected_peers = block_peer_registry.get_connected_peers().await;
-                            if !connected_peers.is_empty() {
-                                let mut synced_count = 0;
-                                let mut checked_count = 0;
-
-                                for peer_ip in &connected_peers {
-                                    if let Some(peer_height) =
-                                        block_peer_registry.get_peer_height(peer_ip).await
-                                    {
-                                        checked_count += 1;
-                                        if peer_height >= block_height {
-                                            synced_count += 1;
-                                        }
-                                    }
-                                }
-
-                                // If majority of reachable peers have synced, move on
-                                // This allows fast catchup without waiting for full consensus
-                                if checked_count > 0 {
-                                    let sync_percentage =
-                                        (synced_count as f64 / checked_count as f64) * 100.0;
-
-                                    if synced_count >= (checked_count * 2 / 3) && synced_count >= 2
-                                    {
-                                        tracing::info!(
-                                            "⚡ Block {} catchup: {}/{} peers synced ({:.0}%) - continuing",
-                                            block_height,
-                                            synced_count,
-                                            checked_count,
-                                            sync_percentage
-                                        );
-                                        break;
-                                    }
-
-                                    // Log sync progress every 2 seconds
-                                    if consensus_start.elapsed().as_secs() % 2 == 0
-                                        && consensus_start.elapsed().as_millis() < 300
-                                    {
-                                        tracing::debug!(
-                                            "🔄 Block {} sync: {}/{} peers at height ({:.0}%)",
-                                            block_height,
-                                            synced_count,
-                                            checked_count,
-                                            sync_percentage
-                                        );
-                                    }
-                                }
+                    // Wait for either: block added (via signal) or timeout
+                    let consensus_reached = tokio::time::timeout(consensus_timeout, async {
+                        loop {
+                            block_signal.notified().await;
+                            // Check if OUR block was the one added
+                            if block_blockchain.get_height() >= block_height {
+                                return true;
                             }
+                            // Signal was for a different block, keep waiting
                         }
+                    })
+                    .await;
 
-                        // Log consensus progress periodically (normal mode or if peers not responding)
-                        let prepare_weight = block_consensus_engine
-                            .timevote
-                            .get_prepare_weight(block_hash);
-                        let precommit_weight = block_consensus_engine
-                            .timevote
-                            .get_precommit_weight(block_hash);
-
-                        if consensus_start.elapsed().as_secs() % 5 == 0
-                            && consensus_start.elapsed().as_millis() < 600
-                        {
-                            tracing::debug!(
-                                "🗳️  Consensus progress for block {}: prepare={}, precommit={}",
-                                block_height,
-                                prepare_weight,
-                                precommit_weight
-                            );
+                    match consensus_reached {
+                        Ok(true) => {
+                            tracing::info!("✅ Block {} finalized via consensus!", block_height);
                         }
+                        _ => {
+                            // Timeout — use fallback: add block directly as leader
+                            let prepare_weight = block_consensus_engine
+                                .timevote
+                                .get_prepare_weight(block_hash);
+                            let precommit_weight = block_consensus_engine
+                                .timevote
+                                .get_precommit_weight(block_hash);
 
-                        // Check timeout
-                        if consensus_start.elapsed() > consensus_timeout {
                             tracing::warn!(
                                 "⏰ Consensus timeout for block {} after {}s (prepare={}, precommit={})",
                                 block_height,
@@ -2259,10 +2202,6 @@ async fn main() {
                                 precommit_weight
                             );
 
-                            // Fallback: If we're the leader, add block when:
-                            // 1. We have SOME votes (partial consensus), OR
-                            // 2. There are very few validators (network bootstrap/recovery)
-                            // This prevents network stall when peers are slow/offline
                             let validator_count =
                                 block_consensus_engine.timevote.get_validators().len();
                             let should_fallback = prepare_weight > 0
@@ -2279,7 +2218,6 @@ async fn main() {
                                 if let Err(e) = block_blockchain.add_block(block.clone()).await {
                                     tracing::error!("❌ Failed to add block in fallback: {}", e);
                                 } else {
-                                    // Broadcast the finalized block for late-joining nodes
                                     let finalized_msg =
                                         crate::network::message::NetworkMessage::TimeLockBlockProposal {
                                             block: block.clone(),
@@ -2298,11 +2236,9 @@ async fn main() {
                                 );
                             }
 
-                            // Clear consensus state for this block
                             block_consensus_engine
                                 .timevote
                                 .cleanup_block_votes(block_hash);
-                            break;
                         }
                     }
 
