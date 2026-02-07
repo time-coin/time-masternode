@@ -15,9 +15,9 @@ const NTP_SERVERS: &[&str] = &[
     "time.nist.gov:123",
 ];
 
-const CHECK_INTERVAL_SECONDS: u64 = 30 * 60; // 30 minutes
-const MAX_DEVIATION_WARNING: i64 = 60; // 1 minute in seconds
-const MAX_DEVIATION_SHUTDOWN: i64 = 120; // 2 minutes in seconds
+const CHECK_INTERVAL_SECONDS: u64 = 5 * 60; // 5 minutes (more frequent checks)
+const MAX_DEVIATION_WARNING: i64 = 5; // 5 seconds - warn if approaching limit
+const MAX_DEVIATION_SHUTDOWN: i64 = 10; // 10 seconds - spec requires ±10s tolerance
 
 pub struct TimeSync {
     calibration_delay_ms: i64,
@@ -34,7 +34,7 @@ impl TimeSync {
     pub fn start_sync_task(self) {
         tokio::spawn(async move {
             let mut sync = self;
-            info!("⏰ Starting NTP time synchronization (checks every 30 minutes)");
+            info!("⏰ Starting NTP time synchronization (checks every 5 minutes)");
 
             loop {
                 if let Err(e) = sync.check_time_sync().await {
@@ -46,52 +46,82 @@ impl TimeSync {
     }
 
     pub async fn check_time_sync(&mut self) -> Result<i64, String> {
-        let mut last_error = None;
+        // Query multiple servers for consensus
+        let mut results = Vec::new();
+        let mut errors = Vec::new();
 
-        // Try each NTP server until one succeeds
         for server in NTP_SERVERS {
             match self.query_ntp_server(server).await {
                 Ok((ntp_time, ping_ms)) => {
                     let local_time = Utc::now().timestamp();
                     let deviation = ntp_time - local_time;
-
-                    // Update calibration delay (half of round-trip time)
-                    self.calibration_delay_ms = ping_ms / 2;
-
-                    info!(
-                        "✓ NTP sync with {} | Offset: {}s | Ping: {}ms | Calibration: {}ms",
-                        server, deviation, ping_ms, self.calibration_delay_ms
-                    );
-
-                    // Check deviation
-                    let offset_ms = deviation * 1000; // Convert to milliseconds
-
-                    if deviation.abs() >= MAX_DEVIATION_SHUTDOWN {
-                        error!(
-                            "🛑 CRITICAL: System time deviation is {}s (>{} seconds)",
-                            deviation, MAX_DEVIATION_SHUTDOWN
-                        );
-                        error!("🛑 Local time: {} | NTP time: {}", local_time, ntp_time);
-                        error!("🛑 Shutting down to prevent consensus issues");
-                        std::process::exit(1);
-                    } else if deviation.abs() >= MAX_DEVIATION_WARNING {
-                        warn!(
-                            "⚠️  WARNING: System time deviation is {}s (>{} seconds)",
-                            deviation, MAX_DEVIATION_WARNING
-                        );
-                        warn!("⚠️  Please synchronize your system clock!");
-                    }
-
-                    return Ok(offset_ms);
+                    results.push((server, ntp_time, deviation, ping_ms));
                 }
                 Err(e) => {
-                    last_error = Some(format!("{}: {}", server, e));
-                    continue;
+                    warn!("Failed to query {}: {}", server, e);
+                    errors.push(format!("{}: {}", server, e));
                 }
             }
         }
 
-        Err(last_error.unwrap_or_else(|| "All NTP servers failed".to_string()))
+        // Need at least 2 servers for consensus (or 1 if only 1 responded)
+        if results.is_empty() {
+            return Err(format!("All NTP servers failed: {}", errors.join(", ")));
+        }
+
+        // Calculate median deviation for robustness against outliers
+        let mut deviations: Vec<i64> = results.iter().map(|(_, _, dev, _)| *dev).collect();
+        deviations.sort_unstable();
+        let median_deviation = if deviations.len() % 2 == 0 {
+            let mid = deviations.len() / 2;
+            (deviations[mid - 1] + deviations[mid]) / 2
+        } else {
+            deviations[deviations.len() / 2]
+        };
+
+        // Find result closest to median for reporting
+        let (best_server, _, _, best_ping) = results
+            .iter()
+            .min_by_key(|(_, _, dev, _)| (dev - median_deviation).abs())
+            .unwrap();
+
+        // Update calibration delay
+        self.calibration_delay_ms = best_ping / 2;
+
+        let offset_ms = median_deviation * 1000;
+
+        info!(
+            "✓ NTP sync: {} servers | Median offset: {}s | Best: {} ({}ms)",
+            results.len(),
+            median_deviation,
+            best_server,
+            best_ping
+        );
+
+        // Check deviation against strict ±10s tolerance
+        if median_deviation.abs() > MAX_DEVIATION_SHUTDOWN {
+            error!(
+                "🛑 CRITICAL: System time deviation is {}s (>±{} seconds)",
+                median_deviation, MAX_DEVIATION_SHUTDOWN
+            );
+            error!("🛑 Protocol requires ±10s clock tolerance (§20.1)");
+            error!(
+                "🛑 Servers queried: {} successful, {} failed",
+                results.len(),
+                errors.len()
+            );
+            error!("🛑 Shutting down to prevent consensus issues");
+            std::process::exit(1);
+        } else if median_deviation.abs() >= MAX_DEVIATION_WARNING {
+            warn!(
+                "⚠️  WARNING: System time deviation is {}s (≥{} seconds)",
+                median_deviation, MAX_DEVIATION_WARNING
+            );
+            warn!("⚠️  Clock approaching ±10s tolerance limit!");
+            warn!("⚠️  Please synchronize your system clock immediately!");
+        }
+
+        Ok(offset_ms)
     }
 
     async fn query_ntp_server(&self, server: &str) -> Result<(i64, i64), String> {

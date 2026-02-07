@@ -47,9 +47,15 @@
 - **Action:** Add comprehensive integration tests for collateral lifecycle
 
 #### 7. Clock sync (NTP)
-- **Issue:** Protocol spec requires ±10s clock tolerance, implementation uses ±120s
-- **Status:** Functional but not spec-compliant
-- **Action:** Implement stricter NTP sync with fallback mechanisms
+- **Issue:** ~~Protocol spec requires ±10s clock tolerance, implementation uses ±120s~~ **FIXED**
+- **Status:** ✅ **COMPLETE** - Strict ±10s tolerance implemented
+- **Implementation:**
+  - `MAX_DEVIATION_SHUTDOWN: 10s` (was 120s)
+  - `MAX_DEVIATION_WARNING: 5s` (was 60s)  
+  - Check interval: 5 minutes (was 30 minutes)
+  - Multi-server consensus using median deviation
+  - Automatic shutdown if >10s drift detected
+- **Date:** 2026-02-07
 
 #### 10. Partition recovery
 - **Issue:** TimeGuard fallback for network partitions implemented, but recovery timing not optimized
