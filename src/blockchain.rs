@@ -675,14 +675,18 @@ impl Blockchain {
 
         // Check if genesis already exists locally
         let height = self.load_chain_height()?;
+        tracing::info!("🔍 initialize_genesis: loaded chain_height = {}", height);
+
         if height > 0 {
             // Verify the genesis block structure
             if let Ok(genesis) = self.get_block_by_height(0).await {
+                tracing::info!("🔍 Found genesis block, verifying structure...");
                 if let Err(e) = GenesisBlock::verify_structure(&genesis) {
                     tracing::error!(
                         "❌ Local genesis block is invalid: {} - will regenerate dynamically",
                         e
                     );
+                    tracing::error!("🚨 WARNING: This will DELETE all {} blocks!", height);
 
                     // Remove the invalid genesis and all blocks built on it
                     self.clear_all_blocks();
@@ -691,6 +695,11 @@ impl Blockchain {
                     // Genesis will be generated dynamically when masternodes register
                     return Ok(());
                 }
+                tracing::info!("✅ Genesis block structure valid");
+            } else {
+                tracing::warn!(
+                    "⚠️ height > 0 but genesis block not found - chain may be corrupted"
+                );
             }
             self.current_height.store(height, Ordering::Release);
             tracing::info!("✓ Local blockchain verified (height: {})", height);
