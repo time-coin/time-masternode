@@ -3964,8 +3964,17 @@ impl Blockchain {
             serialized.clone()
         };
 
+        tracing::debug!(
+            "💾 Saving block {} to disk: {} bytes (serialized: {} bytes, compressed: {})",
+            block.header.height,
+            data_to_store.len(),
+            serialized.len(),
+            self.compress_blocks
+        );
+
+        // Use atomic transaction to ensure block is fully written
         self.storage
-            .insert(key.as_bytes(), data_to_store)
+            .insert(key.as_bytes(), data_to_store.clone())
             .map_err(|e| e.to_string())?;
 
         // CRITICAL: Update cache to ensure consistency
@@ -3984,9 +3993,50 @@ impl Blockchain {
             e.to_string()
         })?;
 
-        tracing::debug!("✓ Block {} flushed to disk", block.header.height);
+        // VERIFICATION: Read back immediately to ensure block was written completely
+        let readback = self.storage.get(key.as_bytes()).map_err(|e| {
+            format!(
+                "Failed to read back block {} after write: {}",
+                block.header.height, e
+            )
+        })?;
 
-        Ok(())
+        match readback {
+            Some(readback_data) => {
+                if readback_data.len() != data_to_store.len() {
+                    return Err(format!(
+                        "Block {} readback size mismatch: wrote {} bytes, read {} bytes",
+                        block.header.height,
+                        data_to_store.len(),
+                        readback_data.len()
+                    ));
+                }
+                // Try to deserialize to ensure it's valid
+                let decompressed =
+                    crate::storage::decompress_block(&readback_data).map_err(|e| {
+                        format!(
+                            "Failed to decompress readback block {}: {}",
+                            block.header.height, e
+                        )
+                    })?;
+                bincode::deserialize::<Block>(&decompressed).map_err(|e| {
+                    format!(
+                        "Failed to deserialize readback block {}: {}",
+                        block.header.height, e
+                    )
+                })?;
+
+                tracing::debug!(
+                    "✓ Block {} flushed and verified on disk",
+                    block.header.height
+                );
+                Ok(())
+            }
+            None => Err(format!(
+                "Block {} disappeared after write - storage corruption",
+                block.header.height
+            )),
+        }
     }
 
     /// Update chain height in storage
