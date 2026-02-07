@@ -5255,12 +5255,17 @@ mod fallback_tests {
         }
 
         // Calculate weight
-        let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
-        let approve_weight: u64 = votes
-            .iter()
-            .filter(|v| matches!(v.vote, FallbackVoteDecision::Approve))
-            .map(|v| v.voter_weight)
-            .sum();
+        // NOTE: Must scope the DashMap Ref guard to avoid deadlock.
+        // `.get()` returns a Ref that holds a read lock on the shard.
+        // If still held when `.entry()` tries to write-lock the same shard below, it deadlocks.
+        let approve_weight: u64 = {
+            let votes = consensus.fallback_votes.get(&proposal_hash).unwrap();
+            votes
+                .iter()
+                .filter(|v| matches!(v.vote, FallbackVoteDecision::Approve))
+                .map(|v| v.voter_weight)
+                .sum()
+        };
         assert_eq!(approve_weight, 5_000_000_000);
         assert!(approve_weight < q_finality, "5B < 6B, should not finalize");
 
