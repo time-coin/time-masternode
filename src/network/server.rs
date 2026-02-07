@@ -1379,13 +1379,13 @@ async fn handle_peer(
                                         );
 
                                         // Step 2: Check if finality threshold reached
-                                        // Calculate total AVS weight and 67% threshold
+                                        // Calculate total AVS weight and 51% threshold (simple majority)
                                         let validators = consensus_clone.timevote.get_validators();
                                         let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
-                                        let finality_threshold = ((total_avs_weight as f64) * 0.67).ceil() as u64;
+                                        let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
 
                                         tracing::debug!(
-                                            "Finality check for TX {:?}: accumulated={}, threshold={} (67% of {})",
+                                            "Finality check for TX {:?}: accumulated={}, threshold={} (51% of {})",
                                             hex::encode(txid),
                                             accumulated_weight,
                                             finality_threshold,
