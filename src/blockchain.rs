@@ -2632,12 +2632,13 @@ impl Blockchain {
     }
 
     /// Check if 2/3 of connected peers agree on the current chain state (height, hash)
+    /// Uses TIER-WEIGHTED voting (Gold > Silver > Bronze > Free)
     /// Returns true if:
     /// - We have 0 connected peers (bootstrap mode allowed), OR
-    /// - 2/3+ of peers agree on our current (height, hash)
+    /// - 2/3+ of WEIGHTED stake agrees on our current (height, hash)
     ///
     /// Returns false if:
-    /// - We have 1+ connected peers AND less than 2/3 agree on our chain
+    /// - We have 1+ connected peers AND less than 2/3 of weighted stake agrees on our chain
     async fn check_2_3_consensus_for_production(&self) -> bool {
         let peer_registry_guard = self.peer_registry.read().await;
         let peer_registry = match peer_registry_guard.as_ref() {
@@ -2668,8 +2669,9 @@ impl Blockchain {
             }
         };
 
-        // Collect peer chain tips for our height
-        let mut peers_on_our_chain = 0;
+        // Collect peer chain tips AND tier weights for our height
+        let mut weight_on_our_chain = 0u64;
+        let mut total_weight = 0u64;
         let mut peers_responding = 0;
 
         for peer_ip in &connected_peers {
@@ -2677,32 +2679,51 @@ impl Blockchain {
             {
                 peers_responding += 1;
 
+                // Get peer's tier weight (default to Bronze if not found)
+                let peer_weight = match self.masternode_registry.get(peer_ip).await {
+                    Some(info) => info.masternode.tier.sampling_weight() as u64,
+                    None => {
+                        tracing::debug!(
+                            "Peer {} not in masternode registry, using Bronze weight",
+                            peer_ip
+                        );
+                        crate::types::MasternodeTier::Bronze.sampling_weight() as u64
+                    }
+                };
+
+                total_weight += peer_weight;
+
                 // Check if peer agrees on our (height, hash)
                 if peer_height == our_height && peer_hash == our_hash {
-                    peers_on_our_chain += 1;
+                    weight_on_our_chain += peer_weight;
                 }
             }
         }
 
-        // Require 2/3 of ALL connected peers to agree on our chain
-        let required_agreement = (connected_peers.len() * 2).div_ceil(3); // Ceiling division for 2/3
-        let has_consensus = peers_on_our_chain >= required_agreement;
+        if total_weight == 0 {
+            tracing::warn!("⚠️ Block production blocked: no responding peers with weight");
+            return false;
+        }
+
+        // Require 2/3 of WEIGHTED stake to agree on our chain
+        let required_weight = (total_weight * 2).div_ceil(3); // Ceiling division for 2/3
+        let has_consensus = weight_on_our_chain >= required_weight;
 
         if has_consensus {
             tracing::debug!(
-                "✅ Block production allowed: {}/{} peers agree on height {} (need {} for 2/3)",
-                peers_on_our_chain,
-                connected_peers.len(),
+                "✅ Block production allowed: {} weight agrees on height {} (need {} for 2/3 of {} total weight)",
+                weight_on_our_chain,
                 our_height,
-                required_agreement
+                required_weight,
+                total_weight
             );
         } else {
             tracing::warn!(
-                "⚠️ Block production blocked: {}/{} peers agree on height {} (need {} for 2/3). Peer responses: {}/{}",
-                peers_on_our_chain,
-                connected_peers.len(),
+                "⚠️ Block production blocked: {} weight agrees on height {} (need {} for 2/3 of {} total). Peer responses: {}/{}",
+                weight_on_our_chain,
                 our_height,
-                required_agreement,
+                required_weight,
+                total_weight,
                 peers_responding,
                 connected_peers.len()
             );
