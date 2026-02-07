@@ -214,6 +214,9 @@ pub struct Blockchain {
     compress_blocks: bool,
     /// Cache for 2/3 consensus check results (TTL: 30s) - avoids redundant peer queries
     consensus_cache: Arc<RwLock<Option<ConsensusCache>>>,
+    /// Signal notified when a new block is successfully added to the chain.
+    /// Used by block production loop to wake up instantly instead of polling.
+    block_added_signal: Arc<tokio::sync::Notify>,
 }
 
 impl Blockchain {
@@ -301,10 +304,17 @@ impl Blockchain {
             tx_index: None, // Initialize without txindex, call build_tx_index() separately
             compress_blocks: false, // Disabled temporarily to debug block corruption issues
             consensus_cache: Arc::new(RwLock::new(None)), // Initialize empty cache
+            block_added_signal: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     /// Enable or disable block compression
+    /// Get the block-added signal for event-driven consensus waiting.
+    /// Notified whenever a new block is successfully added to the chain.
+    pub fn block_added_signal(&self) -> Arc<tokio::sync::Notify> {
+        self.block_added_signal.clone()
+    }
+
     pub fn set_compress_blocks(&mut self, compress: bool) {
         self.compress_blocks = compress;
         tracing::info!(
@@ -3122,6 +3132,9 @@ impl Blockchain {
 
         // Mark block as finalized (TimeVote instant finality achieved)
         self.consensus.record_block_finalized(block_hash);
+
+        // Signal any waiters (e.g. block production loop) that a new block was added
+        self.block_added_signal.notify_waiters();
 
         Ok(())
     }
@@ -7396,6 +7409,7 @@ impl Clone for Blockchain {
             tx_index: self.tx_index.clone(),
             compress_blocks: self.compress_blocks,
             consensus_cache: self.consensus_cache.clone(),
+            block_added_signal: self.block_added_signal.clone(),
         }
     }
 }
