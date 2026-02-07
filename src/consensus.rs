@@ -1265,10 +1265,7 @@ impl TimeVoteConsensus {
         let slot_index = new_proof.slot_index;
 
         // Get or create competing proofs vector for this transaction
-        let mut proofs = self
-            .competing_timeproofs
-            .entry(txid)
-            .or_default();
+        let mut proofs = self.competing_timeproofs.entry(txid).or_default();
 
         let mut weights = Vec::new();
         let mut max_weight = new_proof_weight;
