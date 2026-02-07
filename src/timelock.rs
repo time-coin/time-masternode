@@ -497,7 +497,8 @@ impl TSCDConsensus {
             }
         }
 
-        if signed_stake >= threshold && !state.is_finalized {
+        // Require at least one masternode with stake to achieve finality
+        if total_stake > 0 && signed_stake >= threshold && !state.is_finalized {
             state.is_finalized = true;
             let proof = FinalityProof {
                 block_hash,
