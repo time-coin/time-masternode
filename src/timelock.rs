@@ -479,13 +479,13 @@ impl TSCDConsensus {
 
         state.precommits_received.insert(validator_id, signature);
 
-        // Check if we have majority stake for finality (timevote consensus)
+        // Check if we have 67% stake for finality (Protocol §8.3: Q_finality = 67% of AVS weight)
         let masternodes = match &self.masternode_registry {
             Some(registry) => registry.list_active().await,
             None => vec![],
         };
         let total_stake: u64 = masternodes.iter().map(|m| m.masternode.collateral).sum();
-        let threshold = total_stake.div_ceil(2); // Majority stake (>50%)
+        let threshold = (total_stake * 67).div_ceil(100); // 67% of total stake (ceiling)
 
         let mut signed_stake = 0u64;
         for validator_id in state.precommits_received.keys() {
@@ -497,7 +497,7 @@ impl TSCDConsensus {
             }
         }
 
-        if signed_stake > threshold && !state.is_finalized {
+        if signed_stake >= threshold && !state.is_finalized {
             state.is_finalized = true;
             let proof = FinalityProof {
                 block_hash,
@@ -769,13 +769,13 @@ impl TSCDConsensus {
             )));
         }
 
-        // Verify proof has majority stake for finality (timevote consensus)
+        // Verify proof has 67% stake for finality (Protocol §8.3: Q_finality = 67% of AVS weight)
         let masternodes = match &self.masternode_registry {
             Some(registry) => registry.list_active().await,
             None => vec![],
         };
         let total_stake: u64 = masternodes.iter().map(|m| m.masternode.collateral).sum();
-        let threshold = total_stake.div_ceil(2); // Majority stake (>50%)
+        let threshold = (total_stake * 67).div_ceil(100); // 67% of total stake (ceiling)
 
         if !masternodes.is_empty()
             && proof.signatures.len() as u64 * total_stake / masternodes.len() as u64 <= threshold
