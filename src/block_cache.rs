@@ -260,7 +260,7 @@ mod tests {
         let cache = BlockCacheManager::new(10, 100);
         let block = create_test_block(1);
 
-        cache.put(1, Arc::new(block.clone()));
+        cache.put(1, block.clone());
 
         // Should hit hot cache
         let retrieved = cache.get(1).unwrap();
@@ -277,9 +277,9 @@ mod tests {
         let cache = BlockCacheManager::new(2, 100);
 
         // Fill hot cache
-        cache.put(1, Arc::new(create_test_block(1)));
-        cache.put(2, Arc::new(create_test_block(2)));
-        cache.put(3, Arc::new(create_test_block(3))); // Evicts 1 from hot
+        cache.put(1, create_test_block(1));
+        cache.put(2, create_test_block(2));
+        cache.put(3, create_test_block(3)); // Evicts 1 from hot
 
         // Clear hot cache to test warm cache
         cache.hot.write().clear();
@@ -307,8 +307,8 @@ mod tests {
     fn test_hit_rate_calculation() {
         let cache = BlockCacheManager::new(10, 100);
 
-        cache.put(1, Arc::new(create_test_block(1)));
-        cache.put(2, Arc::new(create_test_block(2)));
+        cache.put(1, create_test_block(1));
+        cache.put(2, create_test_block(2));
 
         cache.get(1); // hot hit
         cache.get(2); // hot hit
