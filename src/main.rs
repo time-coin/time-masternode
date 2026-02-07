@@ -1692,34 +1692,9 @@ async fn main() {
                         if let Some((consensus_height, _)) =
                             block_blockchain.compare_chain_with_peers().await
                         {
-                            // If consensus height equals our height, no one has blocks ahead
-                            // But ONLY trust this if we're not far behind expected height.
-                            // If time says we should be at height 100 but consensus says 0,
-                            // the peer cache is likely stale — request fresh data first.
-                            if consensus_height == current_height {
-                                if blocks_behind > 10 && current_height > 0 {
-                                    // Far behind expected height — consensus data is likely stale.
-                                    // Request fresh chain tips and wait for updated data.
-                                    // NOTE: At height 0 (bootstrap), skip this guard — peers really ARE at 0.
-                                    // No blocks have ever been produced, so there's nothing to sync.
-                                    tracing::info!(
-                                        "🔒 Consensus says height {} but {} blocks behind expected - requesting fresh chain tips before producing",
-                                        consensus_height, blocks_behind
-                                    );
-                                    for peer_ip in &connected_peers {
-                                        let msg = NetworkMessage::GetChainTip;
-                                        let _ =
-                                            block_peer_registry.send_to_peer(peer_ip, msg).await;
-                                    }
-                                    continue;
-                                }
-                                tracing::debug!(
-                                    "Catchup: {} peers agree at height {} - producing",
-                                    connected_peers.len(),
-                                    current_height
-                                );
-                                // Skip sync attempts - fall through to immediate production
-                            } else {
+                            // Some() means peers are ahead or there's a fork we should switch to.
+                            // compare_chain_with_peers() only returns Some when action is needed.
+                            if consensus_height > current_height {
                                 // Consensus is ahead of us - request blocks and loop back
                                 tracing::debug!(
                                     "Peers at height {} (we're at {}) - requesting blocks",
@@ -1727,90 +1702,26 @@ async fn main() {
                                     current_height
                                 );
 
-                                // Request blocks from peers
                                 let probe_start = current_height + 1;
                                 let probe_end = consensus_height.min(current_height + 50);
-
-                                tracing::debug!(
-                                    "📤 Requesting blocks {}-{} from {} peer(s)",
-                                    probe_start,
-                                    probe_end,
-                                    connected_peers.len()
-                                );
 
                                 for peer_ip in &connected_peers {
                                     let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
                                     let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
                                 }
-
-                                // Loop back immediately - blocks will arrive asynchronously
-                                // Message handler adds them to chain, next iteration sees new height
                                 continue;
                             }
-                        } else {
-                            // None means we couldn't determine peer consensus (no cached chain tips with hash)
-                            // Check raw peer heights from pong responses to avoid deadlock
-                            let mut max_peer_height = current_height;
-                            let mut peer_heights_available = 0;
-                            for peer_ip in &connected_peers {
-                                if let Some(h) = block_peer_registry.get_peer_height(peer_ip).await
-                                {
-                                    peer_heights_available += 1;
-                                    if h > max_peer_height {
-                                        max_peer_height = h;
-                                    }
-                                }
-                            }
-
-                            // CRITICAL: If ANY peer has a longer chain, sync first to prevent forks
-                            // Never produce blocks if there's a longer valid chain available
-                            if max_peer_height > current_height {
-                                tracing::info!(
-                                    "📡 Peers ahead: max peer height {} > our height {} - syncing before production",
-                                    max_peer_height,
-                                    current_height
-                                );
-                                for peer_ip in &connected_peers {
-                                    let msg = NetworkMessage::GetBlocks(
-                                        current_height + 1,
-                                        max_peer_height.min(current_height + 50),
-                                    );
-                                    let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
-                                }
-                                continue;
-                            }
-
-                            // Peers are at similar height - check if we're all catching up together
-                            if peer_heights_available > 0 {
-                                if blocks_behind > 10 && current_height > 0 {
-                                    // Peer pong heights show similar height but we're far behind expected.
-                                    // Pong heights may be stale — request explicit chain tips.
-                                    // NOTE: At height 0 (bootstrap), skip this — peers really ARE at 0.
-                                    tracing::info!(
-                                        "🔒 {} peers report similar height (~{}) but {} blocks behind expected - requesting fresh chain tips",
-                                        peer_heights_available, max_peer_height, blocks_behind
-                                    );
-                                    for peer_ip in &connected_peers {
-                                        let msg = NetworkMessage::GetChainTip;
-                                        let _ =
-                                            block_peer_registry.send_to_peer(peer_ip, msg).await;
-                                    }
-                                    continue;
-                                }
-                                tracing::info!(
-                                    "📊 All {} peers at similar height (~{}) - proceeding to production",
-                                    peer_heights_available,
-                                    max_peer_height
-                                );
-                            } else if blocks_behind > 10 {
-                                // No peer height info and far behind - wait a bit for pongs
-                                tracing::debug!(
-                                    "⏳ {} blocks behind, waiting for peer height info",
-                                    blocks_behind
-                                );
-                                continue;
-                            }
+                            // consensus_height <= current_height with Some = fork scenario,
+                            // sync_from_peers was already attempted — fall through to produce
                         }
+                        // None means all peers agree on our chain (same height, same hash).
+                        // This is a POSITIVE confirmation — safe to proceed to block production.
+                        // No stale-data guard needed: compare_chain_with_peers() already
+                        // queried peers and confirmed agreement.
+                        tracing::debug!(
+                            "Catchup: peers agree at height {} - proceeding to production",
+                            current_height
+                        );
                     }
                 } else {
                     // No compatible peers available
