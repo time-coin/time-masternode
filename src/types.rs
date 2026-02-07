@@ -736,6 +736,32 @@ impl AVSSnapshot {
 }
 
 // ============================================================================
+// TIMEPROOF CONFLICT DETECTION - Per Pre-Mainnet Checklist Item 9
+// ============================================================================
+
+/// Information about a competing TimeProof conflict
+/// Used for logging and security monitoring when multiple TimeProofs exist for same transaction
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TimeProofConflictInfo {
+    /// The transaction ID with conflicting proofs
+    pub txid: Hash256,
+    /// Slot index when conflicts were detected
+    pub slot_index: u64,
+    /// Number of competing TimeProofs
+    pub proof_count: usize,
+    /// Weights of each TimeProof (by index in competing_timeproofs vec)
+    pub proof_weights: Vec<u64>,
+    /// Highest weight among competing proofs (for fork resolution)
+    pub max_weight: u64,
+    /// Index of winning proof (highest weight)
+    pub winning_proof_index: usize,
+    /// Timestamp when conflict was detected
+    pub detected_at: u64,
+    /// Whether conflict has been resolved (false until fork healing completes)
+    pub resolved: bool,
+}
+
+// ============================================================================
 // LIVENESS FALLBACK PROTOCOL - Per Protocol §7.6
 // ============================================================================
 

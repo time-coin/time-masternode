@@ -2051,7 +2051,8 @@ impl Blockchain {
                 }
 
                 // Wait for responses to arrive (increased timeout for high-latency networks)
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                // With 10+ masternodes, some may be slow to respond - wait longer to collect responses
+                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
                 // Use the fresh chain tip data we just requested (already stored in peer registry)
@@ -5560,6 +5561,20 @@ impl Blockchain {
             return None;
         }
 
+        // CRITICAL: Require a minimum response rate (50%+) to make consensus decisions
+        // If only 33% of peers respond, we may get incorrect consensus (e.g., 4/6 all at height 8)
+        // With low response rates, wait for more responses rather than deciding prematurely
+        let response_rate = peer_tips.len() as f64 / connected_peers.len() as f64;
+        if response_rate < 0.5 {
+            tracing::warn!(
+                "⚠️  Low peer response rate: {}/{} responded ({:.1}%) - waiting for more responses before consensus decision",
+                peer_tips.len(),
+                connected_peers.len(),
+                response_rate * 100.0
+            );
+            return None;
+        }
+
         // DEBUG: Log what we received from peers
         tracing::debug!(
             "🔍 [DEBUG] Received chain tips from {}/{} peers:",
@@ -5680,6 +5695,21 @@ impl Blockchain {
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
+
+        // CRITICAL: Require consensus chain to have MAJORITY support (>50% of connected peers)
+        // If a chain only has minority support, don't act on it yet - wait for more data
+        // This prevents minority chains from blocking production (e.g., old nodes with stale data)
+        let consensus_support_ratio = consensus_peers.len() as f64 / connected_peers.len() as f64;
+        if consensus_support_ratio <= 0.5 {
+            tracing::warn!(
+                "⚠️  Consensus chain at height {} has insufficient support: {}/{} peers ({:.1}%) - need >50% majority. Waiting for more consensus.",
+                consensus_height,
+                consensus_peers.len(),
+                connected_peers.len(),
+                consensus_support_ratio * 100.0
+            );
+            return None;
+        }
 
         tracing::info!(
             "✅ [CONSENSUS SELECTED] Height {}, hash {}, {} peers: {:?}",
