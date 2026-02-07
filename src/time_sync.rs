@@ -100,17 +100,39 @@ impl TimeSync {
 
         // Check deviation against strict ±10s tolerance
         if median_deviation.abs() > MAX_DEVIATION_SHUTDOWN {
+            error!("");
+            error!("╔════════════════════════════════════════════════════════════════╗");
+            error!("║          🛑 CRITICAL: SYSTEM CLOCK OUT OF SYNC 🛑             ║");
+            error!("╚════════════════════════════════════════════════════════════════╝");
+            error!("");
             error!(
-                "🛑 CRITICAL: System time deviation is {}s (>±{} seconds)",
+                "Your system clock is {}s off (tolerance: ±{}s)",
                 median_deviation, MAX_DEVIATION_SHUTDOWN
             );
-            error!("🛑 Protocol requires ±10s clock tolerance (§20.1)");
+            error!("Protocol requires ±10s clock synchronization (§20.1)");
+            error!("");
+            error!("🔧 ACTION REQUIRED: Synchronize your system clock");
+            error!("");
+            error!("   Linux/Ubuntu:");
+            error!("     sudo systemctl restart systemd-timesyncd");
+            error!("     sudo timedatectl set-ntp true");
+            error!("");
+            error!("   macOS:");
+            error!("     sudo sntp -sS time.apple.com");
+            error!("");
+            error!("   Windows:");
+            error!("     net stop w32time && net start w32time");
+            error!("     w32tm /resync");
+            error!("");
             error!(
-                "🛑 Servers queried: {} successful, {} failed",
+                "NTP servers queried: {} successful, {} failed",
                 results.len(),
                 errors.len()
             );
-            error!("🛑 Shutting down to prevent consensus issues");
+            error!("Median deviation: {}s", median_deviation);
+            error!("");
+            error!("Node shutting down to prevent consensus failures.");
+            error!("");
             std::process::exit(1);
         } else if median_deviation.abs() >= MAX_DEVIATION_WARNING {
             warn!(
