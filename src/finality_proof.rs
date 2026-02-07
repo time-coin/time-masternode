@@ -56,18 +56,14 @@ impl FinalityProofManager {
     }
 
     /// Check if a transaction has enough votes to be finalized
-    /// Uses timevote consensus model: finality achieved through continuous sampling
-    /// Returns total weight of votes if meets timevote quorum threshold, None otherwise
-    /// Threshold: alpha (quorum size) positive responses = consensus
+    /// Per Protocol §8.3: Q_finality = 67% of total AVS weight (rounded up)
+    /// Returns total weight of votes if meets finality threshold, None otherwise
     pub fn check_finality_threshold(&self, txid: Hash256, total_avs_weight: u64) -> Option<u64> {
         if let Some(votes_entry) = self.votes.get(&txid) {
             let total_weight: u64 = votes_entry.iter().map(|v| v.voter_weight).sum();
 
-            // timevote consensus threshold: need quorum_size (14) positive responses
-            // For pure timevote: use sample majority (>50% of sample)
-            // Typical sample size k=20, need alpha=14 confirmations
-            // This is equivalent to >70% of sampled validators
-            let threshold = total_avs_weight.div_ceil(2); // Majority stake weight
+            // Protocol §8.3: Q_finality = 0.67 * total_AVS_weight (rounded up)
+            let threshold = (total_avs_weight * 67).div_ceil(100); // 67% of AVS weight (ceiling)
             if total_weight >= threshold {
                 return Some(total_weight);
             }

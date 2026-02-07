@@ -94,7 +94,7 @@ All signed objects MUST include `chain_id` to prevent replay across networks.
 
 ### 4.4 VRF
 - VRF scheme MUST provide `(vrf_output, vrf_proof)` verifiable under a public key.
-- VRF input MUST bind to `prev_block_hash || slot_time || chain_id`.
+- VRF input MUST bind to `"TIMECOIN_VRF_V2" || height || prev_block_hash`.
 
 ---
 
@@ -108,12 +108,19 @@ A masternode has:
 - `vrf_pubkey` (may be same key)
 
 ### 5.2 Tier Weights
-| Tier | Collateral (TIME) | Weight `w` |
-|------|-------------------|------------|
-| Free | 0 | 1 |
-| Bronze | 1,000 | 10 |
-| Silver | 10,000 | 100 |
-| Gold | 100,000 | 1,000 |
+
+Each tier has multiple weight types for different protocol functions:
+
+| Tier | Collateral (TIME) | Sampling Weight | Reward Weight | Voting Power |
+|------|-------------------|-----------------|---------------|--------------|
+| Free | 0 | 1 | 100 | 0 |
+| Bronze | 1,000 | 10 | 1,000 | 1 |
+| Silver | 10,000 | 100 | 10,000 | 10 |
+| Gold | 100,000 | 1,000 | 100,000 | 100 |
+
+- **Sampling Weight (`w`):** Used for stake-weighted validator selection during TimeVote polling (§7.4)
+- **Reward Weight:** Used for proportional block reward distribution (§10.4). Scales 1:1 with collateral except Free tier (0.1x relative to Bronze)
+- **Voting Power:** Used for governance. Free tier nodes cannot vote on governance (voting power = 0)
 
 ### 5.3 Collateral Enforcement (MUST CHOOSE ONE)
 1. **On-chain staking UTXO (RECOMMENDED):** stake locked by a staking script; weight derived from locked amount and tier mapping.
@@ -633,12 +640,13 @@ Checkpoint blocks exist to:
 
 ### 9.2 Sortition (Deterministic Candidate Ranking)
 For each masternode `i` in the AVS at `slot_index`:
-- `score_i = VRF(prev_block_hash || slot_time || chain_id, sk_i)`
+- `vrf_input = SHA256("TIMECOIN_VRF_V2" || uint64_le(height) || prev_block_hash)`
+- `score_i = VRF(vrf_input, sk_i)`
 
 Lower `score_i` is better.
 
-**Security Note (VRF Grinding Mitigation):**  
-The VRF input MUST include `prev_block_hash` as the first component to prevent grinding attacks. Without this unpredictable entropy, an adversary with multiple masternodes could pre-compute VRF outputs for future slots (since `slot_time` and `chain_id` are predictable) and selectively register only masternodes that will win valuable future slots. The `prev_block_hash` changes with each block and cannot be known in advance, making pre-computation attacks infeasible. This follows best practices from Algorand, Ethereum 2.0, and Cardano.
+**Security Note (VRF Grinding Mitigation):**
+The VRF input MUST include `prev_block_hash` to prevent grinding attacks. The domain separator `"TIMECOIN_VRF_V2"` and block `height` are predictable, but `prev_block_hash` changes with each block and cannot be known in advance, making pre-computation attacks infeasible. This follows best practices from Algorand, Ethereum 2.0, and Cardano.
 
 ### 9.3 Canonical block selection (no timeout proofs)
 Any AVS-active masternode MAY publish a candidate block for the slot.
@@ -690,20 +698,19 @@ Upon block acceptance:
 Rewards are created per checkpoint block.
 
 ### 10.2 Base reward
-`R = 100 * (1 + ln(N))`
+`R = 100 TIME` (fixed per block, 10,000,000,000 satoshis)
 
-`N` MUST be defined as one of:
-- `N = |AVS|` at the block’s `slot_index` (RECOMMENDED), or
-- total registered masternodes
-
-All nodes MUST use the same definition.
+The base reward is a constant 100 TIME per checkpoint block, providing predictable issuance and simplifying consensus (all nodes compute identical rewards without needing to agree on AVS size).
 
 ### 10.3 Fee accounting
 Fees are the sum of included archived transactions’ fees for the slot.
 
 ### 10.4 Payout split
-- Producer: 10% of `(R + fees)`
-- AVS masternodes: 90% of `(R + fees)` distributed proportional to weight `w`
+- AVS masternodes: 100% of `(R + fees)` distributed proportional to tier reward weight
+- No block producer premium (all masternodes share equally by weight)
+- No treasury allocation
+
+Masternodes are sorted canonically by address. Each receives `(total_reward * tier_reward_weight) / total_weight`. The last masternode in the sorted list receives the remainder to avoid rounding errors.
 
 Payout MUST be represented as one or more on-chain reward transactions included in the checkpoint block (coinbase-style).
 
@@ -864,17 +871,17 @@ Alternative: deterministic construction from Ed25519 private key
 
 **Input binding (§9.2):**
 ```
-vrf_input = H_BLAKE3(prev_block_hash || uint64_le(slot_time) || uint32_le(chain_id))
+vrf_input = SHA256("TIMECOIN_VRF_V2" || uint64_le(height) || prev_block_hash)
 (vrf_output, vrf_proof) = VRF_Prove(vrf_sk, vrf_input)
 ```
 
 **CRITICAL: VRF Grinding Attack Prevention**
 
-The order of VRF input components is security-critical:
+The VRF input components are:
 
-1. **`prev_block_hash` MUST be first** - Provides unpredictable entropy that changes with each block
-2. **`slot_time`** - Deterministic but safe when combined with unpredictable hash
-3. **`chain_id`** - Domain separator to prevent cross-chain replay
+1. **`"TIMECOIN_VRF_V2"`** - Domain separator string (version-tagged for security enhancements)
+2. **`height`** - Block height (deterministic, little-endian u64)
+3. **`prev_block_hash`** - Provides unpredictable entropy that changes with each block
 
 **Why this ordering matters:**
 
@@ -1475,22 +1482,23 @@ Total Reward = 100 TIME + transaction_fees
 
 Distribution:
 - 100% to Active Validator Set (AVS) masternodes
-- Proportional to tier weight (Gold=1000, Silver=100, Bronze=10, Free=1)
+- Proportional to tier reward weight (Gold=100000, Silver=10000, Bronze=1000, Free=100)
 - No block producer premium (all masternodes share equally by weight)
 - No treasury allocation (pure validator rewards)
+- Masternodes sorted canonically by address; last node receives remainder
 ```
 
 **Example Distribution (100 masternodes):**
 ```
 AVS Composition:
-- 1 Gold (weight 1000) → 50% of rewards
-- 10 Silver (weight 100 each) → 45% of rewards  
-- 89 Bronze/Free (weight ~10-1) → 5% of rewards
+- 1 Gold (reward_weight 100000) → ~47.6% of rewards
+- 10 Silver (reward_weight 10000 each) → ~47.6% of rewards
+- 89 Free (reward_weight 100 each) → ~4.2% of rewards
 
 For a 100 TIME block:
-- Gold masternode: 50 TIME
-- Each Silver: 4.5 TIME
-- Each Bronze/Free: 0.05-0.5 TIME
+- Gold masternode: ~47.6 TIME
+- Each Silver: ~4.76 TIME
+- Each Free: ~0.048 TIME
 ```
 
 **Fair APY Design:**
