@@ -1697,9 +1697,11 @@ async fn main() {
                             // If time says we should be at height 100 but consensus says 0,
                             // the peer cache is likely stale — request fresh data first.
                             if consensus_height == current_height {
-                                if blocks_behind > 10 {
+                                if blocks_behind > 10 && current_height > 0 {
                                     // Far behind expected height — consensus data is likely stale.
                                     // Request fresh chain tips and wait for updated data.
+                                    // NOTE: At height 0 (bootstrap), skip this guard — peers really ARE at 0.
+                                    // No blocks have ever been produced, so there's nothing to sync.
                                     tracing::info!(
                                         "🔒 Consensus says height {} but {} blocks behind expected - requesting fresh chain tips before producing",
                                         consensus_height, blocks_behind
@@ -1780,9 +1782,10 @@ async fn main() {
 
                             // Peers are at similar height - check if we're all catching up together
                             if peer_heights_available > 0 {
-                                if blocks_behind > 10 {
+                                if blocks_behind > 10 && current_height > 0 {
                                     // Peer pong heights show similar height but we're far behind expected.
                                     // Pong heights may be stale — request explicit chain tips.
+                                    // NOTE: At height 0 (bootstrap), skip this — peers really ARE at 0.
                                     tracing::info!(
                                         "🔒 {} peers report similar height (~{}) but {} blocks behind expected - requesting fresh chain tips",
                                         peer_heights_available, max_peer_height, blocks_behind
