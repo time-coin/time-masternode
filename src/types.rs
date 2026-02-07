@@ -466,7 +466,7 @@ impl TimeVote {
     }
 
     /// Check if this vote contributes to finality weight (Protocol §8.2)
-    /// Only Accept votes count toward the 67% threshold
+    /// Only Accept votes count toward the 51% threshold (simple majority)
     pub fn contributes_to_finality(&self) -> bool {
         matches!(self.decision, VoteDecision::Accept)
     }
@@ -563,7 +563,7 @@ impl VerifiableFinality {
 /// 3. All votes have decision=Accept
 /// 4. Voters are distinct (by voter_mn_id)
 /// 5. Each voter is in AVS snapshot for slot_index
-/// 6. Sum of voter weights ≥ Q_finality (67% of total AVS weight)
+/// 6. Sum of voter weights ≥ Q_finality (51% of total AVS weight - simple majority)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeProof {
     /// The transaction this proof finalizes
@@ -635,7 +635,7 @@ impl TimeProof {
         let finality_threshold = (total_avs_weight * 67) / 100;
         if accumulated_weight < finality_threshold {
             return Err(format!(
-                "Insufficient weight: {} < {} (67% of {})",
+                "Insufficient weight: {} < {} (51% of {})",
                 accumulated_weight, finality_threshold, total_avs_weight
             ));
         }
@@ -729,7 +729,7 @@ impl AVSSnapshot {
         }
     }
 
-    /// Calculate voting threshold (67% of total weight)
+    /// Calculate voting threshold (51% of total weight)
     pub fn voting_threshold(&self) -> u64 {
         (self.total_weight * 67) / 100
     }
@@ -1333,7 +1333,7 @@ mod tests {
                 slot_index: 100,
                 decision: VoteDecision::Accept,
                 voter_mn_id: format!("TIME0voter{}", i),
-                voter_weight: 400, // 400 * 3 = 1200 > 67% of 1500
+                voter_weight: 400, // 400 * 3 = 1200 > 51% of 1500
                 signature: Vec::new(),
             };
             let msg = vote.signing_message();
@@ -1361,13 +1361,13 @@ mod tests {
                 .map(|(_, pk)| *pk)
         };
 
-        // Total AVS weight = 1500, votes = 1200 = 80% > 67%
+        // Total AVS weight = 1500, votes = 1200 = 80% > 51%
         let total_avs_weight = 1500;
         let result = timeproof.verify(total_avs_weight, get_pubkey);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 1200); // 400 * 3
 
-        // Test with insufficient weight (need 67% of 2000 = 1340, but only have 1200)
+        // Test with insufficient weight (need 51% of 2000 = 1340, but only have 1200)
         let result = timeproof.verify(2000, get_pubkey);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Insufficient weight"));

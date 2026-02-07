@@ -232,7 +232,7 @@ pub struct TimeVoteConfig {
     /// Number of consecutive preference confirms needed for finality (beta)
     /// Per spec: beta = 20
     pub finality_confidence: usize,
-    /// Required finality weight threshold as percentage (default 67%)
+    /// Required finality weight threshold as percentage (default 51% for simple majority)
     pub q_finality_percent: u64,
     /// Timeout for query responses (milliseconds)
     pub query_timeout_ms: u64,
@@ -246,7 +246,7 @@ impl Default for TimeVoteConfig {
             sample_size: 20,         // Query 20 validators per round (k)
             quorum_size: 14,         // Need 14+ responses for consensus (alpha)
             finality_confidence: 20, // 20 consecutive confirms for finality (beta)
-            q_finality_percent: 67,  // 67% weight threshold for finality
+            q_finality_percent: 51,  // 51% weight threshold for finality (simple majority)
             query_timeout_ms: 2000,  // 2 second timeout
             max_rounds: 100,
         }
@@ -374,7 +374,7 @@ pub struct VotingState {
     pub accumulated_votes: Vec<FinalityVote>,
     /// Current accumulated vote weight
     pub accumulated_weight: u64,
-    /// Required weight threshold for finality (67% of AVS weight)
+    /// Required weight threshold for finality (51% of AVS weight (simple majority))
     pub required_weight: u64,
 }
 
@@ -400,7 +400,7 @@ impl VotingState {
         self.accumulated_votes.push(vote);
     }
 
-    /// Check if finality threshold reached (67% weight)
+    /// Check if finality threshold reached (51% weight)
     pub fn has_finality_threshold(&self) -> bool {
         self.required_weight > 0 && self.accumulated_weight >= self.required_weight
     }
@@ -411,7 +411,7 @@ impl VotingState {
     }
 
     /// Check if finalized
-    /// Per Protocol §7.5: Finality requires accumulated_weight >= Q_finality (67% of AVS weight)
+    /// Per Protocol §7.5: Finality requires accumulated_weight >= Q_finality (51% of AVS weight (simple majority))
     /// Snowflake confidence is used for preference tracking only, NOT for finality determination
     pub fn is_finalized(&self, _threshold: u32) -> bool {
         self.has_finality_threshold()
@@ -1184,7 +1184,7 @@ impl TimeVoteConsensus {
     }
 
     /// Check if transaction meets TimeProof finality threshold (Protocol §8.3)
-    /// Returns Ok(true) if accumulated weight >= 67% of AVS weight
+    /// Returns Ok(true) if accumulated weight >= 51% of AVS weight (simple majority)
     pub fn check_timeproof_finality(
         &self,
         txid: &Hash256,
@@ -2520,7 +2520,7 @@ impl ConsensusEngine {
     /// 1. ATOMICALLY lock UTXOs and validate transaction
     /// 2. Broadcast to network
     /// 3. Collect votes from masternodes
-    /// 4. Finalize (2/3 quorum) or reject
+    /// 4. Finalize (simple majority) or reject
     #[allow(dead_code)]
     pub async fn lock_and_validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
         let txid = tx.txid();
@@ -2575,7 +2575,7 @@ impl ConsensusEngine {
     /// 2. Lock UTXOs
     /// 3. Broadcast to network
     /// 4. Collect votes from masternodes
-    /// 5. Finalize (2/3 quorum) or reject
+    /// 5. Finalize (simple majority) or reject
     pub async fn submit_transaction(&self, tx: Transaction) -> Result<Hash256, String> {
         let txid = tx.txid();
         let txid_hex = hex::encode(txid);
@@ -3389,7 +3389,7 @@ impl ConsensusEngine {
             }
         }
 
-        // Calculate Q_finality (2/3 of total AVS weight)
+        // Calculate Q_finality (simple majority (>50%) of total AVS weight)
         let q_finality = (total_avs_weight * 2) / 3;
 
         // Check if threshold reached
@@ -5417,7 +5417,7 @@ mod fallback_tests {
         assert_eq!(stored_round, round);
     }
 
-    /// Test Q_finality threshold calculation (2/3 majority)
+    /// Test Q_finality threshold calculation (simple majority)
     #[test]
     fn test_phase6_q_finality_threshold() {
         let config = TimeVoteConfig::default();

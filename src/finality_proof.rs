@@ -56,14 +56,14 @@ impl FinalityProofManager {
     }
 
     /// Check if a transaction has enough votes to be finalized
-    /// Per Protocol §8.3: Q_finality = 67% of total AVS weight (rounded up)
+    /// Per Protocol §8.3: Q_finality = 51% of total AVS weight (simple majority) (rounded up)
     /// Returns total weight of votes if meets finality threshold, None otherwise
     pub fn check_finality_threshold(&self, txid: Hash256, total_avs_weight: u64) -> Option<u64> {
         if let Some(votes_entry) = self.votes.get(&txid) {
             let total_weight: u64 = votes_entry.iter().map(|v| v.voter_weight).sum();
 
-            // Protocol §8.3: Q_finality = 0.67 * total_AVS_weight (rounded up)
-            let threshold = (total_avs_weight * 67).div_ceil(100); // 67% of AVS weight (ceiling)
+            // Protocol §8.3: Q_finality = 0.51 * total_AVS_weight (simple majority) (rounded up)
+            let threshold = (total_avs_weight * 51).div_ceil(100); // 51% of AVS weight (ceiling)
             if total_weight >= threshold {
                 return Some(total_weight);
             }
@@ -218,7 +218,7 @@ mod tests {
     fn test_finality_threshold_calculation() {
         let _mgr = FinalityProofManager::new(1);
 
-        // 100 total weight requires 67 minimum (67% threshold with ceiling)
+        // 100 total weight requires 51 minimum (51% threshold with ceiling)
         let threshold = (100 * 67 + 99) / 100;
         assert_eq!(threshold, 67);
 

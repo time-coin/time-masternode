@@ -42,7 +42,7 @@
 
 TIME Coin separates **state finality** from **historical checkpointing**:
 
-- **TimeVote Protocol (Transaction Layer):** fast, leaderless, stake-weighted voting that converges on a single winner among conflicting transactions. Progressive TimeProof assembly provides **unified finality** when 67% weight threshold is reached.
+- **TimeVote Protocol (Transaction Layer):** fast, leaderless, stake-weighted voting that converges on a single winner among conflicting transactions. Progressive TimeProof assembly provides **unified finality** when 51% weight threshold is reached.
 - **TimeProof:** Accumulates signed votes during consensus to create an **objectively verifiable artifact** that any node can validate offline. No separate assembly step needed.
 - **TimeLock (Block Layer):** deterministic, VRF-sortition checkpoint blocks every 10 minutes. Blocks are **archival** (history + reward events), not the source of transaction finality.
 
@@ -178,7 +178,7 @@ TIME Coin uses stake-weighted repeated voting with progressive proof accumulatio
 ### 7.1 Parameters
 - `k`: sample size (default 20)
 - `α`: successful poll threshold (default 14)
-- `Q_finality`: finality threshold (67% of AVS weight)
+- `Q_finality`: finality threshold (51% of AVS weight)
 - `POLL_TIMEOUT`: default 200ms
 - `MAX_TXS_PER_QUERY`: default 64
 
@@ -209,7 +209,7 @@ Problem: The 20% can CHANGE their votes after partition heals:
 - They have no cryptographic commitment to their Reject decision
 - Could vote Accept for tx_A after seeing it reached 40%
 - Or vote Accept for tx_B after seeing it reached 40%
-- Both transactions could appear to reach 67% threshold (equivocation)
+- Both transactions could appear to reach 51% threshold (equivocation)
 ```
 
 **With signed Reject votes:**
@@ -547,7 +547,7 @@ The v6.2 release provides full implementation of §7.6 with the following compon
 
 ## 8. TimeProof (Verifiable Finality)
 
-TimeProof is the mechanism for achieving finality in TimeCoin. A TimeProof is assembled progressively as nodes collect finality votes during normal transaction validation. Once enough votes are collected (≥67% of AVS weight), the transaction achieves finality and the TimeProof can be:
+TimeProof is the mechanism for achieving finality in TimeCoin. A TimeProof is assembled progressively as nodes collect finality votes during normal transaction validation. Once enough votes are collected (≥51% of AVS weight), the transaction achieves finality and the TimeProof can be:
 - gossiped
 - stored
 - included (directly or by hash) in checkpoint blocks
@@ -587,7 +587,7 @@ Validity conditions:
 **Note on Reject Votes:**
 - Reject votes MUST be signed (equivocation prevention per §7.2)
 - Reject votes create cryptographic proof of rejection
-- Reject votes do NOT count toward the 67% finality threshold
+- Reject votes do NOT count toward the 51% finality threshold
 - Only Accept votes accumulate toward TimeProof finality weight
 
 ### 8.3 Finality threshold
@@ -611,7 +611,7 @@ An AVS snapshot MUST include:
 TimeProof is assembled progressively during normal transaction validation:
 - When performing `SampleQuery` during validation, responders SHOULD include a `FinalityVote` when responding `Valid` (if requested).
 - The initiator accumulates unique votes as part of the normal polling process.
-- Once the accumulated vote weight reaches the finality threshold (≥67% of AVS weight), the TimeProof is complete and the transaction achieves finality.
+- Once the accumulated vote weight reaches the finality threshold (≥51% of AVS weight), the TimeProof is complete and the transaction achieves finality.
 
 There is no separate "finalization phase" - votes are collected during the same process as validation polling.
 
@@ -802,7 +802,7 @@ Blocks MUST only include transactions with TimeProof.
 - AVS membership/weights are correctly enforced (staking/registry + heartbeats + witnesses).
 
 ### 13.2 Safety
-- Transaction finality is objective once a TimeProof with threshold weight (≥67% of AVS) is obtained.
+- Transaction finality is objective once a TimeProof with threshold weight (≥51% of AVS) is obtained.
 - The TimeProof mechanism ensures that conflicting transactions cannot both achieve finality under honest majority assumptions.
 
 ### 13.3 Liveness
@@ -1581,3 +1581,4 @@ test_vectors:
 ```
 
 ---
+

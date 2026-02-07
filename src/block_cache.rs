@@ -258,9 +258,9 @@ mod tests {
     #[test]
     fn test_hot_cache_hit() {
         let cache = BlockCacheManager::new(10, 100);
-        let block = create_test_block(1);
+        let block = Arc::new(create_test_block(1));
 
-        cache.put(1, Arc::new(block.clone()));
+        cache.put(1, block.clone());
 
         // Should hit hot cache
         let retrieved = cache.get(1).unwrap();
