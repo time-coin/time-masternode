@@ -479,11 +479,18 @@ async fn main() {
                     "❌ Chain integrity check failed: {} corrupt blocks detected",
                     corrupt_blocks.len()
                 );
-                // Delete corrupt blocks to trigger re-sync
-                if let Err(e) = blockchain.delete_corrupt_blocks(&corrupt_blocks).await {
-                    tracing::error!("❌ Failed to delete corrupt blocks: {}", e);
-                } else {
-                    tracing::info!("✅ Corrupt blocks deleted - will re-sync from peers");
+                // Repair corrupt blocks by re-fetching from peers
+                match blockchain.repair_corrupt_blocks(&corrupt_blocks).await {
+                    Ok(repaired) => {
+                        tracing::info!(
+                            "✅ Repaired {}/{} corrupt blocks from peers",
+                            repaired,
+                            corrupt_blocks.len()
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ Failed to repair corrupt blocks: {}", e);
+                    }
                 }
             } else {
                 tracing::info!("✅ Chain integrity validation passed");
@@ -1076,17 +1083,21 @@ async fn main() {
                                 corrupt_blocks.len(),
                                 corrupt_blocks
                             );
-                            // Auto-heal: delete corrupt blocks to trigger re-sync
-                            if let Err(e) = blockchain_for_integrity
-                                .delete_corrupt_blocks(&corrupt_blocks)
+                            // Auto-heal: re-fetch corrupt blocks from peers
+                            match blockchain_for_integrity
+                                .repair_corrupt_blocks(&corrupt_blocks)
                                 .await
                             {
-                                tracing::error!("❌ Failed to delete corrupt blocks: {}", e);
-                            } else {
-                                tracing::info!(
-                                    "🔧 Auto-healing: deleted {} corrupt blocks, will re-sync from peers",
-                                    corrupt_blocks.len()
-                                );
+                                Ok(repaired) => {
+                                    tracing::info!(
+                                        "🔧 Auto-healing: repaired {}/{} corrupt blocks from peers",
+                                        repaired,
+                                        corrupt_blocks.len()
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!("❌ Failed to repair corrupt blocks: {}", e);
+                                }
                             }
                         } else {
                             tracing::debug!("✅ Chain integrity check passed");
