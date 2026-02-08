@@ -2133,45 +2133,59 @@ impl RpcHandler {
 
     /// Full reindex: clear UTXOs and rebuild from block 0, plus rebuild tx index.
     /// This fixes stale wallet balances after chain corruption or reset.
+    /// Runs synchronously so the CLI gets the result directly.
     async fn reindex_full(&self) -> Result<Value, RpcError> {
         let blockchain = self.blockchain.clone();
         let height = blockchain.get_height();
 
-        tokio::spawn(async move {
-            tracing::info!("🔄 Starting full reindex (UTXOs + transactions)...");
+        tracing::info!(
+            "🔄 Starting full reindex (UTXOs + transactions) for {} blocks...",
+            height
+        );
 
-            // Step 1: Reindex UTXOs from block 0
-            match blockchain.reindex_utxos().await {
-                Ok((blocks, utxos)) => {
-                    tracing::info!(
-                        "✅ UTXO reindex complete: {} blocks, {} UTXOs",
-                        blocks,
-                        utxos
-                    );
-                }
-                Err(e) => {
-                    tracing::error!("❌ UTXO reindex failed: {}", e);
-                    return;
-                }
+        // Step 1: Reindex UTXOs from block 0 (synchronous — caller waits for result)
+        let (blocks, utxos) = match blockchain.reindex_utxos().await {
+            Ok((blocks, utxos)) => {
+                tracing::info!(
+                    "✅ UTXO reindex complete: {} blocks, {} UTXOs",
+                    blocks,
+                    utxos
+                );
+                (blocks, utxos)
             }
-
-            // Step 2: Rebuild transaction index
-            match blockchain.build_tx_index().await {
-                Ok(()) => {
-                    tracing::info!("✅ Transaction reindex completed");
-                }
-                Err(e) => {
-                    tracing::error!("❌ Transaction reindex failed: {}", e);
-                }
+            Err(e) => {
+                tracing::error!("❌ UTXO reindex failed: {}", e);
+                return Err(RpcError {
+                    code: -1,
+                    message: format!("UTXO reindex failed: {}", e),
+                });
             }
+        };
 
-            tracing::info!("✅ Full reindex complete");
-        });
+        // Step 2: Rebuild transaction index
+        let tx_indexed = match blockchain.build_tx_index().await {
+            Ok(()) => {
+                tracing::info!("✅ Transaction reindex completed");
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️  Transaction reindex failed (tx_index may not be enabled): {}",
+                    e
+                );
+                false
+            }
+        };
+
+        tracing::info!("✅ Full reindex complete");
 
         Ok(json!({
-            "message": "Full reindex started (UTXOs + transactions)",
-            "status": "running",
-            "chain_height": height
+            "message": "Full reindex complete",
+            "status": "complete",
+            "chain_height": height,
+            "blocks_processed": blocks,
+            "utxo_count": utxos,
+            "tx_index_rebuilt": tx_indexed
         }))
     }
 
