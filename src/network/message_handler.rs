@@ -55,6 +55,8 @@ pub struct MessageContext {
     pub node_masternode_address: Option<String>,
     // Blacklist for rejecting messages from banned peers
     pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    // AI System for recording events and making intelligent decisions
+    pub ai_system: Option<Arc<crate::ai::AISystem>>,
 }
 
 impl MessageContext {
@@ -77,6 +79,7 @@ impl MessageContext {
             seen_transactions: None,
             node_masternode_address: None,
             blacklist: None,
+            ai_system: None,
         }
     }
 
@@ -103,6 +106,7 @@ impl MessageContext {
             seen_transactions: None,
             node_masternode_address,
             blacklist: None,
+            ai_system: None,
         }
     }
 
@@ -118,6 +122,8 @@ impl MessageContext {
         let (consensus, block_cache, broadcast_tx) = peer_registry.get_timelock_resources().await;
         // Get local masternode address for voting identity
         let node_masternode_address = masternode_registry.get_local_address().await;
+        // Get AI system from blockchain if available
+        let ai_system = blockchain.ai_system().cloned();
 
         Self {
             blockchain,
@@ -132,6 +138,7 @@ impl MessageContext {
             seen_transactions: None,
             node_masternode_address,
             blacklist: None,
+            ai_system,
         }
     }
 
@@ -144,6 +151,12 @@ impl MessageContext {
     /// Set the blacklist for rejecting messages from banned peers
     pub fn with_blacklist(mut self, blacklist: Arc<RwLock<IPBlacklist>>) -> Self {
         self.blacklist = Some(blacklist);
+        self
+    }
+
+    /// Set the AI system for intelligent event recording and decision making
+    pub fn with_ai_system(mut self, ai_system: Arc<crate::ai::AISystem>) -> Self {
+        self.ai_system = Some(ai_system);
         self
     }
 }
@@ -276,7 +289,7 @@ impl MessageHandler {
             }
         }
 
-        match msg {
+        let result = match msg {
             // === Health Check Messages ===
             NetworkMessage::Ping {
                 nonce,
@@ -532,7 +545,23 @@ impl MessageHandler {
                 );
                 Ok(None)
             }
+        };
+
+        // Record AI events based on message processing results
+        if let Some(ai) = &context.ai_system {
+            // Record all messages as anomaly detector events (for traffic pattern analysis)
+            ai.anomaly_detector
+                .record_event(format!("msg_{}", msg.message_type()), 1.0);
+
+            // Record errors as potential attack indicators
+            if result.is_err() {
+                ai.attack_detector.record_invalid_message(&self.peer_ip);
+                ai.anomaly_detector
+                    .record_event("invalid_message".to_string(), 1.0);
+            }
         }
+
+        result
     }
 
     /// Handle Ping message - respond with Pong
@@ -1414,6 +1443,21 @@ impl MessageHandler {
                     self.direction, block_height, self.peer_ip
                 );
 
+                // Record block for AI predictive sync and transaction analysis
+                if let Some(ai) = &context.ai_system {
+                    let block_time = block.header.timestamp as u64;
+                    ai.predictive_sync.record_block(
+                        block_height,
+                        block_time,
+                        600, // nominal block time
+                    );
+                    let tx_count = block.transactions.len();
+                    if tx_count > 0 {
+                        ai.transaction_analyzer
+                            .record_transaction_batch(tx_count, 0);
+                    }
+                }
+
                 // Gossip inventory to other peers
                 if let Some(broadcast_tx) = &context.broadcast_tx {
                     let msg = NetworkMessage::BlockInventory(block_height);
@@ -1642,6 +1686,12 @@ impl MessageHandler {
             hex::encode(&txid[..8]),
             self.peer_ip
         );
+
+        // Record transaction for AI attack detection (double-spend tracking)
+        if let Some(ai) = &context.ai_system {
+            ai.attack_detector
+                .record_transaction(&hex::encode(&txid[..8]), &self.peer_ip);
+        }
 
         // Process transaction through consensus
         if let Some(consensus) = &context.consensus {

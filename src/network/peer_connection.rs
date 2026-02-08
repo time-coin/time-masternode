@@ -260,6 +260,9 @@ pub struct MessageLoopConfig {
 
     /// Optional: Blacklist for rejecting messages from banned peers
     pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+
+    /// Optional: AI System for recording events and making intelligent decisions
+    pub ai_system: Option<Arc<crate::ai::AISystem>>,
 }
 
 impl MessageLoopConfig {
@@ -273,6 +276,7 @@ impl MessageLoopConfig {
             blockchain: None,
             broadcast_rx: None,
             blacklist: None,
+            ai_system: None,
         }
     }
 
@@ -303,6 +307,12 @@ impl MessageLoopConfig {
     /// Add blacklist (builder pattern)
     pub fn with_blacklist(mut self, blacklist: Arc<RwLock<IPBlacklist>>) -> Self {
         self.blacklist = Some(blacklist);
+        self
+    }
+
+    /// Add AI system (builder pattern)
+    pub fn with_ai_system(mut self, ai_system: Arc<crate::ai::AISystem>) -> Self {
+        self.ai_system = Some(ai_system);
         self
     }
 }
@@ -1097,6 +1107,11 @@ impl PeerConnection {
             // Add blacklist if available
             if let Some(ref blacklist) = config.blacklist {
                 ctx = ctx.with_blacklist(Arc::clone(blacklist));
+            }
+
+            // Add AI system if available
+            if let Some(ref ai_system) = config.ai_system {
+                ctx = ctx.with_ai_system(Arc::clone(ai_system));
             }
 
             ctx
