@@ -2531,7 +2531,7 @@ async fn main() {
             shutdown_manager.register_task(rpc_handle);
 
             // Now create network client for outbound connections
-            let network_client = network::client::NetworkClient::new(
+            let mut network_client = network::client::NetworkClient::new(
                 peer_manager.clone(),
                 registry.clone(),
                 blockchain.clone(),
@@ -2544,6 +2544,8 @@ async fn main() {
                 config.network.blacklisted_peers.clone(),
                 Some(server.blacklist.clone()),
             );
+            // Share AISystem's reconnection AI so connection learning data is unified
+            network_client.set_reconnection_ai(ai_system.reconnection_ai.clone());
             network_client.start().await;
 
             // BOOTSTRAP: At genesis, aggressively request masternode lists from all peers
