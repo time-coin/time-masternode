@@ -1332,7 +1332,11 @@ impl Blockchain {
                 // Always start from 0 when current is 0 (need genesis)
                 // Otherwise start from current + 1 (need next block after our tip)
                 let batch_start = if current == 0 {
-                    0 // Request genesis and subsequent blocks
+                    if self.get_block(0).is_ok() {
+                        1 // Already have genesis, request block 1+
+                    } else {
+                        0 // Need genesis first
+                    }
                 } else {
                     current + 1 // Request next block after our tip
                 };
