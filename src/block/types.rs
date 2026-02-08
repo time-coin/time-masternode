@@ -6,20 +6,8 @@
 #![allow(dead_code)] // Attestation methods are scaffolding for future integration
 
 use crate::types::{Hash256, Transaction};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-/// Custom deserializer for time_attestations to handle legacy block formats
-/// Old blocks may have: Vec<TimeAttestation>, Option<Vec<TimeAttestation>>, or missing field
-#[allow(deprecated)]
-fn deserialize_time_attestations<'de, D>(deserializer: D) -> Result<Vec<TimeAttestation>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // Try to deserialize as Option<Vec> first (handles both Some(vec) and None)
-    let opt: Option<Vec<TimeAttestation>> = Option::deserialize(deserializer).unwrap_or(None);
-    Ok(opt.unwrap_or_default())
-}
 
 /// Build a merkle tree from a list of hashes
 /// Generic merkle root calculator used for transactions, attestations, etc.
@@ -157,8 +145,12 @@ pub struct Block {
     pub masternode_rewards: Vec<(String, u64)>,
     /// DEPRECATED: Heartbeat attestations - kept for deserializing old blocks
     /// Always empty in new blocks but field must exist for backward compatibility
-    /// Uses custom deserializer to handle both Vec and Option<Vec> formats from old blocks
-    #[serde(default, deserialize_with = "deserialize_time_attestations")]
+    /// NOTE: Do NOT use custom deserialize_with here - bincode is positional, not
+    /// self-describing. A custom deserializer that reads Option<Vec> when the field
+    /// is serialized as Vec causes a byte offset mismatch (1 byte for Option tag vs
+    /// 8 bytes for Vec length), corrupting all subsequent field deserialization.
+    /// The BlockV1 fallback path handles legacy format blocks.
+    #[serde(default)]
     pub time_attestations: Vec<TimeAttestation>,
     /// Compact bitmap of consensus participants (1 bit per registered masternode)
     /// Masternodes in deterministic order (sorted by address). Bit=1 means voted.
