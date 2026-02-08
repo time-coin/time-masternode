@@ -70,6 +70,8 @@ pub trait UtxoStorage: Send + Sync {
     async fn list_utxos(&self) -> Vec<UTXO>;
     async fn batch_update(&self, add: Vec<UTXO>, remove: Vec<OutPoint>)
         -> Result<(), StorageError>;
+    /// Remove all UTXOs from storage (used during chain reset/reindex)
+    async fn clear_all(&self) -> Result<(), StorageError>;
 }
 
 pub struct InMemoryUtxoStorage {
@@ -122,6 +124,11 @@ impl UtxoStorage for InMemoryUtxoStorage {
         for outpoint in remove {
             utxos.remove(&outpoint);
         }
+        Ok(())
+    }
+
+    async fn clear_all(&self) -> Result<(), StorageError> {
+        self.utxos.write().await.clear();
         Ok(())
     }
 }
@@ -244,6 +251,17 @@ impl UtxoStorage for SledUtxoStorage {
             }
 
             db.apply_batch(batch)?;
+            Ok::<_, StorageError>(())
+        })
+        .await
+        .map_err(StorageError::TaskJoin)?
+    }
+
+    async fn clear_all(&self) -> Result<(), StorageError> {
+        let db = self.db.clone();
+        spawn_blocking(move || {
+            db.clear()?;
+            db.flush()?;
             Ok::<_, StorageError>(())
         })
         .await

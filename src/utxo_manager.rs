@@ -97,6 +97,22 @@ impl UTXOStateManager {
         Ok(count)
     }
 
+    /// Clear all UTXOs from both storage and in-memory state maps.
+    /// Used during chain reset or full reindex to start with a clean UTXO set.
+    pub async fn clear_all(&self) -> Result<(), UtxoError> {
+        tracing::info!("🗑️  Clearing all UTXOs from storage and state maps...");
+
+        // Clear persistent storage
+        self.storage.clear_all().await?;
+
+        // Clear in-memory state maps
+        self.utxo_states.clear();
+        self.locked_collaterals.clear();
+
+        tracing::info!("✅ All UTXOs cleared");
+        Ok(())
+    }
+
     fn current_timestamp() -> i64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)

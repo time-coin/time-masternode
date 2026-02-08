@@ -403,6 +403,76 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Full reindex: clear all UTXOs and rebuild from block 0 by replaying all blocks.
+    /// This is the proper way to fix stale balances after chain corruption or reset.
+    pub async fn reindex_utxos(&self) -> Result<(u64, usize), String> {
+        let current_height = self.get_height();
+        tracing::info!(
+            "🔄 Starting full UTXO reindex from block 0 to {}...",
+            current_height
+        );
+
+        // Step 1: Clear all existing UTXOs
+        self.utxo_manager
+            .clear_all()
+            .await
+            .map_err(|e| format!("Failed to clear UTXOs: {:?}", e))?;
+
+        // Step 2: Replay all blocks from genesis to current height
+        let mut blocks_processed = 0u64;
+        let start = std::time::Instant::now();
+
+        for height in 0..=current_height {
+            match self.get_block_by_height(height).await {
+                Ok(block) => {
+                    // Process UTXOs for this block (creates outputs, spends inputs)
+                    match self.process_block_utxos(&block).await {
+                        Ok(undo_log) => {
+                            // Save the undo log for future rollback support
+                            if let Err(e) = self.save_undo_log(&undo_log) {
+                                tracing::warn!(
+                                    "⚠️  Failed to save undo log for block {}: {}",
+                                    height,
+                                    e
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "❌ Failed to process UTXOs for block {}: {}",
+                                height,
+                                e
+                            );
+                            return Err(format!("UTXO reindex failed at block {}: {}", height, e));
+                        }
+                    }
+                    blocks_processed += 1;
+
+                    // Progress updates every 100 blocks
+                    if height % 100 == 0 && height > 0 {
+                        tracing::info!("   Reindexed {} blocks so far...", blocks_processed);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("❌ Failed to get block {} during reindex: {}", height, e);
+                    return Err(format!("Reindex failed at block {}: {}", height, e));
+                }
+            }
+        }
+
+        let elapsed = start.elapsed();
+        let final_utxo_count = self.utxo_manager.list_all_utxos().await.len();
+
+        tracing::info!(
+            "✅ UTXO reindex complete: {} blocks processed, {} UTXOs in set ({:.2}s)",
+            blocks_processed,
+            final_utxo_count,
+            elapsed.as_secs_f64()
+        );
+
+        Ok((blocks_processed, final_utxo_count))
+    }
+
     /// Get transaction index statistics
     pub fn get_tx_index_stats(&self) -> Option<(usize, u64)> {
         self.tx_index.as_ref().map(|idx| {
@@ -701,7 +771,7 @@ impl Blockchain {
                     tracing::error!("🚨 WARNING: This will DELETE all {} blocks!", height);
 
                     // Remove the invalid genesis and all blocks built on it
-                    self.clear_all_blocks();
+                    self.clear_all_blocks().await;
                     self.current_height.store(0, Ordering::Release);
 
                     // Genesis will be generated dynamically when masternodes register
@@ -1015,7 +1085,7 @@ impl Blockchain {
     }
 
     /// Clear all block data from storage (for complete reset)
-    pub fn clear_all_blocks(&self) {
+    pub async fn clear_all_blocks(&self) {
         let mut cleared = 0;
         for h in 0..100000 {
             // Clear up to 100k blocks
@@ -1039,11 +1109,30 @@ impl Blockchain {
         // Also clear the genesis marker so it gets recreated
         let _ = self.storage.remove("genesis_initialized");
 
+        // CRITICAL: Clear the UTXO set so stale balances don't persist
+        // Without this, wallet shows balance from blocks that no longer exist
+        if let Err(e) = self.utxo_manager.clear_all().await {
+            tracing::error!("❌ Failed to clear UTXOs during block reset: {:?}", e);
+        }
+
+        // Clear undo logs too since they reference deleted blocks
+        for h in 0..100000 {
+            let undo_key = format!("undo_{}", h);
+            match self.storage.remove(undo_key.as_bytes()) {
+                Ok(Some(_)) => {}
+                _ => {
+                    if h > 1000 && cleared == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+
         // Flush to ensure all deletions are persisted
         let _ = self.storage.flush();
 
         tracing::info!(
-            "🗑️  Cleared {} blocks from storage and reset height to 0",
+            "🗑️  Cleared {} blocks, UTXOs, and undo logs from storage. Height reset to 0.",
             cleared
         );
     }

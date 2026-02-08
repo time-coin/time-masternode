@@ -53,7 +53,8 @@ Commands:
     uptime                 Get daemon uptime
     getinfo                Get general node information
     reindextransactions    Rebuild transaction index
-  
+    reindex                Full reindex: rebuild UTXOs + tx index from block 0
+
     help                   Print this message or the help of the given subcommand(s)
 
 {options}{after-help}
@@ -317,6 +318,10 @@ enum Commands {
     #[command(next_help_heading = "Utility")]
     ReindexTransactions,
 
+    /// Full reindex: rebuild UTXOs and transaction index from block 0
+    #[command(next_help_heading = "Utility")]
+    Reindex,
+
     /// Cleanup expired UTXO locks (older than 10 minutes)
     #[command(next_help_heading = "Utility")]
     CleanupLockedUTXOs,
@@ -439,6 +444,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Uptime => ("uptime", json!([])),
         Commands::GetInfo => ("getinfo", json!([])),
         Commands::ReindexTransactions => ("reindextransactions", json!([])),
+        Commands::Reindex => ("reindex", json!([])),
         Commands::CleanupLockedUTXOs => ("cleanuplockedutxos", json!([])),
         Commands::ListLockedUTXOs => ("listlockedutxos", json!([])),
         Commands::UnlockUTXO { txid, vout } => ("unlockutxo", json!([txid, vout])),
