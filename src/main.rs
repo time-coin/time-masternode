@@ -357,6 +357,18 @@ async fn main() {
     // Keep a reference for flushing on shutdown
     let block_storage_for_shutdown = block_storage.clone();
 
+    // Initialize AI System with all modules
+    let ai_system = match ai::AISystem::new(Arc::new(block_storage.clone())) {
+        Ok(system) => {
+            tracing::info!("🧠 AI System initialized successfully");
+            Arc::new(system)
+        }
+        Err(e) => {
+            tracing::error!("❌ Failed to initialize AI System: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // Enable AI validation using the same db as block storage
     consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
 
@@ -374,6 +386,9 @@ async fn main() {
 
     // Configure block compression from config
     blockchain.set_compress_blocks(config.storage.compress_blocks);
+
+    // Set AI system on blockchain for intelligent decision making
+    blockchain.set_ai_system(ai_system.clone());
 
     // Initialize transaction index for O(1) lookups
     tracing::info!("🔧 Initializing transaction index...");
@@ -2215,6 +2230,7 @@ async fn main() {
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
     let status_catchup_trigger = catchup_trigger.clone(); // Trigger to wake up block production
+    let status_ai_system = ai_system.clone();
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
         let mut tick_count = 0u64; // Track ticks for cache monitoring
@@ -2321,6 +2337,21 @@ async fn main() {
                                 cache_memory_mb
                             );
                         }
+                    }
+
+                    // AI System periodic reporting (every 5 ticks / ~5 minutes)
+                    if tick_count % 5 == 0 && tick_count > 0 {
+                        // Collect metrics snapshot from all AI subsystems
+                        status_ai_system.collect_and_record_metrics();
+                        let ai_status = status_ai_system.brief_status();
+                        tracing::info!("🧠 AI System: {}", ai_status);
+                    }
+
+                    // AI attack detector cleanup (every 60 ticks / ~60 minutes)
+                    if tick_count % 60 == 0 && tick_count > 0 {
+                        status_ai_system.attack_detector.cleanup_old_records(
+                            std::time::Duration::from_secs(3600),
+                        );
                     }
                 }
             }
