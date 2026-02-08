@@ -96,6 +96,7 @@ impl RpcHandler {
             "getblacklist" => self.get_blacklist().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
+            "reindex" => self.reindex_full().await,
             "gettxindexstatus" => self.get_tx_index_status().await,
             "cleanuplockedutxos" => self.cleanup_locked_utxos().await,
             "listlockedutxos" => self.list_locked_utxos().await,
@@ -2127,6 +2128,50 @@ impl RpcHandler {
         Ok(json!({
             "count": collaterals.len(),
             "collaterals": collaterals
+        }))
+    }
+
+    /// Full reindex: clear UTXOs and rebuild from block 0, plus rebuild tx index.
+    /// This fixes stale wallet balances after chain corruption or reset.
+    async fn reindex_full(&self) -> Result<Value, RpcError> {
+        let blockchain = self.blockchain.clone();
+        let height = blockchain.get_height();
+
+        tokio::spawn(async move {
+            tracing::info!("🔄 Starting full reindex (UTXOs + transactions)...");
+
+            // Step 1: Reindex UTXOs from block 0
+            match blockchain.reindex_utxos().await {
+                Ok((blocks, utxos)) => {
+                    tracing::info!(
+                        "✅ UTXO reindex complete: {} blocks, {} UTXOs",
+                        blocks,
+                        utxos
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("❌ UTXO reindex failed: {}", e);
+                    return;
+                }
+            }
+
+            // Step 2: Rebuild transaction index
+            match blockchain.build_tx_index().await {
+                Ok(()) => {
+                    tracing::info!("✅ Transaction reindex completed");
+                }
+                Err(e) => {
+                    tracing::error!("❌ Transaction reindex failed: {}", e);
+                }
+            }
+
+            tracing::info!("✅ Full reindex complete");
+        });
+
+        Ok(json!({
+            "message": "Full reindex started (UTXOs + transactions)",
+            "status": "running",
+            "chain_height": height
         }))
     }
 
