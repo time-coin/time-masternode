@@ -4,7 +4,6 @@
 //! The SledUtxoStorage is an alternative backend that's currently unused
 //! but available for future use if persistent UTXO storage is needed.
 
-use crate::block::types::Block;
 use crate::types::{OutPoint, UTXO};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -71,15 +70,6 @@ pub trait UtxoStorage: Send + Sync {
     async fn list_utxos(&self) -> Vec<UTXO>;
     async fn batch_update(&self, add: Vec<UTXO>, remove: Vec<OutPoint>)
         -> Result<(), StorageError>;
-}
-
-#[async_trait::async_trait]
-#[allow(dead_code)]
-pub trait BlockStorage: Send + Sync {
-    async fn get_block(&self, height: u64) -> Option<Block>;
-    async fn store_block(&self, block: &Block) -> Result<(), String>;
-    async fn get_tip(&self) -> Result<Block, String>;
-    async fn get_height(&self) -> u64;
 }
 
 pub struct InMemoryUtxoStorage {
@@ -258,108 +248,5 @@ impl UtxoStorage for SledUtxoStorage {
         })
         .await
         .map_err(StorageError::TaskJoin)?
-    }
-}
-
-#[allow(dead_code)]
-pub struct SledBlockStorage {
-    db: sled::Db,
-}
-
-#[allow(dead_code)]
-impl SledBlockStorage {
-    pub fn new(path: &str) -> Result<Self, StorageError> {
-        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-
-        let sys = System::new_with_specifics(
-            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
-        );
-        let available_memory = sys.available_memory();
-        let cache_size = std::cmp::min(available_memory / 10, 512 * 1024 * 1024);
-
-        tracing::info!(
-            cache_mb = cache_size / (1024 * 1024),
-            available_mb = available_memory / (1024 * 1024),
-            "Configured sled cache"
-        );
-
-        let db = sled::Config::new()
-            .path(path)
-            .cache_capacity(cache_size)
-            .flush_every_ms(Some(1000))
-            .mode(sled::Mode::HighThroughput)
-            .open()?;
-
-        Ok(Self { db })
-    }
-
-    pub fn db(&self) -> sled::Db {
-        self.db.clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl BlockStorage for SledBlockStorage {
-    async fn get_block(&self, height: u64) -> Option<Block> {
-        let db = self.db.clone();
-        let key_new = format!("block_{}", height);
-        let key_old = format!("block:{}", height);
-
-        spawn_blocking(move || {
-            // Try new format first
-            if let Ok(Some(value)) = db.get(key_new.as_bytes()) {
-                return bincode::deserialize(&value).ok();
-            }
-            // Fallback to old format for backward compatibility
-            if let Ok(Some(value)) = db.get(key_old.as_bytes()) {
-                return bincode::deserialize(&value).ok();
-            }
-            None
-        })
-        .await
-        .ok()
-        .flatten()
-    }
-
-    async fn store_block(&self, block: &Block) -> Result<(), String> {
-        let db = self.db.clone();
-        let block = block.clone();
-        let key = format!("block_{}", block.header.height);
-
-        spawn_blocking(move || {
-            let value = bincode::serialize(&block)?;
-            db.insert(key.as_bytes(), value)?;
-            db.insert(b"tip_height", block.header.height.to_le_bytes().as_ref())?;
-            // CRITICAL: Flush to disk to prevent data loss
-            db.flush()?;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
-    }
-
-    async fn get_tip(&self) -> Result<Block, String> {
-        let height = self.get_height().await;
-        self.get_block(height)
-            .await
-            .ok_or_else(|| "Tip block not found".to_string())
-    }
-
-    async fn get_height(&self) -> u64 {
-        let db = self.db.clone();
-
-        spawn_blocking(move || {
-            db.get(b"tip_height")
-                .ok()
-                .flatten()
-                .and_then(|bytes| {
-                    let arr: [u8; 8] = bytes.as_ref().try_into().ok()?;
-                    Some(u64::from_le_bytes(arr))
-                })
-                .unwrap_or(0)
-        })
-        .await
-        .unwrap_or(0)
     }
 }

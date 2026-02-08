@@ -60,7 +60,7 @@ impl NetworkClient {
     ) -> Self {
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
 
-        // Initialize AI-powered reconnection system
+        // Default AI-powered reconnection system (can be overridden with set_reconnection_ai)
         let reconnection_ai = Arc::new(AdaptiveReconnectionAI::new(ReconnectionConfig::default()));
 
         Self {
@@ -78,6 +78,12 @@ impl NetworkClient {
             ip_blacklist,
             reconnection_ai,
         }
+    }
+
+    /// Replace the reconnection AI with a shared instance from AISystem.
+    /// This ensures connection learning data is shared across all subsystems.
+    pub fn set_reconnection_ai(&mut self, ai: Arc<AdaptiveReconnectionAI>) {
+        self.reconnection_ai = ai;
     }
 
     pub async fn start(&self) {
