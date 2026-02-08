@@ -286,6 +286,8 @@ async fn main() {
     let block_storage = match sled::Config::new()
         .path(&block_storage_path)
         .cache_capacity(cache_size)
+        .flush_every_ms(None) // Disable auto-flush; we flush manually after each block write
+        .mode(sled::Mode::LowSpace) // More conservative writes to prevent corruption
         .open()
     {
         Ok(s) => s,
@@ -351,6 +353,9 @@ async fn main() {
 
     // Initialize ConsensusEngine with direct reference to masternode registry
     let mut consensus_engine = ConsensusEngine::new(Arc::clone(&registry), utxo_mgr.clone());
+
+    // Keep a reference for flushing on shutdown
+    let block_storage_for_shutdown = block_storage.clone();
 
     // Enable AI validation using the same db as block storage
     consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
@@ -2591,6 +2596,16 @@ async fn main() {
 
             // Wait for shutdown signal
             shutdown_manager.wait_for_shutdown().await;
+
+            // CRITICAL: Flush sled databases to disk before exit
+            // Without this, in-memory dirty pages are lost on process termination,
+            // causing block corruption ("unexpected end of file") on restart.
+            tracing::info!("💾 Flushing block storage to disk...");
+            if let Err(e) = block_storage_for_shutdown.flush() {
+                tracing::error!("Failed to flush block storage on shutdown: {}", e);
+            } else {
+                tracing::info!("✓ Block storage flushed successfully");
+            }
         }
         Err(e) => {
             println!("  ❌ Failed to start network: {}", e);
