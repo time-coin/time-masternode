@@ -208,6 +208,8 @@ pub struct Blockchain {
     block_cache: Arc<BlockCacheManager>,
     /// Block validator for validation logic    /// AI-powered consensus health monitoring
     consensus_health: Arc<ConsensusHealthMonitor>,
+    /// Centralized AI system for intelligent decision-making across all subsystems
+    ai_system: Option<Arc<crate::ai::AISystem>>,
     /// Transaction index for O(1) transaction lookups
     pub tx_index: Option<Arc<crate::tx_index::TransactionIndex>>,
     /// Whether to compress blocks when storing (saves ~60-70% space)
@@ -301,6 +303,7 @@ impl Blockchain {
             consensus_peers: Arc::new(RwLock::new(Vec::new())),
             block_cache,
             consensus_health,
+            ai_system: None,
             tx_index: None, // Initialize without txindex, call build_tx_index() separately
             compress_blocks: false, // Disabled temporarily to debug block corruption issues
             consensus_cache: Arc::new(RwLock::new(None)), // Initialize empty cache
@@ -325,6 +328,16 @@ impl Blockchain {
     /// Set transaction index (called from main.rs after blockchain init)
     pub fn set_tx_index(&mut self, tx_index: Arc<crate::tx_index::TransactionIndex>) {
         self.tx_index = Some(tx_index);
+    }
+
+    /// Set the AI system for intelligent decision-making
+    pub fn set_ai_system(&mut self, ai_system: Arc<crate::ai::AISystem>) {
+        self.ai_system = Some(ai_system);
+    }
+
+    /// Get the AI system reference
+    pub fn ai_system(&self) -> Option<&Arc<crate::ai::AISystem>> {
+        self.ai_system.as_ref()
     }
 
     /// Build or rebuild transaction index from blockchain
@@ -3219,6 +3232,22 @@ impl Blockchain {
 
         // Mark block as finalized (TimeVote instant finality achieved)
         self.consensus.record_block_finalized(block_hash);
+
+        // Record block for AI predictive sync, transaction analysis, and anomaly detection
+        if let Some(ai) = &self.ai_system {
+            ai.predictive_sync.record_block(
+                block.header.height,
+                block.header.timestamp as u64,
+                600, // nominal block time in seconds
+            );
+            let tx_count = block.transactions.len();
+            if tx_count > 0 {
+                ai.transaction_analyzer
+                    .record_transaction_batch(tx_count, 0);
+            }
+            ai.anomaly_detector
+                .record_event("block_added".to_string(), block.header.height as f64);
+        }
 
         // Signal any waiters (e.g. block production loop) that a new block was added
         self.block_added_signal.notify_waiters();
@@ -7684,6 +7713,7 @@ impl Clone for Blockchain {
             consensus_peers: self.consensus_peers.clone(),
             block_cache: self.block_cache.clone(),
             consensus_health: self.consensus_health.clone(),
+            ai_system: self.ai_system.clone(),
             tx_index: self.tx_index.clone(),
             compress_blocks: self.compress_blocks,
             consensus_cache: self.consensus_cache.clone(),
