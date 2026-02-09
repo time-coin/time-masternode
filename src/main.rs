@@ -2439,6 +2439,28 @@ async fn main() {
             // Wire up AI system for attack detection enforcement
             server.set_ai_system(ai_system.clone());
 
+            // Initialize TLS for encrypted P2P connections
+            let tls_config = if config.security.enable_tls {
+                match crate::network::tls::TlsConfig::new_self_signed() {
+                    Ok(tls) => {
+                        let tls = Arc::new(tls);
+                        server.set_tls_config(tls.clone());
+                        tracing::info!("🔒 TLS encryption enabled for P2P connections");
+                        Some(tls)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "⚠️ TLS initialization failed, running without encryption: {}",
+                            e
+                        );
+                        None
+                    }
+                }
+            } else {
+                tracing::info!("🔓 TLS disabled by configuration");
+                None
+            };
+
             // Give registry access to network broadcast channel
             registry
                 .set_broadcast_channel(server.tx_notifier.clone())
@@ -2555,6 +2577,9 @@ async fn main() {
             );
             // Share AISystem's reconnection AI so connection learning data is unified
             network_client.set_reconnection_ai(ai_system.reconnection_ai.clone());
+            if let Some(ref tls) = tls_config {
+                network_client.set_tls_config(tls.clone());
+            }
             network_client.start().await;
 
             // BOOTSTRAP: At genesis, aggressively request masternode lists from all peers

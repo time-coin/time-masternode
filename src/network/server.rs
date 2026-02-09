@@ -20,7 +20,6 @@ use std::net::IpAddr;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::RwLock;
@@ -68,6 +67,7 @@ pub struct NetworkServer {
     pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TimeLock voting
     pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
     pub ai_system: Option<Arc<crate::ai::AISystem>>, // AI attack detection & mitigation
+    pub tls_config: Option<Arc<crate::network::tls::TlsConfig>>, // TLS for encrypted connections
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -172,12 +172,18 @@ impl NetworkServer {
             )), // Phase 3E.1: Bounded LRU cache
             peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
             ai_system: None,
+            tls_config: None,
         })
     }
 
     /// Set the AI system for attack detection and mitigation enforcement
     pub fn set_ai_system(&mut self, ai_system: Arc<crate::ai::AISystem>) {
         self.ai_system = Some(ai_system);
+    }
+
+    /// Set the TLS configuration for encrypted connections
+    pub fn set_tls_config(&mut self, tls_config: Arc<crate::network::tls::TlsConfig>) {
+        self.tls_config = Some(tls_config);
     }
 
     #[allow(dead_code)] // Used by binary (main.rs)
@@ -382,8 +388,9 @@ impl NetworkServer {
             let conn_mgr = self.connection_manager.clone();
             let peer_reg = self.peer_registry.clone();
             let local_ip = self.local_ip.clone();
-            let block_cache = self.block_cache.clone(); // Phase 3E.1: Clone block cache
-            let fork_status = self.peer_fork_status.clone(); // Phase 2: Clone fork status tracker
+            let block_cache = self.block_cache.clone();
+            let fork_status = self.peer_fork_status.clone();
+            let tls_config = self.tls_config.clone();
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -405,9 +412,10 @@ impl NetworkServer {
                     conn_mgr,
                     peer_reg,
                     local_ip,
-                    block_cache,    // Phase 3E.1: Pass block cache
-                    fork_status,    // Phase 2: Pass fork status tracker
-                    is_whitelisted, // Phase 1: Pass whitelist status
+                    block_cache,
+                    fork_status,
+                    is_whitelisted,
+                    tls_config,
                 )
                 .await;
             });
@@ -434,13 +442,17 @@ impl NetworkServer {
     }
 }
 
-// Phase 2.3: Message size limits for DoS protection
-const MAX_MESSAGE_SIZE: usize = 2_000_000; // 2MB absolute max for any message
-const MAX_BLOCK_SIZE: usize = 1_000_000; // 1MB for blocks
-const MAX_TX_SIZE: usize = 100_000; // 100KB for transactions
-const MAX_VOTE_SIZE: usize = 1_000; // 1KB for votes
-#[allow(dead_code)] // Reserved for future general message validation
-const MAX_GENERAL_SIZE: usize = 50_000; // 50KB for general messages
+// Message size constants (wire protocol enforces 4MB max frame, these are for tests)
+#[allow(dead_code)]
+const MAX_MESSAGE_SIZE: usize = 2_000_000;
+#[allow(dead_code)]
+const MAX_BLOCK_SIZE: usize = 1_000_000;
+#[allow(dead_code)]
+const MAX_TX_SIZE: usize = 100_000;
+#[allow(dead_code)]
+const MAX_VOTE_SIZE: usize = 1_000;
+#[allow(dead_code)]
+const MAX_GENERAL_SIZE: usize = 50_000;
 
 #[allow(clippy::too_many_arguments)]
 #[allow(dead_code)] // Called by NetworkServer::run which is used by binary
@@ -465,7 +477,8 @@ async fn handle_peer(
     _local_ip: Option<String>,
     block_cache: Arc<BlockCache>, // Phase 3E.1: Block cache parameter
     _peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker (no longer used - periodic resolution handles forks)
-    _is_whitelisted: bool, // Phase 1: Whitelist status for relaxed timeouts (used in future enhancements)
+    _is_whitelisted: bool,
+    tls_config: Option<Arc<crate::network::tls::TlsConfig>>,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -477,65 +490,50 @@ async fn handle_peer(
 
     let ip_str = ip.to_string();
 
-    // DON'T reject duplicate connections immediately - wait for handshake first
-    // This prevents race conditions where both peers connect simultaneously
-    // and both reject before handshake completes
-
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let connection_start = std::time::Instant::now();
-    let (reader, writer) = stream.into_split();
-    let mut reader = BufReader::with_capacity(1024 * 1024, reader); // 1MB buffer
-    let mut writer = Some(BufWriter::with_capacity(2 * 1024 * 1024, writer)); // 2MB buffer
-    let mut line = String::new();
-    let mut failed_parse_count = 0;
+
+    // Wrap with TLS if configured
+    let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
+    let mut writer_box: Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>;
+
+    if let Some(tls) = tls_config {
+        match tls.accept_server(stream).await {
+            Ok(tls_stream) => {
+                let (r, w) = tokio::io::split(tls_stream);
+                reader = Box::new(r);
+                writer_box = Some(Box::new(w));
+                tracing::debug!("🔒 TLS established for inbound {}", peer.addr);
+            }
+            Err(e) => {
+                tracing::warn!("🚫 TLS handshake failed for {}: {}", peer.addr, e);
+                return Ok(());
+            }
+        }
+    } else {
+        let (r, w) = stream.into_split();
+        reader = Box::new(r);
+        writer_box = Some(Box::new(w));
+    }
+
     let mut handshake_done = false;
     let mut is_stable_connection = false;
 
-    // Define expected magic bytes for our protocol
     const MAGIC_BYTES: [u8; 4] = *b"TIME";
 
     loop {
         tokio::select! {
-            result = reader.read_line(&mut line) => {
+            result = crate::network::wire::read_message(&mut reader) => {
                 match result {
-                    Ok(0) => {
+                    Ok(None) => {
                         tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
                         break;
                     }
-                    Ok(n) => {
-                        tracing::debug!("📥 Received {} bytes from {}: {}", n, peer.addr, line.trim());
-
-                        // Phase 2.3: Check message size BEFORE processing to prevent DoS
-                        let message_size = line.len();
-                        if message_size > MAX_MESSAGE_SIZE {
-                            tracing::warn!("🚫 Rejecting oversized message from {}: {} bytes (max: {})",
-                                peer.addr, message_size, MAX_MESSAGE_SIZE);
-
-                            let mut blacklist_guard = blacklist.write().await;
-                            let should_ban = blacklist_guard.record_violation(ip,
-                                &format!("Oversized message: {} bytes", message_size));
-                            drop(blacklist_guard);
-
-                            if should_ban {
-                                tracing::warn!("🚫 Disconnecting {} due to repeated oversized messages", peer.addr);
-                                break;
-                            }
-
-                            line.clear();
-                            continue;
-                        }
-
-                        // Check if this looks like old protocol (starts with ~W~M)
-                        if !handshake_done && line.starts_with("~W~M") {
-                            tracing::warn!("🚫 Rejecting {} - old protocol detected (~W~M magic bytes)", peer.addr);
-                            blacklist.write().await.record_violation(
-                                ip,
-                                "Old protocol magic bytes (~W~M)"
-                            );
-                            break;
-                        }
-
-                        if let Ok(msg) = serde_json::from_str::<NetworkMessage>(&line) {
+                    Err(e) => {
+                        tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
+                        break;
+                    }
+                    Ok(Some(msg)) => {
                             // First message MUST be a valid handshake
                             if !handshake_done {
                                 match &msg {
@@ -573,7 +571,7 @@ async fn handle_peer(
                                         connection_manager.mark_inbound(&ip_str);
 
                                         // Register writer in peer registry after successful handshake
-                                        if let Some(w) = writer.take() {
+                                        if let Some(w) = writer_box.take() {
                                             tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer.addr: {})", ip_str, peer.addr);
                                             peer_registry.register_peer(ip_str.clone(), w).await;
                                             tracing::debug!("✅ Successfully registered {} in registry", ip_str);
@@ -633,8 +631,6 @@ async fn handle_peer(
                                             let request_genesis_msg = NetworkMessage::RequestGenesis;
                                             let _ = peer_registry.send_to_peer(&ip_str, request_genesis_msg).await;
                                         }
-
-                                        line.clear();
                                         continue;
                                     }
                                     _ => {
@@ -666,8 +662,6 @@ async fn handle_peer(
                                             tracing::warn!("🚫 Disconnecting {} due to rate limit violations", peer.addr);
                                             break; // Exit connection loop
                                         }
-
-                                        line.clear();
                                         continue; // Skip processing this message
                                     }
 
@@ -676,27 +670,9 @@ async fn handle_peer(
                                 }};
                             }
 
-                            // Phase 2.3: Message-specific size validation helper
+                            // Size validation handled by wire protocol (4MB max frame)
                             macro_rules! check_message_size {
-                                ($max_size:expr, $msg_type:expr) => {{
-                                    if message_size > $max_size {
-                                        tracing::warn!("🚫 {} from {} exceeds size limit: {} > {} bytes",
-                                            $msg_type, peer.addr, message_size, $max_size);
-
-                                        let mut blacklist_guard = blacklist.write().await;
-                                        let should_ban = blacklist_guard.record_violation(ip,
-                                            &format!("{} too large: {} bytes", $msg_type, message_size));
-                                        drop(blacklist_guard);
-
-                                        if should_ban {
-                                            tracing::warn!("🚫 Disconnecting {} due to oversized messages", peer.addr);
-                                            break;
-                                        }
-
-                                        line.clear();
-                                        continue;
-                                    }
-                                }};
+                                ($max_size:expr, $msg_type:expr) => {{}};
                             }
 
                             match &msg {
@@ -733,7 +709,6 @@ async fn handle_peer(
 
                                     if already_seen {
                                         tracing::debug!("🔁 Ignoring duplicate transaction {} from {}", hex::encode(txid), peer.addr);
-                                        line.clear();
                                         continue;
                                     }
 
@@ -781,7 +756,6 @@ async fn handle_peer(
                                         // Process the transaction to add it to pending pool
                                         if let Err(e) = consensus.process_transaction(tx.clone()).await {
                                             tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
-                                            line.clear();
                                             continue;
                                         }
                                     }
@@ -910,7 +884,6 @@ async fn handle_peer(
                                         let connection_age = connection_start.elapsed().as_secs();
                                         if connection_age < 5 {
                                             tracing::debug!("⏭️  Ignoring masternode announcement from short-lived connection {} (age: {}s)", peer.addr, connection_age);
-                                            line.clear();
                                             continue;
                                         }
                                         is_stable_connection = true;
@@ -922,7 +895,6 @@ async fn handle_peer(
 
                                     if peer_ip.is_empty() {
                                         tracing::warn!("❌ Invalid peer IP from {}", peer.addr);
-                                        line.clear();
                                         continue;
                                     }
 
@@ -1060,7 +1032,6 @@ async fn handle_peer(
                                                 "🚫 REJECTING BlockResponse from blacklisted peer {}: {}",
                                                 peer.addr, reason
                                             );
-                                            line.clear();
                                             continue;
                                         }
                                     }
@@ -1073,7 +1044,6 @@ async fn handle_peer(
 
                                     if already_seen {
                                         tracing::debug!("🔁 Ignoring duplicate block {} from {}", block_height, peer.addr);
-                                        line.clear();
                                         continue;
                                     }
 
@@ -1131,7 +1101,6 @@ async fn handle_peer(
                                                 "🚫 REJECTING BlockAnnouncement from blacklisted peer {}: {}",
                                                 peer.addr, reason
                                             );
-                                            line.clear();
                                             continue;
                                         }
                                     }
@@ -1144,7 +1113,6 @@ async fn handle_peer(
 
                                     if already_seen {
                                         tracing::debug!("🔁 Ignoring duplicate block {} from {}", block_height, peer.addr);
-                                        line.clear();
                                         continue;
                                     }
 
@@ -1197,14 +1165,12 @@ async fn handle_peer(
                                     // Verify this is actually a genesis block
                                     if block.header.height != 0 {
                                         tracing::warn!("⚠️  Received GenesisAnnouncement for non-genesis block {} from {}", block.header.height, peer.addr);
-                                        line.clear();
                                         continue;
                                     }
 
                                     // Check if we already have genesis - try to get block at height 0
                                     if blockchain.get_block_by_height(0).await.is_ok() {
                                         tracing::debug!("⏭️ Ignoring genesis announcement (already have genesis) from {}", peer.addr);
-                                        line.clear();
                                         continue;
                                     }
 
@@ -1661,7 +1627,6 @@ async fn handle_peer(
                                         _ => {
                                             tracing::warn!("Invalid preference: {}", preference);
                                             // Skip processing this invalid vote
-                                            line.clear();
                                             continue;
                                         }
                                     };
@@ -1697,7 +1662,6 @@ async fn handle_peer(
                                                 "🚫 REJECTING TimeLock message from blacklisted peer {}: {}",
                                                 peer.addr, reason
                                             );
-                                            line.clear();
                                             continue;
                                         }
                                     }
@@ -1819,94 +1783,9 @@ async fn handle_peer(
                                     }
                                 }
                             }
-                        } else {
-                            // Check if buffer contains multiple JSON objects (happens during high-throughput sync)
-                            // This is a transport-level issue, not malicious behavior
-                            let trimmed = line.trim();
-                            if trimmed.contains('\n') || (trimmed.starts_with('{') && trimmed.matches('{').count() > 1) {
-                                tracing::debug!("📦 Received concatenated messages from {}, attempting to split", peer.addr);
-
-                                // First split by newlines if present
-                                let mut json_objects = Vec::new();
-                                for segment in trimmed.split('\n').filter(|s| !s.trim().is_empty()) {
-                                    // For each segment, check if it contains multiple JSON objects
-                                    let segment_trimmed = segment.trim();
-                                    if segment_trimmed.starts_with('{') && segment_trimmed.matches('{').count() > 1 {
-                                        // Multiple JSON objects on same line - split by brace matching
-                                        let mut depth = 0;
-                                        let mut start = 0;
-                                        let chars: Vec<char> = segment_trimmed.chars().collect();
-
-                                        for i in 0..chars.len() {
-                                            match chars[i] {
-                                                '{' => depth += 1,
-                                                '}' => {
-                                                    depth -= 1;
-                                                    if depth == 0 {
-                                                        // Found complete JSON object
-                                                        let obj: String = chars[start..=i].iter().collect();
-                                                        json_objects.push(obj);
-                                                        start = i + 1;
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    } else {
-                                        json_objects.push(segment_trimmed.to_string());
-                                    }
-                                }
-
-                                if json_objects.len() > 1 {
-                                    // Verify each split object is valid JSON
-                                    let mut valid_count = 0;
-                                    for json_obj in &json_objects {
-                                        if serde_json::from_str::<NetworkMessage>(json_obj).is_ok() {
-                                            valid_count += 1;
-                                        }
-                                    }
-
-                                    tracing::debug!(
-                                        "📦 Split {} concatenated JSON objects from {} ({} valid, will be processed by peer connection handler)",
-                                        json_objects.len(),
-                                        peer.addr,
-                                        valid_count
-                                    );
-                                    // Don't count as failed parse - these are valid messages that got concatenated
-                                    // They will be processed correctly by the peer_connection.rs handler
-                                } else {
-                                    failed_parse_count += 1;
-                                    tracing::warn!("❌ Failed to parse message from {} (appears concatenated but couldn't split properly)", peer.addr);
-                                }
-                            } else {
-                                failed_parse_count += 1;
-                                // Try to parse to see what the error is
-                                if let Err(parse_err) = serde_json::from_str::<NetworkMessage>(&line) {
-                                    tracing::warn!("❌ Failed to parse message {} from {}: {} | Raw: {}",
-                                        failed_parse_count, peer.addr, parse_err,
-                                        line.chars().take(200).collect::<String>());
-                                }
-                                // Record violation and check if should ban
-                                let should_ban = blacklist.write().await.record_violation(
-                                    ip,
-                                    "Failed to parse message"
-                                );
-                                // Be more lenient - allow up to 10 parse failures before disconnecting
-                                // This handles cases where peers send extra newlines or have temporary issues
-                                if should_ban || failed_parse_count >= 10 {
-                                    tracing::warn!("🚫 Disconnecting {} after {} failed parse attempts", peer.addr, failed_parse_count);
-                                    break;
-                                }
-                            }
                         }
-                        line.clear();
-                    }
-                    Err(e) => {
-                        tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
-                        break;
                     }
                 }
-            }
 
             result = notifier.recv() => {
                 match result {
@@ -2048,8 +1927,8 @@ mod tests {
             timestamp: chrono::Utc::now().timestamp(),
         };
 
-        // Serialize and check size
-        let serialized = serde_json::to_string(&tx).expect("Failed to serialize transaction");
+        // Serialize with bincode and check size
+        let serialized = bincode::serialize(&tx).expect("Failed to serialize transaction");
         let tx_size = serialized.len();
 
         assert!(
