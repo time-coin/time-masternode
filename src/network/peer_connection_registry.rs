@@ -13,12 +13,14 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
-type PeerWriter = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+/// Channel-based writer: sends pre-serialized frame bytes to a dedicated I/O task.
+/// This avoids `tokio::io::split()` on TLS streams, which causes frame corruption
+/// due to shared internal mutex and waker issues.
+pub type PeerWriterTx = mpsc::UnboundedSender<Vec<u8>>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
 type ChainTip = (u64, [u8; 32]); // (height, block_hash)
 
@@ -55,8 +57,8 @@ pub struct PeerConnectionRegistry {
     // Metrics (atomic, no locks)
     inbound_count: AtomicUsize,
     outbound_count: AtomicUsize,
-    // Map of peer IP to their TCP writer (wrapped in Arc<Mutex<>> for safe mutable access)
-    peer_writers: Arc<RwLock<HashMap<String, Arc<tokio::sync::Mutex<PeerWriter>>>>>,
+    // Map of peer IP to their write channel (sends pre-serialized frame bytes to I/O task)
+    peer_writers: Arc<RwLock<HashMap<String, PeerWriterTx>>>,
     // Map of peer IP to their reported blockchain height
     peer_heights: Arc<RwLock<HashMap<String, u64>>>,
     // Map of peer IP to their chain tip (height + hash)
@@ -88,8 +90,8 @@ fn extract_ip(addr: &str) -> &str {
 /// Information about an incompatible peer
 /// (marked_timestamp, incompatibility_reason, is_permanent)
 type IncompatiblePeerInfo = (std::time::Instant, String, bool);
-/// Type alias for shared writer that can be cloned and registered
-pub type SharedPeerWriter = Arc<tokio::sync::Mutex<PeerWriter>>;
+/// Type alias for shared writer channel that can be cloned and registered
+pub type SharedPeerWriter = PeerWriterTx;
 
 impl PeerConnectionRegistry {
     pub fn new() -> Self {
@@ -752,16 +754,16 @@ impl PeerConnectionRegistry {
 
     // ===== Peer Writer Registry (formerly peer_connection_registry.rs) =====
 
-    pub async fn register_peer(&self, peer_ip: String, writer: PeerWriter) {
+    pub async fn register_peer(&self, peer_ip: String, writer: PeerWriterTx) {
         // Mark as connected in the connections map for get_connected_peers()
         self.mark_inbound(&peer_ip);
 
         let mut writers = self.peer_writers.write().await;
-        writers.insert(peer_ip.clone(), Arc::new(tokio::sync::Mutex::new(writer)));
+        writers.insert(peer_ip.clone(), writer);
         debug!("✅ Registered peer connection: {}", peer_ip);
     }
 
-    /// Register an outbound peer with a shared writer (already wrapped in Arc<Mutex<>>)
+    /// Register an outbound peer with a channel-based writer
     pub async fn register_peer_shared(&self, peer_ip: String, writer: SharedPeerWriter) {
         // Also mark as connected in the connections map for get_connected_peers()
         self.mark_connecting(&peer_ip);
@@ -834,15 +836,10 @@ impl PeerConnectionRegistry {
         );
     }
 
-    pub async fn get_peer_writer(
-        &self,
-        _peer_ip: &str,
-    ) -> Option<Arc<tokio::sync::Mutex<PeerWriter>>> {
-        // peer_writers stores PeerWriter directly, not wrapped in Arc
-        // Since we can't clone the writer (it contains TCP state), return None
-        // This is a placeholder - actual implementation would use Arc<Mutex<>> from the start
-        let _writers = self.peer_writers.read().await;
-        None
+    pub async fn get_peer_writer(&self, peer_ip: &str) -> Option<PeerWriterTx> {
+        let ip_only = extract_ip(peer_ip);
+        let writers = self.peer_writers.read().await;
+        writers.get(ip_only).cloned()
     }
 
     pub async fn register_response_handler(&self, peer_ip: &str, tx: ResponseSender) {
@@ -870,10 +867,13 @@ impl PeerConnectionRegistry {
 
         let writers = self.peer_writers.read().await;
 
-        if let Some(writer_arc) = writers.get(ip_only) {
-            let mut writer = writer_arc.lock().await;
+        if let Some(writer_tx) = writers.get(ip_only) {
+            // Pre-serialize the message into a length-prefixed frame
+            let frame_bytes = crate::network::wire::serialize_frame(&message)?;
 
-            crate::network::wire::write_message(&mut *writer, &message).await?;
+            writer_tx
+                .send(frame_bytes)
+                .map_err(|_| format!("Writer channel closed for peer {}", ip_only))?;
 
             Ok(())
         } else {
@@ -966,24 +966,12 @@ impl PeerConnectionRegistry {
         // Log for transaction broadcasts
         let is_tx_broadcast = matches!(message, NetworkMessage::TransactionBroadcast(_));
 
-        for (peer_ip, writer_arc) in writers.iter() {
-            let mut writer = writer_arc.lock().await;
-
-            if let Err(e) = writer.write_all(&msg_bytes).await {
+        for (peer_ip, writer_tx) in writers.iter() {
+            if let Err(_e) = writer_tx.send(msg_bytes.clone()) {
                 if is_tx_broadcast {
-                    warn!("❌ TX broadcast to {} failed: {}", peer_ip, e);
+                    warn!("❌ TX broadcast to {} failed: channel closed", peer_ip);
                 } else {
-                    debug!("❌ Broadcast to {} failed: {}", peer_ip, e);
-                }
-                fail_count += 1;
-                continue;
-            }
-
-            if let Err(e) = writer.flush().await {
-                if is_tx_broadcast {
-                    warn!("❌ TX broadcast flush to {} failed: {}", peer_ip, e);
-                } else {
-                    debug!("❌ Broadcast flush to {} failed: {}", peer_ip, e);
+                    debug!("❌ Broadcast to {} failed: channel closed", peer_ip);
                 }
                 fail_count += 1;
                 continue;

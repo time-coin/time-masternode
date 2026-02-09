@@ -7384,21 +7384,13 @@ impl Blockchain {
         );
 
         // SIMPLIFIED APPROACH: Instead of binary search (which can fail with incomplete data),
-        // search linearly from the lowest peer block downward to find the common ancestor.
-        // This is more reliable when peers send partial block sets.
+        // search linearly downward to find the common ancestor.
+        // Start from our chain height and go down, checking if the peer has a matching block.
 
-        // Find the lowest height in peer's block set
-        let peer_lowest = sorted_blocks.first().unwrap().header.height;
-
-        // If peer's lowest block matches ours, that's likely the common ancestor
-        // Search from peer_lowest downward to find where chains match
         let mut candidate_ancestor = 0u64;
 
-        // CRITICAL: Common ancestor cannot be higher than our chain height
-        // Only search up to min(our_height, peer_lowest)
-        let search_ceiling = our_height.min(peer_lowest);
-
-        for height in (0..=search_ceiling).rev() {
+        // Search from our height downward - at each height, check if peer has a matching block
+        for height in (0..=our_height).rev() {
             // Get our block hash at this height
             let our_hash = match self.get_block_hash(height) {
                 Ok(hash) => hash,

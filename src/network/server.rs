@@ -494,16 +494,54 @@ async fn handle_peer(
     let connection_start = std::time::Instant::now();
 
     // Wrap with TLS if configured
-    let mut reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>;
-    let mut writer_box: Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>;
+    // For TLS: spawn a dedicated I/O bridge task that owns the whole stream,
+    // avoiding `tokio::io::split()` which causes frame corruption on TLS streams.
+    // For non-TLS: `TcpStream::into_split()` is safe (true full-duplex).
+    let (msg_read_tx, mut msg_read_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let writer_tx: crate::network::peer_connection_registry::PeerWriterTx = write_tx;
 
     if let Some(tls) = tls_config {
         match tls.accept_server(stream).await {
             Ok(tls_stream) => {
-                let (r, w) = tokio::io::split(tls_stream);
-                reader = Box::new(r);
-                writer_box = Some(Box::new(w));
                 tracing::debug!("🔒 TLS established for inbound {}", peer.addr);
+                let peer_addr = peer.addr.clone();
+                // Spawn a single I/O bridge task that owns the TLS stream
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    let mut stream = tls_stream;
+                    loop {
+                        tokio::select! {
+                            result = crate::network::wire::read_message(&mut stream) => {
+                                let is_eof = matches!(&result, Ok(None));
+                                let is_err = result.is_err();
+                                if msg_read_tx.send(result).is_err() {
+                                    break; // receiver dropped
+                                }
+                                if is_eof || is_err {
+                                    break;
+                                }
+                            }
+                            bytes = write_rx.recv() => {
+                                match bytes {
+                                    Some(data) => {
+                                        if let Err(e) = stream.write_all(&data).await {
+                                            tracing::debug!("🔒 TLS write error for {}: {}", peer_addr, e);
+                                            break;
+                                        }
+                                        if let Err(e) = stream.flush().await {
+                                            tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr, e);
+                                            break;
+                                        }
+                                    }
+                                    None => break, // writer channel closed
+                                }
+                            }
+                        }
+                    }
+                    tracing::debug!("🔒 TLS I/O bridge exiting for {}", peer_addr);
+                });
             }
             Err(e) => {
                 tracing::warn!("🚫 TLS handshake failed for {}: {}", peer.addr, e);
@@ -512,8 +550,40 @@ async fn handle_peer(
         }
     } else {
         let (r, w) = stream.into_split();
-        reader = Box::new(r);
-        writer_box = Some(Box::new(w));
+        // Spawn reader task for non-TLS
+        let peer_addr = peer.addr.clone();
+        tokio::spawn(async move {
+            let mut reader = r;
+            loop {
+                let result = crate::network::wire::read_message(&mut reader).await;
+                let is_eof = matches!(&result, Ok(None));
+                let is_err = result.is_err();
+                if msg_read_tx.send(result).is_err() {
+                    break;
+                }
+                if is_eof || is_err {
+                    break;
+                }
+            }
+            tracing::debug!("📖 Reader task exiting for {}", peer_addr);
+        });
+        // Spawn writer task for non-TLS
+        let peer_addr2 = peer.addr.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut writer = w;
+            while let Some(data) = write_rx.recv().await {
+                if let Err(e) = writer.write_all(&data).await {
+                    tracing::debug!("📝 Write error for {}: {}", peer_addr2, e);
+                    break;
+                }
+                if let Err(e) = writer.flush().await {
+                    tracing::debug!("📝 Flush error for {}: {}", peer_addr2, e);
+                    break;
+                }
+            }
+            tracing::debug!("📝 Writer task exiting for {}", peer_addr2);
+        });
     }
 
     let mut handshake_done = false;
@@ -523,7 +593,14 @@ async fn handle_peer(
 
     loop {
         tokio::select! {
-            result = crate::network::wire::read_message(&mut reader) => {
+            result = msg_read_rx.recv() => {
+                let result = match result {
+                    Some(r) => r,
+                    None => {
+                        tracing::info!("🔌 Peer {} reader channel closed", peer.addr);
+                        break;
+                    }
+                };
                 match result {
                     Ok(None) => {
                         tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
@@ -570,14 +647,10 @@ async fn handle_peer(
                                         // Also mark in connection_manager for DoS protection tracking
                                         connection_manager.mark_inbound(&ip_str);
 
-                                        // Register writer in peer registry after successful handshake
-                                        if let Some(w) = writer_box.take() {
-                                            tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer.addr: {})", ip_str, peer.addr);
-                                            peer_registry.register_peer(ip_str.clone(), w).await;
-                                            tracing::debug!("✅ Successfully registered {} in registry", ip_str);
-                                        } else {
-                                            tracing::error!("❌ Writer already taken for {}, cannot register!", ip_str);
-                                        }
+                                        // Register write channel in peer registry after successful handshake
+                                        tracing::info!("📝 Registering {} in PeerConnectionRegistry (peer.addr: {})", ip_str, peer.addr);
+                                        peer_registry.register_peer(ip_str.clone(), writer_tx.clone()).await;
+                                        tracing::debug!("✅ Successfully registered {} in registry", ip_str);
 
                                         // Send ACK to confirm handshake was processed
                                         let ack_msg = NetworkMessage::Ack {
