@@ -2188,8 +2188,8 @@ impl Blockchain {
                         consensus_height, our_height
                     );
 
-                    // Only sync if we're behind AND not already syncing
                     if consensus_height > our_height && !already_syncing {
+                        // We're behind - sync to longer chain
                         info!(
                             "📥 Starting sync: {} → {} ({} blocks behind)",
                             our_height,
@@ -2206,6 +2206,55 @@ impl Blockchain {
                                 warn!("⚠️  Sync failed: {}", e);
                             }
                         });
+                    } else if consensus_height == our_height && !already_syncing {
+                        // Same-height fork detected - request blocks from consensus peer
+                        // for atomic reorg (rollback happens when blocks arrive)
+                        info!(
+                            "🔀 Sync coordinator: same-height fork at {}, requesting blocks from {}",
+                            consensus_height, _sync_peer
+                        );
+
+                        if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                            let request_from = consensus_height.saturating_sub(20).max(1);
+                            match self
+                                .sync_coordinator
+                                .request_sync(
+                                    _sync_peer.clone(),
+                                    request_from,
+                                    consensus_height,
+                                    crate::network::sync_coordinator::SyncSource::ForkResolution,
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    let req =
+                                        NetworkMessage::GetBlocks(request_from, consensus_height);
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&_sync_peer, req).await
+                                    {
+                                        self.sync_coordinator.cancel_sync(&_sync_peer).await;
+                                        warn!(
+                                            "⚠️  Failed to request blocks from {}: {}",
+                                            _sync_peer, e
+                                        );
+                                    } else {
+                                        info!(
+                                            "📤 Requested blocks {}-{} from {} for fork resolution",
+                                            request_from, consensus_height, _sync_peer
+                                        );
+                                    }
+                                }
+                                Ok(false) => {
+                                    debug!("⏸️ Fork resolution sync queued with {}", _sync_peer);
+                                }
+                                Err(e) => {
+                                    debug!(
+                                        "⏱️ Fork resolution sync throttled with {}: {}",
+                                        _sync_peer, e
+                                    );
+                                }
+                            }
+                        }
                     }
                     continue; // Skip other sync logic this round
                 }
