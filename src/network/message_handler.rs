@@ -1453,8 +1453,11 @@ impl MessageHandler {
                     );
                     let tx_count = block.transactions.len();
                     if tx_count > 0 {
-                        ai.transaction_analyzer
-                            .record_transaction_batch(tx_count, 0);
+                        tracing::debug!(
+                            "📊 Block {} contains {} transactions",
+                            block_height,
+                            tx_count
+                        );
                     }
                 }
 

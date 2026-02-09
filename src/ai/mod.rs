@@ -7,8 +7,6 @@ pub mod metrics_dashboard;
 pub mod network_optimizer;
 pub mod peer_selector;
 pub mod predictive_sync;
-pub mod resource_manager;
-pub mod transaction_analyzer;
 pub mod transaction_validator;
 
 pub use adaptive_reconnection::{AdaptiveReconnectionAI, ReconnectionAdvice, ReconnectionPriority};
@@ -24,8 +22,6 @@ pub use metrics_dashboard::AIMetricsDashboard;
 pub use network_optimizer::NetworkOptimizer;
 pub use peer_selector::AIPeerSelector;
 pub use predictive_sync::PredictiveSync;
-pub use resource_manager::{AllocationStrategy, ResourceManager};
-pub use transaction_analyzer::TransactionAnalyzer;
 pub use transaction_validator::AITransactionValidator;
 
 use serde::{Deserialize, Serialize};
@@ -91,20 +87,16 @@ impl Default for AIMetrics {
 /// - AttackDetector: Detects sybil, eclipse, fork bombing, and timing attacks
 /// - AdaptiveReconnectionAI: Learns optimal peer reconnection strategies
 /// - AIPeerSelector: Scores and selects best peers for sync
-/// - TransactionAnalyzer: Predicts transaction load and recommends fees
 /// - PredictiveSync: Predicts next block timing for prefetch optimization
 /// - NetworkOptimizer: Analyzes connection/bandwidth metrics for suggestions
-/// - ResourceManager: Monitors CPU/memory/disk for allocation strategy
 /// - AIMetricsCollector: Aggregates all AI subsystem metrics for dashboard
 pub struct AISystem {
     pub anomaly_detector: Arc<anomaly_detector::AnomalyDetector>,
     pub attack_detector: Arc<attack_detector::AttackDetector>,
     pub reconnection_ai: Arc<adaptive_reconnection::AdaptiveReconnectionAI>,
     pub peer_selector: Arc<peer_selector::AIPeerSelector>,
-    pub transaction_analyzer: Arc<transaction_analyzer::TransactionAnalyzer>,
     pub predictive_sync: Arc<predictive_sync::PredictiveSync>,
     pub network_optimizer: Arc<network_optimizer::NetworkOptimizer>,
-    pub resource_manager: Arc<resource_manager::ResourceManager>,
     pub metrics_collector: Arc<metrics_dashboard::AIMetricsCollector>,
 }
 
@@ -118,26 +110,19 @@ impl AISystem {
             adaptive_reconnection::ReconnectionConfig::default(),
         ));
         let peer_selector = Arc::new(peer_selector::AIPeerSelector::new(db.clone(), 0.1)?);
-        let transaction_analyzer = Arc::new(transaction_analyzer::TransactionAnalyzer::new(
-            db.clone(),
-            10,
-        )?);
         let predictive_sync = Arc::new(predictive_sync::PredictiveSync::new(db.clone(), 5)?);
         let network_optimizer = Arc::new(network_optimizer::NetworkOptimizer::new(db.clone(), 10)?);
-        let resource_manager = Arc::new(resource_manager::ResourceManager::new(db.clone()));
         let metrics_collector = Arc::new(metrics_dashboard::AIMetricsCollector::new(1000));
 
-        tracing::info!("🧠 AI System initialized with 9 active modules");
+        tracing::info!("🧠 AI System initialized with 7 active modules");
 
         Ok(Self {
             anomaly_detector,
             attack_detector,
             reconnection_ai,
             peer_selector,
-            transaction_analyzer,
             predictive_sync,
             network_optimizer,
-            resource_manager,
             metrics_collector,
         })
     }

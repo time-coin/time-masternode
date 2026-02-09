@@ -3371,11 +3371,6 @@ impl Blockchain {
                 block.header.timestamp as u64,
                 600, // nominal block time in seconds
             );
-            let tx_count = block.transactions.len();
-            if tx_count > 0 {
-                ai.transaction_analyzer
-                    .record_transaction_batch(tx_count, 0);
-            }
             ai.anomaly_detector
                 .record_event("block_added".to_string(), block.header.height as f64);
         }
