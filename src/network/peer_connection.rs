@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tokio::time::{interval, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -209,11 +209,11 @@ pub struct PeerConnection {
     /// Connection direction
     direction: ConnectionDirection,
 
-    /// Stream reader (trait object for TLS/plain TCP)
-    reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+    /// Channel receiver for incoming parsed messages (from I/O bridge task)
+    msg_reader: tokio::sync::mpsc::UnboundedReceiver<Result<Option<NetworkMessage>, String>>,
 
-    /// Stream writer (trait object, shared for concurrent writes)
-    writer: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
+    /// Channel sender for outgoing serialized frame bytes (to I/O bridge task)
+    writer_tx: crate::network::peer_connection_registry::PeerWriterTx,
 
     /// Ping/pong state
     ping_state: Arc<RwLock<PingState>>,
@@ -353,28 +353,96 @@ impl PeerConnection {
             .local_addr()
             .map_err(|e| format!("Failed to get local address: {}", e))?;
 
-        // Wrap with TLS if configured
-        let (reader, writer): (
-            Box<dyn tokio::io::AsyncRead + Unpin + Send>,
-            Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
-        ) = if let Some(tls) = tls_config {
+        // Create channel-based I/O to avoid tokio::io::split() on TLS streams
+        let (msg_read_tx, msg_read_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+        if let Some(tls) = tls_config {
             info!("🔒 [OUTBOUND] TLS handshake with {}", addr);
             let tls_stream = tls
                 .connect_client(stream, "timecoin.local")
                 .await
                 .map_err(|e| format!("TLS handshake failed with {}: {}", addr, e))?;
-            let (r, w) = tokio::io::split(tls_stream);
-            (Box::new(r), Box::new(w))
+            let peer_addr = addr.clone();
+            // Single I/O bridge task owns the entire TLS stream
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut stream = tls_stream;
+                loop {
+                    tokio::select! {
+                        result = crate::network::wire::read_message(&mut stream) => {
+                            let is_eof = matches!(&result, Ok(None));
+                            let is_err = result.is_err();
+                            if msg_read_tx.send(result).is_err() {
+                                break;
+                            }
+                            if is_eof || is_err {
+                                break;
+                            }
+                        }
+                        bytes = write_rx.recv() => {
+                            match bytes {
+                                Some(data) => {
+                                    if let Err(e) = stream.write_all(&data).await {
+                                        tracing::debug!("🔒 TLS write error for {}: {}", peer_addr, e);
+                                        break;
+                                    }
+                                    if let Err(e) = stream.flush().await {
+                                        tracing::debug!("🔒 TLS flush error for {}: {}", peer_addr, e);
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                tracing::debug!("🔒 TLS I/O bridge exiting for {}", peer_addr);
+            });
         } else {
             let (r, w) = stream.into_split();
-            (Box::new(r), Box::new(w))
-        };
+            let peer_addr = addr.clone();
+            // Spawn reader task
+            tokio::spawn(async move {
+                let mut reader = r;
+                loop {
+                    let result = crate::network::wire::read_message(&mut reader).await;
+                    let is_eof = matches!(&result, Ok(None));
+                    let is_err = result.is_err();
+                    if msg_read_tx.send(result).is_err() {
+                        break;
+                    }
+                    if is_eof || is_err {
+                        break;
+                    }
+                }
+                tracing::debug!("📖 Reader task exiting for {}", peer_addr);
+            });
+            // Spawn writer task
+            let peer_addr2 = addr.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut writer = w;
+                while let Some(data) = write_rx.recv().await {
+                    if let Err(e) = writer.write_all(&data).await {
+                        tracing::debug!("📝 Write error for {}: {}", peer_addr2, e);
+                        break;
+                    }
+                    if let Err(e) = writer.flush().await {
+                        tracing::debug!("📝 Flush error for {}: {}", peer_addr2, e);
+                        break;
+                    }
+                }
+                tracing::debug!("📝 Writer task exiting for {}", peer_addr2);
+            });
+        }
 
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Outbound,
-            reader,
-            writer: Arc::new(Mutex::new(writer)),
+            msg_reader: msg_read_rx,
+            writer_tx: write_tx,
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
@@ -412,28 +480,93 @@ impl PeerConnection {
             info!("🔗 [Inbound] Accepted connection from {}", peer_addr);
         }
 
-        // Wrap with TLS if configured
-        let (reader, writer): (
-            Box<dyn tokio::io::AsyncRead + Unpin + Send>,
-            Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
-        ) = if let Some(tls) = tls_config {
+        // Create channel-based I/O to avoid tokio::io::split() on TLS streams
+        let (msg_read_tx, msg_read_rx) =
+            tokio::sync::mpsc::unbounded_channel::<Result<Option<NetworkMessage>, String>>();
+        let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+
+        if let Some(tls) = tls_config {
             info!("🔒 [INBOUND] TLS handshake with {}", peer_addr);
             let tls_stream = tls
                 .accept_server(stream)
                 .await
                 .map_err(|e| format!("TLS accept failed from {}: {}", peer_addr, e))?;
-            let (r, w) = tokio::io::split(tls_stream);
-            (Box::new(r), Box::new(w))
+            let addr_str = peer_addr.to_string();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut stream = tls_stream;
+                loop {
+                    tokio::select! {
+                        result = crate::network::wire::read_message(&mut stream) => {
+                            let is_eof = matches!(&result, Ok(None));
+                            let is_err = result.is_err();
+                            if msg_read_tx.send(result).is_err() {
+                                break;
+                            }
+                            if is_eof || is_err {
+                                break;
+                            }
+                        }
+                        bytes = write_rx.recv() => {
+                            match bytes {
+                                Some(data) => {
+                                    if let Err(e) = stream.write_all(&data).await {
+                                        tracing::debug!("🔒 TLS write error for {}: {}", addr_str, e);
+                                        break;
+                                    }
+                                    if let Err(e) = stream.flush().await {
+                                        tracing::debug!("🔒 TLS flush error for {}: {}", addr_str, e);
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+                tracing::debug!("🔒 TLS I/O bridge exiting for {}", addr_str);
+            });
         } else {
             let (r, w) = stream.into_split();
-            (Box::new(r), Box::new(w))
-        };
+            let addr_str = peer_addr.to_string();
+            tokio::spawn(async move {
+                let mut reader = r;
+                loop {
+                    let result = crate::network::wire::read_message(&mut reader).await;
+                    let is_eof = matches!(&result, Ok(None));
+                    let is_err = result.is_err();
+                    if msg_read_tx.send(result).is_err() {
+                        break;
+                    }
+                    if is_eof || is_err {
+                        break;
+                    }
+                }
+                tracing::debug!("📖 Reader task exiting for {}", addr_str);
+            });
+            let addr_str2 = peer_addr.to_string();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut writer = w;
+                while let Some(data) = write_rx.recv().await {
+                    if let Err(e) = writer.write_all(&data).await {
+                        tracing::debug!("📝 Write error for {}: {}", addr_str2, e);
+                        break;
+                    }
+                    if let Err(e) = writer.flush().await {
+                        tracing::debug!("📝 Flush error for {}: {}", addr_str2, e);
+                        break;
+                    }
+                }
+                tracing::debug!("📝 Writer task exiting for {}", addr_str2);
+            });
+        }
 
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Inbound,
-            reader,
-            writer: Arc::new(Mutex::new(writer)),
+            msg_reader: msg_read_rx,
+            writer_tx: write_tx,
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
@@ -473,18 +606,20 @@ impl PeerConnection {
         state.last_rtt_ms.map(|ms| ms / 1000.0) // Convert ms to seconds
     }
 
-    /// Get a clone of the shared writer for registration in peer registry
-    pub fn shared_writer(&self) -> Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>> {
-        self.writer.clone()
+    /// Get the writer channel sender for registration in peer registry
+    pub fn shared_writer(&self) -> crate::network::peer_connection_registry::SharedPeerWriter {
+        self.writer_tx.clone()
     }
 
-    /// Send a message using the shared writer (avoids borrowing self across await)
-    async fn send_with_writer(
-        writer: &Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
+    /// Send a message via the write channel
+    fn send_message(
+        writer_tx: &crate::network::peer_connection_registry::PeerWriterTx,
         message: &NetworkMessage,
     ) -> Result<(), String> {
-        let mut guard = writer.lock().await;
-        crate::network::wire::write_message(&mut *guard, message).await
+        let frame_bytes = crate::network::wire::serialize_frame(message)?;
+        writer_tx
+            .send(frame_bytes)
+            .map_err(|_| "Writer channel closed".to_string())
     }
 
     /// Send a ping to the peer
@@ -508,15 +643,14 @@ impl PeerConnection {
             direction, peer_ip, height_info, nonce
         );
 
-        Self::send_with_writer(
-            &self.writer,
+        Self::send_message(
+            &self.writer_tx,
             &NetworkMessage::Ping {
                 nonce,
                 timestamp,
                 height,
             },
         )
-        .await
     }
 
     /// Handle received ping
@@ -543,15 +677,14 @@ impl PeerConnection {
 
         let timestamp = chrono::Utc::now().timestamp();
         // Phase 3: Include our height in pong response
-        Self::send_with_writer(
-            &self.writer,
+        Self::send_message(
+            &self.writer_tx,
             &NetworkMessage::Pong {
                 nonce,
                 timestamp,
                 height: our_height,
             },
-        )
-        .await?;
+        )?;
 
         info!(
             "✅ [{:?}] Sent pong to {} (nonce: {})",
@@ -779,7 +912,7 @@ impl PeerConnection {
         match handler.handle_message(&message, &context).await {
             Ok(Some(response)) => {
                 // Send response if MessageHandler returned one
-                if let Err(e) = Self::send_with_writer(&self.writer, &response).await {
+                if let Err(e) = Self::send_message(&self.writer_tx, &response) {
                     warn!(
                         "⚠️ [{:?}] Failed to send response to {}: {}",
                         self.direction, self.peer_ip, e
@@ -852,7 +985,7 @@ impl PeerConnection {
             network: "mainnet".to_string(),
         };
 
-        if let Err(e) = Self::send_with_writer(&self.writer, &handshake).await {
+        if let Err(e) = Self::send_message(&self.writer_tx, &handshake) {
             error!(
                 "❌ [{:?}] Failed to send handshake to {}: {}",
                 self.direction, self.peer_ip, e
@@ -880,8 +1013,15 @@ impl PeerConnection {
         // Main message loop
         loop {
             tokio::select! {
-                // Read incoming messages (length-prefixed bincode)
-                result = crate::network::wire::read_message(&mut self.reader) => {
+                // Read incoming messages from I/O bridge channel
+                result = self.msg_reader.recv() => {
+                    let result = match result {
+                        Some(r) => r,
+                        None => {
+                            info!("🔌 [{:?}] Reader channel closed for {}", self.direction, self.peer_ip);
+                            break;
+                        }
+                    };
                     match result {
                         Ok(None) => {
                             info!("🔌 [{:?}] Connection closed by {}", self.direction, self.peer_ip);
@@ -914,7 +1054,7 @@ impl PeerConnection {
                 } => {
                     if let Ok(msg) = result {
                         // Forward broadcast to this peer
-                        if let Err(e) = Self::send_with_writer(&self.writer, &msg).await {
+                        if let Err(e) = Self::send_message(&self.writer_tx, &msg) {
                             warn!("⚠️ [{:?}] Failed to forward broadcast to {}: {}",
                                   self.direction, self.peer_ip, e);
                         }
