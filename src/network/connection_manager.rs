@@ -315,8 +315,15 @@ impl ConnectionManager {
 
     /// Mark a peer as being attempted for connection
     pub fn mark_connecting(&self, peer_ip: &str) -> bool {
-        if self.connections.contains_key(peer_ip) {
-            false
+        if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            // Allow reconnection from Disconnected state
+            if entry.state == PeerConnectionState::Disconnected {
+                entry.state = PeerConnectionState::Connecting;
+                entry.direction = ConnectionDirection::Outbound;
+                true
+            } else {
+                false
+            }
         } else {
             let info = ConnectionInfo {
                 state: PeerConnectionState::Connecting,
