@@ -6061,16 +6061,20 @@ impl Blockchain {
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
 
-        // CRITICAL: Require consensus chain to have MAJORITY support (>50% of connected peers)
-        // If a chain only has minority support, don't act on it yet - wait for more data
-        // This prevents minority chains from blocking production (e.g., old nodes with stale data)
-        let consensus_support_ratio = consensus_peers.len() as f64 / connected_peers.len() as f64;
+        // CRITICAL: Require consensus chain to have MAJORITY support among RESPONDING peers
+        // Use peer_tips.len() (peers that actually reported chain tips) as denominator,
+        // not connected_peers.len() — non-responding peers are already gated by the
+        // response rate check above. Using all connected peers would block fork resolution
+        // when some peers haven't reported tips yet (e.g., 2/5 = 40% even though 2/3
+        // responding peers agree on the longest chain).
+        let responding_peers = peer_tips.len();
+        let consensus_support_ratio = consensus_peers.len() as f64 / responding_peers as f64;
         if consensus_support_ratio <= 0.5 {
             tracing::warn!(
-                "⚠️  Consensus chain at height {} has insufficient support: {}/{} peers ({:.1}%) - need >50% majority. Waiting for more consensus.",
+                "⚠️  Consensus chain at height {} has insufficient support: {}/{} responding peers ({:.1}%) - need >50% majority. Waiting for more consensus.",
                 consensus_height,
                 consensus_peers.len(),
-                connected_peers.len(),
+                responding_peers,
                 consensus_support_ratio * 100.0
             );
             return None;
