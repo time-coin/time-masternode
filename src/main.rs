@@ -24,8 +24,6 @@ pub mod time_sync;
 pub mod timelock;
 pub mod timevote;
 pub mod transaction_pool;
-pub mod transaction_priority;
-pub mod transaction_selection;
 pub mod tx_index;
 pub mod types;
 pub mod utxo_manager;
