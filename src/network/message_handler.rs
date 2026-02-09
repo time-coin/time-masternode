@@ -906,7 +906,7 @@ impl MessageHandler {
                     info!(
                         "📤 [{}] Broadcast prepare vote to {} peers",
                         self.direction,
-                        receivers.saturating_sub(1)
+                        receivers
                     );
                 }
                 Err(_) => {
@@ -1022,7 +1022,7 @@ impl MessageHandler {
                         debug!(
                             "📤 [{}] Broadcast precommit vote to {} peers",
                             self.direction,
-                            receivers.saturating_sub(1)
+                            receivers
                         );
                     }
                     Err(_) => {
@@ -1469,7 +1469,7 @@ impl MessageHandler {
                             "🔄 [{}] Gossiped block {} inventory to {} peer(s)",
                             self.direction,
                             block_height,
-                            receivers.saturating_sub(1)
+                            receivers
                         );
                     }
                 }
@@ -1713,7 +1713,7 @@ impl MessageHandler {
                             debug!(
                                 "🔄 [{}] Gossiped transaction to {} peer(s)",
                                 self.direction,
-                                receivers.saturating_sub(1)
+                                receivers
                             );
                         }
                     }
