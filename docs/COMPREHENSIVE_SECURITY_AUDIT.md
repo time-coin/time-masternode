@@ -223,7 +223,8 @@ producer_drift_history: HashMap<MnId, Vec<i64>>
 
 **Code References:**
 - `src/network/connection_manager.rs:232-242` - Per-IP connection limits
-- `src/network/anomaly_detection.rs:148-195` - Behavioral scoring
+- `src/ai/anomaly_detector.rs` - Z-score anomaly detection on network events
+- `src/ai/attack_detector.rs` - Sybil/eclipse/fork bombing detection with auto-ban enforcement
 - `src/masternode_registry.rs` - Tier collateral requirements
 
 ---
@@ -713,8 +714,9 @@ pub struct BlockHeader {
 **Recommendation:** Regular model retraining and adversarial testing.
 
 **Code References:**
-- `src/network/anomaly_detection.rs:148-195` - Behavioral scoring
-- `src/health_ai.rs` - AI-powered health monitoring
+- `src/ai/anomaly_detector.rs` - Z-score anomaly detection
+- `src/ai/attack_detector.rs` - Attack pattern detection with mitigation enforcement
+- `src/ai/consensus_health.rs` - Consensus health monitoring and prediction
 
 ---
 

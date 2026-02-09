@@ -39,6 +39,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3. Verify: total distributed = block_reward (existing check)
   - Result: Byzantine fault tolerant - no trust required, all cryptographically verified
 
+### Fixed - Network & Consensus (February 9, 2026)
+
+- **Same-Height Fork Resolution**: `spawn_sync_coordinator` now detects and resolves forks at the same height, not just when peers are ahead
+- **Consensus Support Ratio**: Fixed denominator to use responding peers instead of all connected peers (2/3 of 3 responding = 67% pass, not 2/5 = 40% fail)
+- **ChainTipResponse on Inbound Connections**: Server now handles `ChainTipResponse` messages from inbound peers (was silently dropped via `_ => {}` catch-all)
+- **Inbound Message Dispatch**: Replaced silent `_ => {}` catch-all with `MessageHandler` delegation for unhandled message types
+- **Fork Resolution Threshold**: Aligned fork resolution to use 2/3 weighted stake consensus (was >50% unweighted), matching block production threshold
+
+### Improved - Event-Driven Block Production
+
+- **Block Added Signal**: Added `block_added_signal` as a wake source in the main production `select!` loop
+  - Loop now wakes immediately when any block is added (from peer sync, consensus, or own production)
+  - Reduces catchup latency from up to 1 second to near-instant
+  - 1-second interval kept as fallback for leader timeouts and chain tip refresh
+
+### Improved - AI Attack Mitigation Enforcement
+
+- **Wired Attack Detector to Blacklist**: Attack detector now enforces recommended mitigations
+  - `BlockPeer` → records violations (auto-escalating: 3→5min ban, 5→1hr, 10→permanent)
+  - `RateLimitPeer` → records violations (escalates to ban on repeat offenses)
+  - `AlertOperator` → logs critical alert
+  - Whitelisted peers use `record_severe_violation` (overrides whitelist on 2nd offense)
+  - Active peers are disconnected on ban
+  - 30-second enforcement interval
+
+### Removed - Dead Code Cleanup (~3,400 lines)
+
+- **Deleted `src/network/fork_resolver.rs`** (-919 lines): Never called from any code path
+- **Deleted `src/network/anomaly_detection.rs`**: Superseded by `ai/anomaly_detector.rs`
+- **Deleted `src/network/block_optimization.rs`**: Never called
+- **Deleted `src/network/connection_state.rs`** (-354 lines): Never imported outside its own module
+- **Deleted `src/ai/transaction_analyzer.rs`** (-232 lines): Recorded data but no code ever queried results
+- **Deleted `src/ai/resource_manager.rs`** (-191 lines): Created but no methods ever invoked
+- **Deleted `src/transaction_priority.rs`** (-370 lines): `TransactionPriorityQueue` only used by unused `TransactionSelector`
+- **Deleted `src/transaction_selection.rs`** (-226 lines): `TransactionSelector` never instantiated
+- **Removed dead methods** from `blockchain.rs` and `ai/fork_resolver.rs`: `update_fork_outcome`, `get_fork_resolver_stats`, `ForkResolverStats`, `ForkOutcome`
+- AI System reduced from 9 to 7 active modules
+
 ## [1.1.0] - 2026-01-28 - TimeVote Consensus Complete
 
 ### Fixed - Critical Transaction Flow Bugs

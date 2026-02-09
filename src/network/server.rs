@@ -67,6 +67,7 @@ pub struct NetworkServer {
     pub local_ip: Option<String>, // Our own public IP (without port) to avoid self-connection
     pub block_cache: Arc<BlockCache>, // Phase 3E.1: Bounded cache for TimeLock voting
     pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
+    pub ai_system: Option<Arc<crate::ai::AISystem>>, // AI attack detection & mitigation
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -170,7 +171,13 @@ impl NetworkServer {
                 Duration::from_secs(300), // 5 minute expiration
             )), // Phase 3E.1: Bounded LRU cache
             peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
+            ai_system: None,
         })
+    }
+
+    /// Set the AI system for attack detection and mitigation enforcement
+    pub fn set_ai_system(&mut self, ai_system: Arc<crate::ai::AISystem>) {
+        self.ai_system = Some(ai_system);
     }
 
     #[allow(dead_code)] // Used by binary (main.rs)
@@ -201,6 +208,93 @@ impl NetworkServer {
                 }
             }
         });
+
+        // Spawn attack mitigation enforcement task
+        // Periodically checks detected attacks and applies mitigations to the blacklist
+        if let Some(ai) = &self.ai_system {
+            let enforce_ai = ai.clone();
+            let enforce_blacklist = self.blacklist.clone();
+            let enforce_registry = self.peer_registry.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+
+                    let attacks = enforce_ai
+                        .attack_detector
+                        .get_recent_attacks(std::time::Duration::from_secs(300));
+
+                    if attacks.is_empty() {
+                        continue;
+                    }
+
+                    let mut blacklist = enforce_blacklist.write().await;
+                    for attack in &attacks {
+                        match &attack.recommended_action {
+                            crate::ai::MitigationAction::BlockPeer(ip_str) => {
+                                if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                    if blacklist.is_whitelisted(ip) {
+                                        // Use severe violation for whitelisted peers
+                                        // (overrides whitelist on 2nd offense)
+                                        let should_disconnect = blacklist.record_severe_violation(
+                                            ip,
+                                            &format!("{:?}", attack.attack_type),
+                                        );
+                                        if should_disconnect {
+                                            tracing::warn!(
+                                                "🛡️ AI: Severe violation for whitelisted peer {} ({:?})",
+                                                ip, attack.attack_type
+                                            );
+                                            enforce_registry.mark_disconnected(ip_str);
+                                        }
+                                    } else {
+                                        let should_disconnect = blacklist.record_violation(
+                                            ip,
+                                            &format!("{:?}", attack.attack_type),
+                                        );
+                                        if should_disconnect {
+                                            tracing::warn!(
+                                                "🚫 AI: Banned peer {} ({:?}, confidence={:.0}%)",
+                                                ip,
+                                                attack.attack_type,
+                                                attack.confidence * 100.0
+                                            );
+                                            enforce_registry.mark_disconnected(ip_str);
+                                        }
+                                    }
+                                }
+                            }
+                            crate::ai::MitigationAction::RateLimitPeer(ip_str) => {
+                                if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+                                    // Rate limit = record as violation (escalates automatically)
+                                    let should_disconnect = blacklist.record_violation(
+                                        ip,
+                                        &format!("Rate limited: {:?}", attack.attack_type),
+                                    );
+                                    if should_disconnect {
+                                        tracing::warn!(
+                                            "🚫 AI: Rate-limited peer {} escalated to ban ({:?})",
+                                            ip,
+                                            attack.attack_type
+                                        );
+                                        enforce_registry.mark_disconnected(ip_str);
+                                    }
+                                }
+                            }
+                            crate::ai::MitigationAction::AlertOperator => {
+                                tracing::error!(
+                                    "🚨 AI ALERT: {:?} detected (confidence={:.0}%, severity={:?})",
+                                    attack.attack_type,
+                                    attack.confidence * 100.0,
+                                    attack.severity
+                                );
+                            }
+                            _ => {} // Monitor, EmergencySync, HaltProduction — log only
+                        }
+                    }
+                }
+            });
+            tracing::info!("🛡️ Attack mitigation enforcement task started (30s interval)");
+        }
 
         // Note: Deduplication filter handles its own cleanup with automatic rotation
 
