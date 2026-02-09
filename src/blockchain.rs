@@ -190,8 +190,6 @@ pub struct Blockchain {
     peer_scoring: Arc<crate::network::peer_scoring::PeerScoringSystem>,
     /// AI-powered fork resolution (decision making)
     fork_resolver: Arc<crate::ai::fork_resolver::ForkResolver>,
-    /// Network fork resolver (state machine & algorithms)
-    network_fork_resolver: Arc<crate::network::fork_resolver::ForkResolver>,
     /// Sync coordinator to prevent sync storms and duplicate requests
     sync_coordinator: Arc<crate::network::sync_coordinator::SyncCoordinator>,
     /// Cumulative chain work for longest-chain-by-work rule
@@ -247,10 +245,6 @@ impl Blockchain {
             storage.clone(),
         )));
 
-        // Initialize network fork resolver (state machine & algorithms)
-        let network_fork_resolver =
-            Arc::new(crate::network::fork_resolver::ForkResolver::default());
-
         // Initialize sync coordinator to prevent sync storms
         let sync_coordinator = Arc::new(crate::network::sync_coordinator::SyncCoordinator::new());
 
@@ -294,7 +288,6 @@ impl Blockchain {
             connection_manager: Arc::new(RwLock::new(None)),
             peer_scoring,
             fork_resolver,
-            network_fork_resolver,
             sync_coordinator,
             cumulative_work: Arc::new(RwLock::new(0)),
             reorg_history: Arc::new(RwLock::new(Vec::new())),
@@ -7846,7 +7839,7 @@ impl Clone for Blockchain {
             connection_manager: self.connection_manager.clone(),
             peer_scoring: self.peer_scoring.clone(),
             fork_resolver: self.fork_resolver.clone(),
-            network_fork_resolver: self.network_fork_resolver.clone(),
+
             sync_coordinator: self.sync_coordinator.clone(),
             cumulative_work: self.cumulative_work.clone(),
             reorg_history: self.reorg_history.clone(),
