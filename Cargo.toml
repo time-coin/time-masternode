@@ -60,7 +60,7 @@ blake3 = "1.5"                                      # Fast cryptographic hashing
 zeroize = { version = "1.7", features = ["derive"] }  # Secure memory cleanup
 subtle = "2.5"                                      # Constant-time comparisons
 tokio-rustls = "0.26"                              # TLS for encrypted transport
-rustls = "0.23"                                     # TLS library
+rustls = { version = "0.23", features = ["ring"] }                    # TLS library
 rustls-pemfile = "2.1"                             # PEM file parsing
 rcgen = "0.13"                                      # Self-signed cert generation
 bytes = "1.5"                                       # Byte buffer utilities
