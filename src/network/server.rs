@@ -1708,7 +1708,22 @@ async fn handle_peer(
                                         tracing::warn!("[Inbound] Error handling gossip from {}: {}", peer.addr, e);
                                     }
                                 }
-                                _ => {}
+                                _ => {
+                                    // Fallback: delegate any unhandled message types to MessageHandler
+                                    // This prevents silently dropping messages that server.rs doesn't
+                                    // explicitly handle (e.g. BlockHeightResponse, ForkAlert, LivenessAlert)
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+
+                                    if let Ok(Some(response)) = handler.handle_message(&msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&ip_str, response).await;
+                                    }
+                                }
                             }
                         } else {
                             // Check if buffer contains multiple JSON objects (happens during high-throughput sync)
