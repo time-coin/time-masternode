@@ -1405,6 +1405,10 @@ async fn main() {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_block_period_started: u64 = 0; // Track which block period we've started
 
+        // Event-driven: wake up immediately when any block is added to our chain
+        // (from peer sync, consensus finalization, or our own production)
+        let block_signal = block_blockchain.block_added_signal();
+
         // Leader rotation timeout tracking
         // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
         const LEADER_TIMEOUT_SECS: u64 = 10; // Wait 10s before rotating to backup leader (2x block production time)
@@ -1427,8 +1431,12 @@ async fn main() {
                     // Triggered by status check - immediate check
                     tracing::info!("🔔 Catchup production triggered by status check");
                 }
+                _ = block_signal.notified() => {
+                    // A block was added (from peer or self) - immediately re-evaluate
+                    tracing::debug!("🔔 Block added signal - re-evaluating production");
+                }
                 _ = interval.tick() => {
-                    // Regular 1-second check
+                    // Regular 1-second check (fallback for leader timeout, chain tip refresh)
                 }
             }
 
