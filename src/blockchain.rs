@@ -6054,21 +6054,35 @@ impl Blockchain {
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
 
-        // CRITICAL: Require consensus chain to have MAJORITY support among RESPONDING peers
-        // Use peer_tips.len() (peers that actually reported chain tips) as denominator,
-        // not connected_peers.len() — non-responding peers are already gated by the
-        // response rate check above. Using all connected peers would block fork resolution
-        // when some peers haven't reported tips yet (e.g., 2/5 = 40% even though 2/3
-        // responding peers agree on the longest chain).
-        let responding_peers = peer_tips.len();
-        let consensus_support_ratio = consensus_peers.len() as f64 / responding_peers as f64;
-        if consensus_support_ratio <= 0.5 {
+        // CRITICAL: Require consensus chain to have MAJORITY support by weighted stake
+        // Uses tier-weighted masternode stakes (Gold=1000, Silver=100, Bronze=10, Free=1)
+        // to match the 2/3 weighted threshold used in block production consensus.
+        // Non-responding peers are already gated by the response rate check above.
+        let mut consensus_weight = 0u64;
+        let mut total_responding_weight = 0u64;
+        for peer_ip in peer_tips.keys() {
+            let peer_weight = match self.masternode_registry.get(peer_ip).await {
+                Some(info) => info.masternode.tier.sampling_weight() as u64,
+                None => crate::types::MasternodeTier::Bronze.sampling_weight() as u64,
+            };
+            total_responding_weight += peer_weight;
+            if consensus_peers.contains(peer_ip) {
+                consensus_weight += peer_weight;
+            }
+        }
+        if total_responding_weight == 0 {
+            tracing::warn!("⚠️  No responding peers with weight for consensus check");
+            return None;
+        }
+        let required_weight = (total_responding_weight * 2).div_ceil(3);
+        if consensus_weight < required_weight {
             tracing::warn!(
-                "⚠️  Consensus chain at height {} has insufficient support: {}/{} responding peers ({:.1}%) - need >50% majority. Waiting for more consensus.",
+                "⚠️  Consensus chain at height {} has insufficient weighted support: {}/{} weight ({:.1}%) - need 2/3 ({}).",
                 consensus_height,
-                consensus_peers.len(),
-                responding_peers,
-                consensus_support_ratio * 100.0
+                consensus_weight,
+                total_responding_weight,
+                (consensus_weight as f64 / total_responding_weight as f64) * 100.0,
+                required_weight
             );
             return None;
         }
