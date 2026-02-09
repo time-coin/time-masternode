@@ -79,6 +79,11 @@ struct Args {
 
 #[tokio::main]
 async fn main() {
+    // Install rustls crypto provider before any TLS usage
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls CryptoProvider");
+
     let args = Args::parse();
 
     // Print hostname at startup BEFORE any logging
