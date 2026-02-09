@@ -7521,24 +7521,6 @@ impl Blockchain {
         Ok(candidate_ancestor)
     }
 
-    /// Update fork outcome for AI learning
-    pub async fn update_fork_outcome(&self, fork_height: u64, was_correct: bool) {
-        let outcome = if was_correct {
-            crate::ai::fork_resolver::ForkOutcome::CorrectChoice
-        } else {
-            crate::ai::fork_resolver::ForkOutcome::WrongChoice
-        };
-
-        self.fork_resolver
-            .update_fork_outcome(fork_height, outcome)
-            .await;
-    }
-
-    /// Get AI fork resolver statistics
-    pub async fn get_fork_resolver_stats(&self) -> crate::ai::fork_resolver::ForkResolverStats {
-        self.fork_resolver.get_statistics().await
-    }
-
     /// Validate that our chain hasn't gotten ahead of the network time schedule
     pub async fn validate_chain_time(&self) -> Result<(), String> {
         let current_height = self.get_height();
