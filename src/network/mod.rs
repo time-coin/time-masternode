@@ -16,3 +16,4 @@ pub mod server;
 pub mod signed_message;
 pub mod sync_coordinator;
 pub mod tls;
+pub mod wire;

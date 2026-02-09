@@ -5,8 +5,6 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{interval, Instant};
@@ -16,6 +14,7 @@ use crate::blockchain::Blockchain;
 use crate::network::blacklist::IPBlacklist;
 use crate::network::message::NetworkMessage;
 use crate::network::message_handler::{ConnectionDirection, MessageContext, MessageHandler};
+use crate::network::tls::TlsConfig;
 
 /// State for tracking ping/pong health
 #[derive(Debug)]
@@ -210,11 +209,11 @@ pub struct PeerConnection {
     /// Connection direction
     direction: ConnectionDirection,
 
-    /// TCP reader
-    reader: BufReader<OwnedReadHalf>,
+    /// Stream reader (trait object for TLS/plain TCP)
+    reader: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
 
-    /// TCP writer (shared for concurrent writes)
-    writer: Arc<Mutex<BufWriter<OwnedWriteHalf>>>,
+    /// Stream writer (trait object, shared for concurrent writes)
+    writer: Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
 
     /// Ping/pong state
     ping_state: Arc<RwLock<PingState>>,
@@ -332,6 +331,7 @@ impl PeerConnection {
         peer_ip: String,
         port: u16,
         is_whitelisted: bool,
+        tls_config: Option<Arc<TlsConfig>>,
     ) -> Result<Self, String> {
         let addr = format!("{}:{}", peer_ip, port);
 
@@ -353,16 +353,28 @@ impl PeerConnection {
             .local_addr()
             .map_err(|e| format!("Failed to get local address: {}", e))?;
 
-        let (read_half, write_half) = stream.into_split();
+        // Wrap with TLS if configured
+        let (reader, writer): (
+            Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+            Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+        ) = if let Some(tls) = tls_config {
+            info!("🔒 [OUTBOUND] TLS handshake with {}", addr);
+            let tls_stream = tls
+                .connect_client(stream, "timecoin.local")
+                .await
+                .map_err(|e| format!("TLS handshake failed with {}: {}", addr, e))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = stream.into_split();
+            (Box::new(r), Box::new(w))
+        };
 
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Outbound,
-            reader: BufReader::with_capacity(1024 * 1024, read_half), // 1MB buffer for large block responses
-            writer: Arc::new(Mutex::new(BufWriter::with_capacity(
-                2 * 1024 * 1024,
-                write_half,
-            ))), // 2MB buffer for large block sends
+            reader,
+            writer: Arc::new(Mutex::new(writer)),
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
@@ -376,7 +388,11 @@ impl PeerConnection {
 
     /// Create a new inbound connection from a peer
     #[allow(dead_code)]
-    pub async fn new_inbound(stream: TcpStream, is_whitelisted: bool) -> Result<Self, String> {
+    pub async fn new_inbound(
+        stream: TcpStream,
+        is_whitelisted: bool,
+        tls_config: Option<Arc<TlsConfig>>,
+    ) -> Result<Self, String> {
         let peer_addr = stream
             .peer_addr()
             .map_err(|e| format!("Failed to get peer address: {}", e))?;
@@ -396,16 +412,28 @@ impl PeerConnection {
             info!("🔗 [Inbound] Accepted connection from {}", peer_addr);
         }
 
-        let (read_half, write_half) = stream.into_split();
+        // Wrap with TLS if configured
+        let (reader, writer): (
+            Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+            Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+        ) = if let Some(tls) = tls_config {
+            info!("🔒 [INBOUND] TLS handshake with {}", peer_addr);
+            let tls_stream = tls
+                .accept_server(stream)
+                .await
+                .map_err(|e| format!("TLS accept failed from {}: {}", peer_addr, e))?;
+            let (r, w) = tokio::io::split(tls_stream);
+            (Box::new(r), Box::new(w))
+        } else {
+            let (r, w) = stream.into_split();
+            (Box::new(r), Box::new(w))
+        };
 
         Ok(Self {
             peer_ip,
             direction: ConnectionDirection::Inbound,
-            reader: BufReader::with_capacity(1024 * 1024, read_half), // 1MB buffer for large block responses
-            writer: Arc::new(Mutex::new(BufWriter::with_capacity(
-                2 * 1024 * 1024,
-                write_half,
-            ))), // 2MB buffer for large block sends
+            reader,
+            writer: Arc::new(Mutex::new(writer)),
             ping_state: Arc::new(RwLock::new(PingState::new())),
             invalid_block_count: Arc::new(RwLock::new(0)),
             peer_height: Arc::new(RwLock::new(None)),
@@ -446,63 +474,54 @@ impl PeerConnection {
     }
 
     /// Get a clone of the shared writer for registration in peer registry
-    pub fn shared_writer(&self) -> Arc<Mutex<BufWriter<OwnedWriteHalf>>> {
+    pub fn shared_writer(&self) -> Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>> {
         self.writer.clone()
     }
 
-    /// Send a message to the peer
-    async fn send_message(&self, message: &NetworkMessage) -> Result<(), String> {
-        let mut writer = self.writer.lock().await;
-
-        let msg_json = serde_json::to_string(message)
-            .map_err(|e| format!("Failed to serialize message: {}", e))?;
-
-        writer
-            .write_all(format!("{}\n", msg_json).as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write message: {}", e))?;
-
-        writer
-            .flush()
-            .await
-            .map_err(|e| format!("Failed to flush: {}", e))?;
-
-        Ok(())
+    /// Send a message using the shared writer (avoids borrowing self across await)
+    async fn send_with_writer(
+        writer: &Arc<Mutex<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
+        message: &NetworkMessage,
+    ) -> Result<(), String> {
+        let mut guard = writer.lock().await;
+        crate::network::wire::write_message(&mut *guard, message).await
     }
 
     /// Send a ping to the peer
-    /// Phase 3: Now includes blockchain height in ping
-    async fn send_ping(&self, blockchain: Option<&Arc<Blockchain>>) -> Result<(), String> {
+    async fn send_ping(&mut self, blockchain: Option<&Arc<Blockchain>>) -> Result<(), String> {
         let nonce = rand::random::<u64>();
         let timestamp = chrono::Utc::now().timestamp();
-        // Phase 3: Get our height if blockchain available
         let height = blockchain.map(|bc| bc.get_height());
+        let direction = self.direction;
+        let peer_ip = self.peer_ip.clone();
 
         {
             let mut state = self.ping_state.write().await;
             state.record_ping_sent(nonce);
         }
 
-        // Phase 3: Include height in log if available
         let height_info = height
             .map(|h| format!(" at height {}", h))
             .unwrap_or_default();
         info!(
             "📤 [{:?}] Sent ping to {}{} (nonce: {})",
-            self.direction, self.peer_ip, height_info, nonce
+            direction, peer_ip, height_info, nonce
         );
 
-        self.send_message(&NetworkMessage::Ping {
-            nonce,
-            timestamp,
-            height,
-        })
+        Self::send_with_writer(
+            &self.writer,
+            &NetworkMessage::Ping {
+                nonce,
+                timestamp,
+                height,
+            },
+        )
         .await
     }
 
     /// Handle received ping
     async fn handle_ping(
-        &self,
+        &mut self,
         nonce: u64,
         _timestamp: i64,
         peer_height: Option<u64>,
@@ -524,11 +543,14 @@ impl PeerConnection {
 
         let timestamp = chrono::Utc::now().timestamp();
         // Phase 3: Include our height in pong response
-        self.send_message(&NetworkMessage::Pong {
-            nonce,
-            timestamp,
-            height: our_height,
-        })
+        Self::send_with_writer(
+            &self.writer,
+            &NetworkMessage::Pong {
+                nonce,
+                timestamp,
+                height: our_height,
+            },
+        )
         .await?;
 
         info!(
@@ -541,7 +563,7 @@ impl PeerConnection {
 
     /// Handle received pong
     async fn handle_pong(
-        &self,
+        &mut self,
         nonce: u64,
         _timestamp: i64,
         peer_height: Option<u64>,
@@ -646,7 +668,7 @@ impl PeerConnection {
 
     /// Check if connection should be closed due to timeout
     async fn should_disconnect(
-        &self,
+        &mut self,
         _peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) -> bool {
         // CRITICAL FIX: Whitelisted masternodes should NEVER be disconnected due to timeout
@@ -679,19 +701,10 @@ impl PeerConnection {
     /// Unified message handler that delegates to MessageHandler
     /// This replaces the old handle_message_with_* functions
     async fn handle_message_unified(
-        &self,
-        line: &str,
+        &mut self,
+        message: NetworkMessage,
         config: &MessageLoopConfig,
     ) -> Result<(), String> {
-        let line = line.trim();
-        if line.is_empty() {
-            return Ok(());
-        }
-
-        // Parse message
-        let message: NetworkMessage =
-            serde_json::from_str(line).map_err(|e| format!("Failed to parse message: {}", e))?;
-
         // Handle connection-level messages that need special state management
         match &message {
             NetworkMessage::Ping {
@@ -766,7 +779,7 @@ impl PeerConnection {
         match handler.handle_message(&message, &context).await {
             Ok(Some(response)) => {
                 // Send response if MessageHandler returned one
-                if let Err(e) = self.send_message(&response).await {
+                if let Err(e) = Self::send_with_writer(&self.writer, &response).await {
                     warn!(
                         "⚠️ [{:?}] Failed to send response to {}: {}",
                         self.direction, self.peer_ip, e
@@ -816,7 +829,6 @@ impl PeerConnection {
     ) -> Result<(), String> {
         let mut ping_interval = interval(Self::PING_INTERVAL);
         let mut timeout_check = interval(Self::TIMEOUT_CHECK_INTERVAL);
-        let mut buffer = String::new();
 
         info!(
             "🔄 [{:?}] Starting unified message loop for {} (port: {})",
@@ -840,7 +852,7 @@ impl PeerConnection {
             network: "mainnet".to_string(),
         };
 
-        if let Err(e) = self.send_message(&handshake).await {
+        if let Err(e) = Self::send_with_writer(&self.writer, &handshake).await {
             error!(
                 "❌ [{:?}] Failed to send handshake to {}: {}",
                 self.direction, self.peer_ip, e
@@ -868,22 +880,21 @@ impl PeerConnection {
         // Main message loop
         loop {
             tokio::select! {
-                // Read incoming messages
-                result = self.reader.read_line(&mut buffer) => {
+                // Read incoming messages (length-prefixed bincode)
+                result = crate::network::wire::read_message(&mut self.reader) => {
                     match result {
-                        Ok(0) => {
+                        Ok(None) => {
                             info!("🔌 [{:?}] Connection closed by {}", self.direction, self.peer_ip);
                             break;
                         }
-                        Ok(_) => {
+                        Ok(Some(message)) => {
                             // Use unified message handler
-                            let handle_result = self.handle_message_unified(&buffer, &config).await;
+                            let handle_result = self.handle_message_unified(message, &config).await;
 
                             if let Err(e) = handle_result {
                                 warn!("⚠️ [{:?}] Error handling message from {}: {}",
                                       self.direction, self.peer_ip, e);
                             }
-                            buffer.clear();
                         }
                         Err(e) => {
                             error!("❌ [{:?}] Error reading from {}: {}", self.direction, self.peer_ip, e);
@@ -903,7 +914,7 @@ impl PeerConnection {
                 } => {
                     if let Ok(msg) = result {
                         // Forward broadcast to this peer
-                        if let Err(e) = self.send_message(&msg).await {
+                        if let Err(e) = Self::send_with_writer(&self.writer, &msg).await {
                             warn!("⚠️ [{:?}] Failed to forward broadcast to {}: {}",
                                   self.direction, self.peer_ip, e);
                         }

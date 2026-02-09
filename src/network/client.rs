@@ -18,6 +18,7 @@ use crate::network::blacklist::IPBlacklist;
 use crate::network::connection_manager::ConnectionManager;
 use crate::network::peer_connection::{PeerConnection, PeerStateManager};
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
+use crate::network::tls::TlsConfig;
 use crate::peer_manager::PeerManager;
 use crate::NetworkType;
 use std::collections::HashSet;
@@ -41,6 +42,8 @@ pub struct NetworkClient {
     ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     /// AI-powered adaptive reconnection
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
+    /// TLS configuration for encrypted connections
+    tls_config: Option<Arc<TlsConfig>>,
 }
 
 impl NetworkClient {
@@ -77,6 +80,7 @@ impl NetworkClient {
             blacklisted_peers: blacklisted_peers.into_iter().collect(),
             ip_blacklist,
             reconnection_ai,
+            tls_config: None,
         }
     }
 
@@ -86,20 +90,34 @@ impl NetworkClient {
         self.reconnection_ai = ai;
     }
 
+    /// Set TLS configuration for encrypted peer connections
+    pub fn set_tls_config(&mut self, tls_config: Arc<TlsConfig>) {
+        self.tls_config = Some(tls_config);
+    }
+
     pub async fn start(&self) {
         let peer_manager = self.peer_manager.clone();
         let masternode_registry = self.masternode_registry.clone();
         let blockchain = self.blockchain.clone();
         let peer_registry = self.peer_connection_registry.clone();
-        let _peer_state = self.peer_state.clone();
         let connection_manager = self.connection_manager.clone();
-        let p2p_port = self.p2p_port;
         let max_peers = self.max_peers;
         let reserved_masternode_slots = self.reserved_masternode_slots;
         let local_ip = self.local_ip.clone();
         let blacklisted_peers = self.blacklisted_peers.clone();
-        let ip_blacklist = self.ip_blacklist.clone();
-        let reconnection_ai = self.reconnection_ai.clone();
+
+        let res = ConnectionResources {
+            port: self.p2p_port,
+            connection_manager: connection_manager.clone(),
+            masternode_registry: masternode_registry.clone(),
+            blockchain: blockchain.clone(),
+            peer_manager: peer_manager.clone(),
+            peer_registry: peer_registry.clone(),
+            local_ip: local_ip.clone(),
+            reconnection_ai: self.reconnection_ai.clone(),
+            ip_blacklist: self.ip_blacklist.clone(),
+            tls_config: self.tls_config.clone(),
+        };
 
         tokio::spawn(async move {
             tracing::info!(
@@ -113,230 +131,109 @@ impl NetworkClient {
                 tracing::info!("🏠 Local IP: {} (will skip self-connections)", ip);
             }
 
-            // PHASE 1: Connect to all registered masternodes FIRST (priority) - PARALLEL
-            // Use list_all() to include offline masternodes - they may come online
+            // Helper: should we skip connecting to this IP?
+            let should_skip = |ip: &str| -> bool {
+                if let Some(ref local) = local_ip {
+                    if ip == local.as_str() {
+                        return true;
+                    }
+                }
+                if blacklisted_peers.contains(ip) {
+                    return true;
+                }
+                if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
+                    return true;
+                }
+                false
+            };
+
+            // Helper: deduplicate peer addresses by IP
+            let dedup_peers = |peers: Vec<String>| -> Vec<String> {
+                let mut seen = std::collections::HashSet::new();
+                peers
+                    .into_iter()
+                    .filter_map(|addr| {
+                        let ip = if let Some(pos) = addr.rfind(':') {
+                            &addr[..pos]
+                        } else {
+                            &addr
+                        };
+                        if seen.insert(ip.to_string()) {
+                            Some(ip.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
+            // PHASE 1: Connect to all registered masternodes FIRST (priority)
             let masternodes = masternode_registry.list_all().await;
             let masternode_ips: Vec<&str> = masternodes
                 .iter()
                 .map(|m| m.masternode.address.as_str())
                 .collect();
             tracing::info!(
-                "🎯 Connecting to {} registered masternode(s) with priority (parallel): {:?}",
+                "🎯 Connecting to {} registered masternode(s) with priority: {:?}",
                 masternodes.len(),
                 masternode_ips
             );
 
-            const CONCURRENT_DIALS: usize = 10;
-            const BURST_INTERVAL_MS: u64 = 50;
-
-            let mut masternode_tasks = Vec::new();
             let mut masternode_connections = 0;
-
             for mn in masternodes.iter().take(reserved_masternode_slots) {
-                let ip = mn.masternode.address.clone();
-
-                // Skip if this is our own IP
-                if let Some(ref local) = local_ip {
-                    if ip == *local {
-                        tracing::info!("⏭️  [PHASE1-MN] Skipping self-connection to {}", ip);
-                        continue;
+                let ip = &mn.masternode.address;
+                if should_skip(ip) {
+                    if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
+                        masternode_connections += 1;
                     }
-                }
-
-                // Skip blacklisted peers
-                if blacklisted_peers.contains(&ip) {
-                    tracing::debug!("🚫 [PHASE1-MN] Skipping blacklisted peer: {}", ip);
                     continue;
                 }
-
-                tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
-
-                // Check if already connected in connection_manager OR peer_registry
-                if connection_manager.is_connected(&ip) || peer_registry.is_connected(&ip) {
-                    tracing::debug!("Already connected to masternode {}", ip);
-                    masternode_connections += 1;
+                if !connection_manager.mark_connecting(ip) {
                     continue;
                 }
-
-                if !connection_manager.mark_connecting(&ip) {
-                    tracing::debug!("[PHASE1-MN] Already connecting to {}, skipping", ip);
-                    continue;
-                }
-
                 masternode_connections += 1;
-
-                let ip_clone = ip.clone();
-                let conn_mgr = connection_manager.clone();
-                let mn_reg = masternode_registry.clone();
-                let bc = blockchain.clone();
-                let peer_mgr = peer_manager.clone();
-                let peer_reg = peer_registry.clone();
-                let local_ip_clone = local_ip.clone();
-                let recon_ai = reconnection_ai.clone();
-                let blacklist = ip_blacklist.clone();
-
-                // Spawn task without waiting for it to complete
-                let task = tokio::spawn(async move {
-                    spawn_connection_task(
-                        ip_clone,
-                        p2p_port,
-                        conn_mgr,
-                        mn_reg,
-                        bc,
-                        peer_mgr,
-                        peer_reg,
-                        true, // is_masternode flag
-                        local_ip_clone,
-                        recon_ai,
-                        blacklist,
-                    );
-                });
-
-                masternode_tasks.push(task);
-
-                // Burst control: limit concurrent dials
-                if masternode_tasks.len() >= CONCURRENT_DIALS {
-                    sleep(Duration::from_millis(BURST_INTERVAL_MS)).await;
-                }
+                tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
+                res.spawn(ip.clone(), true);
             }
 
-            // Wait for all masternode connections to initiate
-            let start_time = std::time::Instant::now();
-            for task in masternode_tasks {
-                let _ = task.await;
-            }
-            let elapsed = start_time.elapsed();
+            // Brief delay for masternode connections to initiate
+            sleep(Duration::from_millis(500)).await;
+
             tracing::info!(
-                "✅ Connected to {} masternode(s) in {:.2}s, {} slots available for regular peers",
+                "✅ Initiated {} masternode connection(s), {} slots for regular peers",
                 masternode_connections,
-                elapsed.as_secs_f64(),
                 max_peers.saturating_sub(masternode_connections)
             );
 
-            // PHASE 2: Fill remaining slots with regular peers - PARALLEL
+            // PHASE 2: Fill remaining slots with regular peers
             let available_slots = max_peers.saturating_sub(masternode_connections);
             if available_slots > 0 {
-                let peers = peer_manager.get_all_peers().await;
-
-                // Deduplicate peers by IP (remove port) to prevent duplicate connections
-                let mut seen_ips = std::collections::HashSet::new();
-                let unique_peers: Vec<String> = peers
-                    .into_iter()
-                    .filter_map(|peer_addr| {
-                        let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
-                            &peer_addr[..colon_pos]
-                        } else {
-                            &peer_addr
-                        };
-
-                        // Only keep first occurrence of each IP
-                        if seen_ips.insert(ip.to_string()) {
-                            Some(ip.to_string())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
+                let unique_peers = dedup_peers(peer_manager.get_all_peers().await);
                 tracing::info!(
-                    "🔌 Filling {} remaining slot(s) with {} unique regular peers (parallel)",
+                    "🔌 Filling {} slot(s) with {} unique regular peers",
                     available_slots,
                     unique_peers.len()
                 );
 
-                let mut peer_tasks = Vec::new();
-
                 for ip in unique_peers.iter().take(available_slots) {
-                    // Skip if this is our own IP
-                    if let Some(ref local) = local_ip {
-                        if ip == local {
-                            tracing::info!("⏭️  [PHASE2-PEER] Skipping self-connection to {}", ip);
-                            continue;
-                        }
-                    }
-
-                    // Skip blacklisted peers
-                    if blacklisted_peers.contains(ip) {
-                        tracing::debug!("🚫 [PHASE2-PEER] Skipping blacklisted peer: {}", ip);
+                    if should_skip(ip) {
                         continue;
                     }
-
-                    // Skip if this is a masternode (already connected in Phase 1)
+                    // Skip masternodes (already handled in Phase 1)
                     if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                         continue;
                     }
-
-                    // Check if this IP is a registered masternode (even if not active)
-                    // This ensures masternodes always get whitelist protection
-                    let all_masternodes = masternode_registry.list_all().await;
-                    let is_registered_masternode = all_masternodes
+                    if !connection_manager.mark_connecting(ip) {
+                        continue;
+                    }
+                    let is_registered_mn = masternode_registry
+                        .list_all()
+                        .await
                         .iter()
                         .any(|mn| mn.masternode.address == *ip);
-
-                    if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
-                        tracing::debug!("Already connected to {}", ip);
-                        continue;
-                    }
-
-                    if !connection_manager.mark_connecting(ip) {
-                        tracing::debug!("[PHASE2-PEER] Already connecting to {}, skipping", ip);
-                        continue;
-                    }
-
-                    if is_registered_masternode {
-                        tracing::info!(
-                            "🔗 [PHASE2-MN-LATE] Connecting to registered masternode: {}",
-                            ip
-                        );
-                    } else {
-                        tracing::info!("🔗 [PHASE2-PEER] Connecting to: {}", ip);
-                    }
-
-                    let ip_clone = ip.clone();
-                    let conn_mgr = connection_manager.clone();
-                    let mn_reg = masternode_registry.clone();
-                    let bc = blockchain.clone();
-                    let peer_mgr = peer_manager.clone();
-                    let peer_reg = peer_registry.clone();
-                    let local_ip_clone = local_ip.clone();
-                    let recon_ai = reconnection_ai.clone();
-                    let blacklist = ip_blacklist.clone();
-
-                    // Spawn task without waiting
-                    let task = tokio::spawn(async move {
-                        spawn_connection_task(
-                            ip_clone,
-                            p2p_port,
-                            conn_mgr,
-                            mn_reg,
-                            bc,
-                            peer_mgr,
-                            peer_reg,
-                            is_registered_masternode, // treat registered masternodes as whitelisted
-                            local_ip_clone,
-                            recon_ai,
-                            blacklist,
-                        );
-                    });
-
-                    peer_tasks.push(task);
-
-                    // Burst control: limit concurrent dials
-                    if peer_tasks.len() >= CONCURRENT_DIALS {
-                        sleep(Duration::from_millis(BURST_INTERVAL_MS)).await;
-                    }
+                    tracing::info!("🔗 [PHASE2] Connecting to: {}", ip);
+                    res.spawn(ip.clone(), is_registered_mn);
                 }
-
-                // Wait for all peer connections to initiate
-                let start_time = std::time::Instant::now();
-                for task in peer_tasks {
-                    let _ = task.await;
-                }
-                let elapsed = start_time.elapsed();
-                tracing::info!(
-                    "✅ Regular peer connections initiated in {:.2}s",
-                    elapsed.as_secs_f64()
-                );
             }
 
             // PHASE 3: Periodic peer discovery with masternode priority
@@ -344,9 +241,6 @@ impl NetworkClient {
             loop {
                 sleep(peer_discovery_interval).await;
 
-                // Use list_all() to get ALL known masternodes, not just active ones
-                // This ensures we attempt to reconnect to masternodes that went offline
-                // (their status will be restored once we reconnect and receive heartbeats)
                 let all_masternodes = masternode_registry.list_all().await;
                 let active_count = masternode_registry.list_active().await.len();
                 let connected_count = connection_manager.connected_count();
@@ -360,154 +254,56 @@ impl NetworkClient {
                 );
 
                 // Reconnect to any disconnected masternodes (HIGH PRIORITY)
-                // Note: For masternodes, we want BOTH nodes to establish outbound connections
-                // to ensure full mesh redundancy. Only check if we have an outbound connection,
-                // so both nodes will attempt outbound connections to each other.
                 for mn in all_masternodes.iter().take(reserved_masternode_slots) {
                     let ip = &mn.masternode.address;
-
-                    // Skip if this is our own IP
-                    if let Some(ref local) = local_ip {
-                        if ip == local {
-                            continue;
-                        }
-                    }
-
-                    // Skip blacklisted peers
-                    if blacklisted_peers.contains(ip) {
+                    if should_skip(ip) {
                         continue;
                     }
-
-                    // For masternodes: only skip if we already have an OUTBOUND connection
-                    // This allows both nodes to connect outbound to each other for full mesh
-                    if !connection_manager.has_outbound_connection(ip)
-                        && connection_manager.mark_connecting(ip)
-                    {
-                        tracing::info!(
-                            "🎯 [PHASE3-MN-PRIORITY] Reconnecting to masternode: {}",
-                            ip
-                        );
-
-                        spawn_connection_task(
-                            ip.clone(),
-                            p2p_port,
-                            connection_manager.clone(),
-                            masternode_registry.clone(),
-                            blockchain.clone(),
-                            peer_manager.clone(),
-                            peer_registry.clone(),
-                            true,
-                            local_ip.clone(),
-                            reconnection_ai.clone(),
-                            ip_blacklist.clone(),
-                        );
+                    // Only skip if we already have an OUTBOUND connection (allow full mesh)
+                    if connection_manager.has_outbound_connection(ip) {
+                        continue;
+                    }
+                    if connection_manager.mark_connecting(ip) {
+                        tracing::info!("🎯 [PHASE3-MN] Reconnecting to masternode: {}", ip);
+                        res.spawn(ip.clone(), true);
                     }
                 }
 
-                // Fill any remaining slots with regular peers
+                // Fill remaining slots with regular peers
                 let available_slots = max_peers.saturating_sub(connected_count);
                 if available_slots > 0 {
-                    let current_peers = peer_manager.get_all_peers().await;
-
-                    // Deduplicate peers by IP (remove port) to prevent duplicate connections
-                    let mut seen_ips = std::collections::HashSet::new();
-                    let unique_peers: Vec<String> = current_peers
-                        .into_iter()
-                        .filter_map(|peer_addr| {
-                            let ip = if let Some(colon_pos) = peer_addr.rfind(':') {
-                                &peer_addr[..colon_pos]
-                            } else {
-                                &peer_addr
-                            };
-
-                            // Only keep first occurrence of each IP
-                            if seen_ips.insert(ip.to_string()) {
-                                Some(ip.to_string())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
-
-                    tracing::info!(
-                        "🔗 {} connection slot(s) available, checking {} unique peer candidates",
-                        available_slots,
-                        unique_peers.len()
-                    );
-
+                    let unique_peers = dedup_peers(peer_manager.get_all_peers().await);
                     for ip in unique_peers.iter().take(available_slots) {
-                        // Skip if this is our own IP
-                        if let Some(ref local) = local_ip {
-                            if ip == local {
-                                continue;
-                            }
-                        }
-
-                        // Skip blacklisted peers
-                        if blacklisted_peers.contains(ip) {
+                        if should_skip(ip) {
                             continue;
                         }
-
-                        // Skip masternodes (they're handled above with priority)
                         if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
                             continue;
                         }
-
-                        // Check if already connected OR already connecting (prevents race condition)
-                        if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
-                            continue;
-                        }
-
-                        // Check if peer is in reconnection backoff - don't start duplicate connection
                         if connection_manager.is_reconnecting(ip) {
                             continue;
                         }
-
-                        // Atomically check and mark as connecting
                         if !connection_manager.mark_connecting(ip) {
-                            // Another task already connecting, skip
                             continue;
                         }
-
-                        tracing::info!(
-                            "🔗 [PHASE3-PEER] Discovered new peer, connecting to: {}",
-                            ip
-                        );
-
-                        spawn_connection_task(
-                            ip.clone(),
-                            p2p_port,
-                            connection_manager.clone(),
-                            masternode_registry.clone(),
-                            blockchain.clone(),
-                            peer_manager.clone(),
-                            peer_registry.clone(),
-                            false,
-                            local_ip.clone(),
-                            reconnection_ai.clone(),
-                            ip_blacklist.clone(),
-                        );
-
+                        tracing::info!("🔗 [PHASE3-PEER] Connecting to: {}", ip);
+                        res.spawn(ip.clone(), false);
                         sleep(Duration::from_millis(100)).await;
                     }
                 }
 
                 // PHASE 4: Periodic chain tip comparison for fork detection
-                // Query all connected peers for their chain tip and check for forks
                 let our_height = blockchain.get_height();
                 if our_height > 0 {
                     let our_hash = blockchain.get_block_hash(our_height).unwrap_or([0u8; 32]);
-
-                    // Send GetChainTip to all connected peers
                     let connected_peers = peer_registry.get_connected_peers().await;
                     if !connected_peers.is_empty() {
                         tracing::debug!(
-                            "🔍 Chain tip check: our height {} hash {}, querying {} peers",
+                            "🔍 Chain tip check: height {} hash {}, querying {} peers",
                             our_height,
                             hex::encode(&our_hash[..8]),
                             connected_peers.len()
                         );
-
                         for peer_ip in connected_peers.iter() {
                             let msg = crate::network::message::NetworkMessage::GetChainTip;
                             if let Err(e) = peer_registry.send_to_peer(peer_ip, msg).await {
@@ -521,151 +317,169 @@ impl NetworkClient {
     }
 }
 
-/// Helper function to spawn a persistent connection task
-#[allow(clippy::too_many_arguments)]
-fn spawn_connection_task(
-    ip: String,
+/// Shared resources for spawning peer connections.
+/// Eliminates repeated Arc cloning at each call site.
+#[derive(Clone)]
+struct ConnectionResources {
     port: u16,
     connection_manager: Arc<ConnectionManager>,
     masternode_registry: Arc<MasternodeRegistry>,
     blockchain: Arc<Blockchain>,
     peer_manager: Arc<PeerManager>,
     peer_registry: Arc<PeerConnectionRegistry>,
-    is_masternode: bool,
     local_ip: Option<String>,
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
     ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
-) {
-    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-    tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
+    tls_config: Option<Arc<TlsConfig>>,
+}
 
-    tokio::spawn(async move {
-        let mut session_start: Option<std::time::Instant> = None;
+impl ConnectionResources {
+    /// Spawn a persistent connection task for a peer
+    fn spawn(&self, ip: String, is_masternode: bool) {
+        let res = self.clone();
+        let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+        tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
 
-        loop {
-            // Get AI-powered reconnection advice
-            let advice = reconnection_ai.get_reconnection_advice(&ip, is_masternode);
+        tokio::spawn(async move {
+            let mut session_start: Option<std::time::Instant> = None;
 
-            if !advice.should_attempt {
+            loop {
+                // Get AI-powered reconnection advice
+                let advice = res
+                    .reconnection_ai
+                    .get_reconnection_advice(&ip, is_masternode);
+
+                if !advice.should_attempt {
+                    tracing::info!(
+                        "🧠 [AI] Skipping reconnection to {}: {}",
+                        ip,
+                        advice.reasoning
+                    );
+                    res.connection_manager.clear_reconnecting(&ip);
+                    break;
+                }
+
+                let connect_start = std::time::Instant::now();
+
+                match maintain_peer_connection(
+                    &ip,
+                    res.port,
+                    res.connection_manager.clone(),
+                    res.masternode_registry.clone(),
+                    res.blockchain.clone(),
+                    res.peer_manager.clone(),
+                    res.peer_registry.clone(),
+                    res.local_ip.clone(),
+                    is_masternode,
+                    res.ip_blacklist.clone(),
+                    res.tls_config.clone(),
+                )
+                .await
+                {
+                    Ok(_) => {
+                        let connect_time = connect_start.elapsed().as_millis() as u64;
+                        res.reconnection_ai.record_connection_success(
+                            &ip,
+                            is_masternode,
+                            connect_time,
+                        );
+
+                        if let Some(start) = session_start {
+                            res.reconnection_ai
+                                .record_session_end(&ip, start.elapsed().as_secs());
+                        }
+                        session_start = Some(std::time::Instant::now());
+
+                        let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+                        tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                    }
+                    Err(e) => {
+                        res.reconnection_ai
+                            .record_connection_failure(&ip, is_masternode, &e);
+
+                        if let Some(start) = session_start {
+                            res.reconnection_ai
+                                .record_session_end(&ip, start.elapsed().as_secs());
+                        }
+                        session_start = None;
+
+                        let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+                        tracing::warn!("{} Connection to {} failed: {}", tag, ip, e);
+                    }
+                }
+
+                res.connection_manager.mark_disconnected(&ip);
+
+                if is_masternode {
+                    if let Err(e) = res
+                        .masternode_registry
+                        .mark_inactive_on_disconnect(&ip)
+                        .await
+                    {
+                        tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
+                    }
+                }
+
+                let advice = res
+                    .reconnection_ai
+                    .get_reconnection_advice(&ip, is_masternode);
+                let retry_delay = advice.delay_secs;
+
+                let tag = if is_masternode { "[MASTERNODE]" } else { "" };
                 tracing::info!(
-                    "🧠 [AI] Skipping reconnection to {}: {}",
+                    "{} 🧠 [AI] Reconnecting to {} in {}s (priority={:?})",
+                    tag,
                     ip,
-                    advice.reasoning
+                    retry_delay,
+                    advice.priority
                 );
-                connection_manager.clear_reconnecting(&ip);
-                break;
-            }
 
-            let connect_start = std::time::Instant::now();
+                res.connection_manager.mark_reconnecting(
+                    &ip,
+                    std::time::Duration::from_secs(retry_delay),
+                    0,
+                );
 
-            match maintain_peer_connection(
-                &ip,
-                port,
-                connection_manager.clone(),
-                masternode_registry.clone(),
-                blockchain.clone(),
-                peer_manager.clone(),
-                peer_registry.clone(),
-                local_ip.clone(),
-                is_masternode,
-                ip_blacklist.clone(),
-            )
-            .await
-            {
-                Ok(_) => {
-                    let connect_time = connect_start.elapsed().as_millis() as u64;
-                    reconnection_ai.record_connection_success(&ip, is_masternode, connect_time);
+                sleep(Duration::from_secs(retry_delay)).await;
 
-                    // Record session duration if we had a session
-                    if let Some(start) = session_start {
-                        reconnection_ai.record_session_end(&ip, start.elapsed().as_secs());
-                    }
-                    session_start = Some(std::time::Instant::now());
+                res.connection_manager.clear_reconnecting(&ip);
 
-                    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-                    tracing::info!("{} Connection to {} ended gracefully", tag, ip);
+                if res.connection_manager.is_connected(&ip) || res.peer_registry.is_connected(&ip) {
+                    tracing::debug!(
+                        "{} Already connected to {} during reconnect, task exiting",
+                        tag,
+                        ip
+                    );
+                    break;
                 }
-                Err(e) => {
-                    reconnection_ai.record_connection_failure(&ip, is_masternode, &e);
 
-                    // Record session duration if we had a session
-                    if let Some(start) = session_start {
-                        reconnection_ai.record_session_end(&ip, start.elapsed().as_secs());
-                    }
-                    session_start = None;
-
-                    let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-                    tracing::warn!("{} Connection to {} failed: {}", tag, ip, e);
+                if !res.connection_manager.mark_connecting(&ip) {
+                    tracing::debug!(
+                        "{} Already connecting to {} during reconnect, task exiting",
+                        tag,
+                        ip
+                    );
+                    break;
                 }
             }
 
-            connection_manager.mark_disconnected(&ip);
+            res.connection_manager.mark_disconnected(&ip);
 
-            // If this is a masternode connection, mark it as inactive in the registry
             if is_masternode {
-                if let Err(e) = masternode_registry.mark_inactive_on_disconnect(&ip).await {
-                    tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
+                if let Err(e) = res
+                    .masternode_registry
+                    .mark_inactive_on_disconnect(&ip)
+                    .await
+                {
+                    tracing::debug!(
+                        "Could not mark masternode {} as inactive on task exit: {:?}",
+                        ip,
+                        e
+                    );
                 }
             }
-
-            // Get updated advice after recording the result
-            let advice = reconnection_ai.get_reconnection_advice(&ip, is_masternode);
-            let retry_delay = advice.delay_secs;
-
-            let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-            tracing::info!(
-                "{} 🧠 [AI] Reconnecting to {} in {}s (priority={:?})",
-                tag,
-                ip,
-                retry_delay,
-                advice.priority
-            );
-
-            // Mark peer as in reconnection backoff
-            connection_manager.mark_reconnecting(
-                &ip,
-                std::time::Duration::from_secs(retry_delay),
-                0, // AI handles failure tracking internally
-            );
-
-            sleep(Duration::from_secs(retry_delay)).await;
-
-            // Clear reconnection state after backoff completes
-            connection_manager.clear_reconnecting(&ip);
-
-            // Check if already connected/connecting before reconnecting
-            if connection_manager.is_connected(&ip) || peer_registry.is_connected(&ip) {
-                tracing::debug!(
-                    "{} Already connected to {} during reconnect, task exiting",
-                    tag,
-                    ip
-                );
-                break;
-            }
-
-            if !connection_manager.mark_connecting(&ip) {
-                tracing::debug!(
-                    "{} Already connecting to {} during reconnect, task exiting",
-                    tag,
-                    ip
-                );
-                break;
-            }
-        }
-
-        connection_manager.mark_disconnected(&ip);
-
-        // Final cleanup: Mark masternode as inactive when task exits
-        if is_masternode {
-            if let Err(e) = masternode_registry.mark_inactive_on_disconnect(&ip).await {
-                tracing::debug!(
-                    "Could not mark masternode {} as inactive on task exit: {:?}",
-                    ip,
-                    e
-                );
-            }
-        }
-    });
+        });
+    }
 }
 
 /// Maintain a persistent connection to a peer
@@ -681,6 +495,7 @@ async fn maintain_peer_connection(
     _local_ip: Option<String>,
     is_masternode: bool,
     ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
+    tls_config: Option<Arc<TlsConfig>>,
 ) -> Result<(), String> {
     // Mark in peer_registry BEFORE attempting connection to prevent race with inbound
     if !peer_registry.mark_connecting(ip) {
@@ -691,14 +506,15 @@ async fn maintain_peer_connection(
     }
 
     // Create outbound connection with whitelist status
-    let peer_conn = match PeerConnection::new_outbound(ip.to_string(), port, is_masternode).await {
-        Ok(conn) => conn,
-        Err(e) => {
-            // Failed to connect - clean up peer_registry mark
-            peer_registry.unregister_peer(ip).await;
-            return Err(e);
-        }
-    };
+    let peer_conn =
+        match PeerConnection::new_outbound(ip.to_string(), port, is_masternode, tls_config).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                // Failed to connect - clean up peer_registry mark
+                peer_registry.unregister_peer(ip).await;
+                return Err(e);
+            }
+        };
 
     tracing::info!("✓ Connected to peer: {}", ip);
 

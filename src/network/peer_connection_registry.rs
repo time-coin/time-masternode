@@ -13,13 +13,12 @@ use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::io::{AsyncWriteExt, BufWriter};
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use tokio::sync::{broadcast, oneshot};
 use tracing::{debug, info, warn};
 
-type PeerWriter = BufWriter<OwnedWriteHalf>;
+type PeerWriter = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
 type ResponseSender = oneshot::Sender<NetworkMessage>;
 type ChainTip = (u64, [u8; 32]); // (height, block_hash)
 
@@ -869,18 +868,7 @@ impl PeerConnectionRegistry {
         if let Some(writer_arc) = writers.get(ip_only) {
             let mut writer = writer_arc.lock().await;
 
-            let msg_json = serde_json::to_string(&message)
-                .map_err(|e| format!("Failed to serialize message: {}", e))?;
-
-            writer
-                .write_all(format!("{}\n", msg_json).as_bytes())
-                .await
-                .map_err(|e| format!("Failed to write message to {}: {}", ip_only, e))?;
-
-            writer
-                .flush()
-                .await
-                .map_err(|e| format!("Failed to flush to {}: {}", ip_only, e))?;
+            crate::network::wire::write_message(&mut *writer, &message).await?;
 
             Ok(())
         } else {
@@ -959,14 +947,13 @@ impl PeerConnectionRegistry {
         }
 
         // Pre-serialize the message once for efficiency
-        let msg_json = match serde_json::to_string(&message) {
-            Ok(json) => format!("{}\n", json),
+        let msg_bytes = match crate::network::wire::serialize_frame(&message) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 warn!("❌ Failed to serialize broadcast message: {}", e);
                 return;
             }
         };
-        let msg_bytes = msg_json.as_bytes();
 
         let mut send_count = 0;
         let mut fail_count = 0;
@@ -977,7 +964,7 @@ impl PeerConnectionRegistry {
         for (peer_ip, writer_arc) in writers.iter() {
             let mut writer = writer_arc.lock().await;
 
-            if let Err(e) = writer.write_all(msg_bytes).await {
+            if let Err(e) = writer.write_all(&msg_bytes).await {
                 if is_tx_broadcast {
                     warn!("❌ TX broadcast to {} failed: {}", peer_ip, e);
                 } else {
