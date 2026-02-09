@@ -552,19 +552,24 @@ impl PeerConnectionRegistry {
                 self.inbound_count.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(mut e) => {
-                // Allow reconnection by updating existing entry
-                let old_direction = e.get().direction;
-                e.insert(ConnectionState {
-                    direction: ConnectionDirection::Inbound,
-                    connected_at: Instant::now(),
-                });
-                // Adjust counters if direction changed
-                if old_direction == ConnectionDirection::Outbound {
-                    self.outbound_count.fetch_sub(1, Ordering::Relaxed);
-                    self.inbound_count.fetch_add(1, Ordering::Relaxed);
+            Entry::Occupied(e) => {
+                // Reject inbound if an outbound connection already exists
+                // Allowing both causes writer overwrite in peer_writers, corrupting
+                // the outbound connection's frame stream
+                if e.get().direction == ConnectionDirection::Outbound {
+                    tracing::debug!(
+                        "🔄 Rejecting inbound from {} - outbound connection already exists",
+                        ip
+                    );
+                    false
+                } else {
+                    // Already have an inbound connection, reject duplicate
+                    tracing::debug!(
+                        "🔄 Rejecting duplicate inbound from {} - already connected",
+                        ip
+                    );
+                    false
                 }
-                true
             }
         }
     }
