@@ -1683,6 +1683,18 @@ async fn handle_peer(
                                     // Handle via response system - handled by request/response pattern
                                     peer_registry.handle_response(&ip_str, msg).await;
                                 }
+                                NetworkMessage::ChainTipResponse { .. } => {
+                                    // Route through unified message handler to update peer_chain_tips cache
+                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip, ConnectionDirection::Inbound);
+                                    let context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+
+                                    let _ = handler.handle_message(&msg, &context).await;
+                                }
                                 NetworkMessage::MasternodeStatusGossip { .. } => {
                                     // Handle gossip via unified message handler
                                     let handler = MessageHandler::new(ip_str.clone(), ConnectionDirection::Inbound);
