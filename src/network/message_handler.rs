@@ -905,8 +905,7 @@ impl MessageHandler {
                 Ok(receivers) => {
                     info!(
                         "📤 [{}] Broadcast prepare vote to {} peers",
-                        self.direction,
-                        receivers
+                        self.direction, receivers
                     );
                 }
                 Err(_) => {
@@ -1021,8 +1020,7 @@ impl MessageHandler {
                     Ok(receivers) => {
                         debug!(
                             "📤 [{}] Broadcast precommit vote to {} peers",
-                            self.direction,
-                            receivers
+                            self.direction, receivers
                         );
                     }
                     Err(_) => {
@@ -1467,9 +1465,7 @@ impl MessageHandler {
                     if let Ok(receivers) = broadcast_tx.send(msg) {
                         debug!(
                             "🔄 [{}] Gossiped block {} inventory to {} peer(s)",
-                            self.direction,
-                            block_height,
-                            receivers
+                            self.direction, block_height, receivers
                         );
                     }
                 }
@@ -1712,8 +1708,7 @@ impl MessageHandler {
                         if let Ok(receivers) = broadcast_tx.send(msg) {
                             debug!(
                                 "🔄 [{}] Gossiped transaction to {} peer(s)",
-                                self.direction,
-                                receivers
+                                self.direction, receivers
                             );
                         }
                     }
