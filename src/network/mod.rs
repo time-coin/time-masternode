@@ -2,7 +2,6 @@ pub mod blacklist;
 pub mod block_cache;
 pub mod client;
 pub mod connection_manager;
-pub mod connection_state;
 pub mod dedup_filter;
 
 pub mod message;
