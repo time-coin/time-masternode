@@ -155,10 +155,6 @@ predictive_loading = false
 enabled = true
 alert_threshold = 2.0
 
-[ai.transaction_analyzer]
-# AI transaction pattern analysis
-enabled = true
-
 [ai.network_optimizer]
 # AI network optimization
 enabled = true
@@ -166,8 +162,4 @@ enabled = true
 [ai.predictive_sync]
 # AI predictive sync
 enabled = true
-
-[ai.resource_manager]
-# AI resource management (experimental)
-enabled = false
 

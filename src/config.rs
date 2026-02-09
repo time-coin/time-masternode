@@ -288,16 +288,10 @@ pub struct AIConfig {
     pub anomaly_detector: AIAnomalyDetectorConfig,
 
     #[serde(default)]
-    pub transaction_analyzer: AITransactionAnalyzerConfig,
-
-    #[serde(default)]
     pub network_optimizer: AINetworkOptimizerConfig,
 
     #[serde(default)]
     pub predictive_sync: AIPredictiveSyncConfig,
-
-    #[serde(default)]
-    pub resource_manager: AIResourceManagerConfig,
 }
 
 impl Default for AIConfig {
@@ -314,10 +308,8 @@ impl Default for AIConfig {
             sync_recovery: AISyncRecoveryConfig::default(),
             mempool_optimizer: AIMempoolOptimizerConfig::default(),
             anomaly_detector: AIAnomalyDetectorConfig::default(),
-            transaction_analyzer: AITransactionAnalyzerConfig::default(),
             network_optimizer: AINetworkOptimizerConfig::default(),
             predictive_sync: AIPredictiveSyncConfig::default(),
-            resource_manager: AIResourceManagerConfig::default(),
         }
     }
 }
@@ -462,19 +454,6 @@ impl Default for AIAnomalyDetectorConfig {
     }
 }
 
-/// AI Transaction Analyzer Configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AITransactionAnalyzerConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-impl Default for AITransactionAnalyzerConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 /// AI Network Optimizer Configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AINetworkOptimizerConfig {
@@ -499,13 +478,6 @@ impl Default for AIPredictiveSyncConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
-}
-
-/// AI Resource Manager Configuration
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct AIResourceManagerConfig {
-    #[serde(default = "default_false")]
-    pub enabled: bool,
 }
 
 impl Config {
