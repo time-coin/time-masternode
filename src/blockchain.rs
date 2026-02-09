@@ -214,6 +214,10 @@ pub struct Blockchain {
     compress_blocks: bool,
     /// Cache for 2/3 consensus check results (TTL: 30s) - avoids redundant peer queries
     consensus_cache: Arc<RwLock<Option<ConsensusCache>>>,
+    /// Tracks whether this node has ever had connected peers.
+    /// Once true, bootstrap mode (0-peer block production) is permanently disabled
+    /// to prevent solo chain divergence after peer disconnection.
+    has_ever_had_peers: Arc<AtomicBool>,
     /// Signal notified when a new block is successfully added to the chain.
     /// Used by block production loop to wake up instantly instead of polling.
     block_added_signal: Arc<tokio::sync::Notify>,
@@ -300,6 +304,7 @@ impl Blockchain {
             tx_index: None, // Initialize without txindex, call build_tx_index() separately
             compress_blocks: false, // Disabled temporarily to debug block corruption issues
             consensus_cache: Arc::new(RwLock::new(None)), // Initialize empty cache
+            has_ever_had_peers: Arc::new(AtomicBool::new(false)),
             block_added_signal: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -2785,8 +2790,17 @@ impl Blockchain {
         tracing::debug!("🔄 2/3 consensus check cache MISS - recalculating");
         let result = self.check_2_3_consensus_for_production().await;
 
-        // Update cache
-        {
+        // Only cache results from real peer consensus, not bootstrap mode.
+        // Caching a bootstrap `true` could allow solo production for up to 30s
+        // after peers connect (stale cache), causing chain divergence.
+        let has_peers = {
+            let guard = self.peer_registry.read().await;
+            match guard.as_ref() {
+                Some(registry) => !registry.get_connected_peers().await.is_empty(),
+                None => false,
+            }
+        };
+        if has_peers {
             let mut cache = self.consensus_cache.write().await;
             *cache = Some(ConsensusCache {
                 result,
@@ -2821,10 +2835,25 @@ impl Blockchain {
 
         let connected_peers = peer_registry.get_connected_peers().await;
 
-        // Bootstrap mode: allow production with 0 peers
+        // Bootstrap mode: allow production with 0 peers ONLY if we've never had peers.
+        // Once peers have been seen, losing all peers means network issue, not bootstrap.
+        // Producing blocks solo after having had peers causes chain divergence.
         if connected_peers.is_empty() {
-            tracing::debug!("✅ Block production allowed in bootstrap mode (0 connected peers)");
+            if self.has_ever_had_peers.load(Ordering::Acquire) {
+                tracing::warn!(
+                    "⚠️ Block production blocked: 0 connected peers but node has previously had peers. \
+                     Solo block production disabled to prevent chain divergence."
+                );
+                return false;
+            }
+            tracing::debug!("✅ Block production allowed in bootstrap mode (0 connected peers, never had peers before)");
             return true;
+        }
+
+        // Mark that we've had peers — permanently disables bootstrap mode
+        if !self.has_ever_had_peers.load(Ordering::Acquire) {
+            self.has_ever_had_peers.store(true, Ordering::Release);
+            tracing::info!("🔒 Bootstrap mode permanently disabled — peers detected");
         }
 
         let our_height = self.current_height.load(Ordering::Acquire);
@@ -7843,6 +7872,7 @@ impl Clone for Blockchain {
             tx_index: self.tx_index.clone(),
             compress_blocks: self.compress_blocks,
             consensus_cache: self.consensus_cache.clone(),
+            has_ever_had_peers: self.has_ever_had_peers.clone(),
             block_added_signal: self.block_added_signal.clone(),
         }
     }
