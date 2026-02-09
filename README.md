@@ -65,7 +65,7 @@
   - Core consensus: TimeVote + TimeLock ✅
   - Liveness fallback: TimeGuard Protocol ✅
   - Network layer: P2P + RPC ✅
-  - AI systems: 8 optimization modules ✅
+  - AI systems: 7 optimization modules ✅
   - Storage: Sled database + snapshots ✅
 
 ### Security Audit Summary

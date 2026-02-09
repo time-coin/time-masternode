@@ -1,7 +1,7 @@
-# Network Architecture - TIME Coin Protocol v5
+# Network Architecture - TIME Coin Protocol v6.2
 
-**Document Version:** 1.0  
-**Last Updated:** December 23, 2024  
+**Document Version:** 1.1  
+**Last Updated:** February 9, 2026  
 **Status:** Production-Ready
 
 ---

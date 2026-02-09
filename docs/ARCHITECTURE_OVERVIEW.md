@@ -1,7 +1,7 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-02-01  
-**Version:** 1.1.0 (Fork Resolution Consistency Fix)
+**Last Updated:** 2026-02-09  
+**Version:** 1.1.0 (Fork Resolution & Dead Code Cleanup)
 
 ---
 
@@ -14,7 +14,7 @@
 - **Impact**: Network fragmentation - nodes on same-height fork couldn't agree on canonical chain
 - **Root Cause**: `choose_canonical_chain()` had VRF score comparison that contradicted hash tiebreaker
 - **Fix**: Removed VRF score from fork resolution; now uses "lower hash wins" consistently everywhere
-- **Result**: All fork resolution paths (blockchain.rs, fork_resolver.rs, masternode_authority.rs) now agree
+- **Result**: All fork resolution paths (blockchain.rs, masternode_authority.rs) now agree using 2/3 weighted stake consensus
 
 **Bug #1: Broadcast Callback Not Wired**
 - **Issue**: Consensus engine had no way to broadcast TimeVote requests
@@ -181,9 +181,9 @@ pub struct TimeLockConsensus {
 2. **Lower hash wins** - At equal height, lexicographically smaller block hash is canonical
 
 **Consistency:** This "lower hash wins" rule is applied uniformly across:
-- `blockchain.rs` - `choose_canonical_chain()`
-- `ai/fork_resolver.rs` - AI-assisted fork decisions
-- `masternode_authority.rs` - Masternode chain authority analysis
+- `blockchain.rs` - `choose_canonical_chain()` and `compare_chain_with_peers()` (2/3 weighted stake)
+- `ai/fork_resolver.rs` - Longest-chain fork decisions
+- `masternode_authority.rs` - Masternode chain authority analysis (tier-based tiebreaker)
 - `network/peer_connection.rs` - Peer chain comparison
 
 **Why lower hash?**

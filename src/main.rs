@@ -2436,6 +2436,9 @@ async fn main() {
             // NOTE: Masternodes announced via P2P are NOT auto-whitelisted.
             // Only peers from time-coin.io and config are trusted.
 
+            // Wire up AI system for attack detection enforcement
+            server.set_ai_system(ai_system.clone());
+
             // Give registry access to network broadcast channel
             registry
                 .set_broadcast_channel(server.tx_notifier.clone())
