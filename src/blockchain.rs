@@ -6118,10 +6118,7 @@ impl Blockchain {
 
         let (consensus_height, consensus_hash, consensus_peers) = consensus_chain;
 
-        // CRITICAL: Require consensus chain to have MAJORITY support by weighted stake
-        // Uses tier-weighted masternode stakes (Gold=1000, Silver=100, Bronze=10, Free=1)
-        // to match the 2/3 weighted threshold used in block production consensus.
-        // Non-responding peers are already gated by the response rate check above.
+        // Check weighted stake support for the consensus chain
         let mut consensus_weight = 0u64;
         let mut total_responding_weight = 0u64;
         for peer_ip in peer_tips.keys() {
@@ -6138,17 +6135,44 @@ impl Blockchain {
             tracing::warn!("⚠️  No responding peers with weight for consensus check");
             return None;
         }
-        let required_weight = (total_responding_weight * 2).div_ceil(3);
-        if consensus_weight < required_weight {
-            tracing::warn!(
-                "⚠️  Consensus chain at height {} has insufficient weighted support: {}/{} weight ({:.1}%) - need 2/3 ({}).",
+
+        // LONGEST CHAIN RULE: If the consensus chain is strictly taller than ALL other chains,
+        // it's canonical regardless of weighted vote — block production already proved consensus.
+        // Only require 2/3 weighted threshold for same-height fork tiebreakers.
+        let second_highest = chain_counts
+            .iter()
+            .filter(|((h, hash), _)| !(*h == consensus_height && *hash == consensus_hash))
+            .map(|((h, _), _)| *h)
+            .max()
+            .unwrap_or(0);
+
+        let height_advantage = consensus_height.saturating_sub(second_highest);
+
+        if height_advantage == 0 {
+            // Same-height fork — require 2/3 weighted support to pick a winner
+            let required_weight = (total_responding_weight * 2).div_ceil(3);
+            if consensus_weight < required_weight {
+                tracing::warn!(
+                    "⚠️  Same-height fork at {}: consensus has insufficient weighted support: {}/{} weight ({:.1}%) - need 2/3 ({}).",
+                    consensus_height,
+                    consensus_weight,
+                    total_responding_weight,
+                    (consensus_weight as f64 / total_responding_weight as f64) * 100.0,
+                    required_weight
+                );
+                return None;
+            }
+        } else {
+            // Longest chain is strictly taller — it wins by longest chain rule
+            // Log at debug to avoid noise; this is the normal, expected case
+            tracing::debug!(
+                "✅ Longest chain at height {} is {} blocks ahead of next chain at {} ({}/{} weight)",
                 consensus_height,
+                height_advantage,
+                second_highest,
                 consensus_weight,
-                total_responding_weight,
-                (consensus_weight as f64 / total_responding_weight as f64) * 100.0,
-                required_weight
+                total_responding_weight
             );
-            return None;
         }
 
         // Only log consensus result when it changes (prevents duplicate spam from multiple callers)
