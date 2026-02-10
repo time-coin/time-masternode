@@ -2314,8 +2314,7 @@ impl ConsensusEngine {
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
-        self.validate_transaction_with_locks(tx, Hash256::default())
-            .await
+        self.validate_transaction_with_locks(tx, tx.txid()).await
     }
 
     /// Validate transaction, allowing UTXOs locked by the specified txid
@@ -2341,12 +2340,16 @@ impl ConsensusEngine {
             ));
         }
 
-        // 2. Check inputs exist and are unspent (or locked by us)
+        // 2. Check inputs exist and are unspent (or locked/finalized by this tx)
         for input in &tx.inputs {
             match self.utxo_manager.get_state(&input.previous_output) {
                 Some(UTXOState::Unspent) => {}
                 Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {
                     // OK - locked by this transaction
+                }
+                Some(UTXOState::SpentFinalized { txid, .. }) if txid == our_txid => {
+                    // OK - already finalized by this transaction (e.g., receiving a block
+                    // containing a TX we already finalized locally via TimeVote)
                 }
                 Some(state) => {
                     return Err(format!("UTXO not unspent: {}", state));
@@ -2766,6 +2769,19 @@ impl ConsensusEngine {
 
             if self.tx_pool.is_finalized(&txid) {
                 tracing::info!("✅ TX {:?} auto-finalized", hex::encode(txid));
+
+                // CRITICAL: Transition UTXOs from Locked → SpentFinalized
+                // Without this, other nodes reject blocks containing this TX
+                // because the UTXOs are still in Locked state
+                for input in &tx.inputs {
+                    let new_state = UTXOState::SpentFinalized {
+                        txid,
+                        finalized_at: chrono::Utc::now().timestamp(),
+                        votes: 0,
+                    };
+                    self.utxo_manager
+                        .update_state(&input.previous_output, new_state);
+                }
 
                 // Broadcast finalization to all nodes so they also finalize it
                 // Include the transaction itself so nodes can add it if they don't have it

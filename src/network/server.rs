@@ -875,6 +875,17 @@ async fn handle_peer(
                                     // Move from pending → finalized pool so block producers can include it
                                     if consensus.tx_pool.finalize_transaction(*txid) {
                                         tracing::info!("📦 Moved TX {} to finalized pool on this node", hex::encode(*txid));
+
+                                        // CRITICAL: Transition UTXOs from Locked → SpentFinalized
+                                        // Without this, block validation rejects the TX ("UTXO not unspent: Locked")
+                                        for input in &tx.inputs {
+                                            let new_state = crate::types::UTXOState::SpentFinalized {
+                                                txid: *txid,
+                                                finalized_at: chrono::Utc::now().timestamp(),
+                                                votes: 0,
+                                            };
+                                            consensus.utxo_manager.update_state(&input.previous_output, new_state);
+                                        }
                                     } else {
                                         tracing::warn!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
                                     }
