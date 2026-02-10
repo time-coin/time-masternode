@@ -2190,13 +2190,51 @@ async fn main() {
                     let still_behind = new_expected.saturating_sub(new_height);
                     if still_behind > 0 {
                         tracing::info!(
-                            "🔄 Still {} blocks behind expected height {}, continuing catchup",
+                            "🔄 Still {} blocks behind expected height {}, waiting for peer sync",
                             still_behind,
                             new_expected
                         );
+
+                        // Invalidate consensus cache so next check uses fresh peer data
+                        block_blockchain.invalidate_consensus_cache().await;
+
+                        // Request fresh chain tips from all peers
+                        block_peer_registry
+                            .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                            .await;
+
+                        // Event-driven wait: wait for peers to report our new height
+                        // before attempting to produce the next block
+                        let tip_signal = block_peer_registry.chain_tip_updated_signal();
+                        let wait_result =
+                            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                                loop {
+                                    tip_signal.notified().await;
+                                    if block_blockchain.check_2_3_consensus_cached().await {
+                                        return true;
+                                    }
+                                }
+                            })
+                            .await;
+
+                        match wait_result {
+                            Ok(true) => {
+                                tracing::debug!(
+                                    "✅ Peers confirmed height {} — continuing catchup",
+                                    new_height
+                                );
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "⏱️ Peer sync timeout at height {} — retrying",
+                                    new_height
+                                );
+                            }
+                        }
+
                         is_producing.store(false, Ordering::SeqCst);
-                        interval.reset(); // Reset interval to avoid double-tick
-                        continue; // Skip waiting, loop immediately
+                        interval.reset();
+                        continue;
                     }
                 }
                 Err(e) => {

@@ -81,6 +81,8 @@ pub struct PeerConnectionRegistry {
     // Persistent fork error counter per peer (tracks errors across multiple block requests)
     // Maps peer IP -> error count (resets on successful block add)
     fork_error_counts: DashMap<String, u32>,
+    // Notified when any peer's chain tip is updated (for event-driven consensus checks)
+    chain_tip_updated: Arc<tokio::sync::Notify>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -112,6 +114,7 @@ impl PeerConnectionRegistry {
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
             fork_error_counts: DashMap::new(),
+            chain_tip_updated: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -815,6 +818,8 @@ impl PeerConnectionRegistry {
         let ip_only = extract_ip(peer_ip);
         let mut tips = self.peer_chain_tips.write().await;
         tips.insert(ip_only.to_string(), (height, hash));
+        drop(tips);
+        self.chain_tip_updated.notify_waiters();
     }
 
     /// Get a peer's chain tip (height + hash)
@@ -822,6 +827,11 @@ impl PeerConnectionRegistry {
         let ip_only = extract_ip(peer_ip);
         let tips = self.peer_chain_tips.read().await;
         tips.get(ip_only).copied()
+    }
+
+    /// Get the chain tip update signal (notified when any peer reports a new chain tip)
+    pub fn chain_tip_updated_signal(&self) -> Arc<tokio::sync::Notify> {
+        self.chain_tip_updated.clone()
     }
 
     /// Clear stale peer data when peer disconnects

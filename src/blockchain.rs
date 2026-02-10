@@ -2770,10 +2770,18 @@ impl Blockchain {
         Ok(block)
     }
 
+    /// Invalidate the 2/3 consensus cache, forcing the next check to query fresh peer data.
+    pub async fn invalidate_consensus_cache(&self) {
+        *self.consensus_cache.write().await = None;
+    }
+
     /// Cached version of consensus check - returns result from cache if fresh (< 30s old)
     /// Falls back to full check if cache miss or expired
     /// Saves 5-10ms per check by avoiding redundant peer queries
-    async fn check_2_3_consensus_cached(&self) -> bool {
+    ///
+    /// Invalidate the cache with `invalidate_consensus_cache()` after
+    /// producing a block to force a fresh check with updated peer data.
+    pub async fn check_2_3_consensus_cached(&self) -> bool {
         const CONSENSUS_CACHE_TTL: Duration = Duration::from_secs(30);
 
         // Check cache first
