@@ -2298,6 +2298,8 @@ impl ConsensusEngine {
     async fn broadcast(&self, msg: NetworkMessage) {
         if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
             callback(msg);
+        } else {
+            tracing::error!("❌ Broadcast attempted but callback not set!");
         }
     }
 

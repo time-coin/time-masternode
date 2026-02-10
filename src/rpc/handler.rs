@@ -11,7 +11,6 @@ use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::time::Duration;
@@ -24,7 +23,7 @@ pub struct RpcHandler {
     blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     start_time: SystemTime,
     network: NetworkType,
-    mempool: Arc<tokio::sync::RwLock<HashMap<[u8; 32], Transaction>>>,
+    // Note: mempool field removed - use consensus.tx_pool instead for accurate state
 }
 
 impl RpcHandler {
@@ -44,7 +43,6 @@ impl RpcHandler {
             blacklist,
             start_time: SystemTime::now(),
             network,
-            mempool: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
     pub async fn handle_request(&self, request: RpcRequest) -> RpcResponse {
@@ -312,11 +310,12 @@ impl RpcHandler {
             });
         }
 
-        // Check mempool first
+        // Check consensus tx_pool first (pending + finalized)
         let mut txid_array = [0u8; 32];
         txid_array.copy_from_slice(&txid);
 
-        if let Some(tx) = self.mempool.read().await.get(&txid_array) {
+        if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid_array) {
+            let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
             return Ok(json!({
                 "txid": hex::encode(txid_array),
                 "version": tx.version,
@@ -336,6 +335,7 @@ impl RpcHandler {
                     }
                 })).collect::<Vec<_>>(),
                 "confirmations": 0,
+                "finalized": is_finalized,
                 "time": tx.timestamp,
                 "blocktime": tx.timestamp
             }));
@@ -499,8 +499,8 @@ impl RpcHandler {
             let mut txid_array = [0u8; 32];
             txid_array.copy_from_slice(&txid);
 
-            // Check mempool first
-            if let Some(tx) = self.mempool.read().await.get(&txid_array) {
+            // Check consensus tx_pool first
+            if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid_array) {
                 let tx_bytes = bincode::serialize(&tx).map_err(|_| RpcError {
                     code: -8,
                     message: "Failed to serialize transaction".to_string(),
@@ -593,11 +593,9 @@ impl RpcHandler {
             }
         }
 
-        // Add to mempool
-        {
-            let mut mempool = self.mempool.write().await;
-            mempool.insert(txid, tx.clone());
-        }
+        // Transaction is already submitted to consensus via consensus.submit_transaction
+        // in sendtoaddress RPC, so we don't need to add to mempool here
+        // The consensus engine manages the tx_pool internally
 
         // Process transaction through consensus
         // Start TimeVote consensus to finalize this transaction
@@ -1018,13 +1016,18 @@ impl RpcHandler {
     }
 
     async fn get_mempool_info(&self) -> Result<Value, RpcError> {
-        let mempool = self.mempool.read().await;
-        let size = mempool.len();
-        let bytes: usize = mempool.values().map(|_| 250).sum(); // Estimate
+        // Get real mempool info from consensus engine
+        let (pending_count, finalized_count) = self.consensus.get_mempool_info();
+        let total_count = pending_count + finalized_count;
+
+        // Estimate bytes (250 bytes per transaction is reasonable average)
+        let bytes = total_count * 250;
 
         Ok(json!({
             "loaded": true,
-            "size": size,
+            "size": total_count,
+            "pending": pending_count,
+            "finalized": finalized_count,
             "bytes": bytes,
             "usage": bytes,
             "maxmempool": 300000000,
@@ -1034,8 +1037,18 @@ impl RpcHandler {
     }
 
     async fn get_raw_mempool(&self) -> Result<Value, RpcError> {
-        let mempool = self.mempool.read().await;
-        let txids: Vec<String> = mempool.keys().map(hex::encode).collect();
+        // Get transaction IDs from consensus tx_pool
+        let pending_txs = self.consensus.tx_pool.get_pending_transactions();
+        let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
+
+        let mut txids: Vec<String> = Vec::new();
+        for tx in pending_txs {
+            txids.push(hex::encode(tx.txid()));
+        }
+        for tx in finalized_txs {
+            txids.push(hex::encode(tx.txid()));
+        }
+
         Ok(json!(txids))
     }
 
@@ -1551,17 +1564,16 @@ impl RpcHandler {
             }));
         }
 
-        // Check if transaction is in mempool
-        let mempool = self.mempool.read().await;
-        if mempool.contains_key(&txid_array) {
+        // Check if transaction is in consensus tx_pool
+        if self.consensus.tx_pool.has_transaction(&txid_array) {
+            let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
             return Ok(json!({
                 "txid": txid,
-                "finalized": false,
-                "status": "pending",
+                "finalized": is_finalized,
+                "status": if is_finalized { "finalized" } else { "pending" },
                 "in_mempool": true
             }));
         }
-        drop(mempool);
 
         // Transaction not found
         Err(RpcError {
@@ -2375,17 +2387,8 @@ impl RpcHandler {
             if let Some(crate::types::UTXOState::Locked { txid, locked_at }) =
                 self.utxo_manager.get_state(&utxo.outpoint)
             {
-                // Check if the locking transaction exists in mempool or blockchain
-                let tx_exists = {
-                    // Check mempool
-                    let in_mempool = self.mempool.read().await.contains_key(&txid);
-
-                    // Check if it's in consensus pool (pending or finalized)
-                    let in_pool = self.consensus.tx_pool.is_pending(&txid)
-                        || self.consensus.tx_pool.is_finalized(&txid);
-
-                    in_mempool || in_pool
-                };
+                // Check if the locking transaction exists in consensus pool or blockchain
+                let tx_exists = self.consensus.tx_pool.has_transaction(&txid);
 
                 if !tx_exists {
                     // Transaction doesn't exist - this is an orphaned lock
