@@ -1495,10 +1495,34 @@ impl MessageHandler {
                 }
             }
             Err(e) => {
-                warn!(
-                    "❌ [{}] Failed to add block {}: {}",
-                    self.direction, block_height, e
-                );
+                if e.contains("Fork detected") || e.contains("previous_hash") {
+                    // Fork detected — trigger immediate resolution
+                    warn!(
+                        "🔀 [{}] Fork detected with {} at block {}: {}",
+                        self.direction, self.peer_ip, block_height, e
+                    );
+                    let current_height = context.blockchain.get_height();
+
+                    // Request blocks going back far enough to find common ancestor
+                    let request_from = current_height.saturating_sub(20).max(1);
+                    info!(
+                        "📥 [{}] Requesting blocks {}-{} from {} for fork resolution",
+                        self.direction, request_from, block_height, self.peer_ip
+                    );
+                    let sync_msg = NetworkMessage::GetBlocks(request_from, block_height);
+                    if let Err(send_err) = context
+                        .peer_registry
+                        .send_to_peer(&self.peer_ip, sync_msg)
+                        .await
+                    {
+                        warn!("Failed to request blocks for fork resolution: {}", send_err);
+                    }
+                } else {
+                    warn!(
+                        "❌ [{}] Failed to add block {}: {}",
+                        self.direction, block_height, e
+                    );
+                }
             }
         }
 
