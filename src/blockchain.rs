@@ -221,6 +221,9 @@ pub struct Blockchain {
     /// Signal notified when a new block is successfully added to the chain.
     /// Used by block production loop to wake up instantly instead of polling.
     block_added_signal: Arc<tokio::sync::Notify>,
+    /// Last logged consensus result (height, hash) to suppress duplicate log lines
+    #[allow(clippy::type_complexity)]
+    last_consensus_log: Arc<RwLock<Option<(u64, [u8; 32])>>>,
 }
 
 impl Blockchain {
@@ -306,6 +309,7 @@ impl Blockchain {
             consensus_cache: Arc::new(RwLock::new(None)), // Initialize empty cache
             has_ever_had_peers: Arc::new(AtomicBool::new(false)),
             block_added_signal: Arc::new(tokio::sync::Notify::new()),
+            last_consensus_log: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -6111,13 +6115,31 @@ impl Blockchain {
             return None;
         }
 
-        tracing::info!(
-            "✅ [CONSENSUS SELECTED] Height {}, hash {}, {} peers: {:?}",
-            consensus_height,
-            hex::encode(&consensus_hash[..8]),
-            consensus_peers.len(),
-            consensus_peers
-        );
+        // Only log consensus result when it changes (prevents duplicate spam from multiple callers)
+        let consensus_key = (consensus_height, consensus_hash);
+        let should_log = {
+            let last = self.last_consensus_log.read().await;
+            *last != Some(consensus_key)
+        };
+        if should_log {
+            let peer_summary = if consensus_peers.len() <= 3 {
+                format!("{:?}", consensus_peers)
+            } else {
+                format!(
+                    "{:?} ... and {} more",
+                    &consensus_peers[..3],
+                    consensus_peers.len() - 3
+                )
+            };
+            tracing::info!(
+                "✅ [CONSENSUS SELECTED] Height {}, hash {}, {} peers: {}",
+                consensus_height,
+                hex::encode(&consensus_hash[..8]),
+                consensus_peers.len(),
+                peer_summary
+            );
+            *self.last_consensus_log.write().await = Some(consensus_key);
+        }
 
         // Store consensus peers for validation during block acceptance
         *self.consensus_peers.write().await = consensus_peers.clone();
@@ -6162,9 +6184,9 @@ impl Blockchain {
             }
         }
 
-        // DEBUG: Log consensus decision
-        tracing::info!(
-            "🔍 [DEBUG] Consensus: height {} hash {} ({} peers agree). Our height: {} hash {}",
+        // Log consensus vs our state at debug level (avoid spamming at info)
+        tracing::debug!(
+            "Consensus: height {} hash {} ({} peers agree). Our height: {} hash {}",
             consensus_height,
             hex::encode(&consensus_hash[..8]),
             consensus_peers.len(),
@@ -6175,11 +6197,10 @@ impl Blockchain {
         // Case 1: Longest chain is longer than us - sync to it
         if consensus_height > our_height {
             tracing::warn!(
-                "🔀 FORK RESOLUTION TRIGGERED: longest chain height {} > our height {} (found on {} peers: {:?})",
+                "🔀 FORK RESOLUTION TRIGGERED: longest chain height {} > our height {} ({} peers agree)",
                 consensus_height,
                 our_height,
-                consensus_peers.len(),
-                consensus_peers
+                consensus_peers.len()
             );
             tracing::warn!("   Will attempt to sync from peer: {}", consensus_peers[0]);
             return Some((consensus_height, consensus_peers[0].clone()));
@@ -7866,6 +7887,7 @@ impl Clone for Blockchain {
             consensus_cache: self.consensus_cache.clone(),
             has_ever_had_peers: self.has_ever_had_peers.clone(),
             block_added_signal: self.block_added_signal.clone(),
+            last_consensus_log: self.last_consensus_log.clone(),
         }
     }
 }
