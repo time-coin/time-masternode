@@ -857,6 +857,13 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TransactionFinalized { txid, tx } => {
+                                    // Dedup: skip if we've already processed this finalization
+                                    let already_seen = seen_transactions.check_and_insert(txid).await;
+                                    if already_seen {
+                                        tracing::debug!("🔁 Ignoring duplicate TransactionFinalized {} from {}", hex::encode(*txid), peer.addr);
+                                        continue;
+                                    }
+
                                     tracing::info!("✅ Transaction {} finalized (from {})",
                                         hex::encode(*txid), peer.addr);
 
