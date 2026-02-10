@@ -507,13 +507,27 @@ impl PrepareVoteAccumulator {
             .push((voter_id, weight));
     }
 
-    /// Check if timevote consensus reached: majority of sample votes for block
-    /// Pure timevote: need >50% of sampled validators to agree
+    /// Check if timevote consensus reached: majority of participating validators agree
+    ///
+    /// ADAPTIVE QUORUM: The denominator is the smaller of `sample_size` (active validators)
+    /// and the total unique voters across ALL block hashes. This ensures that connected
+    /// but non-participating nodes (e.g., on a fork, or failing to vote) don't inflate
+    /// the quorum denominator and block finalization for the agreeing majority.
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
-            // Majority: need more than half of sampled validators
-            vote_count > sample_size / 2
+            // Count unique voters across ALL block hashes (participating validators)
+            let mut all_voters = std::collections::HashSet::new();
+            for entry in self.votes.iter() {
+                for (voter_id, _) in entry.value() {
+                    all_voters.insert(voter_id.clone());
+                }
+            }
+            let participating = all_voters.len();
+            // Use the smaller of active validators and actual participants as denominator
+            let effective_size = sample_size.min(participating.max(1));
+            // Majority: need more than half of participating validators
+            vote_count > effective_size / 2
         } else {
             false
         }
@@ -570,13 +584,26 @@ impl PrecommitVoteAccumulator {
             .push((voter_id, weight));
     }
 
-    /// Check if timevote consensus reached: majority of sample votes for block
-    /// Pure timevote: need >50% of sampled validators to agree (consistent with prepare)
+    /// Check if timevote consensus reached: majority of participating validators agree
+    ///
+    /// ADAPTIVE QUORUM: Same logic as PrepareVoteAccumulator::check_consensus.
+    /// Uses min(active_validators, total_unique_voters) as denominator so that
+    /// non-participating nodes don't block finalization.
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
-            // Majority: need more than half of sampled validators
-            vote_count > sample_size / 2
+            // Count unique voters across ALL block hashes (participating validators)
+            let mut all_voters = std::collections::HashSet::new();
+            for entry in self.votes.iter() {
+                for (voter_id, _) in entry.value() {
+                    all_voters.insert(voter_id.clone());
+                }
+            }
+            let participating = all_voters.len();
+            // Use the smaller of active validators and actual participants as denominator
+            let effective_size = sample_size.min(participating.max(1));
+            // Majority: need more than half of participating validators
+            vote_count > effective_size / 2
         } else {
             false
         }
@@ -1594,13 +1621,14 @@ impl TimeVoteConsensus {
     }
 
     /// Check if prepare consensus reached (Phase 3D.2)
-    /// Pure timevote: majority of sampled validators must vote for block
+    /// Pure timevote: majority of participating validators must vote for block
     pub fn check_prepare_consensus(&self, block_hash: Hash256) -> bool {
         let validators = self.get_validators();
         let sample_size = validators.len();
 
         // BOOTSTRAP FIX: If no active validators, use all registered masternodes
-        // This handles genesis/block 1 where nodes haven't accumulated peer reports yet
+        // as the upper bound. The adaptive quorum in check_consensus() will
+        // min() this with actual participants, so non-voting nodes won't block finalization.
         let sample_size = if sample_size == 0 {
             let all_registered = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(self.masternode_registry.list_all())
@@ -1660,13 +1688,14 @@ impl TimeVoteConsensus {
     }
 
     /// Check if precommit consensus reached (Phase 3E.2)
-    /// Pure timevote: majority of sampled validators must vote for block
+    /// Pure timevote: majority of participating validators must vote for block
     pub fn check_precommit_consensus(&self, block_hash: Hash256) -> bool {
         let validators = self.get_validators();
         let sample_size = validators.len();
 
         // BOOTSTRAP FIX: If no active validators, use all registered masternodes
-        // This handles genesis/block 1 where nodes haven't accumulated peer reports yet
+        // as the upper bound. The adaptive quorum in check_consensus() will
+        // min() this with actual participants, so non-voting nodes won't block finalization.
         let sample_size = if sample_size == 0 {
             let all_registered = tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current().block_on(self.masternode_registry.list_all())
