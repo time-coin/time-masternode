@@ -1471,10 +1471,28 @@ impl MessageHandler {
                 }
             }
             Ok(false) => {
-                debug!(
-                    "⏭️ [{}] Skipped block {} (already have or invalid)",
-                    self.direction, block_height
-                );
+                let current_height = context.blockchain.get_height();
+                if block_height > current_height + 1 {
+                    // Block is ahead of us — immediately request missing blocks
+                    let gap = block_height - current_height - 1;
+                    info!(
+                        "📥 [{}] Block {} is ahead of our height {} (gap: {}) — requesting missing blocks from {}",
+                        self.direction, block_height, current_height, gap, self.peer_ip
+                    );
+                    let sync_msg = NetworkMessage::GetBlocks(current_height + 1, block_height);
+                    if let Err(e) = context
+                        .peer_registry
+                        .send_to_peer(&self.peer_ip, sync_msg)
+                        .await
+                    {
+                        warn!("Failed to request missing blocks: {}", e);
+                    }
+                } else {
+                    debug!(
+                        "⏭️ [{}] Skipped block {} (already have or not sequential)",
+                        self.direction, block_height
+                    );
+                }
             }
             Err(e) => {
                 warn!(
@@ -2627,13 +2645,30 @@ impl MessageHandler {
                 self.direction, added, self.peer_ip, skipped
             );
         } else if skipped > 0 && !fork_detected {
-            warn!(
-                "⚠️ [{}] No blocks added from {} - all {} blocks skipped (likely not sequential with our chain at height {})",
-                self.direction,
-                self.peer_ip,
-                skipped,
-                context.blockchain.get_height()
-            );
+            // No blocks added — check if we're behind and need to request missing blocks
+            let current_height = context.blockchain.get_height();
+            if start_height > current_height + 1 {
+                info!(
+                    "📥 [{}] Blocks {}-{} are ahead of our height {} — requesting missing blocks from {}",
+                    self.direction, start_height, end_height, current_height, self.peer_ip
+                );
+                let sync_msg = NetworkMessage::GetBlocks(current_height + 1, end_height);
+                if let Err(e) = context
+                    .peer_registry
+                    .send_to_peer(&self.peer_ip, sync_msg)
+                    .await
+                {
+                    warn!("Failed to request missing blocks: {}", e);
+                }
+            } else {
+                warn!(
+                    "⚠️ [{}] No blocks added from {} - all {} blocks skipped (likely not sequential with our chain at height {})",
+                    self.direction,
+                    self.peer_ip,
+                    skipped,
+                    current_height
+                );
+            }
         }
 
         if fork_detected {
