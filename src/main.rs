@@ -2011,6 +2011,40 @@ async fn main() {
                 continue;
             }
 
+            // Wait for 2/3 peer consensus before producing (event-driven).
+            // After receiving a block from a peer, our height advances but peers
+            // may still report their old height. Instead of failing with "no 2/3
+            // consensus" and retrying every second, wait for peer chain tips to update.
+            if !block_blockchain.check_2_3_consensus_cached().await {
+                block_blockchain.invalidate_consensus_cache().await;
+                block_peer_registry
+                    .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                    .await;
+
+                let tip_signal = block_peer_registry.chain_tip_updated_signal();
+                let consensus_ok =
+                    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        loop {
+                            tip_signal.notified().await;
+                            // Re-check with fresh data (invalidate stale cache each time)
+                            block_blockchain.invalidate_consensus_cache().await;
+                            if block_blockchain.check_2_3_consensus_cached().await {
+                                return true;
+                            }
+                        }
+                    })
+                    .await;
+
+                if consensus_ok != Ok(true) {
+                    tracing::warn!(
+                        "⏱️ No 2/3 peer consensus for block {} after 10s — skipping this attempt",
+                        next_height
+                    );
+                    is_producing.store(false, Ordering::SeqCst);
+                    continue;
+                }
+            }
+
             // Produce the block
             match block_blockchain
                 .produce_block_at_height(
