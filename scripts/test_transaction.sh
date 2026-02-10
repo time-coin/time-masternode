@@ -57,6 +57,16 @@ fi
 
 log_info "Using CLI: $CLI_CMD"
 
+# Check if daemon is reachable
+log_info "Checking if daemon is running..."
+if ! $CLI_CMD getblockchaininfo >/dev/null 2>&1; then
+    log_error "Cannot connect to timed daemon"
+    log_info "Please ensure timed is running before running this test"
+    log_info "Start daemon with: timed (or ./target/release/timed)"
+    exit 1
+fi
+log_success "Daemon is running"
+
 log_info "Starting transaction test..."
 echo ""
 
@@ -113,8 +123,8 @@ LOCKED_BALANCE=$(echo "$BALANCE_JSON" | jq -r '.locked // 0')
 log_info "Available balance: $AVAILABLE_BALANCE TIME"
 log_info "Locked balance: $LOCKED_BALANCE TIME"
 
-# Check if we have enough balance
-if (( $(echo "$AVAILABLE_BALANCE < $AMOUNT" | bc -l) )); then
+# Check if we have enough balance (using awk for portability instead of bc)
+if awk -v avail="$AVAILABLE_BALANCE" -v amt="$AMOUNT" 'BEGIN {exit !(avail < amt)}'; then
     log_error "Insufficient balance. Need $AMOUNT TIME, have $AVAILABLE_BALANCE TIME available"
     exit 1
 fi
@@ -261,33 +271,31 @@ if [ "$CONFIRMED" = false ]; then
     log_info "Check status later with: $CLI_CMD gettransaction $TXID"
     echo ""
     
-    # Show diagnostic logs
-    log_info "=== Diagnostic Logs (last 2 minutes) ==="
+    # Show diagnostic info
+    log_info "=== Diagnostic Information ==="
     echo ""
     
-    log_info "1. Transaction broadcast:"
-    journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "Received new transaction.*${TXID:0:16}" | head -5 || echo "  No broadcast logs found"
-    echo ""
-    
-    log_info "2. TimeVote finalization:"
-    journalctl -u timed --since "2 minutes ago" --no-pager | grep -iE "finalized.*${TXID:0:16}|${TXID:0:16}.*finalized" | head -5 || echo "  No finalization logs found"
-    echo ""
-    
-    log_info "3. TransactionFinalized broadcast (Bug #4 fix):"
-    journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "Broadcast TransactionFinalized.*${TXID:0:16}" | head -5 || echo "  No broadcast logs found (Bug #4 may not be fixed!)"
-    echo ""
-    
-    log_info "4. Recent blocks produced:"
-    journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "Block.*produced|Including.*finalized" | tail -5 || echo "  No block production logs found"
-    echo ""
-    
-    log_info "5. Errors/failures:"
-    journalctl -u timed --since "2 minutes ago" --no-pager | grep -iE "error|failed" | grep -v "No precommit voters" | tail -5 || echo "  No errors found"
-    echo ""
-    
-    log_info "6. Mempool status:"
+    log_info "1. Mempool status:"
     $CLI_CMD getmempoolinfo 2>&1 || echo "  Failed to get mempool info"
     echo ""
+    
+    log_info "2. Recent blockchain info:"
+    $CLI_CMD getblockchaininfo 2>&1 | jq -r 'del(.blocks_info) | del(.genesis_info)' 2>/dev/null || echo "  Failed to get blockchain info"
+    echo ""
+    
+    log_info "3. Masternode connectivity:"
+    $CLI_CMD masternodelist 2>&1 | jq -r '.masternodes[]? | select(.is_connected == true) | {ip: .address, wallet: .wallet_address}' 2>/dev/null | head -5 || echo "  Failed to get masternode info"
+    echo ""
+    
+    # Show system logs if journalctl is available (Linux only)
+    if command -v journalctl &> /dev/null; then
+        log_info "4. System logs (last 2 minutes):"
+        journalctl -u timed --since "2 minutes ago" --no-pager | grep -E "transaction.*${TXID:0:16}|finalized|TimeProof" | head -10 || echo "  No relevant logs found"
+        echo ""
+    else
+        log_info "4. System logs: (journalctl not available - check logs manually)"
+        echo ""
+    fi
     
     exit 2
 fi
