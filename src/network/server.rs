@@ -59,6 +59,7 @@ pub struct NetworkServer {
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
     pub seen_blocks: Arc<DeduplicationFilter>, // Bloom filter for block heights
     pub seen_transactions: Arc<DeduplicationFilter>, // Bloom filter for tx hashes
+    pub seen_utxo_locks: Arc<DeduplicationFilter>, // Bloom filter for UTXO lock updates
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     #[allow(dead_code)]
@@ -162,6 +163,7 @@ impl NetworkServer {
             peer_manager,
             seen_blocks: Arc::new(DeduplicationFilter::new(Duration::from_secs(300))), // 5 min rotation
             seen_transactions: Arc::new(DeduplicationFilter::new(Duration::from_secs(600))), // 10 min rotation
+            seen_utxo_locks: Arc::new(DeduplicationFilter::new(Duration::from_secs(300))), // 5 min rotation
             connection_manager,
             peer_registry,
             peer_state,
@@ -385,6 +387,7 @@ impl NetworkServer {
             let broadcast_tx = self.tx_notifier.clone();
             let seen_blocks = self.seen_blocks.clone();
             let seen_txs = self.seen_transactions.clone();
+            let seen_locks = self.seen_utxo_locks.clone();
             let conn_mgr = self.connection_manager.clone();
             let peer_reg = self.peer_registry.clone();
             let local_ip = self.local_ip.clone();
@@ -409,6 +412,7 @@ impl NetworkServer {
                     broadcast_tx,
                     seen_blocks,
                     seen_txs,
+                    seen_locks,
                     conn_mgr,
                     peer_reg,
                     local_ip,
@@ -472,6 +476,7 @@ async fn handle_peer(
     broadcast_tx: broadcast::Sender<NetworkMessage>,
     seen_blocks: Arc<DeduplicationFilter>,
     seen_transactions: Arc<DeduplicationFilter>,
+    seen_utxo_locks: Arc<DeduplicationFilter>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
     _local_ip: Option<String>,
@@ -752,6 +757,40 @@ async fn handle_peer(
                                 // PRIORITY: UTXO locks MUST be processed immediately, even during block sync
                                 // This prevents double-spend race conditions
                                 NetworkMessage::UTXOStateUpdate { outpoint, state } => {
+                                    // Create unique identifier for this UTXO lock update
+                                    let mut lock_id = Vec::new();
+                                    lock_id.extend_from_slice(&outpoint.txid);
+                                    lock_id.extend_from_slice(&outpoint.vout.to_le_bytes());
+
+                                    // Add state discriminant to differentiate lock types
+                                    match state {
+                                        UTXOState::Locked { txid, .. } => {
+                                            lock_id.push(1); // Locked state
+                                            lock_id.extend_from_slice(txid);
+                                        }
+                                        UTXOState::Unspent => lock_id.push(2),
+                                        UTXOState::SpentPending { txid, .. } => {
+                                            lock_id.push(3);
+                                            lock_id.extend_from_slice(txid);
+                                        }
+                                        UTXOState::SpentFinalized { txid, .. } => {
+                                            lock_id.push(4);
+                                            lock_id.extend_from_slice(txid);
+                                        }
+                                        UTXOState::Confirmed { txid, .. } => {
+                                            lock_id.push(5);
+                                            lock_id.extend_from_slice(txid);
+                                        }
+                                    }
+
+                                    // Check if we've already processed this exact UTXO lock update
+                                    let already_seen = seen_utxo_locks.check_and_insert(&lock_id).await;
+
+                                    if already_seen {
+                                        tracing::debug!("🔁 Ignoring duplicate UTXO lock update from {}", peer.addr);
+                                        continue;
+                                    }
+
                                     tracing::debug!("🔒 PRIORITY: Received UTXO lock update from {}", peer.addr);
                                     consensus.utxo_manager.update_state(outpoint, state.clone());
 
@@ -764,7 +803,7 @@ async fn handle_peer(
                                         );
                                     }
 
-                                    // Gossip lock to other peers immediately
+                                    // Gossip lock to other peers immediately (only if not duplicate)
                                     let _ = broadcast_tx.send(msg.clone());
                                 }
 
