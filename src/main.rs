@@ -1909,10 +1909,15 @@ async fn main() {
             // Log leader selection at INFO level every 30 seconds to help debug production issues
             static LAST_LEADER_LOG: std::sync::atomic::AtomicI64 =
                 std::sync::atomic::AtomicI64::new(0);
+            static LAST_LEADER_ATTEMPT: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
             let now_secs = chrono::Utc::now().timestamp();
             let last_log = LAST_LEADER_LOG.load(Ordering::Relaxed);
-            if now_secs - last_log >= 30 || leader_attempt > 0 {
+            let prev_attempt = LAST_LEADER_ATTEMPT.load(Ordering::Relaxed);
+            // Log every 30s, or immediately when leader attempt changes
+            if now_secs - last_log >= 30 || leader_attempt != prev_attempt {
                 LAST_LEADER_LOG.store(now_secs, Ordering::Relaxed);
+                LAST_LEADER_ATTEMPT.store(leader_attempt, Ordering::Relaxed);
                 tracing::info!(
                     "🎲 Block {} leader selection: {} of {} masternodes, selected: {} (us: {}){}",
                     next_height,
