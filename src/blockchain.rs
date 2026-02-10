@@ -2955,14 +2955,6 @@ impl Blockchain {
                 // Check if peer agrees on our (height, hash)
                 if peer_height == our_height && peer_hash == our_hash {
                     weight_on_our_chain += peer_weight;
-                } else if peer_height == our_height.saturating_sub(1) && our_height > 0 {
-                    // Peer is exactly 1 block behind — check if they're on our chain
-                    // (they haven't received our latest block yet, but agree on the parent)
-                    if let Ok(parent_hash) = self.get_block_hash(our_height - 1) {
-                        if peer_hash == parent_hash {
-                            weight_on_our_chain += peer_weight;
-                        }
-                    }
                 }
             }
         }
