@@ -34,7 +34,7 @@ const ALERT_REORG_DEPTH: u64 = 100; // Alert on reorgs deeper than this
 
 // P2P sync configuration (Phase 3 Step 4: Extended timeouts for masternodes)
 const PEER_SYNC_TIMEOUT_SECS: u64 = 60; // Short timeout for responsive sync (1 min)
-const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 30; // Check sync every 30 seconds (reduced from 60s for faster fork detection)
+const SYNC_COORDINATOR_INTERVAL_SECS: u64 = 10; // Check sync every 10 seconds
 
 // Chain work constants - each block adds work based on validator count
 const BASE_WORK_PER_BLOCK: u128 = 1_000_000;
@@ -2205,9 +2205,8 @@ impl Blockchain {
                     }
                 }
 
-                // Wait for responses to arrive (increased timeout for high-latency networks)
-                // With 10+ masternodes, some may be slow to respond - wait longer to collect responses
-                tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                // Wait for responses to arrive
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
                 // Use the fresh chain tip data we just requested (already stored in peer registry)
