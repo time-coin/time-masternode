@@ -1454,10 +1454,9 @@ async fn main() {
                         "📡 Periodic chain tip refresh: requesting from {} peer(s)",
                         connected.len()
                     );
-                    for peer_ip in &connected {
-                        let msg = crate::network::message::NetworkMessage::GetChainTip;
-                        let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
-                    }
+                    block_peer_registry
+                        .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                        .await;
                     last_chain_tip_request = std::time::Instant::now();
                 }
             }
@@ -1660,8 +1659,8 @@ async fn main() {
             let next_block_scheduled_time = genesis_timestamp + (next_height as i64 * 600); // 600 seconds (10 min) per block
             let time_past_scheduled = now_timestamp - next_block_scheduled_time;
 
-            // Grace period: 60 seconds after scheduled time before we produce
-            const GRACE_PERIOD_SECS: i64 = 60;
+            // Grace period: 10 seconds after scheduled time before we produce
+            const GRACE_PERIOD_SECS: i64 = 10;
 
             // Sync threshold: if more than this many blocks behind, try to sync first
             const SYNC_THRESHOLD_BLOCKS: u64 = 5;
@@ -1739,8 +1738,7 @@ async fn main() {
                     }
                 } else if !connected_peers.is_empty() {
                     // Not in syncing state - check consensus to decide sync vs produce
-                    // First, check consensus: are all peers at the same height as us?
-                    // This detects bootstrap scenarios where no one has produced blocks yet
+                    // Single consensus check handles both sync-behind and same-height fork cases
                     let min_peers_for_check = connected_peers.len().min(3);
                     if connected_peers.len() >= min_peers_for_check {
                         if let Some((consensus_height, _)) =
@@ -1765,13 +1763,19 @@ async fn main() {
                                 }
                                 continue;
                             }
-                            // consensus_height <= current_height with Some = fork scenario,
-                            // sync_from_peers was already attempted — fall through to produce
+                            // consensus_height == current_height with Some = same-height fork
+                            // We're on the minority chain — sync to majority before producing
+                            tracing::warn!(
+                                "🔀 Fork detected at height {}: syncing to majority chain before producing",
+                                current_height
+                            );
+                            if let Err(e) = block_blockchain.sync_from_peers(None).await {
+                                tracing::warn!("⚠️  Sync to majority failed: {}", e);
+                            }
+                            continue;
                         }
                         // None means all peers agree on our chain (same height, same hash).
                         // This is a POSITIVE confirmation — safe to proceed to block production.
-                        // No stale-data guard needed: compare_chain_with_peers() already
-                        // queried peers and confirmed agreement.
                         tracing::debug!(
                             "Catchup: peers agree at height {} - proceeding to production",
                             current_height
@@ -1792,34 +1796,6 @@ async fn main() {
 
             // Case 3: Within grace period or sync failed - time to produce
             // Use TimeLock consensus for leader election
-
-            // First: Verify we're on the consensus chain (prevent fork perpetuation)
-            // Use compatible peers only (excludes nodes on incompatible chains like old software)
-            let connected_peers = block_peer_registry.get_compatible_peers().await;
-            tracing::debug!(
-                "Compatible peers for consensus: {} peers",
-                connected_peers.len()
-            );
-            let min_peers_for_consensus = (masternodes.len() / 2).max(2); // Majority or at least 2
-
-            if connected_peers.len() >= min_peers_for_consensus {
-                // Check if we're on the same chain as majority
-                if let Some((consensus_height, _)) =
-                    block_blockchain.compare_chain_with_peers().await
-                {
-                    if consensus_height == current_height {
-                        // Same height but different hash - we're on minority chain
-                        tracing::warn!(
-                            "🔀 Fork detected at height {}: syncing to majority chain before producing",
-                            current_height
-                        );
-                        if let Err(e) = block_blockchain.sync_from_peers(None).await {
-                            tracing::warn!("⚠️  Sync to majority failed: {}", e);
-                        }
-                        continue;
-                    }
-                }
-            }
 
             // Get previous block hash for leader selection
             let prev_block_hash = match block_blockchain.get_block_hash(current_height) {
@@ -1972,6 +1948,7 @@ async fn main() {
             // Safety checks before producing
             // Always require at least 3 peers to prevent isolated nodes from creating forks
             // Even during catchup, we need network consensus to produce valid blocks
+            let connected_peers = block_peer_registry.get_compatible_peers().await;
             let min_peers_required = 3;
             if connected_peers.len() < min_peers_required {
                 tracing::warn!(
@@ -2128,7 +2105,7 @@ async fn main() {
                     let consensus_timeout = if blocks_behind > 0 {
                         std::time::Duration::from_secs(10) // Catchup: shorter timeout
                     } else {
-                        std::time::Duration::from_secs(30) // Normal: full timeout
+                        std::time::Duration::from_secs(15) // Normal: wait for consensus signal
                     };
 
                     let block_signal = block_blockchain.block_added_signal();
