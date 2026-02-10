@@ -255,6 +255,19 @@ impl TransactionPool {
         self.pending.get(txid).map(|e| e.tx.clone())
     }
 
+    /// Get a transaction from either pending or finalized pool
+    pub fn get_transaction(&self, txid: &Hash256) -> Option<Transaction> {
+        self.pending
+            .get(txid)
+            .or_else(|| self.finalized.get(txid))
+            .map(|e| e.tx.clone())
+    }
+
+    /// Get all pending transactions
+    pub fn get_pending_transactions(&self) -> Vec<Transaction> {
+        self.pending.iter().map(|e| e.value().tx.clone()).collect()
+    }
+
     /// Check if transaction is finalized
     #[allow(dead_code)]
     pub fn is_finalized(&self, txid: &Hash256) -> bool {
