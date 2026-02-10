@@ -1296,6 +1296,35 @@ impl Blockchain {
         // If expected height is far ahead, peer cache is likely stale — don't skip sync
         const MAX_BOOTSTRAP_SHORTCUT_BEHIND: u64 = 10;
 
+        // ALWAYS check if peers actually have blocks beyond our height.
+        // Even when far behind time-based target, if no peer has more blocks than us,
+        // syncing is futile — the blocks need to be produced, not downloaded.
+        if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+            let connected_peers = peer_registry.get_connected_peers().await;
+            if !connected_peers.is_empty() {
+                let mut max_peer_height = current;
+                let mut peers_checked = 0u32;
+                for peer_ip in &connected_peers {
+                    if let Some((height, _)) = peer_registry.get_peer_chain_tip(peer_ip).await {
+                        peers_checked += 1;
+                        if height > max_peer_height {
+                            max_peer_height = height;
+                        }
+                    }
+                }
+
+                if peers_checked >= 2 && max_peer_height <= current {
+                    tracing::info!(
+                        "✅ No peers have blocks beyond height {} ({} peers checked, target {}). Skipping sync — blocks must be produced.",
+                        current,
+                        peers_checked,
+                        target
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         if blocks_behind_target <= MAX_BOOTSTRAP_SHORTCUT_BEHIND {
             if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
                 let connected_peers = peer_registry.get_connected_peers().await;
