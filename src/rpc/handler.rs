@@ -393,7 +393,16 @@ impl RpcHandler {
                             wallet_output as i64
                         };
 
-                        return Ok(json!({
+                        // Look up TimeProof certificate
+                        let timeproof_json = self.consensus.finality_proof_mgr
+                            .get_timeproof(&txid_array)
+                            .map(|proof| json!({
+                                "votes": proof.votes.len(),
+                                "slot_index": proof.slot_index,
+                                "accumulated_weight": proof.votes.iter().map(|v| v.voter_weight).sum::<u64>(),
+                            }));
+
+                        let mut result = json!({
                             "txid": hex::encode(txid_array),
                             "version": tx.version,
                             "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
@@ -421,7 +430,13 @@ impl RpcHandler {
                             "blocktime": block.header.timestamp,
                             "blockhash": hex::encode(block.hash()),
                             "height": location.block_height
-                        }));
+                        });
+
+                        if let Some(tp) = timeproof_json {
+                            result["timeproof"] = tp;
+                        }
+
+                        return Ok(result);
                     }
                 }
             }
@@ -483,7 +498,16 @@ impl RpcHandler {
                 wallet_output as i64
             };
 
-            return Ok(json!({
+            // Look up TimeProof certificate
+            let timeproof_json = self.consensus.finality_proof_mgr
+                .get_timeproof(&txid_array)
+                .map(|proof| json!({
+                    "votes": proof.votes.len(),
+                    "slot_index": proof.slot_index,
+                    "accumulated_weight": proof.votes.iter().map(|v| v.voter_weight).sum::<u64>(),
+                }));
+
+            let mut result = json!({
                 "txid": hex::encode(txid_array),
                 "version": tx.version,
                 "size": 250, // Estimate
@@ -507,7 +531,13 @@ impl RpcHandler {
                 "finalized": is_finalized,
                 "time": tx.timestamp,
                 "blocktime": tx.timestamp
-            }));
+            });
+
+            if let Some(tp) = timeproof_json {
+                result["timeproof"] = tp;
+            }
+
+            return Ok(result);
         }
 
         // Fallback: Search blockchain for the transaction
