@@ -638,7 +638,7 @@ impl PeerConnection {
         let height_info = height
             .map(|h| format!(" at height {}", h))
             .unwrap_or_default();
-        info!(
+        debug!(
             "📤 [{:?}] Sent ping to {}{} (nonce: {})",
             direction, peer_ip, height_info, nonce
         );
@@ -705,7 +705,7 @@ impl PeerConnection {
         let height_info = peer_height
             .map(|h| format!(" at height {}", h))
             .unwrap_or_default();
-        info!(
+        debug!(
             "📨 [{:?}] Received pong from {}{}  (nonce: {})",
             self.direction, self.peer_ip, height_info, nonce
         );
@@ -717,7 +717,7 @@ impl PeerConnection {
 
         let mut state = self.ping_state.write().await;
 
-        info!(
+        debug!(
             "📊 [{:?}] Before pong: {} pending pings, {} missed",
             self.direction,
             state.pending_pings.len(),
@@ -725,7 +725,7 @@ impl PeerConnection {
         );
 
         if state.record_pong_received(nonce) {
-            info!(
+            debug!(
                 "✅ [{:?}] Pong MATCHED for {} (nonce: {}), {} pending pings remain",
                 self.direction,
                 self.peer_ip,

@@ -847,16 +847,21 @@ async fn handle_peer(
                                             }
                                         }
                                         Err(e) => {
-                                            tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
+                                            let err_str = e.to_string();
+                                            if err_str.contains("already in pool") || err_str.contains("Already") {
+                                                tracing::debug!("🔁 Transaction {} already in pool (from {})", hex::encode(txid), peer.addr);
+                                            } else {
+                                                tracing::warn!("❌ Transaction {} rejected: {}", hex::encode(txid), e);
 
-                                            // Phase 2.2: Record violation for invalid transaction
-                                            let mut blacklist_guard = blacklist.write().await;
-                                            let should_ban = blacklist_guard.record_violation(ip, "Invalid transaction");
-                                            drop(blacklist_guard);
+                                                // Phase 2.2: Record violation for invalid transaction
+                                                let mut blacklist_guard = blacklist.write().await;
+                                                let should_ban = blacklist_guard.record_violation(ip, "Invalid transaction");
+                                                drop(blacklist_guard);
 
-                                            if should_ban {
-                                                tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions", peer.addr);
-                                                break;
+                                                if should_ban {
+                                                    tracing::warn!("🚫 Disconnecting {} due to repeated invalid transactions", peer.addr);
+                                                    break;
+                                                }
                                             }
                                         }
                                     }
@@ -899,7 +904,7 @@ async fn handle_peer(
                                             consensus.utxo_manager.update_state(&input.previous_output, new_state);
                                         }
                                     } else {
-                                        tracing::warn!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
+                                        tracing::debug!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
                                     }
 
                                     // Gossip finalization to other peers
