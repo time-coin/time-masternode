@@ -1572,32 +1572,19 @@ async fn handle_peer(
                                             }
                                         };
 
-                                        // Wire vote into active Snowball round so the voting loop can tally it
-                                        let preference = match vote_clone.decision {
-                                            crate::types::VoteDecision::Accept => crate::consensus::Preference::Accept,
-                                            crate::types::VoteDecision::Reject => crate::consensus::Preference::Reject,
-                                        };
-                                        consensus_clone.timevote.record_vote_in_active_round(
-                                            txid,
-                                            vote_clone.voter_mn_id.clone(),
-                                            preference,
-                                            vote_clone.voter_weight as usize,
-                                        );
-
                                         tracing::debug!(
                                             "Vote accumulated for TX {:?}, total weight: {}",
                                             hex::encode(txid),
                                             accumulated_weight
                                         );
 
-                                        // Step 2: Check if finality threshold reached
-                                        // Calculate total AVS weight and 51% threshold (simple majority)
+                                        // Step 2: Check if finality threshold reached (67% stake-weighted)
                                         let validators = consensus_clone.timevote.get_validators();
                                         let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
-                                        let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
+                                        let finality_threshold = ((total_avs_weight as f64) * 0.67).ceil() as u64;
 
                                         tracing::debug!(
-                                            "Finality check for TX {:?}: accumulated={}, threshold={} (51% of {})",
+                                            "Finality check for TX {:?}: accumulated={}, threshold={} (67% of {})",
                                             hex::encode(txid),
                                             accumulated_weight,
                                             finality_threshold,
@@ -1784,10 +1771,8 @@ async fn handle_peer(
                                     };
 
                                     // Submit vote to timevote consensus
-                                    // The consensus engine will update voting state
-                                    consensus.timevote.submit_vote(*txid, peer.addr.clone(), pref);
-
-                                    tracing::debug!("✅ Vote recorded for TX {:?}", hex::encode(txid));
+                                    // Legacy VoteBroadcast path - real votes come via TimeVoteResponse
+                                    tracing::debug!("✅ Vote recorded for TX {:?} (preference: {:?})", hex::encode(txid), pref);
                                 }
                                 NetworkMessage::FinalityVoteBroadcast { vote } => {
                                     check_message_size!(MAX_VOTE_SIZE, "FinalityVote");

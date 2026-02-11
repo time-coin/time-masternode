@@ -113,45 +113,27 @@ impl TimeVoteHandler {
         );
 
         // Run consensus to completion
-        self.run_consensus_to_completion(txid).await?;
+        self.wait_for_finalization(txid).await?;
 
         Ok(txid)
     }
 
-    /// Run TimeVote consensus rounds until transaction is finalized
-    async fn run_consensus_to_completion(&self, txid: Hash256) -> Result<(), TimeVoteError> {
-        let max_rounds = 100;
-        let mut round = 0;
+    /// Wait for TimeVote finalization (driven by server.rs vote accumulation)
+    async fn wait_for_finalization(&self, txid: Hash256) -> Result<(), TimeVoteError> {
+        let timeout = Duration::from_secs(10);
+        let poll_interval = Duration::from_millis(50);
+        let start = std::time::Instant::now();
 
         loop {
-            // Execute query round
-            if let Err(e) = self.consensus.execute_query_round(txid).await {
-                tracing::warn!("Query round error: {}", e);
-                round += 1;
-                if round >= max_rounds {
-                    return Err(TimeVoteError::ConsensusError(
-                        "TimeVote consensus timeout".to_string(),
-                    ));
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                continue;
-            }
-
-            // Check if finalized
             if self.consensus.is_finalized(&txid) {
-                // Check final preference
-                if let Some((preference, confidence, _rounds, _finalized)) =
-                    self.consensus.get_tx_state(&txid)
-                {
+                if let Some((preference, _finalized)) = self.consensus.get_tx_state(&txid) {
                     let event = FinalityEvent {
                         txid,
                         preference,
-                        confidence,
+                        confidence: 0,
                     };
 
                     let _ = self.finality_tx.send(event);
-
-                    // Apply the result
                     self.apply_finality_result(txid, preference).await?;
 
                     tracing::info!(
@@ -163,14 +145,13 @@ impl TimeVoteHandler {
                 return Ok(());
             }
 
-            round += 1;
-            if round >= max_rounds {
+            if start.elapsed() >= timeout {
                 return Err(TimeVoteError::ConsensusError(
-                    "TimeVote consensus timeout".to_string(),
+                    "TimeVote finalization timeout".to_string(),
                 ));
             }
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(poll_interval).await;
         }
     }
 
@@ -247,7 +228,7 @@ impl TimeVoteHandler {
     }
 
     /// Get consensus state for a transaction
-    pub fn get_consensus_state(&self, txid: &Hash256) -> Option<(Preference, usize, usize, bool)> {
+    pub fn get_consensus_state(&self, txid: &Hash256) -> Option<(Preference, bool)> {
         self.consensus.get_tx_state(txid)
     }
 
@@ -289,28 +270,27 @@ pub struct TimeVoteMetrics {
     pub active_validators: usize,
 }
 
-/// Background task runner for continuous consensus rounds
+/// Background task runner for continuous consensus monitoring
 #[allow(dead_code)]
 pub async fn run_timevote_loop(
     handler: Arc<TimeVoteHandler>,
     mut finality_rx: mpsc::UnboundedReceiver<FinalityEvent>,
 ) {
-    let mut round_interval = tokio::time::interval(Duration::from_millis(500));
+    let mut check_interval = tokio::time::interval(Duration::from_millis(500));
 
     loop {
         tokio::select! {
             // Process finality events
             Some(event) = finality_rx.recv() => {
                 tracing::info!(
-                    "🏔️ Finality achieved: TX {:?} - {} (confidence: {})",
+                    "🏔️ Finality achieved: TX {:?} - {}",
                     hex::encode(event.txid),
-                    event.preference,
-                    event.confidence
+                    event.preference
                 );
             }
 
-            // Run consensus rounds periodically for pending transactions
-            _ = round_interval.tick() => {
+            // Monitor pending transactions for finalization
+            _ = check_interval.tick() => {
                 let pending: Vec<Hash256> = handler.tx_pool
                     .get_all_pending()
                     .into_iter()
@@ -318,10 +298,8 @@ pub async fn run_timevote_loop(
                     .collect();
 
                 for txid in pending {
-                    if !handler.is_finalized(&txid) {
-                        if let Err(e) = handler.consensus.execute_query_round(txid).await {
-                            tracing::debug!("Consensus round error for TX {:?}: {}", hex::encode(txid), e);
-                        }
+                    if handler.is_finalized(&txid) {
+                        tracing::debug!("TX {:?} finalized (detected by timevote loop)", hex::encode(txid));
                     }
                 }
             }

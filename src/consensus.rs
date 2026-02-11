@@ -22,10 +22,7 @@ use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
 use ed25519_dalek::{Verifier, VerifyingKey};
 use parking_lot::RwLock;
-use rand::seq::SliceRandom;
-use rand::thread_rng;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -265,7 +262,6 @@ pub enum Preference {
 #[derive(Debug, Clone)]
 pub struct ConsensusMemoryStats {
     pub tx_state_entries: usize,
-    pub active_rounds: usize,
     pub finalized_txs: usize,
     pub avs_snapshots: usize,
     pub vfp_votes: usize,
@@ -287,190 +283,25 @@ pub struct ValidatorInfo {
     pub weight: usize, // Sampling weight based on tier
 }
 
-/// Vote result from a single validator with weight
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct Vote {
-    pub voter_id: String,
-    pub preference: Preference,
-    pub timestamp: Instant,
-    pub weight: usize, // Stake weight of the voter
-}
-
-/// Snowflake protocol state - improved with dynamic k adjustment
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct Snowflake {
-    pub preference: Preference,
-    pub confidence: u32,
-    pub k: usize,                        // Current sample size (dynamic)
-    pub suspicion: HashMap<String, f64>, // Trust scores for validators
-    pub last_updated: Instant,
-}
-
-impl Snowflake {
-    pub fn new(initial_preference: Preference, validators: &[ValidatorInfo]) -> Self {
-        let mut suspicion = HashMap::new();
-        for validator in validators {
-            suspicion.insert(validator.address.clone(), 1.0); // Start with full trust
-        }
-
-        Self {
-            preference: initial_preference,
-            confidence: 0,
-            k: 20, // Default sample size
-            suspicion,
-            last_updated: Instant::now(),
-        }
-    }
-
-    /// Update preference with dynamic k adjustment
-    /// When preference matches: increase confidence, decrease k
-    /// When preference changes: reset confidence, increase k
-    pub fn update(&mut self, new_preference: Preference, _beta: u32) {
-        if new_preference == self.preference {
-            self.confidence += 1;
-            // Decrease k dynamically when confident
-            if self.k > 2 {
-                self.k -= 1;
-            }
-        } else {
-            // Preference flipped - reset confidence and increase k
-            self.preference = new_preference;
-            self.confidence = 1;
-            self.k += 1;
-        }
-        self.last_updated = Instant::now();
-    }
-
-    /// Check if finalized (high confidence)
-    pub fn is_finalized(&self, threshold: u32) -> bool {
-        self.confidence >= threshold
-    }
-
-    /// Update validator suspicion scores based on their vote
-    pub fn update_suspicion(&mut self, voter: &str, voted_preference: Preference) {
-        if voted_preference == self.preference {
-            // Increase trust if they voted with us
-            if let Some(score) = self.suspicion.get_mut(voter) {
-                *score = (*score + 1.0).min(1.0); // Cap at 1.0
-            }
-        } else {
-            // Decrease trust if they voted against us
-            if let Some(score) = self.suspicion.get_mut(voter) {
-                *score = (*score - 0.1).max(0.0); // Floor at 0.0
-            }
-        }
-    }
-}
-
-/// TimeVote protocol state - Progressive TimeProof assembly with vote accumulation
+/// Transaction voting state - tracks preference for fallback protocol
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct VotingState {
-    pub snowflake: Snowflake,
+    pub preference: Preference,
     pub last_finalized: Option<Preference>,
-    /// Accumulated finality votes for TimeProof assembly
-    pub accumulated_votes: Vec<FinalityVote>,
-    /// Current accumulated vote weight
-    pub accumulated_weight: u64,
-    /// Required weight threshold for finality (51% of AVS weight (simple majority))
-    pub required_weight: u64,
 }
 
 impl VotingState {
-    pub fn new(initial_preference: Preference, validators: &[ValidatorInfo]) -> Self {
+    pub fn new(initial_preference: Preference) -> Self {
         Self {
-            snowflake: Snowflake::new(initial_preference, validators),
+            preference: initial_preference,
             last_finalized: None,
-            accumulated_votes: Vec::new(),
-            accumulated_weight: 0,
-            required_weight: 0, // Will be set based on AVS snapshot
         }
-    }
-
-    /// Update based on query results
-    pub fn update(&mut self, new_preference: Preference, beta: u32) {
-        self.snowflake.update(new_preference, beta);
-    }
-
-    /// Add a finality vote and update accumulated weight
-    pub fn add_vote(&mut self, vote: FinalityVote) {
-        self.accumulated_weight += vote.voter_weight;
-        self.accumulated_votes.push(vote);
-    }
-
-    /// Check if finality threshold reached (51% weight)
-    pub fn has_finality_threshold(&self) -> bool {
-        self.required_weight > 0 && self.accumulated_weight >= self.required_weight
     }
 
     /// Record finalization
     pub fn finalize(&mut self) {
-        self.last_finalized = Some(self.snowflake.preference);
-    }
-
-    /// Check if finalized
-    /// Per Protocol §7.5: Finality requires accumulated_weight >= Q_finality (51% of AVS weight (simple majority))
-    /// Snowflake confidence is used for preference tracking only, NOT for finality determination
-    pub fn is_finalized(&self, _threshold: u32) -> bool {
-        self.has_finality_threshold()
-    }
-}
-
-/// Query round tracking - improved for better consensus detection
-#[derive(Debug)]
-#[allow(dead_code)]
-pub struct QueryRound {
-    pub round_number: usize,
-    pub txid: Hash256,
-    pub sampled_validators: Vec<ValidatorInfo>,
-    pub votes_received: DashMap<String, Vote>,
-    pub started_at: Instant,
-}
-
-impl QueryRound {
-    pub fn new(round_number: usize, txid: Hash256, sampled_validators: Vec<ValidatorInfo>) -> Self {
-        Self {
-            round_number,
-            txid,
-            sampled_validators,
-            votes_received: DashMap::new(),
-            started_at: Instant::now(),
-        }
-    }
-
-    /// Check if round is complete (all responses or timeout)
-    pub fn is_complete(&self, timeout: Duration) -> bool {
-        let elapsed = self.started_at.elapsed();
-        elapsed > timeout || self.votes_received.len() >= self.sampled_validators.len()
-    }
-
-    /// Get consensus from collected votes - improved majority detection
-    pub fn get_consensus(&self) -> Option<(Preference, usize)> {
-        let mut accept_count = 0;
-        let mut reject_count = 0;
-
-        for vote in self.votes_received.iter() {
-            match vote.value().preference {
-                Preference::Accept => accept_count += 1,
-                Preference::Reject => reject_count += 1,
-            }
-        }
-
-        let total = accept_count + reject_count;
-        if total == 0 {
-            return None;
-        }
-
-        // Strict majority: must have more than half the votes
-        if accept_count > reject_count {
-            Some((Preference::Accept, accept_count))
-        } else if reject_count > accept_count {
-            Some((Preference::Reject, reject_count))
-        } else {
-            None // Tie - no consensus
-        }
+        self.last_finalized = Some(self.preference);
     }
 }
 
@@ -638,11 +469,8 @@ pub struct TimeVoteConsensus {
     /// Reference to masternode registry (single source of truth for validators)
     masternode_registry: Arc<MasternodeRegistry>,
 
-    /// Transaction state tracking (txid -> Snowball)
+    /// Transaction preference tracking (for fallback protocol)
     tx_state: DashMap<Hash256, Arc<RwLock<VotingState>>>,
-
-    /// Active query rounds
-    active_rounds: DashMap<Hash256, Arc<RwLock<QueryRound>>>,
 
     /// Finalized transactions with timestamp for cleanup
     /// Made pub(crate) for atomic finalization guard in network server
@@ -739,7 +567,6 @@ impl TimeVoteConsensus {
             config,
             masternode_registry,
             tx_state: DashMap::new(),
-            active_rounds: DashMap::new(),
             finalized_txs: DashMap::new(),
             avs_snapshots: DashMap::new(),
             timeproof_votes: DashMap::new(),
@@ -782,29 +609,6 @@ impl TimeVoteConsensus {
         )
     }
 
-    /// Record a vote in the active query round for a transaction.
-    /// This wires TimeVoteResponse votes into the Snowball voting loop so it can tally them.
-    pub fn record_vote_in_active_round(
-        &self,
-        txid: Hash256,
-        voter_id: String,
-        preference: Preference,
-        weight: usize,
-    ) {
-        if let Some(round_entry) = self.active_rounds.get(&txid) {
-            let round = round_entry.value().read();
-            round.votes_received.insert(
-                voter_id.clone(),
-                Vote {
-                    voter_id,
-                    preference,
-                    timestamp: Instant::now(),
-                    weight,
-                },
-            );
-        }
-    }
-
     /// Cleanup finalized transactions and associated state older than retention period
     /// This prevents unbounded memory growth in the DashMaps
     pub fn cleanup_old_finalized(&self, retention_secs: u64) -> usize {
@@ -823,7 +627,6 @@ impl TimeVoteConsensus {
         for txid in to_remove {
             self.finalized_txs.remove(&txid);
             self.tx_state.remove(&txid);
-            self.active_rounds.remove(&txid);
             self.timeproof_votes.remove(&txid);
             self.accumulated_weight.remove(&txid);
             removed_count += 1;
@@ -844,10 +647,9 @@ impl TimeVoteConsensus {
     pub fn memory_stats(&self) -> ConsensusMemoryStats {
         ConsensusMemoryStats {
             tx_state_entries: self.tx_state.len(),
-            active_rounds: self.active_rounds.len(),
             finalized_txs: self.finalized_txs.len(),
             avs_snapshots: self.avs_snapshots.len(),
-            vfp_votes: self.timeproof_votes.len(), // Legacy field name in struct
+            vfp_votes: self.timeproof_votes.len(),
         }
     }
 
@@ -859,52 +661,7 @@ impl TimeVoteConsensus {
             .collect()
     }
 
-    /// Sample validators using stake-weighted probability
-    /// P(sampling node_i) = Weight_i / Total_Weight
-    fn sample_validators(
-        &self,
-        validators: &[ValidatorInfo],
-        sample_size: usize,
-    ) -> Vec<ValidatorInfo> {
-        if validators.is_empty() {
-            return Vec::new();
-        }
-
-        // Calculate total weight
-        let total_weight: usize = validators.iter().map(|v| v.weight).sum();
-        if total_weight == 0 {
-            return Vec::new();
-        }
-
-        // Create weighted sampling pool
-        let mut pool = Vec::new();
-        for validator in validators {
-            // Add validator multiple times based on weight
-            for _ in 0..validator.weight {
-                pool.push(validator.clone());
-            }
-        }
-
-        // Shuffle and sample with duplication removed
-        let mut rng = thread_rng();
-        pool.shuffle(&mut rng);
-
-        // Use indices to avoid duplicates and take only sample_size
-        let mut sampled = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for validator in pool.into_iter().take(sample_size * 2) {
-            if seen.insert(validator.address.clone()) {
-                sampled.push(validator);
-                if sampled.len() >= sample_size {
-                    break;
-                }
-            }
-        }
-        sampled
-    }
-
-    /// Initiate consensus on a transaction
-    /// Returns true if consensus process was newly started, false if already in progress
+    /// Initialize tracking for a new transaction's consensus preference
     pub fn initiate_consensus(&self, txid: Hash256, initial_preference: Preference) -> bool {
         if self.finalized_txs.contains_key(&txid) {
             return false; // Already finalized
@@ -914,192 +671,20 @@ impl TimeVoteConsensus {
             return false; // Already initiated
         }
 
-        let validators = self.get_validators();
         self.tx_state.insert(
             txid,
-            Arc::new(RwLock::new(VotingState::new(
-                initial_preference,
-                &validators,
-            ))),
+            Arc::new(RwLock::new(VotingState::new(initial_preference))),
         );
 
         true
     }
 
-    /// Submit a vote for a transaction from a validator
-    pub fn submit_vote(&self, txid: Hash256, voter_id: String, preference: Preference) {
-        // Look up the validator's weight
-        let validators = self.get_validators();
-        let weight = validators
-            .iter()
-            .find(|v| v.address == voter_id)
-            .map(|v| v.weight)
-            .unwrap_or(1); // Default to 1 if not found
-
-        let vote = Vote {
-            voter_id: voter_id.clone(),
-            preference,
-            timestamp: Instant::now(),
-            weight,
-        };
-
-        // If there's an active round, record the vote
-        if let Some(round) = self.active_rounds.get(&txid) {
-            round
-                .value()
-                .read()
-                .votes_received
-                .insert(voter_id.clone(), vote);
-
-            // Update validator suspicion scores in snowball
-            if let Some(state) = self.tx_state.get(&txid) {
-                let mut voting_state = state.value().write();
-                voting_state
-                    .snowflake
-                    .update_suspicion(&voter_id, preference);
-            }
-        }
-    }
-
-    /// Execute a single query round for a transaction
-    pub async fn execute_query_round(&self, txid: Hash256) -> Result<(), TimeVoteError> {
-        // Get or create transaction state
-        let tx_state = self
-            .tx_state
-            .get(&txid)
-            .ok_or(TimeVoteError::TransactionNotFound)?;
-
-        let validators = self.get_validators();
-        if validators.is_empty() {
-            return Err(TimeVoteError::QueryFailed(
-                "No validators available".to_string(),
-            ));
-        }
-
-        // Get current k from snowball (dynamic sample size)
-        let current_k = {
-            let voting_state = tx_state.value().read();
-            voting_state.snowflake.k
-        };
-
-        // Sample validators based on current k
-        let sampled = self.sample_validators(&validators, current_k);
-
-        // Create query round
-        let round_number = self.rounds_executed.fetch_add(1, Ordering::Relaxed);
-        let round = Arc::new(RwLock::new(QueryRound::new(round_number, txid, sampled)));
-
-        self.active_rounds.insert(txid, round.clone());
-
-        // Wait for responses or timeout
-        let timeout = Duration::from_millis(self.config.query_timeout_ms);
-        let start = Instant::now();
-        loop {
-            {
-                let rd = round.read();
-                if rd.is_complete(timeout) {
-                    drop(rd);
-                    break;
-                }
-            }
-
-            if start.elapsed() > timeout {
-                break;
-            }
-
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-
-        // Process results
-        let consensus = {
-            let rd = round.read();
-            rd.get_consensus()
-        };
-
-        if let Some((preference, count)) = consensus {
-            // Update transaction state
-            {
-                let mut state = tx_state.value().write();
-                let old_pref = state.snowflake.preference;
-
-                // Update transaction state with new preference and dynamic k adjustment
-                state.update(preference, self.config.finality_confidence as u32);
-
-                tracing::debug!(
-                    "Round {}: TX {:?} preference {} -> {} ({} votes, confidence: {}, k: {})",
-                    round_number,
-                    hex::encode(txid),
-                    old_pref,
-                    preference,
-                    count,
-                    state.snowflake.confidence,
-                    state.snowflake.k
-                );
-
-                // Check for finalization using beta (finality_confidence)
-                if state.is_finalized(self.config.finality_confidence as u32) {
-                    self.finalized_txs
-                        .insert(txid, (preference, Instant::now()));
-                    self.txs_finalized.fetch_add(1, Ordering::Relaxed);
-                    state.finalize();
-                    tracing::info!(
-                        "✅ TX {:?} finalized with preference: {} (confidence: {})",
-                        hex::encode(txid),
-                        preference,
-                        state.snowflake.confidence
-                    );
-                }
-            }
-        } else {
-            tracing::warn!("No consensus in round {}", round_number);
-        }
-
-        self.active_rounds.remove(&txid);
-        Ok(())
-    }
-
-    /// Run consensus to completion for a transaction
-    pub async fn run_consensus(&self, txid: Hash256) -> Result<Preference, TimeVoteError> {
-        // Check if already finalized
-        if let Some(pref) = self.finalized_txs.get(&txid) {
-            return Ok(pref.value().0);
-        }
-
-        // Initialize if not already
-        self.initiate_consensus(txid, Preference::Accept);
-
-        // Run rounds until finalized
-        for _ in 0..self.config.max_rounds {
-            self.execute_query_round(txid).await?;
-
-            if let Some(pref) = self.finalized_txs.get(&txid) {
-                return Ok(pref.value().0);
-            }
-
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-
-        Err(TimeVoteError::InsufficientConfidence {
-            got: self
-                .tx_state
-                .get(&txid)
-                .map(|s| s.read().snowflake.confidence as usize)
-                .unwrap_or(0),
-            threshold: self.config.finality_confidence,
-        })
-    }
-
     /// Get current state of a transaction
-    pub fn get_tx_state(&self, txid: &Hash256) -> Option<(Preference, usize, usize, bool)> {
+    pub fn get_tx_state(&self, txid: &Hash256) -> Option<(Preference, bool)> {
         self.tx_state.get(txid).map(|state| {
             let s = state.read();
-            let is_finalized = s.is_finalized(self.config.finality_confidence as u32);
-            (
-                s.snowflake.preference,
-                s.snowflake.confidence as usize,
-                s.snowflake.k,
-                is_finalized,
-            )
+            let is_finalized = self.finalized_txs.contains_key(txid);
+            (s.preference, is_finalized)
         })
     }
 
@@ -1752,7 +1337,6 @@ impl TimeVoteConsensus {
         TimeVoteMetrics {
             rounds_executed: self.rounds_executed.load(Ordering::Relaxed),
             txs_finalized: self.txs_finalized.load(Ordering::Relaxed),
-            active_rounds: self.active_rounds.len(),
             tracked_txs: self.tx_state.len(),
         }
     }
@@ -1763,7 +1347,6 @@ impl TimeVoteConsensus {
 pub struct TimeVoteMetrics {
     pub rounds_executed: usize,
     pub txs_finalized: usize,
-    pub active_rounds: usize,
     pub tracked_txs: usize,
 }
 
@@ -2212,7 +1795,7 @@ impl ConsensusEngine {
     // ========================================================================
 
     /// Generate a finality vote for a transaction if this validator is AVS-active
-    /// Called when this validator responds with "Valid" during query round
+    /// Called when this validator responds with "Valid" during TimeVote consensus
     pub fn generate_finality_vote(
         &self,
         txid: Hash256,
@@ -2753,7 +2336,7 @@ impl ConsensusEngine {
             .map_err(|e| format!("Failed to add to pool: {}", e))?;
 
         // ===== timevote CONSENSUS INTEGRATION =====
-        // Start timevote Snowball consensus for this transaction
+        // Start TimeVote consensus for this transaction
         // Use validators from consensus engine (which queries masternode registry)
         let validators_for_consensus = self.timevote.get_validators();
 
@@ -2839,20 +2422,9 @@ impl ConsensusEngine {
             return Ok(());
         }
 
-        // Initiate consensus with Snowball
-        let tx_state = Arc::new(RwLock::new(VotingState::new(
-            Preference::Accept,
-            &validators_for_consensus,
-        )));
+        // Initiate consensus tracking for fallback protocol
+        let tx_state = Arc::new(RwLock::new(VotingState::new(Preference::Accept)));
         self.timevote.tx_state.insert(txid, tx_state);
-
-        // Create initial QueryRound for vote tracking
-        let query_round = Arc::new(RwLock::new(QueryRound::new(
-            0,
-            txid,
-            validators_for_consensus.as_ref().clone(),
-        )));
-        self.timevote.active_rounds.insert(txid, query_round);
 
         // §7.6 Integration: Set initial transaction status to Voting
         // Calculate transaction hash commitment (Protocol §8.1)
@@ -2890,13 +2462,12 @@ impl ConsensusEngine {
 
         self.transition_to_voting(txid);
 
-        // Spawn consensus round executor as blocking task
+        // Spawn consensus monitoring task
         let consensus = self.timevote.clone();
-        let _utxo_mgr = self.utxo_manager.clone();
         let tx_pool = self.tx_pool.clone();
         let consensus_engine_clone = Arc::new(ConsensusEngine {
             masternode_registry: self.masternode_registry.clone(),
-            identity: OnceLock::new(), // Clone doesn't copy OnceLock content, but we don't need identity in spawned task
+            identity: OnceLock::new(),
             utxo_manager: self.utxo_manager.clone(),
             tx_pool: self.tx_pool.clone(),
             broadcast_callback: self.broadcast_callback.clone(),
@@ -2907,15 +2478,13 @@ impl ConsensusEngine {
             finality_times: self.finality_times.clone(),
             avg_finality_ms: self.avg_finality_ms.clone(),
         });
-        let _masternodes_for_voting = masternodes.clone();
-        let tx_status_map = self.timevote.tx_status.clone(); // §7.6: Track status for fallback
+        let tx_status_map = self.timevote.tx_status.clone();
 
         // PRIORITY: Spawn with high priority for instant finality
         tokio::spawn(async move {
-            // Wait for votes to accumulate - the TimeVoteResponse handler in server.rs
-            // records votes into active_rounds AND accumulates them in timevote.
-            // The server.rs handler finalizes when threshold is met.
-            // This loop monitors for that finalization or times out.
+            // The TimeVoteResponse handler in server.rs accumulates votes and
+            // finalizes when 67% threshold is met. This loop monitors for that
+            // finalization or auto-finalizes on timeout.
             let vote_deadline = Duration::from_secs(5);
             let poll_interval = Duration::from_millis(50);
             let start = Instant::now();
@@ -2935,159 +2504,81 @@ impl ConsensusEngine {
                     break;
                 }
 
-                // Check vote tally in active round
-                let tally = consensus.active_rounds.get(&txid).and_then(|round_entry| {
-                    let round = round_entry.value().read();
-                    round.get_consensus()
-                });
-
-                if let Some((preference, vote_count)) = tally {
-                    // Update Snowball state
-                    if let Some(tx_state) = consensus.tx_state.get(&txid) {
-                        let mut voting_state = tx_state.value().write();
-                        voting_state
-                            .update(preference, consensus.config.finality_confidence as u32);
-                    }
-
-                    // Check if finalized via Snowball confidence
-                    if let Some((pref, _, _, is_finalized)) = consensus.get_tx_state(&txid) {
-                        if is_finalized && pref == Preference::Accept {
-                            let tx_for_broadcast = tx_pool.get_pending(&txid);
-                            tx_pool.finalize_transaction(txid);
-
-                            if tx_pool.is_finalized(&txid) {
-                                tracing::info!(
-                                        "📦 TX {:?} finalized via TimeVote ({} votes, Snowball confidence reached)",
-                                        hex::encode(txid),
-                                        vote_count
-                                    );
-
-                                // Assemble and store TimeProof certificate
-                                match consensus.assemble_timeproof(txid) {
-                                    Ok(proof) => {
-                                        tracing::info!(
-                                            "📜 TimeProof assembled for TX {:?} with {} votes",
-                                            hex::encode(txid),
-                                            proof.votes.len()
-                                        );
-                                        let _ = consensus_engine_clone
-                                            .finality_proof_mgr
-                                            .store_timeproof(proof.clone());
-                                        consensus_engine_clone.broadcast_timeproof(proof).await;
-                                    }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "TimeProof assembly skipped for TX {:?}: {}",
-                                            hex::encode(txid),
-                                            e
-                                        );
-                                    }
-                                }
-
-                                if let Some(tx_data) = tx_for_broadcast {
-                                    consensus_engine_clone
-                                        .broadcast(NetworkMessage::TransactionFinalized {
-                                            txid,
-                                            tx: tx_data,
-                                        })
-                                        .await;
-                                }
-                            }
-                            consensus
-                                .finalized_txs
-                                .insert(txid, (Preference::Accept, Instant::now()));
-
-                            // Update status
-                            tx_status_map.insert(
-                                txid,
-                                TransactionStatus::Finalized {
-                                    finalized_at: chrono::Utc::now().timestamp_millis(),
-                                    vfp_weight: 0,
-                                },
-                            );
-                            break;
-                        }
-                    }
-                }
-
                 if start.elapsed() >= vote_deadline {
-                    // Timeout: check if we got any votes at all
-                    let got_votes = consensus
-                        .active_rounds
+                    // Timeout: check accumulated weight from server.rs handler
+                    let weight = consensus
+                        .accumulated_weight
                         .get(&txid)
-                        .map(|r| {
-                            let round = r.value().read();
-                            !round.votes_received.is_empty()
-                        })
-                        .unwrap_or(false);
+                        .map(|w| *w.value())
+                        .unwrap_or(0);
 
-                    if let Some((preference, _, _, _)) = consensus.get_tx_state(&txid) {
-                        if !got_votes && preference == Preference::Accept {
-                            // No votes received but TX is valid and UTXOs are locked.
-                            // Auto-finalize: UTXO locks prevent double-spends.
-                            tracing::warn!(
-                                "⚠️ TX {:?} received 0 votes within {}s. Auto-finalizing (UTXOs locked, double-spend impossible)",
+                    let preference = consensus
+                        .tx_state
+                        .get(&txid)
+                        .map(|s| s.read().preference)
+                        .unwrap_or(Preference::Accept);
+
+                    if preference == Preference::Accept {
+                        // Auto-finalize: UTXOs are locked, double-spend impossible
+                        tracing::warn!(
+                            "⚠️ TX {:?} timed out after {}s (weight: {}). Auto-finalizing (UTXOs locked)",
+                            hex::encode(txid),
+                            vote_deadline.as_secs(),
+                            weight
+                        );
+
+                        let tx_for_broadcast = tx_pool.get_pending(&txid);
+                        tx_pool.finalize_transaction(txid);
+
+                        if tx_pool.is_finalized(&txid) {
+                            tracing::info!(
+                                "✅ TX {:?} auto-finalized (UTXO-lock protected, weight: {})",
                                 hex::encode(txid),
-                                vote_deadline.as_secs()
+                                weight
                             );
 
-                            let tx_for_broadcast = tx_pool.get_pending(&txid);
-                            tx_pool.finalize_transaction(txid);
-
-                            if tx_pool.is_finalized(&txid) {
-                                tracing::info!(
-                                    "✅ TX {:?} auto-finalized (UTXO-lock protected, 0 validator responses)",
-                                    hex::encode(txid)
-                                );
-
-                                // Try to assemble TimeProof from any votes that arrived via accumulate_timevote
-                                match consensus.assemble_timeproof(txid) {
-                                    Ok(proof) => {
-                                        tracing::info!(
-                                            "📜 TimeProof assembled for TX {:?} with {} votes (late arrival)",
-                                            hex::encode(txid),
-                                            proof.votes.len()
-                                        );
-                                        let _ = consensus_engine_clone
-                                            .finality_proof_mgr
-                                            .store_timeproof(proof.clone());
-                                        consensus_engine_clone.broadcast_timeproof(proof).await;
-                                    }
-                                    Err(_) => {
-                                        tracing::debug!(
-                                            "No votes available for TimeProof assembly on TX {:?}",
-                                            hex::encode(txid)
-                                        );
-                                    }
+                            // Try to assemble TimeProof from any votes that arrived
+                            match consensus.assemble_timeproof(txid) {
+                                Ok(proof) => {
+                                    tracing::info!(
+                                        "📜 TimeProof assembled for TX {:?} with {} votes",
+                                        hex::encode(txid),
+                                        proof.votes.len()
+                                    );
+                                    let _ = consensus_engine_clone
+                                        .finality_proof_mgr
+                                        .store_timeproof(proof.clone());
+                                    consensus_engine_clone.broadcast_timeproof(proof).await;
                                 }
-
-                                if let Some(tx_data) = tx_for_broadcast {
-                                    consensus_engine_clone
-                                        .broadcast(NetworkMessage::TransactionFinalized {
-                                            txid,
-                                            tx: tx_data,
-                                        })
-                                        .await;
+                                Err(_) => {
+                                    tracing::debug!(
+                                        "No votes available for TimeProof assembly on TX {:?}",
+                                        hex::encode(txid)
+                                    );
                                 }
                             }
-                            consensus
-                                .finalized_txs
-                                .insert(txid, (Preference::Accept, Instant::now()));
-                        } else if got_votes {
-                            // Got votes but didn't reach threshold - reject
-                            tx_pool.reject_transaction(
-                                txid,
-                                "TimeVote consensus not reached".to_string(),
-                            );
-                            consensus
-                                .finalized_txs
-                                .insert(txid, (Preference::Reject, Instant::now()));
-                            tracing::warn!(
-                                "❌ TX {:?} rejected: TimeVote consensus not reached within {}s",
-                                hex::encode(txid),
-                                vote_deadline.as_secs()
-                            );
+
+                            if let Some(tx_data) = tx_for_broadcast {
+                                consensus_engine_clone
+                                    .broadcast(NetworkMessage::TransactionFinalized {
+                                        txid,
+                                        tx: tx_data,
+                                    })
+                                    .await;
+                            }
                         }
+                        consensus
+                            .finalized_txs
+                            .insert(txid, (Preference::Accept, Instant::now()));
+
+                        // Update status
+                        tx_status_map.insert(
+                            txid,
+                            TransactionStatus::Finalized {
+                                finalized_at: chrono::Utc::now().timestamp_millis(),
+                                vfp_weight: weight,
+                            },
+                        );
                     }
                     break;
                 }
@@ -3096,7 +2587,6 @@ impl ConsensusEngine {
             }
 
             // Cleanup
-            consensus.active_rounds.remove(&txid);
             consensus.tx_state.remove(&txid);
             tracing::debug!(
                 "🧹 Cleaned up consensus state for TX {:?}",
@@ -3809,7 +3299,7 @@ impl ConsensusEngine {
             // Get the transaction's current preference
             let decision = if let Some(voting_state) = self.timevote.tx_state.get(txid) {
                 let state = voting_state.value().read();
-                match state.snowflake.preference {
+                match state.preference {
                     Preference::Accept => {
                         // Check if still valid
                         if self.is_transaction_still_valid(txid) {
@@ -4286,7 +3776,7 @@ impl ConsensusEngine {
         // Get tx_hash_commitment (use txid for now, will be transaction hash in full implementation)
         let tx_hash_commitment = txid;
 
-        // Get poll history (empty for now, will be populated from Snowball state)
+        // Get poll history (empty for now, will be populated from vote accumulation)
         let poll_history = Vec::new();
 
         // Sign and create the alert
@@ -4344,19 +3834,14 @@ impl ConsensusEngine {
         if let Some(voting_state) = self.timevote.tx_state.get(txid) {
             let state = voting_state.value().read();
 
-            // Use Snowflake's current preference and confidence
-            let preference = state.snowflake.preference;
-            let confidence = state.snowflake.confidence;
+            let preference = state.preference;
 
             tracing::debug!(
-                "Fallback decision for tx {}: preference={:?}, confidence={}",
+                "Fallback decision for tx {}: preference={:?}",
                 hex::encode(&txid[..8]),
-                preference,
-                confidence
+                preference
             );
 
-            // If preference is Accept, propose Accept
-            // Otherwise propose Reject
             match preference {
                 Preference::Accept => FallbackDecision::Accept,
                 Preference::Reject => FallbackDecision::Reject,
@@ -4859,61 +4344,9 @@ mod tests {
         assert!(av.initiate_consensus(txid, Preference::Accept));
         assert!(!av.initiate_consensus(txid, Preference::Accept)); // Already initiated
 
-        let (pref, confidence, _finality_threshold, finalized) = av.get_tx_state(&txid).unwrap();
+        let (pref, finalized) = av.get_tx_state(&txid).unwrap();
         assert_eq!(pref, Preference::Accept);
-        assert_eq!(confidence, 0);
         assert!(!finalized);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_vote_submission() {
-        let config = TimeVoteConfig::default();
-        let registry = create_test_registry();
-        let av = TimeVoteConsensus::new(config, registry).unwrap();
-        let txid = test_txid(1);
-
-        av.initiate_consensus(txid, Preference::Accept);
-        av.submit_vote(txid, "v1".to_string(), Preference::Accept);
-
-        // Votes recorded but not processed until round completes
-    }
-
-    // Snowflake tests disabled - implementation replaced by newer timevote consensus
-    #[test]
-    #[ignore]
-    fn test_snowflake() {
-        let mut sf = Snowflake::new(Preference::Accept, &[]);
-        assert_eq!(sf.preference, Preference::Accept);
-        assert_eq!(sf.confidence, 0);
-
-        sf.update(Preference::Accept, 1);
-        assert_eq!(sf.confidence, 1);
-
-        sf.update(Preference::Accept, 1);
-        assert_eq!(sf.confidence, 2);
-
-        sf.update(Preference::Reject, 1);
-        assert_eq!(sf.preference, Preference::Reject);
-        assert_eq!(sf.confidence, 1);
-    }
-
-    #[test]
-    #[ignore]
-    fn test_query_round_consensus() {
-        let round = QueryRound::new(0, test_txid(1), vec![]);
-
-        round.votes_received.insert(
-            "v1".to_string(),
-            Vote {
-                voter_id: "v1".to_string(),
-                preference: Preference::Accept,
-                timestamp: Instant::now(),
-                weight: 1,
-            },
-        );
-
-        let consensus = round.get_consensus();
-        assert_eq!(consensus, Some((Preference::Accept, 1)));
     }
 
     #[tokio::test]
