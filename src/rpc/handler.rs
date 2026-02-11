@@ -314,34 +314,8 @@ impl RpcHandler {
         let mut txid_array = [0u8; 32];
         txid_array.copy_from_slice(&txid);
 
-        if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid_array) {
-            let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
-            return Ok(json!({
-                "txid": hex::encode(txid_array),
-                "version": tx.version,
-                "size": 250, // Estimate
-                "locktime": tx.lock_time,
-                "vin": tx.inputs.iter().map(|input| json!({
-                    "txid": hex::encode(input.previous_output.txid),
-                    "vout": input.previous_output.vout,
-                    "sequence": input.sequence
-                })).collect::<Vec<_>>(),
-                "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
-                    "value": output.value as f64 / 100_000_000.0,
-                    "n": i,
-                    "scriptPubKey": {
-                        "hex": hex::encode(&output.script_pubkey),
-                        "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
-                    }
-                })).collect::<Vec<_>>(),
-                "confirmations": 0,
-                "finalized": is_finalized,
-                "time": tx.timestamp,
-                "blocktime": tx.timestamp
-            }));
-        }
-
-        // Use transaction index for O(1) lookup if available
+        // Check transaction index FIRST (confirmed transactions take priority)
+        // This avoids a race where the TX is still in the pool but already in a block
         if let Some(ref tx_index) = self.blockchain.tx_index {
             if let Some(location) = tx_index.get_location(&txid_array) {
                 // Found in index - direct lookup
@@ -384,6 +358,34 @@ impl RpcHandler {
                     }
                 }
             }
+        }
+
+        // Then check pool (pending/finalized but not yet in a block)
+        if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid_array) {
+            let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
+            return Ok(json!({
+                "txid": hex::encode(txid_array),
+                "version": tx.version,
+                "size": 250, // Estimate
+                "locktime": tx.lock_time,
+                "vin": tx.inputs.iter().map(|input| json!({
+                    "txid": hex::encode(input.previous_output.txid),
+                    "vout": input.previous_output.vout,
+                    "sequence": input.sequence
+                })).collect::<Vec<_>>(),
+                "vout": tx.outputs.iter().enumerate().map(|(i, output)| json!({
+                    "value": output.value as f64 / 100_000_000.0,
+                    "n": i,
+                    "scriptPubKey": {
+                        "hex": hex::encode(&output.script_pubkey),
+                        "address": String::from_utf8_lossy(&output.script_pubkey).to_string()
+                    }
+                })).collect::<Vec<_>>(),
+                "confirmations": 0,
+                "finalized": is_finalized,
+                "time": tx.timestamp,
+                "blocktime": tx.timestamp
+            }));
         }
 
         // Fallback: Search blockchain for the transaction

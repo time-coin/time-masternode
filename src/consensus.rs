@@ -2426,7 +2426,7 @@ impl ConsensusEngine {
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             "✅ Transaction signatures verified: {} inputs, {} outputs",
             tx.inputs.len(),
             tx.outputs.len()
