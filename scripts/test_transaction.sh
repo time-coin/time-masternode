@@ -117,7 +117,7 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-AVAILABLE_BALANCE=$(echo "$BALANCE_JSON" | jq -r '.balance // 0')
+AVAILABLE_BALANCE=$(echo "$BALANCE_JSON" | jq -r '.available // 0')
 LOCKED_BALANCE=$(echo "$BALANCE_JSON" | jq -r '.locked // 0')
 
 log_info "Available balance: $AVAILABLE_BALANCE TIME"
