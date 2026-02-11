@@ -4003,7 +4003,13 @@ impl Blockchain {
     }
 
     /// Get transaction confirmations (stub for compatibility)
-    pub async fn get_transaction_confirmations(&self, _txid: &[u8; 32]) -> Option<u64> {
+    pub async fn get_transaction_confirmations(&self, txid: &[u8; 32]) -> Option<u64> {
+        if let Some(ref tx_index) = self.tx_index {
+            if let Some(location) = tx_index.get_location(txid) {
+                let current_height = self.get_height();
+                return Some(current_height.saturating_sub(location.block_height) + 1);
+            }
+        }
         Some(0)
     }
 
