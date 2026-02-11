@@ -2507,25 +2507,26 @@ impl Blockchain {
             ));
         }
 
-        // Get finalized transactions from consensus layer
-        let finalized_txs = self.consensus.get_finalized_transactions_for_block();
+        // Get finalized transactions with pre-computed fees from consensus layer
+        // CRITICAL: Use pool-stored fees because input UTXOs are already removed from
+        // storage by auto-finalization's spend_utxo before block production runs
+        let finalized_txs_with_fees = self
+            .consensus
+            .get_finalized_transactions_with_fees_for_block();
+        let finalized_txs: Vec<Transaction> = finalized_txs_with_fees
+            .iter()
+            .map(|(tx, _)| tx.clone())
+            .collect();
+        let finalized_txs_fees: u64 = finalized_txs_with_fees.iter().map(|(_, fee)| fee).sum();
+
         if !finalized_txs.is_empty() {
             tracing::info!(
-                "🔍 Block {}: Including {} finalized transaction(s)",
+                "📝 Block {}: Including {} finalized transaction(s) (total fees: {} satoshis)",
                 next_height,
-                finalized_txs.len()
+                finalized_txs.len(),
+                finalized_txs_fees
             );
-            for (i, tx) in finalized_txs.iter().enumerate() {
-                // Calculate fee for logging (same logic as fee calculation below)
-                let mut input_sum = 0u64;
-                for input in &tx.inputs {
-                    if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
-                        input_sum = input_sum.saturating_add(utxo.value);
-                    }
-                }
-                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-                let fee = input_sum.saturating_sub(output_sum);
-
+            for (i, (tx, fee)) in finalized_txs_with_fees.iter().enumerate() {
                 tracing::debug!(
                     "  📝 [{}] TX {} (inputs: {}, outputs: {}, fee: {} satoshis)",
                     i + 1,
@@ -2540,23 +2541,6 @@ impl Blockchain {
                 "🔍 Block {}: No finalized transactions to include",
                 next_height
             );
-        }
-
-        // Calculate fees from finalized transactions that will be included in THIS block
-        let mut finalized_txs_fees = 0u64;
-        for tx in &finalized_txs {
-            // Calculate input sum
-            let mut input_sum = 0u64;
-            for input in &tx.inputs {
-                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
-                    input_sum = input_sum.saturating_add(utxo.value);
-                }
-            }
-            // Calculate output sum
-            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-            // Fee is difference (if any)
-            finalized_txs_fees =
-                finalized_txs_fees.saturating_add(input_sum.saturating_sub(output_sum));
         }
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
@@ -4575,22 +4559,40 @@ impl Blockchain {
                 let spent_txid = input.previous_output.txid;
                 let spent_vout = input.previous_output.vout;
 
-                // Search through blocks to find the transaction that created this UTXO
+                // Try tx_index first for O(1) lookup
                 let mut found = false;
-                let search_limit = block.header.height.min(1000); // Limit search depth
-                for search_height in (0..block.header.height).rev().take(search_limit as usize) {
-                    if let Ok(search_block) = self.get_block(search_height) {
-                        for search_tx in &search_block.transactions {
-                            if search_tx.txid() == spent_txid {
-                                if let Some(output) = search_tx.outputs.get(spent_vout as usize) {
+                if let Some(ref txi) = self.tx_index {
+                    if let Some(loc) = txi.get_location(&spent_txid) {
+                        if let Ok(src_block) = self.get_block(loc.block_height) {
+                            if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
+                                if let Some(output) = src_tx.outputs.get(spent_vout as usize) {
                                     input_sum += output.value;
                                     found = true;
-                                    break;
                                 }
                             }
                         }
-                        if found {
-                            break;
+                    }
+                }
+
+                // Fallback: linear search through recent blocks
+                if !found {
+                    let search_limit = block.header.height.min(1000);
+                    for search_height in (0..block.header.height).rev().take(search_limit as usize)
+                    {
+                        if let Ok(search_block) = self.get_block(search_height) {
+                            for search_tx in &search_block.transactions {
+                                if search_tx.txid() == spent_txid {
+                                    if let Some(output) = search_tx.outputs.get(spent_vout as usize)
+                                    {
+                                        input_sum += output.value;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if found {
+                                break;
+                            }
                         }
                     }
                 }
