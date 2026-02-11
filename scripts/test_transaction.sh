@@ -94,8 +94,14 @@ if [ "$CONNECTED_MN" -eq 0 ]; then
     exit 1
 fi
 
-# Extract a connected masternode wallet address (filter for is_connected=true)
-RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes[]? | select(.is_connected == true) | .wallet_address' | head -n 1)
+# Extract a connected masternode wallet address that is NOT our own (avoid self-send)
+OUR_ADDRESS=$($CLI_CMD masternodestatus 2>/dev/null | jq -r '.reward_address // empty')
+RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r --arg ours "$OUR_ADDRESS" '.masternodes[]? | select(.is_connected == true and .wallet_address != $ours) | .wallet_address' | head -n 1)
+
+# Fallback: if all connected masternodes are us (shouldn't happen), use any connected
+if [ -z "$RECIPIENT_ADDRESS" ] || [ "$RECIPIENT_ADDRESS" = "null" ]; then
+    RECIPIENT_ADDRESS=$(echo "$MASTERNODE_JSON" | jq -r '.masternodes[]? | select(.is_connected == true) | .wallet_address' | head -n 1)
+fi
 
 if [ -z "$RECIPIENT_ADDRESS" ] || [ "$RECIPIENT_ADDRESS" = "null" ]; then
     log_error "Could not extract wallet address from connected masternode"

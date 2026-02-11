@@ -1470,13 +1470,28 @@ impl RpcHandler {
         // Convert TIME to smallest unit (like satoshis)
         let amount_units = (amount * 100_000_000.0) as u64;
 
+        // Get wallet address for UTXO filtering and change output
+        let wallet_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address)
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode - no wallet address".to_string(),
+            })?;
+
         // Get UTXOs for this wallet
         let all_utxos = self.utxo_manager.list_all_utxos().await;
 
-        // Filter to only spendable UTXOs (not locked as collateral AND in Unspent state)
+        // Filter to only OUR spendable UTXOs (wallet address match, not locked, Unspent state)
         let mut utxos: Vec<_> = all_utxos
             .into_iter()
             .filter(|u| {
+                // Only spend our own UTXOs
+                if u.address != wallet_address {
+                    return false;
+                }
                 // Check if locked as collateral
                 if self.utxo_manager.is_collateral_locked(&u.outpoint) {
                     return false;
@@ -1555,15 +1570,10 @@ impl RpcHandler {
         // Add change output if necessary
         let change = total_input - amount_units - fee;
         if change > 0 {
-            // Send change back to the first input address
-            let change_address = selected_utxos
-                .first()
-                .map(|u| u.address.as_bytes().to_vec())
-                .unwrap_or_default();
-
+            // Send change back to our wallet address
             outputs.push(TxOutput {
                 value: change,
-                script_pubkey: change_address,
+                script_pubkey: wallet_address.as_bytes().to_vec(),
             });
         }
 
