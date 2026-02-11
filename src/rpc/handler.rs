@@ -902,12 +902,13 @@ impl RpcHandler {
     }
 
     async fn list_unspent(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let _min_conf = params.first().and_then(|v| v.as_u64()).unwrap_or(1);
-        let _max_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(9999999);
+        let min_conf = params.first().and_then(|v| v.as_u64()).unwrap_or(1);
+        let max_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(9999999);
         let addresses = params.get(2).and_then(|v| v.as_array());
         let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
         let utxos = self.utxo_manager.list_all_utxos().await;
+        let current_height = self.blockchain.get_height();
 
         // Get local masternode's reward address to filter UTXOs
         let local_address = self
@@ -954,17 +955,29 @@ impl RpcHandler {
                     _ => (false, "unavailable"),
                 };
 
+                let confirmations = self
+                    .blockchain
+                    .tx_index
+                    .as_ref()
+                    .and_then(|idx| idx.get_location(&u.outpoint.txid))
+                    .map(|loc| current_height.saturating_sub(loc.block_height) + 1)
+                    .unwrap_or(0);
+
                 json!({
                     "txid": hex::encode(u.outpoint.txid),
                     "vout": u.outpoint.vout,
                     "address": u.address,
                     "amount": u.value as f64 / 100_000_000.0,
-                    "confirmations": 1,
+                    "confirmations": confirmations,
                     "spendable": spendable,
                     "state": state_str,
                     "solvable": true,
                     "safe": true
                 })
+            })
+            .filter(|v| {
+                let c = v.get("confirmations").and_then(|v| v.as_u64()).unwrap_or(0);
+                c >= min_conf && c <= max_conf
             })
             .collect();
 
@@ -992,6 +1005,7 @@ impl RpcHandler {
         let include_empty = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
 
         let utxos = self.utxo_manager.list_all_utxos().await;
+        let current_height = self.blockchain.get_height();
 
         // Get local masternode's reward address to filter UTXOs
         let local_address = self
@@ -1000,9 +1014,9 @@ impl RpcHandler {
             .await
             .map(|mn| mn.reward_address);
 
-        // Group UTXOs by address
+        // Group UTXOs by address: (total_amount, tx_count, min_confirmations)
         use std::collections::HashMap;
-        let mut address_map: HashMap<String, (u64, usize)> = HashMap::new();
+        let mut address_map: HashMap<String, (u64, usize, u64)> = HashMap::new();
 
         for utxo in utxos.iter() {
             // Only show this node's addresses
@@ -1015,21 +1029,31 @@ impl RpcHandler {
                 continue;
             }
 
-            // Group by address (count amount and transaction count)
-            let entry = address_map.entry(utxo.address.clone()).or_insert((0, 0));
+            let confirmations = self
+                .blockchain
+                .tx_index
+                .as_ref()
+                .and_then(|idx| idx.get_location(&utxo.outpoint.txid))
+                .map(|loc| current_height.saturating_sub(loc.block_height) + 1)
+                .unwrap_or(0);
+
+            let entry = address_map
+                .entry(utxo.address.clone())
+                .or_insert((0, 0, u64::MAX));
             entry.0 += utxo.value;
             entry.1 += 1;
+            entry.2 = entry.2.min(confirmations);
         }
 
         // Convert to JSON array
         let mut result: Vec<Value> = address_map
             .iter()
-            .filter(|(_, (amount, _))| include_empty || *amount > 0)
-            .map(|(address, (amount, txcount))| {
+            .filter(|(_, (amount, _, confs))| (include_empty || *amount > 0) && *confs >= minconf)
+            .map(|(address, (amount, txcount, confs))| {
                 json!({
                     "address": address,
                     "amount": *amount as f64 / 100_000_000.0,
-                    "confirmations": minconf,
+                    "confirmations": confs,
                     "txcount": txcount
                 })
             })
