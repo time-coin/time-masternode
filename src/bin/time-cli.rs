@@ -28,6 +28,7 @@ Commands:
     getnewaddress          Get a new receiving address
     listreceivedbyaddress  List addresses with balances
     listunspent            List unspent transaction outputs
+    listtransactions       List recent wallet transactions
     sendtoaddress          Send TIME to an address
     mergeutxos             Merge UTXOs to reduce UTXO set size
   Transaction
@@ -161,6 +162,14 @@ enum Commands {
         /// Maximum confirmations
         #[arg(default_value = "9999999")]
         maxconf: u32,
+    },
+
+    /// List recent wallet transactions (sent and received)
+    #[command(next_help_heading = "Wallet")]
+    ListTransactions {
+        /// Number of transactions to show (default: 10)
+        #[arg(short = 'n', long, default_value = "10")]
+        count: u64,
     },
 
     /// Send TIME to an address
@@ -413,6 +422,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } => ("listunspent", json!([minconf, maxconf, null, limit])),
         Commands::GetNewAddress => ("getnewaddress", json!([])),
         Commands::GetWalletInfo => ("getwalletinfo", json!([])),
+        Commands::ListTransactions { count } => ("listtransactions", json!([count])),
         Commands::ListReceivedByAddress {
             minconf,
             include_empty,
@@ -640,6 +650,39 @@ fn print_human_readable(
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0)
             );
+        }
+        Commands::ListTransactions { .. } => {
+            if let Some(txs) = result.as_array() {
+                println!("\nRecent Wallet Transactions:");
+                println!(
+                    "{:<10} {:>15} {:>8} {:>8} {:<64}",
+                    "Category", "Amount (TIME)", "Confs", "Height", "TxID"
+                );
+                println!("{}", "-".repeat(110));
+                for tx in txs {
+                    let category = tx.get("category").and_then(|v| v.as_str()).unwrap_or("?");
+                    let amount = tx.get("amount").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let confs = tx
+                        .get("confirmations")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let height = tx.get("blockheight").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let txid = tx.get("txid").and_then(|v| v.as_str()).unwrap_or("");
+                    let fee_str = tx
+                        .get("fee")
+                        .and_then(|v| v.as_f64())
+                        .map(|f| format!(" (fee: {:.8})", f))
+                        .unwrap_or_default();
+
+                    println!(
+                        "{:<10} {:>15.8} {:>8} {:>8} {:<64}{}",
+                        category, amount, confs, height, txid, fee_str
+                    );
+                }
+                println!("\nTotal: {} transaction(s)", txs.len());
+            } else {
+                println!("No transactions found");
+            }
         }
         Commands::ListUnspent { limit, .. } => {
             if let Some(utxos) = result.as_array() {

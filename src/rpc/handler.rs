@@ -93,6 +93,7 @@ impl RpcHandler {
             "removewhitelist" => self.remove_whitelist(&params_array).await,
             "getblacklist" => self.get_blacklist().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
+            "listtransactions" => self.list_transactions(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
             "reindex" => self.reindex_full().await,
             "gettxindexstatus" => self.get_tx_index_status().await,
@@ -946,6 +947,139 @@ impl RpcHandler {
         });
 
         Ok(json!(result))
+    }
+
+    /// List recent transactions involving this wallet (sent and received).
+    /// Params: [count (default 10)]
+    async fn list_transactions(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let count = params.first().and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address)
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode".to_string(),
+            })?;
+
+        let chain_height = self.blockchain.get_height();
+        let mut transactions: Vec<Value> = Vec::new();
+
+        // Scan blocks from newest to oldest, collecting wallet-related TXs
+        let scan_start = chain_height;
+        for height in (0..=scan_start).rev() {
+            if transactions.len() >= count {
+                break;
+            }
+
+            let block = match self.blockchain.get_block(height) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            let block_hash = hex::encode(block.hash());
+            let block_time = block.header.timestamp;
+
+            for (tx_idx, tx) in block.transactions.iter().enumerate() {
+                let txid = hex::encode(tx.txid());
+
+                // Check if any output goes to our address (receive)
+                let mut received: u64 = 0;
+                for output in &tx.outputs {
+                    let addr = String::from_utf8_lossy(&output.script_pubkey);
+                    if addr == local_address {
+                        received += output.value;
+                    }
+                }
+
+                // Check if any input spends from our address (send)
+                let mut sent: u64 = 0;
+                for input in &tx.inputs {
+                    // Look up the UTXO being spent to check its address
+                    let spent_txid = input.previous_output.txid;
+                    let spent_vout = input.previous_output.vout;
+
+                    // Search for the source transaction in the chain
+                    if let Some(ref txi) = self.blockchain.tx_index {
+                        if let Some(loc) = txi.get_location(&spent_txid) {
+                            if let Ok(src_block) = self.blockchain.get_block(loc.block_height) {
+                                if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
+                                    if let Some(src_output) =
+                                        src_tx.outputs.get(spent_vout as usize)
+                                    {
+                                        let src_addr =
+                                            String::from_utf8_lossy(&src_output.script_pubkey);
+                                        if src_addr == local_address {
+                                            sent += src_output.value;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if sent > 0 || received > 0 {
+                    // Skip coinbase (tx_idx 0) and reward distribution (tx_idx 1) for "send"
+                    // They are always "receive" type
+                    let category = if tx_idx <= 1 {
+                        "generate"
+                    } else if sent > 0 && received > 0 {
+                        // Change back to self — net effect is a send
+                        "send"
+                    } else if sent > 0 {
+                        "send"
+                    } else {
+                        "receive"
+                    };
+
+                    let net_amount = if category == "send" {
+                        // For sends, show the net amount leaving the wallet (negative)
+                        // sent - received = total input from wallet - change back
+                        -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
+                    } else {
+                        received as f64 / 100_000_000.0
+                    };
+
+                    // Calculate fee for sends
+                    let fee = if category == "send" {
+                        let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                        let total_in = sent; // We only know our inputs
+                        if total_in > total_out {
+                            Some(-((total_in - total_out) as f64 / 100_000_000.0))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let mut entry = json!({
+                        "txid": txid,
+                        "category": category,
+                        "amount": net_amount,
+                        "confirmations": chain_height.saturating_sub(height) + 1,
+                        "blockhash": block_hash,
+                        "blockheight": height,
+                        "blocktime": block_time,
+                        "time": block_time,
+                    });
+
+                    if let Some(f) = fee {
+                        entry["fee"] = json!(f);
+                    }
+
+                    transactions.push(entry);
+                }
+            }
+        }
+
+        // Truncate to requested count
+        transactions.truncate(count);
+
+        Ok(json!(transactions))
     }
 
     async fn masternode_status(&self) -> Result<Value, RpcError> {
