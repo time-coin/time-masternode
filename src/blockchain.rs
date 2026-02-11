@@ -2656,14 +2656,51 @@ impl Blockchain {
         let mut all_txs = vec![coinbase.clone(), reward_distribution];
 
         // PHASE 3: Validate finalized transactions before including in block
-        // Edge case: TX was valid when finalized but may be invalid now (UTXOs spent, etc.)
+        // Check for double-spends: multiple TXs spending the same UTXO
         let mut valid_finalized = Vec::new();
-        let invalid_count = 0;
+        let mut invalid_count = 0;
+        let mut spent_outpoints = std::collections::HashSet::new();
+        let mut seen_txids = std::collections::HashSet::new();
         for tx in finalized_txs {
-            // Quick validation: check if transaction is still acceptable
-            // Note: Full validation would require UTXO checks which are expensive
-            // For now, trust that finalized TXs are valid (they were validated when added to pending pool)
-            // Future enhancement: Add UTXO validation here if needed
+            let txid = tx.txid();
+
+            // Skip duplicate txids
+            if !seen_txids.insert(txid) {
+                tracing::warn!(
+                    "⚠️  Block {}: Skipping duplicate TX {}",
+                    next_height,
+                    hex::encode(txid)
+                );
+                invalid_count += 1;
+                continue;
+            }
+
+            // Check for double-spends within this block's transaction set
+            let mut has_double_spend = false;
+            for input in &tx.inputs {
+                let outpoint_key = (input.previous_output.txid, input.previous_output.vout);
+                if spent_outpoints.contains(&outpoint_key) {
+                    tracing::warn!(
+                        "⚠️  Block {}: Excluding TX {} - double-spend on UTXO {}:{}",
+                        next_height,
+                        hex::encode(txid),
+                        hex::encode(input.previous_output.txid),
+                        input.previous_output.vout
+                    );
+                    has_double_spend = true;
+                    break;
+                }
+            }
+
+            if has_double_spend {
+                invalid_count += 1;
+                continue;
+            }
+
+            // Mark all inputs as spent
+            for input in &tx.inputs {
+                spent_outpoints.insert((input.previous_output.txid, input.previous_output.vout));
+            }
             valid_finalized.push(tx);
         }
 
