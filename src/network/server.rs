@@ -1560,7 +1560,7 @@ async fn handle_peer(
                                     // Spawn finality check (non-blocking)
                                     tokio::spawn(async move {
                                         // Step 1: Accumulate the vote
-                                        let accumulated_weight = match consensus_clone.timevote.accumulate_timevote(vote_clone) {
+                                        let accumulated_weight = match consensus_clone.timevote.accumulate_timevote(vote_clone.clone()) {
                                             Ok(weight) => weight,
                                             Err(e) => {
                                                 tracing::warn!(
@@ -1571,6 +1571,18 @@ async fn handle_peer(
                                                 return;
                                             }
                                         };
+
+                                        // Wire vote into active Snowball round so the voting loop can tally it
+                                        let preference = match vote_clone.decision {
+                                            crate::types::VoteDecision::Accept => crate::consensus::Preference::Accept,
+                                            crate::types::VoteDecision::Reject => crate::consensus::Preference::Reject,
+                                        };
+                                        consensus_clone.timevote.record_vote_in_active_round(
+                                            txid,
+                                            vote_clone.voter_mn_id.clone(),
+                                            preference,
+                                            vote_clone.voter_weight as usize,
+                                        );
 
                                         tracing::debug!(
                                             "Vote accumulated for TX {:?}, total weight: {}",

@@ -782,6 +782,29 @@ impl TimeVoteConsensus {
         )
     }
 
+    /// Record a vote in the active query round for a transaction.
+    /// This wires TimeVoteResponse votes into the Snowball voting loop so it can tally them.
+    pub fn record_vote_in_active_round(
+        &self,
+        txid: Hash256,
+        voter_id: String,
+        preference: Preference,
+        weight: usize,
+    ) {
+        if let Some(round_entry) = self.active_rounds.get(&txid) {
+            let round = round_entry.value().read();
+            round.votes_received.insert(
+                voter_id.clone(),
+                Vote {
+                    voter_id,
+                    preference,
+                    timestamp: Instant::now(),
+                    weight,
+                },
+            );
+        }
+    }
+
     /// Cleanup finalized transactions and associated state older than retention period
     /// This prevents unbounded memory growth in the DashMaps
     pub fn cleanup_old_finalized(&self, retention_secs: u64) -> usize {
@@ -2889,177 +2912,84 @@ impl ConsensusEngine {
 
         // PRIORITY: Spawn with high priority for instant finality
         tokio::spawn(async move {
-            // Minimal delay - instant finality requires fast response
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Wait for votes to accumulate - the TimeVoteResponse handler in server.rs
+            // records votes into active_rounds AND accumulates them in timevote.
+            // The server.rs handler finalizes when threshold is met.
+            // This loop monitors for that finalization or times out.
+            let vote_deadline = Duration::from_secs(5);
+            let poll_interval = Duration::from_millis(50);
+            let start = Instant::now();
 
-            // Execute multiple timevote rounds for this transaction
-            let max_rounds = 10;
-            for round_num in 0..max_rounds {
-                // §7.6 Integration: Check if transaction is in FallbackResolution state
-                // If in fallback, skip timevote sampling and let fallback protocol handle it
-                if let Some(status_entry) = tx_status_map.get(&txid) {
-                    if matches!(
-                        status_entry.value(),
-                        TransactionStatus::FallbackResolution { .. }
-                    ) {
-                        tracing::info!(
-                            "Round {}: TX {:?} in FallbackResolution, skipping timevote sampling",
-                            round_num,
-                            hex::encode(txid)
-                        );
-                        // Wait for fallback to complete
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        continue;
-                    }
+            loop {
+                // Check if already finalized (by server.rs TimeVoteResponse handler)
+                if consensus.finalized_txs.contains_key(&txid) {
+                    tracing::debug!(
+                        "✅ TX {:?} finalized via TimeVote (detected by voting loop)",
+                        hex::encode(txid)
+                    );
+                    break;
                 }
 
-                // Create new QueryRound for this round
-                let query_round = Arc::new(RwLock::new(QueryRound::new(
-                    round_num,
-                    txid,
-                    (*validators_for_consensus).clone(),
-                )));
-                consensus.active_rounds.insert(txid, query_round);
-
-                // Sample size calculation (no RNG needed for count)
-                let sample_size = (validators_for_consensus.len() / 3)
-                    .max(3)
-                    .min(validators_for_consensus.len());
-
-                tracing::debug!(
-                    "Round {}: Voting with {} validators from {} for TX {:?}",
-                    round_num,
-                    sample_size,
-                    validators_for_consensus.len(),
-                    hex::encode(txid)
-                );
-
-                // Send vote request to all peers (broadcast)
-                consensus_engine_clone
-                    .broadcast(vote_request_msg.clone())
-                    .await;
-
-                // Wait for votes to arrive - reduced for instant finality
-                // 200ms should be enough for local network responses
-                tokio::time::sleep(Duration::from_millis(200)).await;
-
-                // Tally votes from this round
-                // Get the active round for this transaction
-                if let Some(round_entry) = consensus.active_rounds.get(&txid) {
-                    let round_lock = round_entry.value();
-                    let round = round_lock.read();
-                    // Get consensus from collected votes (Accept vs Reject tally)
-                    if let Some((vote_preference, vote_count)) = round.get_consensus() {
-                        tracing::debug!(
-                            "Round {}: Tally result - {} votes for {:?}",
-                            round_num,
-                            vote_count,
-                            vote_preference
-                        );
-
-                        drop(round); // Release read lock before acquiring write lock
-
-                        // Update Snowball state with vote result
-                        if let Some(tx_state) = consensus.tx_state.get(&txid) {
-                            let mut voting_state = tx_state.value().write();
-                            let old_pref = voting_state.snowflake.preference;
-
-                            // Update preference and confidence based on votes
-                            voting_state.update(
-                                vote_preference,
-                                consensus.config.finality_confidence as u32,
-                            );
-
-                            tracing::info!(
-                                "Round {}: TX {:?} preference {} -> {} ({} votes, confidence: {})",
-                                round_num,
-                                hex::encode(txid),
-                                old_pref,
-                                vote_preference,
-                                vote_count,
-                                voting_state.snowflake.confidence
-                            );
-
-                            // Generate and broadcast finality votes if we have valid responses
-                            // This propagates votes to peers for VFP accumulation
-                            // TODO: Get current slot index and local validator info
-                            // For now, this is wired but needs slot tracking integration
-                        }
-                    } else {
-                        tracing::debug!("Round {}: No consensus yet (not enough votes)", round_num);
-                        drop(round);
-                    }
+                if tx_pool.is_finalized(&txid) {
+                    tracing::debug!("✅ TX {:?} already in finalized pool", hex::encode(txid));
+                    break;
                 }
 
-                // Check finalization after vote tally
-                if let Some((preference, _, _, is_finalized)) = consensus.get_tx_state(&txid) {
-                    if is_finalized && preference == Preference::Accept {
-                        // Transition directly to Finalized when threshold reached
-                        if let Some(status_entry) = tx_status_map.get(&txid) {
-                            let status = status_entry.value();
-                            if matches!(status, TransactionStatus::Voting { .. }) {
-                                drop(status_entry);
-                                tx_status_map.insert(
-                                    txid,
-                                    TransactionStatus::Finalized {
-                                        finalized_at: chrono::Utc::now().timestamp_millis(),
-                                        vfp_weight: 0, // TODO: Use accumulated_weight from Snowball
-                                    },
-                                );
-                                tracing::info!("TX {:?} → Finalized", hex::encode(txid));
+                // Check vote tally in active round
+                let tally = consensus.active_rounds.get(&txid).and_then(|round_entry| {
+                    let round = round_entry.value().read();
+                    round.get_consensus()
+                });
+
+                if let Some((preference, vote_count)) = tally {
+                    // Update Snowball state
+                    if let Some(tx_state) = consensus.tx_state.get(&txid) {
+                        let mut voting_state = tx_state.value().write();
+                        voting_state
+                            .update(preference, consensus.config.finality_confidence as u32);
+                    }
+
+                    // Check if finalized via Snowball confidence
+                    if let Some((pref, _, _, is_finalized)) = consensus.get_tx_state(&txid) {
+                        if is_finalized && pref == Preference::Accept {
+                            let tx_for_broadcast = tx_pool.get_pending(&txid);
+                            tx_pool.finalize_transaction(txid);
+
+                            if tx_pool.is_finalized(&txid) {
+                                tracing::info!(
+                                        "📦 TX {:?} finalized via TimeVote ({} votes, Snowball confidence reached)",
+                                        hex::encode(txid),
+                                        vote_count
+                                    );
+
+                                if let Some(tx_data) = tx_for_broadcast {
+                                    consensus_engine_clone
+                                        .broadcast(NetworkMessage::TransactionFinalized {
+                                            txid,
+                                            tx: tx_data,
+                                        })
+                                        .await;
+                                }
                             }
-                        }
+                            consensus
+                                .finalized_txs
+                                .insert(txid, (Preference::Accept, Instant::now()));
 
-                        tracing::info!(
-                            "✅ TX {:?} finalized via TimeVote after round {} (progressive finality)",
-                            hex::encode(txid),
-                            round_num
-                        );
-                        break;
-                    }
-                }
-
-                // Small delay before next round
-                if round_num < max_rounds - 1 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            }
-
-            // Final finalization: check if we reached consensus
-            if let Some((preference, _, _, is_finalized)) = consensus.get_tx_state(&txid) {
-                if is_finalized {
-                    // Get TX before finalizing (PoolEntry is private)
-                    let tx_for_broadcast = tx_pool.get_pending(&txid);
-
-                    // Move to finalized pool
-                    tx_pool.finalize_transaction(txid);
-
-                    if tx_pool.is_finalized(&txid) {
-                        tracing::info!(
-                            "📦 TX {:?} moved to finalized pool (Snowball confidence threshold reached)",
-                            hex::encode(txid)
-                        );
-
-                        // Broadcast finalization to all nodes if we have the TX
-                        if let Some(tx_data) = tx_for_broadcast {
-                            consensus_engine_clone
-                                .broadcast(NetworkMessage::TransactionFinalized {
-                                    txid,
-                                    tx: tx_data,
-                                })
-                                .await;
-                            tracing::info!(
-                                "📡 Broadcast TransactionFinalized for {:?}",
-                                hex::encode(txid)
+                            // Update status
+                            tx_status_map.insert(
+                                txid,
+                                TransactionStatus::Finalized {
+                                    finalized_at: chrono::Utc::now().timestamp_millis(),
+                                    vfp_weight: 0,
+                                },
                             );
+                            break;
                         }
                     }
-                    // Record finalization preference for reference
-                    consensus
-                        .finalized_txs
-                        .insert(txid, (preference, Instant::now()));
-                } else {
-                    // Check if we got ANY votes at all
+                }
+
+                if start.elapsed() >= vote_deadline {
+                    // Timeout: check if we got any votes at all
                     let got_votes = consensus
                         .active_rounds
                         .get(&txid)
@@ -3069,63 +2999,59 @@ impl ConsensusEngine {
                         })
                         .unwrap_or(false);
 
-                    // SAFETY: If transaction is valid (preference=Accept) and UTXOs are locked,
-                    // but validators didn't respond (network partitioned or peers not upgraded),
-                    // we can safely finalize because UTXO locks prevent double-spends
-                    if !got_votes && preference == Preference::Accept {
-                        tracing::warn!(
-                            "⚠️ TX {:?} received 0 votes (validators not responding). Auto-finalizing because UTXOs are locked (double-spend impossible)",
-                            hex::encode(txid)
-                        );
-
-                        // Auto-finalize with UTXO lock safety
-                        // Get TX before finalizing (PoolEntry is private)
-                        let tx_for_broadcast = tx_pool.get_pending(&txid);
-
-                        tx_pool.finalize_transaction(txid);
-
-                        if tx_pool.is_finalized(&txid) {
-                            tracing::info!(
-                                "✅ TX {:?} auto-finalized (UTXO-lock protected, 0 validator responses)",
-                                hex::encode(txid)
+                    if let Some((preference, _, _, _)) = consensus.get_tx_state(&txid) {
+                        if !got_votes && preference == Preference::Accept {
+                            // No votes received but TX is valid and UTXOs are locked.
+                            // Auto-finalize: UTXO locks prevent double-spends.
+                            tracing::warn!(
+                                "⚠️ TX {:?} received 0 votes within {}s. Auto-finalizing (UTXOs locked, double-spend impossible)",
+                                hex::encode(txid),
+                                vote_deadline.as_secs()
                             );
 
-                            // Broadcast finalization to all nodes if we have the TX
-                            if let Some(tx_data) = tx_for_broadcast {
-                                consensus_engine_clone
-                                    .broadcast(NetworkMessage::TransactionFinalized {
-                                        txid,
-                                        tx: tx_data,
-                                    })
-                                    .await;
+                            let tx_for_broadcast = tx_pool.get_pending(&txid);
+                            tx_pool.finalize_transaction(txid);
+
+                            if tx_pool.is_finalized(&txid) {
                                 tracing::info!(
-                                    "📡 Broadcast TransactionFinalized for {:?}",
+                                    "✅ TX {:?} auto-finalized (UTXO-lock protected, 0 validator responses)",
                                     hex::encode(txid)
                                 );
+                                if let Some(tx_data) = tx_for_broadcast {
+                                    consensus_engine_clone
+                                        .broadcast(NetworkMessage::TransactionFinalized {
+                                            txid,
+                                            tx: tx_data,
+                                        })
+                                        .await;
+                                }
                             }
+                            consensus
+                                .finalized_txs
+                                .insert(txid, (Preference::Accept, Instant::now()));
+                        } else if got_votes {
+                            // Got votes but didn't reach threshold - reject
+                            tx_pool.reject_transaction(
+                                txid,
+                                "TimeVote consensus not reached".to_string(),
+                            );
+                            consensus
+                                .finalized_txs
+                                .insert(txid, (Preference::Reject, Instant::now()));
+                            tracing::warn!(
+                                "❌ TX {:?} rejected: TimeVote consensus not reached within {}s",
+                                hex::encode(txid),
+                                vote_deadline.as_secs()
+                            );
                         }
-                        consensus
-                            .finalized_txs
-                            .insert(txid, (Preference::Accept, Instant::now()));
-                    } else {
-                        // Got votes but didn't reach consensus threshold - truly reject
-                        tx_pool
-                            .reject_transaction(txid, "TimeVote consensus not reached".to_string());
-                        consensus
-                            .finalized_txs
-                            .insert(txid, (Preference::Reject, Instant::now()));
-                        tracing::warn!(
-                            "❌ TX {:?} rejected: TimeVote consensus not reached after {} rounds (preference: {}, votes received: {})",
-                            hex::encode(txid),
-                            max_rounds,
-                            preference,
-                            if got_votes { "yes" } else { "no" }
-                        );
                     }
+                    break;
                 }
+
+                tokio::time::sleep(poll_interval).await;
             }
 
-            // Cleanup: remove QueryRound and tx_state
+            // Cleanup
             consensus.active_rounds.remove(&txid);
             consensus.tx_state.remove(&txid);
             tracing::debug!(
