@@ -2438,10 +2438,9 @@ async fn main() {
             if removed > 0 {
                 let stats = cleanup_consensus.memory_stats();
                 tracing::info!(
-                    "🧹 Consensus cleanup: removed {} old finalized txs. Current: {} tx_state, {} active_rounds, {} finalized",
+                    "🧹 Consensus cleanup: removed {} old finalized txs. Current: {} tx_state, {} finalized",
                     removed,
                     stats.tx_state_entries,
-                    stats.active_rounds,
                     stats.finalized_txs
                 );
             }
