@@ -1164,47 +1164,61 @@ impl MessageHandler {
                         );
                     } else if block.header.height > current_height {
                         let block_height = block.header.height; // Store height before move
-                        if let Err(e) = context.blockchain.add_block(block).await {
-                            // Check if this is a height mismatch (gap) error
-                            if e.contains("Block height mismatch") {
-                                let gap = block_height - current_height;
-                                warn!(
-                                    "[{}] ⚠️ Block height gap detected: expected {}, got {} (gap: {})",
-                                    self.direction, current_height + 1, block_height, gap
-                                );
-
-                                // Trigger automatic sync to fill the gap
+                        info!(
+                            "📥 [{}] Adding finalized block {} at height {} to blockchain (current: {})",
+                            self.direction,
+                            hex::encode(block_hash),
+                            block_height,
+                            current_height
+                        );
+                        match context.blockchain.add_block_with_fork_handling(block).await {
+                            Ok(true) => {
                                 info!(
-                                    "📥 Requesting missing blocks {}-{} from {}",
-                                    current_height + 1,
-                                    block_height - 1,
-                                    self.peer_ip
-                                );
-
-                                let sync_msg =
-                                    NetworkMessage::GetBlocks(current_height + 1, block_height - 1);
-
-                                if let Err(send_err) = context
-                                    .peer_registry
-                                    .send_to_peer(&self.peer_ip, sync_msg)
-                                    .await
-                                {
-                                    warn!("Failed to request missing blocks: {}", send_err);
-                                }
-                            } else {
-                                // Downgrade to debug - often happens due to race conditions
-                                // when multiple peers try to add the same block
-                                debug!(
-                                    "[{}] Failed to add finalized block to blockchain: {}",
-                                    self.direction, e
+                                    "✅ [{}] Block {} finalized via consensus!",
+                                    self.direction, block_height
                                 );
                             }
-                        } else {
-                            debug!(
-                                "✅ [{}] Added finalized block {} to blockchain",
-                                self.direction,
-                                hex::encode(block_hash)
-                            );
+                            Ok(false) => {
+                                debug!(
+                                    "[{}] Block {} already in blockchain, skipping",
+                                    self.direction, block_height
+                                );
+                            }
+                            Err(e) => {
+                                if e.contains("Block height mismatch") {
+                                    let gap = block_height - current_height;
+                                    warn!(
+                                        "[{}] ⚠️ Block height gap detected: expected {}, got {} (gap: {})",
+                                        self.direction, current_height + 1, block_height, gap
+                                    );
+
+                                    // Trigger automatic sync to fill the gap
+                                    info!(
+                                        "📥 Requesting missing blocks {}-{} from {}",
+                                        current_height + 1,
+                                        block_height - 1,
+                                        self.peer_ip
+                                    );
+
+                                    let sync_msg = NetworkMessage::GetBlocks(
+                                        current_height + 1,
+                                        block_height - 1,
+                                    );
+
+                                    if let Err(send_err) = context
+                                        .peer_registry
+                                        .send_to_peer(&self.peer_ip, sync_msg)
+                                        .await
+                                    {
+                                        warn!("Failed to request missing blocks: {}", send_err);
+                                    }
+                                } else {
+                                    warn!(
+                                        "[{}] ⚠️ Failed to add finalized block {} to blockchain: {}",
+                                        self.direction, block_height, e
+                                    );
+                                }
+                            }
                         }
                     } else {
                         debug!(
