@@ -230,6 +230,14 @@ impl ConnectionManager {
             .unwrap_or(false)
     }
 
+    /// Check if a peer has any active state (connecting, connected, or reconnecting)
+    pub fn is_active(&self, peer_ip: &str) -> bool {
+        self.connections
+            .get(peer_ip)
+            .map(|info| info.state != PeerConnectionState::Disconnected)
+            .unwrap_or(false)
+    }
+
     /// Check if we have an outbound connection to a peer
     pub fn has_outbound_connection(&self, peer_ip: &str) -> bool {
         self.connections
@@ -495,12 +503,13 @@ impl ConnectionManager {
     /// Mark a peer as reconnecting (with retry logic)
     pub fn mark_reconnecting(
         &self,
-        _peer_ip: &str,
+        peer_ip: &str,
         _retry_delay: std::time::Duration,
         _consecutive_failures: u32,
     ) {
-        // Reconnection tracking with exponential backoff
-        // For now, just a placeholder
+        if let Some(mut entry) = self.connections.get_mut(peer_ip) {
+            entry.state = PeerConnectionState::Reconnecting;
+        }
     }
 
     /// Get list of currently connected peers

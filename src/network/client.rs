@@ -141,7 +141,8 @@ impl NetworkClient {
                 if blacklisted_peers.contains(ip) {
                     return true;
                 }
-                if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
+                // Skip if already connected, connecting, or reconnecting
+                if connection_manager.is_active(ip) || peer_registry.is_connected(ip) {
                     return true;
                 }
                 false
@@ -259,8 +260,8 @@ impl NetworkClient {
                     if should_skip(ip) {
                         continue;
                     }
-                    // Only skip if we already have an OUTBOUND connection (allow full mesh)
-                    if connection_manager.has_outbound_connection(ip) {
+                    // Only spawn if no task is already handling this peer
+                    if connection_manager.is_active(ip) {
                         continue;
                     }
                     if connection_manager.mark_connecting(ip) {
