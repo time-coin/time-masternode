@@ -2347,6 +2347,9 @@ impl ConsensusEngine {
                 Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {
                     // OK - locked by this transaction
                 }
+                Some(UTXOState::SpentPending { txid, .. }) if txid == our_txid => {
+                    // OK - voting in progress for this transaction
+                }
                 Some(UTXOState::SpentFinalized { txid, .. }) if txid == our_txid => {
                     // OK - already finalized by this transaction (e.g., receiving a block
                     // containing a TX we already finalized locally via TimeVote)
