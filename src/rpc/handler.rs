@@ -301,13 +301,19 @@ impl RpcHandler {
 
         let txid = hex::decode(txid_str).map_err(|_| RpcError {
             code: -8,
-            message: "Invalid txid format".to_string(),
+            message: format!(
+                "Invalid txid format (expected 64 hex chars, got {} chars)",
+                txid_str.len()
+            ),
         })?;
 
         if txid.len() != 32 {
             return Err(RpcError {
                 code: -8,
-                message: "Invalid txid length".to_string(),
+                message: format!(
+                    "Invalid txid length (expected 32 bytes, got {})",
+                    txid.len()
+                ),
             });
         }
 
