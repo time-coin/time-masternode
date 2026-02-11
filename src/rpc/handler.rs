@@ -857,65 +857,42 @@ impl RpcHandler {
     async fn get_balance(&self, params: &[Value]) -> Result<Value, RpcError> {
         let address = params.first().and_then(|v| v.as_str());
 
-        if let Some(addr) = address {
-            // Get balance for specific address
-            let utxos = self.utxo_manager.list_all_utxos().await;
+        let utxos = self.utxo_manager.list_all_utxos().await;
 
-            let total_balance: u64 = utxos
-                .iter()
-                .filter(|u| u.address == addr)
-                .map(|u| u.value)
-                .sum();
-
-            let locked_balance: u64 = utxos
-                .iter()
-                .filter(|u| u.address == addr)
-                .filter(|u| self.utxo_manager.is_collateral_locked(&u.outpoint))
-                .map(|u| u.value)
-                .sum();
-
-            let available_balance = total_balance.saturating_sub(locked_balance);
-
-            Ok(json!({
-                "balance": total_balance as f64 / 100_000_000.0,
-                "locked": locked_balance as f64 / 100_000_000.0,
-                "available": available_balance as f64 / 100_000_000.0
-            }))
+        let filter_addr = if let Some(addr) = address {
+            addr.to_string()
+        } else if let Some(local_mn) = self.registry.get_local_masternode().await {
+            local_mn.reward_address
         } else {
-            // Get wallet balance for this masternode's reward address
-            let utxos = self.utxo_manager.list_all_utxos().await;
+            return Ok(json!({
+                "balance": 0.0,
+                "locked": 0.0,
+                "available": 0.0
+            }));
+        };
 
-            // Try to get this masternode's reward address
-            if let Some(local_mn) = self.registry.get_local_masternode().await {
-                let total_balance: u64 = utxos
-                    .iter()
-                    .filter(|u| u.address == local_mn.reward_address)
-                    .map(|u| u.value)
-                    .sum();
+        let mut spendable: u64 = 0;
+        let mut locked_collateral: u64 = 0;
+        let mut pending: u64 = 0;
 
-                let locked_balance: u64 = utxos
-                    .iter()
-                    .filter(|u| u.address == local_mn.reward_address)
-                    .filter(|u| self.utxo_manager.is_collateral_locked(&u.outpoint))
-                    .map(|u| u.value)
-                    .sum();
-
-                let available_balance = total_balance.saturating_sub(locked_balance);
-
-                Ok(json!({
-                    "balance": total_balance as f64 / 100_000_000.0,
-                    "locked": locked_balance as f64 / 100_000_000.0,
-                    "available": available_balance as f64 / 100_000_000.0
-                }))
-            } else {
-                // Not a masternode - return 0 balance
-                Ok(json!({
-                    "balance": 0.0,
-                    "locked": 0.0,
-                    "available": 0.0
-                }))
+        for u in utxos.iter().filter(|u| u.address == filter_addr) {
+            if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                locked_collateral += u.value;
+                continue;
+            }
+            match self.utxo_manager.get_state(&u.outpoint) {
+                Some(crate::types::UTXOState::Unspent) => spendable += u.value,
+                _ => pending += u.value,
             }
         }
+
+        let total = spendable + locked_collateral + pending;
+
+        Ok(json!({
+            "balance": total as f64 / 100_000_000.0,
+            "locked": locked_collateral as f64 / 100_000_000.0,
+            "available": spendable as f64 / 100_000_000.0
+        }))
     }
 
     async fn list_unspent(&self, params: &[Value]) -> Result<Value, RpcError> {
@@ -2066,41 +2043,53 @@ impl RpcHandler {
         if let Some(local_mn) = self.registry.get_local_masternode().await {
             let utxos = self.utxo_manager.list_all_utxos().await;
 
-            // Calculate total balance for this wallet
-            let total_balance: u64 = utxos
+            // Categorize UTXOs by state
+            let mut spendable_balance: u64 = 0;
+            let mut locked_collateral: u64 = 0;
+            let mut pending_balance: u64 = 0;
+            let mut utxo_count: usize = 0;
+
+            for u in utxos
                 .iter()
                 .filter(|u| u.address == local_mn.reward_address)
-                .map(|u| u.value)
-                .sum();
+            {
+                utxo_count += 1;
 
-            // Calculate locked balance (collateral)
-            let locked_balance: u64 = utxos
-                .iter()
-                .filter(|u| u.address == local_mn.reward_address)
-                .filter(|u| self.utxo_manager.is_collateral_locked(&u.outpoint))
-                .map(|u| u.value)
-                .sum();
+                if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                    locked_collateral += u.value;
+                    continue;
+                }
 
-            // Available = total - locked
-            let available_balance = total_balance.saturating_sub(locked_balance);
+                match self.utxo_manager.get_state(&u.outpoint) {
+                    Some(crate::types::UTXOState::Unspent) => {
+                        spendable_balance += u.value;
+                    }
+                    Some(
+                        crate::types::UTXOState::Locked { .. }
+                        | crate::types::UTXOState::SpentPending { .. },
+                    ) => {
+                        pending_balance += u.value;
+                    }
+                    _ => {
+                        // SpentFinalized, Confirmed, etc. — shouldn't be in storage
+                        // but count them as non-spendable if present
+                        pending_balance += u.value;
+                    }
+                }
+            }
 
-            let unconfirmed_balance = 0u64; // TIME has instant finality
-            let immature_balance = 0u64;
-
-            let utxo_count = utxos
-                .iter()
-                .filter(|u| u.address == local_mn.reward_address)
-                .count();
+            let total_balance = spendable_balance + locked_collateral + pending_balance;
 
             Ok(json!({
                 "walletname": "default",
                 "walletversion": 1,
                 "format": "timecoin",
                 "balance": total_balance as f64 / 100_000_000.0,
-                "locked": locked_balance as f64 / 100_000_000.0,
-                "available": available_balance as f64 / 100_000_000.0,
-                "unconfirmed_balance": unconfirmed_balance as f64 / 100_000_000.0,
-                "immature_balance": immature_balance as f64 / 100_000_000.0,
+                "locked": locked_collateral as f64 / 100_000_000.0,
+                "available": spendable_balance as f64 / 100_000_000.0,
+                "pending": pending_balance as f64 / 100_000_000.0,
+                "unconfirmed_balance": pending_balance as f64 / 100_000_000.0,
+                "immature_balance": 0.0,
                 "txcount": utxo_count,
                 "keypoolsize": 1,
                 "unlocked_until": 0,
