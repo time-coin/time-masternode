@@ -244,7 +244,7 @@ while [ $(($(date +%s) - START_TIME)) -lt $TEST_TIMEOUT ]; do
         CONFIRMATIONS=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
         
         if [ "$CONFIRMATIONS" -gt 0 ]; then
-            BLOCK_HEIGHT=$(echo "$TX_INFO" | jq -r '.blockheight // "N/A"')
+            BLOCK_HEIGHT=$(echo "$TX_INFO" | jq -r '.height // .blockheight // "N/A"')
             BLOCK_HASH=$(echo "$TX_INFO" | jq -r '.blockhash // "N/A"')
             
             log_success "Transaction confirmed!"
@@ -316,7 +316,7 @@ fi
 TX_AMOUNT=$(echo "$FINAL_TX" | jq -r '.amount // 0')
 TX_FEE=$(echo "$FINAL_TX" | jq -r '.fee // 0')
 TX_CONFIRMATIONS=$(echo "$FINAL_TX" | jq -r '.confirmations // 0')
-TX_BLOCK=$(echo "$FINAL_TX" | jq -r '.blockheight // "N/A"')
+TX_BLOCK=$(echo "$FINAL_TX" | jq -r '.height // .blockheight // "N/A"')
 
 # Check for TimeProof (Phase 2 validation)
 HAS_TIMEPROOF=$(echo "$FINAL_TX" | jq -r '.timeproof // null')
