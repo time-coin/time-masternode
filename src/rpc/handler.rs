@@ -329,11 +329,44 @@ impl RpcHandler {
                         let current_height = self.blockchain.get_height();
                         let confirmations = current_height - location.block_height + 1;
 
+                        // Calculate total output value
+                        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+
+                        // Calculate total input value by looking up spent UTXOs
+                        let mut input_sum: u64 = 0;
+                        for input in &tx.inputs {
+                            if let Some(src_loc) =
+                                tx_index.get_location(&input.previous_output.txid)
+                            {
+                                if let Ok(src_block) =
+                                    self.blockchain.get_block(src_loc.block_height)
+                                {
+                                    if let Some(src_tx) =
+                                        src_block.transactions.get(src_loc.tx_index)
+                                    {
+                                        if let Some(src_out) =
+                                            src_tx.outputs.get(input.previous_output.vout as usize)
+                                        {
+                                            input_sum += src_out.value;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        let fee = if input_sum > 0 {
+                            input_sum.saturating_sub(output_sum)
+                        } else {
+                            0
+                        };
+
                         return Ok(json!({
                             "txid": hex::encode(txid_array),
                             "version": tx.version,
                             "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
                             "locktime": tx.lock_time,
+                            "amount": output_sum as f64 / 100_000_000.0,
+                            "fee": fee as f64 / 100_000_000.0,
                             "vin": tx.inputs.iter().map(|input| json!({
                                 "txid": hex::encode(input.previous_output.txid),
                                 "vout": input.previous_output.vout,
@@ -364,11 +397,39 @@ impl RpcHandler {
         // Then check pool (pending/finalized but not yet in a block)
         if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid_array) {
             let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+
+            // Try to calculate fee from input UTXOs
+            let mut input_sum: u64 = 0;
+            if let Some(ref txi) = self.blockchain.tx_index {
+                for input in &tx.inputs {
+                    if let Some(src_loc) = txi.get_location(&input.previous_output.txid) {
+                        if let Ok(src_block) = self.blockchain.get_block(src_loc.block_height) {
+                            if let Some(src_tx) = src_block.transactions.get(src_loc.tx_index) {
+                                if let Some(src_out) =
+                                    src_tx.outputs.get(input.previous_output.vout as usize)
+                                {
+                                    input_sum += src_out.value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let fee = if input_sum > 0 {
+                input_sum.saturating_sub(output_sum)
+            } else {
+                0
+            };
+
             return Ok(json!({
                 "txid": hex::encode(txid_array),
                 "version": tx.version,
                 "size": 250, // Estimate
                 "locktime": tx.lock_time,
+                "amount": output_sum as f64 / 100_000_000.0,
+                "fee": fee as f64 / 100_000_000.0,
                 "vin": tx.inputs.iter().map(|input| json!({
                     "txid": hex::encode(input.previous_output.txid),
                     "vout": input.previous_output.vout,
