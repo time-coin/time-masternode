@@ -659,7 +659,7 @@ async fn main() {
                     }
                     _ = interval.tick() => {
                         // Request masternodes from all connected peers for peer exchange
-                        tracing::info!("📤 Broadcasting GetMasternodes to all peers");
+                        tracing::debug!("📤 Broadcasting GetMasternodes to all peers");
                         peer_connection_registry_clone
                             .broadcast(NetworkMessage::GetMasternodes)
                             .await;

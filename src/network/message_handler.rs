@@ -475,7 +475,7 @@ impl MessageHandler {
                 visible_masternodes,
                 timestamp,
             } => {
-                tracing::info!(
+                tracing::debug!(
                     "📥 [{:?}] Processing gossip from {}: {} masternodes visible",
                     self.direction,
                     reporter,
@@ -1861,7 +1861,7 @@ impl MessageHandler {
         // Use peer IP instead of announced address for security
         let peer_ip = self.peer_ip.clone();
 
-        info!(
+        debug!(
             "📨 [{}] Received masternode announcement from {} (announced: {})",
             self.direction, peer_ip, address
         );
@@ -1885,7 +1885,7 @@ impl MessageHandler {
         {
             Ok(()) => {
                 let count = context.masternode_registry.total_count().await;
-                info!(
+                debug!(
                     "✅ [{}] Registered masternode {} (total: {})",
                     self.direction, peer_ip, count
                 );
@@ -1970,7 +1970,7 @@ impl MessageHandler {
         masternodes: Vec<crate::network::message::MasternodeAnnouncementData>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        info!(
+        debug!(
             "📥 [{}] Received MasternodesResponse from {} with {} masternode(s)",
             self.direction,
             self.peer_ip,
@@ -2019,7 +2019,7 @@ impl MessageHandler {
                     self.direction, registered
                 );
             } else {
-                info!(
+                debug!(
                     "✓ [{}] Registered {} masternode(s) from peer exchange",
                     self.direction, registered
                 );

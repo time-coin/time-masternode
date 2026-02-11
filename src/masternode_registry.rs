@@ -785,7 +785,7 @@ impl MasternodeRegistry {
                     tracing::warn!("📡 Gossip broadcast: no peers connected to receive message");
                 }
                 Ok(receivers) => {
-                    tracing::info!("📡 Gossip broadcast sent to {} peer(s)", receivers);
+                    tracing::debug!("📡 Gossip broadcast sent to {} peer(s)", receivers);
                 }
                 Err(e) => {
                     tracing::warn!("📡 Gossip broadcast failed: {:?}", e);
@@ -969,7 +969,7 @@ impl MasternodeRegistry {
         let reporter = local_addr.unwrap();
         let connected_peers = peer_registry.get_connected_peers().await;
 
-        tracing::info!(
+        tracing::debug!(
             "📡 Gossip: Checking visibility - we have {} connected peers, reporter: {}",
             connected_peers.len(),
             reporter
@@ -978,7 +978,7 @@ impl MasternodeRegistry {
         // Find which masternodes we're connected to
         let masternodes = self.masternodes.read().await;
 
-        tracing::info!(
+        tracing::debug!(
             "📡 Gossip: Registry has {} total masternodes: {:?}",
             masternodes.len(),
             masternodes.keys().collect::<Vec<_>>()
@@ -1009,7 +1009,7 @@ impl MasternodeRegistry {
 
         self.broadcast_message(msg).await;
 
-        tracing::info!(
+        tracing::debug!(
             "📡 Gossip: Broadcasting visibility of {} masternodes: {:?}",
             visible.len(),
             visible
@@ -1053,7 +1053,7 @@ impl MasternodeRegistry {
                 updated_count
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 "📥 Gossip from {}: reports seeing {} masternodes (updated {} in registry)",
                 reporter,
                 visible_masternodes.len(),
@@ -1174,7 +1174,7 @@ impl MasternodeRegistry {
             }
         }
 
-        if status_changes > 0 || total_active > 0 || !to_remove.is_empty() {
+        if !to_remove.is_empty() || status_changes > 0 {
             if !to_remove.is_empty() {
                 tracing::info!(
                     "🧹 Cleanup: {} status changes, {} removed, {} total active masternodes",
@@ -1189,6 +1189,11 @@ impl MasternodeRegistry {
                     total_active
                 );
             }
+        } else {
+            tracing::debug!(
+                "🧹 Cleanup: 0 status changes, {} total active masternodes",
+                total_active
+            );
         }
     }
 
@@ -1360,7 +1365,7 @@ impl MasternodeRegistry {
                     "Recommend: Check connections and restart inactive nodes".to_string(),
                 ],
             ),
-            5..=9 => (
+            5..=9 if inactive > 0 => (
                 HealthStatus::Degraded,
                 vec![
                     "DEGRADED: Network should have more active masternodes".to_string(),

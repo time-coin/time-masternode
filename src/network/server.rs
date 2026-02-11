@@ -1033,7 +1033,7 @@ async fn handle_peer(
                                         continue;
                                     }
 
-                                    tracing::info!("📨 Received masternode announcement from {} (IP: {})", peer.addr, peer_ip);
+                                    tracing::debug!("📨 Received masternode announcement from {} (IP: {})", peer.addr, peer_ip);
 
                                     let mn = crate::types::Masternode::new_legacy(
                                         peer_ip.clone(),
@@ -1050,7 +1050,7 @@ async fn handle_peer(
                                     match masternode_registry.register(mn, reward_address.clone()).await {
                                         Ok(()) => {
                                             let count = masternode_registry.total_count().await;
-                                            tracing::info!("✅ Registered masternode {} (total: {})", peer_ip, count);
+                                            tracing::debug!("✅ Registered masternode {} (total: {})", peer_ip, count);
 
                                             // Add masternode IP (without port) to peer_manager for P2P connections
                                             peer_manager.add_peer(peer_ip.clone()).await;
