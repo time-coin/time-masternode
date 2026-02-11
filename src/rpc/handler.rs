@@ -329,11 +329,26 @@ impl RpcHandler {
                         let current_height = self.blockchain.get_height();
                         let confirmations = current_height - location.block_height + 1;
 
-                        // Calculate total output value
+                        // Get wallet address for net amount calculation
+                        let local_address = self
+                            .registry
+                            .get_local_masternode()
+                            .await
+                            .map(|mn| mn.reward_address);
+
+                        // Calculate input/output sums and wallet-relative amounts
+                        let mut input_sum: u64 = 0;
+                        let mut wallet_input: u64 = 0;
+                        let mut wallet_output: u64 = 0;
                         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
-                        // Calculate total input value by looking up spent UTXOs
-                        let mut input_sum: u64 = 0;
+                        for output in &tx.outputs {
+                            let addr = String::from_utf8_lossy(&output.script_pubkey);
+                            if local_address.as_deref() == Some(addr.as_ref()) {
+                                wallet_output += output.value;
+                            }
+                        }
+
                         for input in &tx.inputs {
                             if let Some(src_loc) =
                                 tx_index.get_location(&input.previous_output.txid)
@@ -348,6 +363,11 @@ impl RpcHandler {
                                             src_tx.outputs.get(input.previous_output.vout as usize)
                                         {
                                             input_sum += src_out.value;
+                                            let src_addr =
+                                                String::from_utf8_lossy(&src_out.script_pubkey);
+                                            if local_address.as_deref() == Some(src_addr.as_ref()) {
+                                                wallet_input += src_out.value;
+                                            }
                                         }
                                     }
                                 }
@@ -360,12 +380,19 @@ impl RpcHandler {
                             0
                         };
 
+                        // Net amount: positive = received, negative = sent
+                        let net_amount = if wallet_input > 0 {
+                            (wallet_output as i64) - (wallet_input as i64)
+                        } else {
+                            wallet_output as i64
+                        };
+
                         return Ok(json!({
                             "txid": hex::encode(txid_array),
                             "version": tx.version,
                             "size": bincode::serialize(tx).map(|v| v.len()).unwrap_or(250),
                             "locktime": tx.lock_time,
-                            "amount": output_sum as f64 / 100_000_000.0,
+                            "amount": net_amount as f64 / 100_000_000.0,
                             "fee": fee as f64 / 100_000_000.0,
                             "vin": tx.inputs.iter().map(|input| json!({
                                 "txid": hex::encode(input.previous_output.txid),
@@ -399,6 +426,23 @@ impl RpcHandler {
             let is_finalized = self.consensus.tx_pool.is_finalized(&txid_array);
             let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
+            // Get wallet address for net amount calculation
+            let local_address = self
+                .registry
+                .get_local_masternode()
+                .await
+                .map(|mn| mn.reward_address);
+
+            let mut wallet_input: u64 = 0;
+            let mut wallet_output: u64 = 0;
+
+            for output in &tx.outputs {
+                let addr = String::from_utf8_lossy(&output.script_pubkey);
+                if local_address.as_deref() == Some(addr.as_ref()) {
+                    wallet_output += output.value;
+                }
+            }
+
             // Try to calculate fee from input UTXOs
             let mut input_sum: u64 = 0;
             if let Some(ref txi) = self.blockchain.tx_index {
@@ -410,6 +454,10 @@ impl RpcHandler {
                                     src_tx.outputs.get(input.previous_output.vout as usize)
                                 {
                                     input_sum += src_out.value;
+                                    let src_addr = String::from_utf8_lossy(&src_out.script_pubkey);
+                                    if local_address.as_deref() == Some(src_addr.as_ref()) {
+                                        wallet_input += src_out.value;
+                                    }
                                 }
                             }
                         }
@@ -423,12 +471,18 @@ impl RpcHandler {
                 0
             };
 
+            let net_amount = if wallet_input > 0 {
+                (wallet_output as i64) - (wallet_input as i64)
+            } else {
+                wallet_output as i64
+            };
+
             return Ok(json!({
                 "txid": hex::encode(txid_array),
                 "version": tx.version,
                 "size": 250, // Estimate
                 "locktime": tx.lock_time,
-                "amount": output_sum as f64 / 100_000_000.0,
+                "amount": net_amount as f64 / 100_000_000.0,
                 "fee": fee as f64 / 100_000_000.0,
                 "vin": tx.inputs.iter().map(|input| json!({
                     "txid": hex::encode(input.previous_output.txid),
