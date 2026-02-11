@@ -242,13 +242,22 @@ impl NetworkClient {
             loop {
                 sleep(peer_discovery_interval).await;
 
+                // Clean up stale Connecting/Reconnecting states (stuck >30s)
+                let stale = connection_manager.cleanup_stale_connecting(Duration::from_secs(30));
+                if stale > 0 {
+                    tracing::info!("🧹 Reset {} stale connecting peer(s)", stale);
+                }
+
                 let all_masternodes = masternode_registry.list_all().await;
                 let active_count = masternode_registry.list_active().await.len();
-                let connected_count = connection_manager.connected_count();
+                let outbound_count = connection_manager.connected_count();
+                let inbound_count = peer_registry.inbound_count();
 
                 tracing::info!(
-                    "🔍 Peer check: {} connected, {} known masternodes ({} active), {} total slots",
-                    connected_count,
+                    "🔍 Peer check: {} connected ({} out, {} in), {} known masternodes ({} active), {} total slots",
+                    outbound_count + inbound_count,
+                    outbound_count,
+                    inbound_count,
                     all_masternodes.len(),
                     active_count,
                     max_peers
@@ -271,7 +280,7 @@ impl NetworkClient {
                 }
 
                 // Fill remaining slots with regular peers
-                let available_slots = max_peers.saturating_sub(connected_count);
+                let available_slots = max_peers.saturating_sub(outbound_count + inbound_count);
                 if available_slots > 0 {
                     let unique_peers = dedup_peers(peer_manager.get_all_peers().await);
                     for ip in unique_peers.iter().take(available_slots) {

@@ -341,9 +341,13 @@ impl PeerConnection {
             info!("🔗 [OUTBOUND] Connecting to {}", addr);
         }
 
-        let stream = TcpStream::connect(&addr)
-            .await
-            .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
+        let stream = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            TcpStream::connect(&addr),
+        )
+        .await
+        .map_err(|_| format!("Connection to {} timed out (10s)", addr))?
+        .map_err(|e| format!("Failed to connect to {}: {}", addr, e))?;
 
         let remote_addr = stream
             .peer_addr()
