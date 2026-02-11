@@ -132,7 +132,7 @@ impl AITransactionValidator {
                 let time_delta = now.saturating_sub(pattern.last_seen);
                 if time_delta < 10 {
                     spam_indicators += 1;
-                    warn!(
+                    debug!(
                         "🚨 Rapid transaction detected for output {}: {} seconds",
                         idx, time_delta
                     );
