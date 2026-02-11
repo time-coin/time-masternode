@@ -2962,6 +2962,28 @@ impl ConsensusEngine {
                                         vote_count
                                     );
 
+                                // Assemble and store TimeProof certificate
+                                match consensus.assemble_timeproof(txid) {
+                                    Ok(proof) => {
+                                        tracing::info!(
+                                            "📜 TimeProof assembled for TX {:?} with {} votes",
+                                            hex::encode(txid),
+                                            proof.votes.len()
+                                        );
+                                        let _ = consensus_engine_clone
+                                            .finality_proof_mgr
+                                            .store_timeproof(proof.clone());
+                                        consensus_engine_clone.broadcast_timeproof(proof).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(
+                                            "TimeProof assembly skipped for TX {:?}: {}",
+                                            hex::encode(txid),
+                                            e
+                                        );
+                                    }
+                                }
+
                                 if let Some(tx_data) = tx_for_broadcast {
                                     consensus_engine_clone
                                         .broadcast(NetworkMessage::TransactionFinalized {
@@ -3017,6 +3039,28 @@ impl ConsensusEngine {
                                     "✅ TX {:?} auto-finalized (UTXO-lock protected, 0 validator responses)",
                                     hex::encode(txid)
                                 );
+
+                                // Try to assemble TimeProof from any votes that arrived via accumulate_timevote
+                                match consensus.assemble_timeproof(txid) {
+                                    Ok(proof) => {
+                                        tracing::info!(
+                                            "📜 TimeProof assembled for TX {:?} with {} votes (late arrival)",
+                                            hex::encode(txid),
+                                            proof.votes.len()
+                                        );
+                                        let _ = consensus_engine_clone
+                                            .finality_proof_mgr
+                                            .store_timeproof(proof.clone());
+                                        consensus_engine_clone.broadcast_timeproof(proof).await;
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!(
+                                            "No votes available for TimeProof assembly on TX {:?}",
+                                            hex::encode(txid)
+                                        );
+                                    }
+                                }
+
                                 if let Some(tx_data) = tx_for_broadcast {
                                     consensus_engine_clone
                                         .broadcast(NetworkMessage::TransactionFinalized {
