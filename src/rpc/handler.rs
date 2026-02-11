@@ -1110,8 +1110,9 @@ impl RpcHandler {
 
         let all_masternodes = self.registry.list_all().await;
 
-        // Get connection manager from blockchain to check connection status
+        // Get connection manager and peer registry to check connection status
         let connection_manager = self.blockchain.get_connection_manager().await;
+        let peer_registry = self.blockchain.get_peer_registry().await;
 
         // Build full list with connection status
         let full_list: Vec<_> = all_masternodes
@@ -1129,18 +1130,22 @@ impl RpcHandler {
                         (false, None)
                     };
 
-                // Check if masternode is currently connected
-                let is_connected = if let Some(ref cm) = connection_manager {
-                    let ip_only = mn
-                        .masternode
-                        .address
-                        .split(':')
-                        .next()
-                        .unwrap_or(&mn.masternode.address);
-                    cm.is_connected(ip_only)
-                } else {
-                    false
-                };
+                // Check if masternode is currently connected (check both registries)
+                let ip_only = mn
+                    .masternode
+                    .address
+                    .split(':')
+                    .next()
+                    .unwrap_or(&mn.masternode.address);
+                let cm_connected = connection_manager
+                    .as_ref()
+                    .map(|cm| cm.is_connected(ip_only))
+                    .unwrap_or(false);
+                let pr_connected = peer_registry
+                    .as_ref()
+                    .map(|pr| pr.is_connected(ip_only))
+                    .unwrap_or(false);
+                let is_connected = cm_connected || pr_connected;
 
                 (mn, is_connected, collateral_locked, collateral_outpoint)
             })

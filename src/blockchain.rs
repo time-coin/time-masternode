@@ -503,6 +503,10 @@ impl Blockchain {
         self.connection_manager.read().await.clone()
     }
 
+    pub async fn get_peer_registry(&self) -> Option<Arc<PeerConnectionRegistry>> {
+        self.peer_registry.read().await.clone()
+    }
+
     pub fn genesis_timestamp(&self) -> i64 {
         self.genesis_timestamp // Use cached value
     }
