@@ -1301,7 +1301,7 @@ impl RpcHandler {
             "active_validators": mn_count,
             "finality_type": "TimeVote consensus (seconds) + TimeLock blocks (10 minutes)",
             "instant_finality": true,
-            "average_finality_time_ms": 750
+            "average_finality_time_ms": self.consensus.get_avg_finality_time_ms()
         });
 
         Ok(timevote_config)
@@ -1323,7 +1323,7 @@ impl RpcHandler {
                 "max_rounds": 100
             },
             "metrics": {
-                "average_finality_time_ms": 750,
+                "average_finality_time_ms": self.consensus.get_avg_finality_time_ms(),
                 "finality_type": "probabilistic (cryptographically secure)",
                 "validator_sampling": "random k-of-n",
                 "description": "TimeVote consensus: query random 20 validators per round, finalize after 15 consecutive confirms"
