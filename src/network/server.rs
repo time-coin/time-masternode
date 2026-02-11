@@ -59,6 +59,7 @@ pub struct NetworkServer {
     pub peer_manager: Arc<crate::peer_manager::PeerManager>,
     pub seen_blocks: Arc<DeduplicationFilter>, // Bloom filter for block heights
     pub seen_transactions: Arc<DeduplicationFilter>, // Bloom filter for tx hashes
+    pub seen_tx_finalized: Arc<DeduplicationFilter>, // Bloom filter for finalized tx messages
     pub seen_utxo_locks: Arc<DeduplicationFilter>, // Bloom filter for UTXO lock updates
     pub connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     pub peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
@@ -163,6 +164,7 @@ impl NetworkServer {
             peer_manager,
             seen_blocks: Arc::new(DeduplicationFilter::new(Duration::from_secs(300))), // 5 min rotation
             seen_transactions: Arc::new(DeduplicationFilter::new(Duration::from_secs(600))), // 10 min rotation
+            seen_tx_finalized: Arc::new(DeduplicationFilter::new(Duration::from_secs(600))), // 10 min rotation
             seen_utxo_locks: Arc::new(DeduplicationFilter::new(Duration::from_secs(300))), // 5 min rotation
             connection_manager,
             peer_registry,
@@ -387,6 +389,7 @@ impl NetworkServer {
             let broadcast_tx = self.tx_notifier.clone();
             let seen_blocks = self.seen_blocks.clone();
             let seen_txs = self.seen_transactions.clone();
+            let seen_tx_fin = self.seen_tx_finalized.clone();
             let seen_locks = self.seen_utxo_locks.clone();
             let conn_mgr = self.connection_manager.clone();
             let peer_reg = self.peer_registry.clone();
@@ -412,6 +415,7 @@ impl NetworkServer {
                     broadcast_tx,
                     seen_blocks,
                     seen_txs,
+                    seen_tx_fin,
                     seen_locks,
                     conn_mgr,
                     peer_reg,
@@ -476,6 +480,7 @@ async fn handle_peer(
     broadcast_tx: broadcast::Sender<NetworkMessage>,
     seen_blocks: Arc<DeduplicationFilter>,
     seen_transactions: Arc<DeduplicationFilter>,
+    seen_tx_finalized: Arc<DeduplicationFilter>,
     seen_utxo_locks: Arc<DeduplicationFilter>,
     connection_manager: Arc<crate::network::connection_manager::ConnectionManager>,
     peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
@@ -858,7 +863,7 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::TransactionFinalized { txid, tx } => {
                                     // Dedup: skip if we've already processed this finalization
-                                    let already_seen = seen_transactions.check_and_insert(txid).await;
+                                    let already_seen = seen_tx_finalized.check_and_insert(txid).await;
                                     if already_seen {
                                         tracing::debug!("🔁 Ignoring duplicate TransactionFinalized {} from {}", hex::encode(*txid), peer.addr);
                                         continue;
