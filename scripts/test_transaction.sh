@@ -1,11 +1,11 @@
 #!/bin/bash
 # Transaction Test Script - TimeVote Protocol Testing
-# Tests sending 1 TIME coin and validates the new TimeVote consensus flow:
+# Tests sending 1 TIME coin and validates the TimeVote consensus flow:
 # - Transaction broadcasting
 # - TimeVote request/response (signed votes with stake weighting)
-# - Automatic finalization at 67% threshold
+# - Automatic finalization at 67% threshold (= confirmed)
 # - TimeProof certificate assembly and broadcasting
-# - Transaction confirmation in blockchain
+# - Block archival (separate from finality)
 
 set -e  # Exit on error
 
@@ -238,49 +238,50 @@ else
 fi
 echo ""
 
-# Step 6: Wait for confirmation
-log_info "Step 6: Waiting for transaction confirmation (timeout: ${TEST_TIMEOUT}s)..."
-log_info "Note: Blocks are produced every ~600s. Confirmation may take longer than the test timeout."
-CONFIRMED=false
-START_TIME=$(date +%s)
-
-while [ $(($(date +%s) - START_TIME)) -lt $TEST_TIMEOUT ]; do
-    TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
+# Step 6: Verify finality status (TimeVote is the confirmation mechanism, not blocks)
+log_info "Step 6: Verifying TimeVote finality status..."
+if [ "$FINALIZED" = true ]; then
+    log_success "Transaction is confirmed (finalized via TimeVote consensus)"
+    log_info "Note: Block archival occurs every ~600s but finality is already achieved"
+else
+    log_info "Waiting for TimeVote finality (timeout: ${TEST_TIMEOUT}s)..."
+    START_TIME=$(date +%s)
     
-    if [ $? -eq 0 ] && echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
-        CONFIRMATIONS=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
+    while [ $(($(date +%s) - START_TIME)) -lt $TEST_TIMEOUT ]; do
+        TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
         
-        if [ "$CONFIRMATIONS" -gt 0 ]; then
-            BLOCK_HEIGHT=$(echo "$TX_INFO" | jq -r '.height // .blockheight // "N/A"')
-            BLOCK_HASH=$(echo "$TX_INFO" | jq -r '.blockhash // "N/A"')
+        if [ $? -eq 0 ] && echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
+            IS_FINALIZED=$(echo "$TX_INFO" | jq -r '.finalized // false')
             
-            log_success "Transaction confirmed!"
-            log_info "  Confirmations: $CONFIRMATIONS"
-            log_info "  Block height: $BLOCK_HEIGHT"
-            log_info "  Block hash: ${BLOCK_HASH:0:16}..."
-            CONFIRMED=true
-            break
-        else
-            echo -ne "\r  Waiting for confirmation... (${CONFIRMATIONS} confirmations, elapsed: $(($(date +%s) - START_TIME))s)"
+            if [ "$IS_FINALIZED" = "true" ]; then
+                log_success "Transaction confirmed (finalized via TimeVote consensus)!"
+                FINALIZED=true
+                break
+            fi
         fi
-    else
-        echo -ne "\r  Transaction pending... (elapsed: $(($(date +%s) - START_TIME))s)                    "
-    fi
+        
+        echo -ne "\r  Waiting for finality... (elapsed: $(($(date +%s) - START_TIME))s)    "
+        sleep 2
+    done
+    echo ""
     
-    sleep 2
-done
-
-echo ""  # Newline after progress indicator
-
-if [ "$CONFIRMED" = false ]; then
-    if [ "$FINALIZED" = true ]; then
-        log_info "Transaction finalized but not yet in a block (blocks produced every ~600s)"
-        log_info "TXID: $TXID"
-        log_info "Check confirmation later with: $CLI_CMD gettransaction $TXID"
-    else
-        log_warning "Transaction not confirmed within ${TEST_TIMEOUT} seconds"
+    if [ "$FINALIZED" = false ]; then
+        log_warning "TimeVote finality not achieved within ${TEST_TIMEOUT}s"
         log_info "Transaction may still be pending. TXID: $TXID"
         log_info "Check status later with: $CLI_CMD gettransaction $TXID"
+    fi
+fi
+
+# Check if already archived in a block
+CONFIRMED=false
+TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
+if [ $? -eq 0 ] && echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
+    CONFIRMATIONS=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
+    if [ "$CONFIRMATIONS" -gt 0 ]; then
+        BLOCK_HEIGHT=$(echo "$TX_INFO" | jq -r '.height // .blockheight // "N/A"')
+        BLOCK_HASH=$(echo "$TX_INFO" | jq -r '.blockhash // "N/A"')
+        log_success "Also archived in block $BLOCK_HEIGHT (${BLOCK_HASH:0:16}...)"
+        CONFIRMED=true
     fi
 fi
 
@@ -300,7 +301,8 @@ fi
 TX_AMOUNT=$(echo "$FINAL_TX" | jq -r '.amount // 0')
 TX_FEE=$(echo "$FINAL_TX" | jq -r '.fee // 0')
 TX_CONFIRMATIONS=$(echo "$FINAL_TX" | jq -r '.confirmations // 0')
-TX_BLOCK=$(echo "$FINAL_TX" | jq -r '.height // .blockheight // "N/A"')
+TX_BLOCK=$(echo "$FINAL_TX" | jq -r '.height // .blockheight // "pending"')
+TX_FINALIZED=$(echo "$FINAL_TX" | jq -r '.finalized // false')
 
 # Check for TimeProof (Phase 2 validation)
 HAS_TIMEPROOF=$(echo "$FINAL_TX" | jq -r '.timeproof // null')
@@ -323,38 +325,38 @@ echo "  TXID:           $TXID"
 echo "  Amount:         $TX_AMOUNT TIME"
 echo "  Fee:            $TX_FEE TIME"
 echo "  Recipient:      $RECIPIENT_ADDRESS"
-echo "  Confirmations:  $TX_CONFIRMATIONS"
-echo "  Block:          $TX_BLOCK"
 echo "══════════════════════════════════════════════════════════════"
-echo "                   TIMEVOTE PROTOCOL STATUS"
+echo "                   TIMEVOTE CONSENSUS STATUS"
 echo "══════════════════════════════════════════════════════════════"
+echo "  Finalized:      $TX_FINALIZED"
 echo "  TimeProof:      $TIMEPROOF_STATUS"
 echo "  Votes:          $TIMEPROOF_VOTES masternodes"
 echo "  Weight:         $TIMEPROOF_WEIGHT (≥67% required)"
 echo "══════════════════════════════════════════════════════════════"
+echo "                      BLOCK ARCHIVAL"
+echo "══════════════════════════════════════════════════════════════"
+echo "  Block:          $TX_BLOCK"
+echo "  Depth:          $TX_CONFIRMATIONS blocks"
 echo "══════════════════════════════════════════════════════════════"
 echo ""
 
 # Final status report
-if [ "$TX_CONFIRMATIONS" -gt 0 ]; then
-    log_success "✨ Transaction test completed successfully!"
-    log_success "Transaction finalized and confirmed in blockchain!"
-    echo ""
-    log_info "Complete flow verified:"
-    log_info "  ✓ Transaction broadcast to network"
-    log_info "  ✓ Transaction finalized via TimeVote consensus"
-    log_info "  ✓ Included in block $TX_BLOCK"
-    log_info "  ✓ Confirmed with $TX_CONFIRMATIONS confirmation(s)"
-elif [ "$FINALIZED" = true ]; then
+if [ "$FINALIZED" = true ]; then
     log_success "✨ Transaction test PASSED!"
-    log_success "Transaction finalized via TimeVote consensus (instant finality achieved)"
+    log_success "Transaction confirmed via TimeVote consensus (instant finality)"
     echo ""
     log_info "Verified:"
     log_info "  ✓ Transaction broadcast to network"
     log_info "  ✓ TimeVote finality achieved (deterministic, irreversible)"
-    log_info "  ⏳ Awaiting block inclusion (blocks every ~600s)"
-    log_info ""
-    log_info "Check block confirmation later: $CLI_CMD gettransaction $TXID"
+    if [ "$CONFIRMED" = true ]; then
+        log_info "  ✓ Archived in block $TX_BLOCK"
+    else
+        log_info "  ⏳ Awaiting block archival (blocks every ~600s)"
+        log_info "  Check later: $CLI_CMD gettransaction $TXID"
+    fi
+elif [ "$CONFIRMED" = true ]; then
+    log_success "✨ Transaction test completed successfully!"
+    log_success "Transaction archived in blockchain at block $TX_BLOCK"
 else
     log_warning "Transaction sent but finality not detected"
     log_info "Check status with: $CLI_CMD gettransaction $TXID"
