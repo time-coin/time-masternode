@@ -1527,8 +1527,8 @@ async fn handle_peer(
                                                 decision
                                             );
                                         } else {
-                                            tracing::warn!(
-                                                "⚠️  Failed to sign TimeVote for TX {:?} (not a masternode or identity not set)",
+                                            tracing::debug!(
+                                                "TimeVote signing skipped for TX {:?} (not a masternode or identity not set)",
                                                 hex::encode(txid_val)
                                             );
                                         }
