@@ -4560,92 +4560,72 @@ impl Blockchain {
             ));
         }
 
-        // CRITICAL: Validate the block_reward is correct (base reward + fees from previous block)
-        // Calculate fees from previous block's transactions (deterministic, not from local state)
-        let calculated_fees = if block.header.height > 0 {
-            match self.get_block(block.header.height - 1) {
-                Ok(prev_block) => {
-                    // Calculate fees from previous block: sum(inputs) - sum(outputs)
-                    // Skip coinbase (first tx) and reward distribution (second tx) as they create new coins
-                    let mut total_fees = 0u64;
+        // CRITICAL: Validate the block_reward is correct (base reward + fees from THIS block's txs)
+        // Calculate fees from the current block's user transactions (indices 2+)
+        // This mirrors the block producer's logic in produce_block_at_height()
+        let mut calculated_fees = 0u64;
+        for tx in block.transactions.iter().skip(2) {
+            // Calculate output sum
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
 
-                    for tx in prev_block.transactions.iter().skip(2) {
-                        // Calculate output sum (easy - just sum the values)
-                        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            // Calculate input sum by looking up each spent UTXO value from blockchain
+            let mut input_sum: u64 = 0;
+            let mut all_found = true;
+            for input in &tx.inputs {
+                let spent_txid = input.previous_output.txid;
+                let spent_vout = input.previous_output.vout;
 
-                        // Calculate input sum by looking up each spent UTXO value from previous transactions
-                        let mut input_sum: u64 = 0;
-                        for input in &tx.inputs {
-                            // Find the transaction that created this UTXO
-                            let spent_txid = input.previous_output.txid;
-                            let spent_vout = input.previous_output.vout;
-
-                            // Search through previous blocks to find the transaction
-                            let mut found = false;
-                            for search_height in (0..prev_block.header.height).rev() {
-                                if let Ok(search_block) = self.get_block(search_height) {
-                                    for search_tx in &search_block.transactions {
-                                        if search_tx.txid() == spent_txid {
-                                            if let Some(output) =
-                                                search_tx.outputs.get(spent_vout as usize)
-                                            {
-                                                input_sum += output.value;
-                                                found = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if found {
-                                        break;
-                                    }
+                // Search through blocks to find the transaction that created this UTXO
+                let mut found = false;
+                let search_limit = block.header.height.min(1000); // Limit search depth
+                for search_height in (0..block.header.height).rev().take(search_limit as usize) {
+                    if let Ok(search_block) = self.get_block(search_height) {
+                        for search_tx in &search_block.transactions {
+                            if search_tx.txid() == spent_txid {
+                                if let Some(output) = search_tx.outputs.get(spent_vout as usize) {
+                                    input_sum += output.value;
+                                    found = true;
+                                    break;
                                 }
                             }
-
-                            if !found {
-                                tracing::debug!(
-                                    "Could not find UTXO for fee validation in tx {} (tx {}, vout {}), skipping fee check",
-                                    hex::encode(&tx.txid()[..8]),
-                                    hex::encode(&spent_txid[..8]),
-                                    spent_vout
-                                );
-                                // If we can't find the UTXO, skip fee validation entirely
-                                // The block was already validated by consensus peers
-                                return Ok(());
-                            }
                         }
-
-                        // Fee for this transaction = inputs - outputs
-                        if input_sum >= output_sum {
-                            total_fees += input_sum - output_sum;
-                        } else {
-                            tracing::debug!(
-                                "Transaction {} in block {} has outputs ({}) exceeding inputs ({}), skipping fee validation",
-                                hex::encode(&tx.txid()[..8]),
-                                prev_block.header.height,
-                                output_sum,
-                                input_sum
-                            );
-                            return Ok(());
+                        if found {
+                            break;
                         }
                     }
-
-                    total_fees
                 }
-                Err(e) => {
-                    // If we can't get previous block, skip fee validation
-                    // This can happen during sync or with incomplete chain data
+
+                if !found {
                     tracing::debug!(
-                        "Cannot validate block {} fees: previous block {} not found ({}), skipping",
-                        block.header.height,
-                        block.header.height - 1,
-                        e
+                        "Could not find UTXO for fee validation in tx {} (tx {}, vout {}), skipping fee check",
+                        hex::encode(&tx.txid()[..8]),
+                        hex::encode(&spent_txid[..8]),
+                        spent_vout
                     );
-                    return Ok(());
+                    all_found = false;
+                    break;
                 }
             }
-        } else {
-            0 // Genesis has no previous block
-        };
+
+            if !all_found {
+                // Can't validate fees without all UTXO data - skip
+                return Ok(());
+            }
+
+            // Fee for this transaction = inputs - outputs
+            if input_sum >= output_sum {
+                calculated_fees += input_sum - output_sum;
+            } else {
+                tracing::debug!(
+                    "Transaction {} in block {} has outputs ({}) exceeding inputs ({}), skipping fee validation",
+                    hex::encode(&tx.txid()[..8]),
+                    block.header.height,
+                    output_sum,
+                    input_sum
+                );
+                return Ok(());
+            }
+        }
 
         // Verify block_reward matches base reward + calculated fees
         let expected_reward = BLOCK_REWARD_SATOSHIS + calculated_fees;
