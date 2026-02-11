@@ -328,6 +328,7 @@ impl ConnectionManager {
             if entry.state == PeerConnectionState::Disconnected {
                 entry.state = PeerConnectionState::Connecting;
                 entry.direction = ConnectionDirection::Outbound;
+                entry.last_message_at = Some(Instant::now()); // Track when connecting started
                 true
             } else {
                 false
@@ -339,12 +340,12 @@ impl ConnectionManager {
                 connected_at: None,
                 disconnected_at: None,
                 connection_count: 0,
-                last_message_at: None,
+                last_message_at: Some(Instant::now()), // Track when connecting started
                 bytes_sent: 0,
                 bytes_received: 0,
                 messages_sent: 0,
                 messages_received: 0,
-                is_whitelisted: false, // Will be updated if peer is whitelisted
+                is_whitelisted: false,
             };
             self.connections.insert(peer_ip.to_string(), info);
             true
@@ -528,6 +529,29 @@ impl ConnectionManager {
             .filter(|entry| entry.value().state == PeerConnectionState::Connecting)
             .map(|entry| entry.key().clone())
             .collect()
+    }
+
+    /// Reset peers stuck in Connecting/Reconnecting state for longer than the timeout.
+    /// Returns the number of peers reset to Disconnected.
+    pub fn cleanup_stale_connecting(&self, timeout: Duration) -> usize {
+        let now = Instant::now();
+        let mut cleaned = 0;
+        for mut entry in self.connections.iter_mut() {
+            let key = entry.key().clone();
+            let info = entry.value_mut();
+            if info.state == PeerConnectionState::Connecting
+                || info.state == PeerConnectionState::Reconnecting
+            {
+                let started = info.last_message_at.unwrap_or(now);
+                if now.duration_since(started) > timeout {
+                    tracing::debug!("🧹 Resetting stale {:?} state for peer {}", info.state, key);
+                    info.state = PeerConnectionState::Disconnected;
+                    info.disconnected_at = Some(now);
+                    cleaned += 1;
+                }
+            }
+        }
+        cleaned
     }
 
     /// Phase 2.1: Update activity timestamp for a peer (for detecting slow/unresponsive)
