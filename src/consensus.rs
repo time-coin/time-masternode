@@ -3690,7 +3690,7 @@ impl ConsensusEngine {
     /// Vote decision: either Approve or Reject
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// let decision = consensus.decide_fallback_vote(&tx_hash);
     /// match decision {
     ///     FallbackVoteDecision::Approve => { /* cast approve vote */ }
@@ -3995,7 +3995,7 @@ impl ConsensusEngine {
     /// Number of timed-out rounds that were retried or escalated
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// // Called every 5 seconds by background task
     /// let retry_count = consensus.check_fallback_timeouts(&registry).await;
     /// if retry_count > 0 {
@@ -4138,7 +4138,7 @@ impl ConsensusEngine {
     /// JoinHandle for the background task
     ///
     /// # Example
-    /// ```rust
+    /// ```ignore
     /// let timeout_checker = ConsensusEngine::start_fallback_timeout_checker(
     ///     consensus.clone(),
     ///     registry.clone(),

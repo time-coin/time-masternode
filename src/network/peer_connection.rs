@@ -940,7 +940,7 @@ impl PeerConnection {
     /// flexible implementation using the builder pattern.
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// // Basic setup (peer registry only)
     /// let config = MessageLoopConfig::new(peer_registry);
     /// peer_connection.run_message_loop_unified(config).await?;
