@@ -29,12 +29,12 @@ Seen → Voting → Finalized → Archived
 
 #### 2. Updated Parameters
 - **Removed:** `β_local` (local acceptance threshold of 20 rounds)
-- **Added:** `Q_finality` = 67% of AVS weight (single finality threshold)
+- **Added:** `Q_finality` = 51% of AVS weight (single finality threshold)
 
 #### 3. Progressive TimeProof Assembly
 - Every vote is now **immediately signed** as a `FinalityVote`
 - Votes accumulate progressively during polling rounds
-- When accumulated weight ≥ 67%, transaction is `Finalized` with TimeProof ready
+- When accumulated weight ≥ 51%, transaction is `Finalized` with TimeProof ready
 - No separate "assembly phase" needed
 
 ### Code Changes
@@ -71,7 +71,7 @@ pub struct VotingState {
     // Progressive TimeProof assembly
     pub accumulated_votes: Vec<FinalityVote>,
     pub accumulated_weight: u64,
-    pub required_weight: u64,  // 67% of AVS weight
+    pub required_weight: u64,  // 51% of AVS weight
 }
 ```
 
@@ -81,7 +81,7 @@ impl VotingState {
     /// Add a finality vote and update accumulated weight
     pub fn add_vote(&mut self, vote: FinalityVote, weight: u64) -> bool;
     
-    /// Check if finality threshold (67%) has been reached
+    /// Check if finality threshold (51%) has been reached
     pub fn has_finality_threshold(&self) -> bool;
 }
 ```
@@ -91,7 +91,7 @@ impl VotingState {
 pub struct AvalancheConfig {
     pub k: usize,                 // Sample size (default: 20)
     pub alpha: usize,             // Quorum threshold (default: 14)
-    pub q_finality_percent: u64,  // NEW: 67% weight threshold
+    pub q_finality_percent: u64,  // NEW: 51% weight threshold
     // Removed: beta_local
 }
 ```
@@ -116,7 +116,7 @@ pub struct AvalancheConfig {
 
 ### 2. **Performance**
 - **Before:** ~4-5 seconds (20 rounds LocallyAccepted + TimeProof assembly)
-- **After:** ~1-2 seconds (progressive accumulation to 67% threshold)
+- **After:** ~1-2 seconds (progressive accumulation to 51% threshold)
 
 ### 3. **Verifiability**
 - **Before:** LocallyAccepted was not verifiable by others
@@ -153,7 +153,7 @@ pub struct AvalancheConfig {
 2. Validator responds "Valid" with signed FinalityVote
 3. Add vote to accumulated_votes
 4. Update accumulated_weight
-5. If weight ≥ 67% → Finalized (TimeProof ready)
+5. If weight ≥ 51% → Finalized (TimeProof ready)
 ```
 
 ### State Transition Logic
@@ -191,7 +191,7 @@ while status == Voting {
 ```rust
 pub struct TimeProof {
     pub votes: Vec<FinalityVote>,  // Accumulated during voting
-    pub total_weight: u64,          // ≥ 67% of AVS weight
+    pub total_weight: u64,          // ≥ 51% of AVS weight
 }
 
 pub struct FinalityVote {
@@ -250,7 +250,7 @@ pub struct FinalityVote {
 ## Security Analysis
 
 ### Byzantine Tolerance
-- **Unchanged:** Still requires 67% honest weight
+- **Unchanged:** Still requires 51% honest weight
 - **Improved:** Every vote is signed immediately (harder to forge)
 
 ### Double-Spend Prevention
@@ -262,7 +262,7 @@ pub struct FinalityVote {
 - **Improved:** Faster detection of stalls (no LocallyAccepted delay)
 
 ### Network Partition Recovery
-- **Unchanged:** Partitions cannot finalize without 67% weight
+- **Unchanged:** Partitions cannot finalize without 51% weight
 - **Improved:** Clearer state - either Finalized or not
 
 ---

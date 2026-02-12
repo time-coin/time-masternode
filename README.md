@@ -421,7 +421,7 @@ Transactions achieve **deterministic finality** during the Voting phase via Time
    - Transactions finalize in <1 second
    - Stake-weighted voting among masternodes
    - Progressive TimeProof assembly
-   - 67% threshold for finality
+   - 51% threshold for finality
 
 2. **TimeLock Layer (Archival Layer)**
    - Deterministic blocks every 600 seconds
@@ -506,7 +506,7 @@ finality_timeout = 3000  # milliseconds
 - ✅ TimeLock (600s deterministic blocks)
 - ✅ TimeGuard (bounded liveness recovery)
 - ✅ VRF sortition (RFC 9381 ECVRF)
-- ✅ Stake-weighted voting with 67% threshold
+- ✅ Stake-weighted voting with 51% threshold
 - ✅ UTXO state machine (5-state lifecycle)
 
 #### Security & Cryptography

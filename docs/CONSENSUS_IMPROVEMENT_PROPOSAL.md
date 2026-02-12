@@ -14,7 +14,7 @@ This proposal has been **fully implemented** in the TimeCoin protocol as of Janu
 1. ✅ Single finality state (`Finalized`) replacing two-tier system
 2. ✅ Progressive TimeProof assembly during voting rounds
 3. ✅ Immediate vote signing with every positive response
-4. ✅ Unified threshold: Q_finality = 67% of AVS weight
+4. ✅ Unified threshold: Q_finality = 51% of AVS weight
 5. ✅ State machine: `Seen → Voting → Finalized`
 6. ✅ Removed `β_local` parameter (no longer needed)
 
@@ -30,7 +30,7 @@ Previous TimeCoin protocol had **two-tier consensus**:
    - Not verifiable by others
    - Creates UX confusion ("confirmed" vs "finalized")
 
-2. **GloballyFinalized** (Q_finality = 67% weight with TimeProof)
+2. **GloballyFinalized** (Q_finality = 51% weight with TimeProof)
    - Objective
    - Verifiable by anyone
    - Requires separate TimeProof assembly
@@ -69,7 +69,7 @@ TimeVote (accumulate signed votes) → Finalized (when threshold reached)
 **States:**
 - `Seen` - Transaction received, pending validation
 - `Voting` - Actively collecting TimeProof votes
-- `Finalized` - TimeProof threshold reached (67% weight)
+- `Finalized` - TimeProof threshold reached (51% weight)
 - `Rejected` - Invalid or lost conflict
 - `Archived` - Included in TimeLock checkpoint
 
@@ -96,7 +96,7 @@ struct TimeVoteState {
     status: ConsensusStatus,
     accumulated_votes: Vec<FinalityVote>, // Signed votes
     accumulated_weight: u64,              // Running total
-    required_weight: u64,                 // 67% of AVS weight
+    required_weight: u64,                 // 51% of AVS weight
     confidence: u32,                      // Consecutive successful rounds
 }
 ```
@@ -116,7 +116,7 @@ To maintain sub-second UX:
 ```rust
 if confidence >= 3 && accumulated_weight >= 0.51 * required_weight {
     // "Optimistically Confirmed" (UX only, not protocol state)
-    // Still waiting for full 67% threshold
+    // Still waiting for full 51% threshold
 }
 ```
 
@@ -147,7 +147,7 @@ Wallets can show "Confirming..." until full finality, but **only one protocol st
 - No confusion about "confirmed but not final"
 
 ### 5. **Security**
-- Same 67% Byzantine threshold
+- Same 51% Byzantine threshold
 - Same TimeProof security guarantees
 - Stronger because every vote is signed immediately
 
@@ -163,7 +163,7 @@ Wallets can show "Confirming..." until full finality, but **only one protocol st
 ### 7.1 Parameters
 - k: sample size (default 20)
 - α: successful poll threshold (default 14)
-- Q_finality: finality threshold (67% of AVS weight)
+- Q_finality: finality threshold (51% of AVS weight)
 - POLL_TIMEOUT: default 200ms
 - MAX_TXS_PER_QUERY: default 64
 
@@ -277,7 +277,7 @@ impl TimeVoteState {
 The TimeGuard protocol becomes simpler - if a transaction stalls in `Voting`:
 1. Wait for timeout
 2. Fall back to deterministic leader-based resolution
-3. Leader's decision must still get 67% signed votes
+3. Leader's decision must still get 51% signed votes
 
 No need for separate LocallyAccepted tracking.
 
@@ -321,7 +321,7 @@ LocallyAccepted (confidence=20, probabilistic)
     ↓
 Assemble TimeProof (request signatures separately)
     ↓
-GloballyFinalized (67% weight)
+GloballyFinalized (51% weight)
     ↓
 Checkpointed
 
@@ -334,7 +334,7 @@ User sends TX
     ↓
 Seen → Voting (collect signed votes)
     ↓
-Finalized (67% weight reached, TimeProof ready)
+Finalized (51% weight reached, TimeProof ready)
     ↓
 Checkpointed
 
@@ -348,7 +348,7 @@ Time to finality: ~1-2 seconds (accumulate to threshold)
 ## Security Analysis
 
 ### Byzantine Tolerance
-- **Same:** 67% threshold (tolerates <33% Byzantine)
+- **Same:** 51% threshold (tolerates <49% Byzantine)
 - **Better:** Every vote is signed from the start (harder to forge)
 
 ### Liveness
@@ -360,7 +360,7 @@ Time to finality: ~1-2 seconds (accumulate to threshold)
 - **Better:** Finalized = TimeProof exists (objective proof)
 
 ### Network Partition
-- **Same:** Partitions can't finalize transactions without 67% weight
+- **Same:** Partitions can't finalize transactions without 51% weight
 - **Better:** Clearer state (either Finalized or not)
 
 ---
@@ -373,7 +373,7 @@ The two-tier system (LocallyAccepted vs GloballyFinalized) was eliminated and re
 
 ✅ **One finality (Finalized state)**  
 ✅ **One proof (TimeProof)**  
-✅ **One definition (67% weight threshold)**  
+✅ **One definition (51% weight threshold)**  
 
 This makes the protocol simpler, faster, and more secure.
 

@@ -76,16 +76,16 @@ cargo clippy -- -D warnings
 
 TIME Coin implements a unique dual-layer consensus:
 
-1. **TimeVote Protocol (Transaction Layer)**: Real-time transaction finalization in <1 second via stake-weighted voting among masternodes. Transactions achieve deterministic finality BEFORE block inclusion. This is NOT a traditional BFT committee—it's leaderless with progressive vote accumulation requiring 67% stake threshold.
+1. **TimeVote Protocol (Transaction Layer)**: Real-time transaction finalization in <1 second via stake-weighted voting among masternodes. Transactions achieve deterministic finality BEFORE block inclusion. This is NOT a traditional BFT committee—it's leaderless with progressive vote accumulation requiring 51% stake threshold.
 
 2. **TimeLock Protocol (Block Layer)**: Deterministic block production every 600 seconds using VRF sortition for fair producer selection. Blocks archive already-finalized transactions. TimeGuard fallback ensures bounded liveness (max 11.3 min recovery).
 
-**Critical Flow**: TX submission → UTXO locking → TimeVote broadcast → Vote collection → Finalization (67% threshold) → TimeProof assembly → Block inclusion → Archival on chain.
+**Critical Flow**: TX submission → UTXO locking → TimeVote broadcast → Vote collection → Finalization (51% threshold) → TimeProof assembly → Block inclusion → Archival on chain.
 
 ### UTXO State Machine
 
 Five states (not the typical 2):
-- `Unspent` → `SpentPending` (locked during voting) → `Voting` (TimeVote active) → `Finalized` (67% votes achieved) → `Archived` (in block)
+- `Unspent` → `SpentPending` (locked during voting) → `Voting` (TimeVote active) → `Finalized` (51% votes achieved) → `Archived` (in block)
 
 Transactions finalize during Voting phase, not block inclusion. This enables instant finality.
 
@@ -161,7 +161,7 @@ Without this, consensus engine cannot communicate with the network and transacti
 
 Two separate pools:
 1. **Pending pool** (`transaction_pool.rs`): Unfinalized transactions
-2. **Finalized pool** (in `ConsensusEngine`): Transactions with 67% TimeVote approval
+2. **Finalized pool** (in `ConsensusEngine`): Transactions with 51% TimeVote approval
 
 **Critical**: Finalized pool must NOT clear on every block add. Only clear transactions that are actually included in the added block (use `clear_finalized_txs(txids)` not `clear_finalized_transactions()`).
 

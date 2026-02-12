@@ -852,7 +852,7 @@ impl TimeVoteConsensus {
             }
         }
 
-        // Check threshold: 67% of total weight
+        // Check threshold: 51% of total weight
         let threshold = snapshot.voting_threshold();
         Ok(total_weight >= threshold)
     }
@@ -1152,7 +1152,7 @@ impl TimeVoteConsensus {
     /// This method verifies that a TimeProof is valid by:
     /// 1. Checking all vote signatures
     /// 2. Verifying voters are in AVS
-    /// 3. Checking accumulated weight >= 67% threshold
+    /// 3. Checking accumulated weight >= 51% threshold
     /// 4. Ensuring vote consistency
     ///
     /// Returns Ok(accumulated_weight) if valid, Err if invalid
@@ -2483,7 +2483,7 @@ impl ConsensusEngine {
         // PRIORITY: Spawn with high priority for instant finality
         tokio::spawn(async move {
             // The TimeVoteResponse handler in server.rs accumulates votes and
-            // finalizes when 67% threshold is met. This loop monitors for that
+            // finalizes when 51% threshold is met. This loop monitors for that
             // finalization or auto-finalizes on timeout.
             let vote_deadline = Duration::from_secs(5);
             let poll_interval = Duration::from_millis(50);

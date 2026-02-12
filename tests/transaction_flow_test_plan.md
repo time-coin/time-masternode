@@ -1174,7 +1174,7 @@ journalctl -u timed -f | grep -E "precommit vote|Block.*precommit"
 **Success Criteria:**
 - [ ] Log: "Generated precommit vote for block ..."
 - [ ] Precommit follows prepare phase
-- [ ] 67% threshold required
+- [ ] 51% threshold required
 - [ ] Votes accumulate toward commit
 
 ---

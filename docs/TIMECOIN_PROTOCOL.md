@@ -594,7 +594,7 @@ Validity conditions:
 Let `total_AVS_weight(slot_index)` be the total weight of the AVS at that slot.
 
 Default:
-- `Q_finality(slot_index) = 0.67 * total_AVS_weight(slot_index)` (rounded up)
+- `Q_finality(slot_index) = 0.51 * total_AVS_weight(slot_index)` (rounded up)
 
 The network MUST use a single, agreed rounding rule.
 
@@ -815,7 +815,7 @@ If honest weight dominates and the network is connected, honest transactions can
 - `BLOCK_INTERVAL = 600s`
 - `TIMEVOTE_K = 20` (sample size)
 - `TIMEVOTE_ALPHA = 14` (quorum threshold)
-- `Q_FINALITY = 0.67 * total_AVS_weight(slot_index)` (finality threshold)
+- `Q_FINALITY = 0.51 * total_AVS_weight(slot_index)` (finality threshold)
 - `HEARTBEAT_PERIOD = 60s`
 - `HEARTBEAT_TTL = 180s`
 - `WITNESS_MIN = 3`

@@ -3,7 +3,7 @@
 # Tests sending 1 TIME coin and validates the TimeVote consensus flow:
 # - Transaction broadcasting
 # - TimeVote request/response (signed votes with stake weighting)
-# - Automatic finalization at 67% threshold (= confirmed)
+# - Automatic finalization at 51% threshold (= confirmed)
 # - TimeProof certificate assembly and broadcasting
 # - Block archival (separate from finality)
 
@@ -162,7 +162,7 @@ log_success "Transaction sent! TXID: $TXID"
 echo ""
 
 # Step 4: Wait for TimeVote finality (NEW - Phase 2)
-log_info "Step 4: Waiting for TimeVote finality (67% threshold)..."
+log_info "Step 4: Waiting for TimeVote finality (51% threshold)..."
 log_info "Monitoring for: Vote requests → Vote accumulation → Finalization → TimeProof"
 FINALIZED=false
 START_TIME=$(date +%s)
@@ -187,7 +187,7 @@ while [ $(($(date +%s) - START_TIME)) -lt $FINALITY_TIMEOUT ]; do
                 
                 log_info "  TimeProof assembled:"
                 log_info "    Votes: $VOTE_COUNT masternodes"
-                log_info "    Weight: $ACCUMULATED_WEIGHT (≥67% threshold)"
+                log_info "    Weight: $ACCUMULATED_WEIGHT (≥51% threshold)"
                 log_info "    Slot: $SLOT_INDEX"
             fi
             
@@ -205,7 +205,7 @@ echo ""  # Newline after progress
 if [ "$FINALIZED" = false ]; then
     log_warning "TimeVote finality not detected within ${FINALITY_TIMEOUT}s"
     log_info "This may indicate:"
-    log_info "  - Not enough masternodes connected (need ≥67% AVS weight)"
+    log_info "  - Not enough masternodes connected (need ≥51% AVS weight)"
     log_info "  - Vote collection still in progress"
     log_info "  - TimeProof not yet assembled"
     log_info "Continuing to check blockchain confirmation..."
@@ -331,7 +331,7 @@ echo "════════════════════════�
 echo "  Finalized:      $TX_FINALIZED"
 echo "  TimeProof:      $TIMEPROOF_STATUS"
 echo "  Votes:          $TIMEPROOF_VOTES masternodes"
-echo "  Weight:         $TIMEPROOF_WEIGHT (≥67% required)"
+echo "  Weight:         $TIMEPROOF_WEIGHT (≥51% required)"
 echo "══════════════════════════════════════════════════════════════"
 echo "                      BLOCK ARCHIVAL"
 echo "══════════════════════════════════════════════════════════════"

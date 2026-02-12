@@ -365,8 +365,8 @@ TimeCoin uses a hybrid consensus combining two mechanisms:
 ### 7.2 Finality
 
 - **Instant finality** (<10 seconds typically)
-- Once a block receives 2/3 (67%) weighted stake agreement, it's finalized
-- Prepare/Precommit phases use >50% validator count; production gating uses 2/3 weighted stake
+- Once a block receives 51% weighted stake agreement, it's finalized
+- Prepare/Precommit phases use >50% validator count; production gating uses 51% weighted stake
 - Finalized transactions are protected during fork resolution
 - No probabilistic finality (unlike Bitcoin's 6-confirmation rule)
 
@@ -437,7 +437,7 @@ Without the sled flush, dirty pages are lost, causing block corruption ("unexpec
 | Max block size | Configurable | Block size limit |
 | Block cache size | ~500 blocks | Two-tier cache capacity |
 | Tx pool max | 100MB | Transaction pool memory limit |
-| Finality threshold | 2/3 (67%) weight | Weighted stake agreement for block production |
+| Finality threshold | 51% weight | Weighted stake agreement for block production |
 | Ping interval | 30s | Peer heartbeat |
 | Pong timeout | 90s (300s in peer_connection.rs) | Max time without pong |
 | Cleanup interval | 600s (10 min) | Memory cleanup cycle |
