@@ -177,20 +177,29 @@ Wallet Balance:
 
 #### Step 2: Create Collateral UTXO
 
-Send the exact collateral amount to yourself:
+Send the exact collateral amount to yourself. A 0.1% network fee applies, so your wallet needs slightly more than the collateral amount:
+
+| Tier | Collateral | Fee (0.1%) | Total Needed |
+|------|-----------|------------|--------------|
+| Bronze | 1,000 TIME | 1.0 TIME | 1,001.0 TIME |
+| Silver | 10,000 TIME | 10.0 TIME | 10,010.0 TIME |
+| Gold | 100,000 TIME | 100.0 TIME | 100,100.0 TIME |
+
 ```bash
 # Get your address
 time-cli getnewaddress
 
-# Send collateral to yourself
+# Send collateral to yourself (fee is added on top)
 time-cli sendtoaddress <your_address> 1000.0
 
-# Returns transaction ID
-# abc123def456789...
+# Or use --subtract-fee to deduct fee from the amount
+# (NOT recommended — the resulting UTXO will be less than 1000 and collateral will fail)
 ```
 
+> ⚠️ **Do NOT use `--subtract-fee`** when creating collateral UTXOs. The collateral amount must be exactly 1,000 / 10,000 / 100,000 TIME. The fee must be paid on top.
+
 **Why send to yourself?**
-- Creates a distinct UTXO to lock
+- Creates a distinct UTXO of exactly the required collateral amount
 - Easier to track and manage
 - Standard practice (Dash-style)
 
