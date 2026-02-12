@@ -772,6 +772,16 @@ impl PeerConnectionRegistry {
         self.mark_connecting(&peer_ip);
 
         let mut writers = self.peer_writers.write().await;
+        // Only overwrite if the existing writer is dead (channel closed).
+        // A live writer (e.g., from an accepted inbound connection) must not be
+        // replaced by a speculative outbound writer that may be rejected.
+        if let Some(existing) = writers.get(&peer_ip) {
+            if !existing.is_closed() {
+                debug!("🔄 Outbound peer {} already has a live writer, skipping overwrite", peer_ip);
+                return;
+            }
+            debug!("♻️ Replacing dead writer for peer {}", peer_ip);
+        }
         writers.insert(peer_ip.clone(), writer);
         debug!("✅ Registered outbound peer connection: {}", peer_ip);
     }
