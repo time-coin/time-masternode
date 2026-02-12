@@ -184,13 +184,14 @@ time-cli masternoderegister <tier> <collateral_txid> <vout> <reward_address> <no
 Registers a new masternode with locked collateral (Dash-style).
 
 **Parameters:**
-- `tier`: Masternode tier (bronze, silver, or gold)
-- `collateral_txid`: Transaction ID containing collateral UTXO (hex)
-- `vout`: Output index of collateral UTXO
+- `tier`: Masternode tier (free, bronze, silver, or gold)
+- `collateral_txid`: Transaction ID containing collateral UTXO (hex) — not needed for free tier
+- `vout`: Output index of collateral UTXO — not needed for free tier
 - `reward_address`: Address to receive masternode rewards
 - `node_address`: Node identifier/address
 
-**Collateral Requirements:**
+**Collateral Requirements (exact amounts):**
+- Free: 0 TIME (no collateral needed)
 - Bronze: 1,000 TIME
 - Silver: 10,000 TIME
 - Gold: 100,000 TIME
@@ -200,9 +201,13 @@ Registers a new masternode with locked collateral (Dash-style).
 - UTXO amount must match tier requirement
 - UTXO must not be already locked
 
-**Example:**
+**Examples:**
 ```bash
-time-cli masternoderegister bronze abc123def456... 0 TIMEyouraddress node1.example.com
+# Free tier (no collateral needed)
+time-cli masternoderegister free "" 0 TIMEyouraddress 1.2.3.4
+
+# Bronze tier (1,000 TIME collateral)
+time-cli masternoderegister bronze abc123def456... 0 TIMEyouraddress 1.2.3.4
 ```
 
 #### Unlock Masternode Collateral
@@ -256,8 +261,9 @@ Returns wallet balance.
 #### Send to Address
 ```bash
 time-cli sendtoaddress <address> <amount>
+time-cli sendtoaddress <address> <amount> --subtract-fee
 ```
-Send TIME to an address.
+Send TIME to an address. Fee is 0.1% of input value (min 0.00001 TIME), added on top by default. Use `--subtract-fee` to deduct the fee from the send amount instead.
 
 #### Validate Address
 ```bash

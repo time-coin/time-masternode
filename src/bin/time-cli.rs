@@ -61,9 +61,13 @@ Commands:
 {options}{after-help}
 ")]
 struct Args {
-    /// RPC server address
-    #[arg(short, long, default_value = "http://127.0.0.1:24101")]
-    rpc_url: String,
+    /// RPC server address (overrides --testnet flag)
+    #[arg(short, long)]
+    rpc_url: Option<String>,
+
+    /// Connect to testnet (port 24101 instead of mainnet 24001)
+    #[arg(long)]
+    testnet: bool,
 
     /// Output compact JSON (single line)
     #[arg(long)]
@@ -397,6 +401,14 @@ async fn main() {
 async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let client = Client::new();
 
+    let rpc_url = args.rpc_url.unwrap_or_else(|| {
+        if args.testnet {
+            "http://127.0.0.1:24101".to_string()
+        } else {
+            "http://127.0.0.1:24001".to_string()
+        }
+    });
+
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
         Commands::GetBlock { height } => ("getblock", json!([height])),
@@ -490,7 +502,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         params,
     };
 
-    let response = client.post(&args.rpc_url).json(&request).send().await?;
+    let response = client.post(&rpc_url).json(&request).send().await?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP error: {}", response.status()).into());

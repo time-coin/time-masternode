@@ -93,10 +93,10 @@ Fork Resolution:
 ## Masternode Tiers
 
 ```yaml
-Free:   0 TIME     → weight 1
-Bronze: 1,000 TIME → weight 10
-Silver: 10,000 TIME → weight 100
-Gold:   100,000 TIME → weight 1,000
+Free:   0 TIME          → sampling weight 1, no governance
+Bronze: 1,000 TIME      → sampling weight 10  (exact collateral)
+Silver: 10,000 TIME     → sampling weight 100 (exact collateral)
+Gold:   100,000 TIME    → sampling weight 1,000 (exact collateral)
 ```
 
 ---
