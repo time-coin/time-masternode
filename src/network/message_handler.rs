@@ -1941,9 +1941,9 @@ impl MessageHandler {
                 match utxo_manager.get_utxo(&outpoint).await {
                     Ok(utxo) => {
                         let required = tier.collateral();
-                        if utxo.value < required {
+                        if utxo.value != required {
                             warn!(
-                                "❌ [{}] Rejecting {:?} masternode from {} — collateral {} < required {}",
+                                "❌ [{}] Rejecting {:?} masternode from {} — collateral {} != required {}",
                                 self.direction, tier, peer_ip, utxo.value, required
                             );
                             return Ok(None);

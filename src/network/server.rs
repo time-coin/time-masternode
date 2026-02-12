@@ -1102,8 +1102,8 @@ async fn handle_peer(
                                         match consensus.utxo_manager.get_utxo(&outpoint).await {
                                             Ok(utxo) => {
                                                 let required = tier.collateral();
-                                                if utxo.value < required {
-                                                    tracing::warn!("❌ Rejecting {:?} masternode from {} — collateral {} < required {}", tier, peer_ip, utxo.value, required);
+                                                if utxo.value != required {
+                                                    tracing::warn!("❌ Rejecting {:?} masternode from {} — collateral {} != required {}", tier, peer_ip, utxo.value, required);
                                                     continue;
                                                 }
                                                 if consensus.utxo_manager.is_collateral_locked(&outpoint) {
