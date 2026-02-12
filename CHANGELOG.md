@@ -108,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ✅ Added `VoteDecision` enum (Accept/Reject)
 - ✅ Implemented cryptographic vote signing and verification
 - ✅ Added stake-weighted vote accumulation with DashMap
-- ✅ Implemented 67% finality threshold calculation
+- ✅ Implemented 51% finality threshold calculation
 - ✅ Added automatic finalization when threshold reached
 - ✅ Byzantine-resistant consensus with signature verification
 
@@ -133,7 +133,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 2. ✅ TimeVote requests → broadcast to all validators
 3. ✅ Validators sign votes → return to submitter
 4. ✅ Stake-weighted vote accumulation
-5. ✅ 67% threshold → finalization (all nodes)
+5. ✅ 51% threshold → finalization (all nodes)
 6. ✅ TimeProof assembly → broadcast to network
 7. ✅ Block production → includes finalized TXs
 8. ✅ UTXO processing → transaction archival

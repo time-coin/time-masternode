@@ -172,7 +172,7 @@ Broadcast to network (all nodes receive)
     ↓
 TimeVote consensus (validators vote)
     ↓
-Finalization (67% threshold reached)
+Finalization (51% threshold reached)
     ↓
 Broadcast TransactionFinalized ⭐ NEW!
     ↓
@@ -180,7 +180,7 @@ All nodes finalize TX locally ⭐ NEW!
     ↓
 Block producer includes TX (any node can produce)
     ↓
-Block consensus (67% accept)
+Block consensus (51% accept)
     ↓
 Block storage (TX confirmed)
 ```
@@ -199,7 +199,7 @@ INFO 🔍 Validating transaction abc123...
 INFO ✅ Transaction abc123... validation passed
 INFO 📡 Broadcasting transaction to network
 INFO 📡 Broadcasting TimeVoteRequest for TX
-INFO ✅ Transaction finalized (67% threshold)
+INFO ✅ Transaction finalized (51% threshold)
 INFO 📡 Broadcast TransactionFinalized for abc123...
 INFO 🔍 Block 1234: Including 1 finalized transaction(s)
 INFO 💸 Block 1234: included 10000000 satoshis in fees
@@ -229,7 +229,7 @@ journalctl -u timed | grep "Broadcasting TimeVoteRequest"
 
 # 2. Check validator count
 time-cli getmasternodes | jq 'length'
-# Need ≥4 for 67% threshold
+# Need ≥4 for 51% threshold
 
 # 3. Check vote responses
 journalctl -u timed | grep "Received TimeVote"

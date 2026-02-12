@@ -1446,7 +1446,7 @@ async fn handle_peer(
                                     let peer_registry_clone = Arc::clone(&peer_registry);
 
                                     tokio::spawn(async move {
-                                        tracing::debug!(
+                                        tracing::info!(
                                             "🗳️  TimeVoteRequest from {} for TX {:?} (slot {}){}",
                                             peer_addr_str,
                                             hex::encode(txid_val),
@@ -1500,7 +1500,7 @@ async fn handle_peer(
                                                 // Step 3: Verify UTXOs are available (basic validation)
                                                 match consensus_clone.validate_transaction(&tx).await {
                                                     Ok(_) => {
-                                                        tracing::debug!("✅ TX {:?} validated successfully", hex::encode(txid_val));
+                                                        tracing::info!("✅ TX {:?} validated successfully for vote", hex::encode(txid_val));
                                                         crate::types::VoteDecision::Accept
                                                     }
                                                     Err(e) => {
@@ -1525,15 +1525,27 @@ async fn handle_peer(
                                         if let Some(vote) = vote_opt {
                                             // Step 5: Send TimeVoteResponse with signed vote
                                             let vote_response = NetworkMessage::TimeVoteResponse { vote };
-                                            let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
-                                            tracing::debug!(
-                                                "✅ TimeVoteResponse sent for TX {:?} (decision: {:?})",
-                                                hex::encode(txid_val),
-                                                decision
-                                            );
+                                            match peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await {
+                                                Ok(_) => {
+                                                    tracing::info!(
+                                                        "✅ TimeVoteResponse sent to {} for TX {:?} (decision: {:?})",
+                                                        ip_str_clone,
+                                                        hex::encode(txid_val),
+                                                        decision
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "❌ Failed to send TimeVoteResponse to {} for TX {:?}: {}",
+                                                        ip_str_clone,
+                                                        hex::encode(txid_val),
+                                                        e
+                                                    );
+                                                }
+                                            }
                                         } else {
-                                            tracing::debug!(
-                                                "TimeVote signing skipped for TX {:?} (not a masternode or identity not set)",
+                                            tracing::warn!(
+                                                "⚠️ TimeVote signing skipped for TX {:?} (not a masternode or identity not set)",
                                                 hex::encode(txid_val)
                                             );
                                         }
@@ -1544,7 +1556,7 @@ async fn handle_peer(
                                     check_rate_limit!("vote");
 
                                     // Received a signed TimeVote from a peer
-                                    tracing::debug!(
+                                    tracing::info!(
                                         "📥 TimeVoteResponse from {} for TX {:?} (decision: {:?}, weight: {})",
                                         peer.addr,
                                         hex::encode(vote.txid),
@@ -1572,7 +1584,7 @@ async fn handle_peer(
                                             }
                                         };
 
-                                        tracing::debug!(
+                                        tracing::info!(
                                             "Vote accumulated for TX {:?}, total weight: {}",
                                             hex::encode(txid),
                                             accumulated_weight
@@ -1583,7 +1595,7 @@ async fn handle_peer(
                                         let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
                                         let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
 
-                                        tracing::debug!(
+                                        tracing::info!(
                                             "Finality check for TX {:?}: accumulated={}, threshold={} (51% of {})",
                                             hex::encode(txid),
                                             accumulated_weight,

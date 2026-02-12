@@ -36,16 +36,15 @@ This document provides a comprehensive security analysis of TimeCoin against all
 **Attack:** Attacker controls >50% of network resources to rewrite history.
 
 **TimeCoin Protection:**
-- **67% supermajority finality**: Requires 67%+ of active validator stake to finalize blocks
-- **BFT consensus**: TimeVote protocol tolerates up to 33% Byzantine validators
+- **51% majority finality**: Requires 51%+ of active validator stake to finalize blocks
 - **Stake-weighted voting**: Must acquire majority of TIME collateral (expensive)
-- **Cryptographic finality proofs**: Finalized blocks have verifiable signatures from 67%+ stake
+- **Cryptographic finality proofs**: Finalized blocks have verifiable signatures from 51%+ stake
 - **Cannot rewrite finalized blocks**: Once TimeProof assembled, block is immutable
 
-**Attack Cost:** Would require acquiring >67% of all staked TIME coins (hundreds of millions in market cap)
+**Attack Cost:** Would require acquiring >51% of all staked TIME coins (hundreds of millions in market cap)
 
 **Code References:**
-- `src/consensus.rs:603-607` - Finality weight threshold Q_finality = 67%
+- `src/consensus.rs:603-607` - Finality weight threshold Q_finality = 51%
 - `src/block/types.rs:44-59` - TimeAttestation with witness signatures
 
 ---
@@ -75,7 +74,7 @@ This document provides a comprehensive security analysis of TimeCoin against all
 **TimeCoin Protection:**
 - **Single chain finalization**: TimeVote protocol finalizes one chain at a time
 - **Fork choice rule**: Prefer chain with most finalized blocks (TimeProofs)
-- **BFT consensus**: Requires 67% to finalize, can't finalize conflicting blocks
+- **BFT consensus**: Requires 51% to finalize, can't finalize conflicting blocks
 - **Deterministic leader selection**: All honest nodes agree on next block producer
 - **Signature binding**: Votes sign specific block_hash + slot, can't reuse
 
@@ -115,7 +114,7 @@ pub struct VoteResponse {
 - **Deterministic leader selection**: Next leader is known, can't "race" for advantage
 - **No PoW mining**: Block production isn't competitive (no mining reward advantage)
 - **Immediate broadcast**: Blocks must be broadcast for voting (can't hide)
-- **TimeVote finality**: Must accumulate votes from 67% stake to finalize
+- **TimeVote finality**: Must accumulate votes from 51% stake to finalize
 
 **Code References:**
 - `src/tsdc.rs:116-203` - Deterministic slot-based leader selection
@@ -746,7 +745,7 @@ pub struct BlockHeader {
 
 | Attack Vector | Mitigation Status | Risk Level | Notes |
 |---------------|-------------------|------------|-------|
-| **51% Attack** | ✅ Strong | 🟢 Low | Requires 67% stake (economically prohibitive) |
+| **51% Attack** | ✅ Strong | 🟢 Low | Requires 51% stake (economically prohibitive) |
 | **Long-Range Attack** | ✅ Mitigated | 🟢 Low | Checkpoints prevent history rewrite |
 | **Nothing-at-Stake** | ✅ N/A | 🟢 Low | BFT consensus prevents multi-voting |
 | **Selfish Mining** | ✅ Mitigated | 🟢 Low | Deterministic slots, no mining advantage |
@@ -909,7 +908,7 @@ pub struct BlockHeader {
 TimeCoin demonstrates **strong security posture** against the vast majority of known cryptocurrency attacks. The hybrid Proof-of-Stake + BFT consensus model, combined with comprehensive network and transaction-layer protections, creates a resilient system.
 
 **Key Strengths:**
-- ✅ 67% finality threshold prevents consensus attacks
+- ✅ 51% finality threshold prevents consensus attacks
 - ✅ VRF-based leader selection eliminates stake grinding
 - ✅ Multi-layer network protections (rate limiting, anomaly detection, deduplication)
 - ✅ Cryptographically secure transaction validation

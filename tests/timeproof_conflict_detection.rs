@@ -112,7 +112,7 @@ async fn test_competing_timeproofs_detected_as_anomaly() {
     let consensus = create_test_consensus();
     let txid = create_dummy_hash(100);
 
-    // First proof: 67% from validators 1,2,3 (weight: 3000)
+    // First proof: 51% from validators 1,2,3 (weight: 3000)
     let mut votes_a = vec![];
     votes_a.push(create_test_vote("v1", 1000, txid, VoteDecision::Accept));
     votes_a.push(create_test_vote("v2", 1000, txid, VoteDecision::Accept));
