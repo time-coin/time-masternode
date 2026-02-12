@@ -700,14 +700,23 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(footer, area);
 }
 
-async fn detect_network() -> String {
+async fn detect_network(prefer_testnet: bool) -> String {
     let client = Client::new();
 
-    // Try both ports and check which network they're running
-    for (url, expected_network) in [
-        ("http://127.0.0.1:24101", "testnet"),
-        ("http://127.0.0.1:24001", "mainnet"),
-    ] {
+    // Try preferred network first
+    let ports: Vec<(&str, &str)> = if prefer_testnet {
+        vec![
+            ("http://127.0.0.1:24101", "testnet"),
+            ("http://127.0.0.1:24001", "mainnet"),
+        ]
+    } else {
+        vec![
+            ("http://127.0.0.1:24001", "mainnet"),
+            ("http://127.0.0.1:24101", "testnet"),
+        ]
+    };
+
+    for (url, expected_network) in ports {
         if let Ok(response) = client
             .post(url)
             .json(&serde_json::json!({
@@ -721,16 +730,13 @@ async fn detect_network() -> String {
             .await
         {
             if response.status().is_success() {
-                // Parse the response to verify the network type
                 if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
                     if let Some(result) = rpc_response.get("result") {
                         if let Some(chain) = result.get("chain").and_then(|c| c.as_str()) {
-                            // Verify the chain matches what we expect for this port
                             if chain.to_lowercase() == expected_network {
                                 return url.to_string();
                             }
                         } else {
-                            // If no chain field, assume it's correct for this port
                             return url.to_string();
                         }
                     }
@@ -739,18 +745,25 @@ async fn detect_network() -> String {
         }
     }
 
-    // Default to testnet if neither responds
-    "http://127.0.0.1:24101".to_string()
+    // Default based on preference
+    if prefer_testnet {
+        "http://127.0.0.1:24101".to_string()
+    } else {
+        "http://127.0.0.1:24001".to_string()
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    let testnet = args.iter().any(|a| a == "--testnet");
+
     // Parse command line arguments or auto-detect network
-    let rpc_url = if let Some(url) = std::env::args().nth(1) {
-        url
+    let rpc_url = if let Some(url) = args.iter().find(|a| a.starts_with("http")) {
+        url.clone()
     } else {
-        // Auto-detect network type by checking which port responds
-        detect_network().await
+        // Auto-detect: try mainnet first unless --testnet flag is set
+        detect_network(testnet).await
     };
 
     // Setup terminal

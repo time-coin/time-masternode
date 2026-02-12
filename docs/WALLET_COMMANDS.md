@@ -15,11 +15,15 @@ time-cli sendtoaddress TIME0abc123def456... 10.0
 
 # Example: Send 0.5 TIME
 time-cli sendtoaddress TIME0xyz789... 0.5
+
+# Example: Deduct fee from the send amount (sends slightly less than 10)
+time-cli sendtoaddress TIME0abc123def456... 10.0 --subtract-fee
 ```
 
 **Parameters:**
-- `address` - The recipient's TIME Coin address (starts with `time1` prefix)
+- `address` - The recipient's TIME Coin address
 - `amount` - The amount to send in TIME (supports decimal values)
+- `--subtract-fee` - (Optional) Deduct fee from the send amount instead of adding it on top
 
 **Returns:**
 - Transaction ID (txid) on success
@@ -35,7 +39,9 @@ time-cli sendtoaddress TIME0xyz789... 0.5
 8. Returns the transaction ID
 
 **Fee:**
-- Fixed fee: 0.00001 TIME per transaction
+- 0.1% of input UTXO value (minimum 0.00001 TIME)
+- Fee is added on top of the send amount by default
+- Use `--subtract-fee` to deduct the fee from the send amount
 
 **Example Output:**
 ```json
@@ -141,7 +147,7 @@ time-cli masternodestatus
 
 - All amounts are in TIME (the base unit)
 - Transactions achieve instant finality via TimeVote consensus
-- Minimum transaction fee: 0.00001 TIME
+- Minimum transaction fee: 0.00001 TIME (0.1% of input value)
 - UTXOs are locked during transaction processing
 - Rejected transactions will unlock UTXOs automatically
 - Testnet addresses start with TIME0

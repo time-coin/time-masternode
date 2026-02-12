@@ -30,11 +30,7 @@ time-cli listunspent
 
 ### 4. Register Masternode
 ```bash
-time-cli masternoderegister \
-  --tier Bronze \
-  --collateral-txid <txid_from_step_2> \
-  --vout 0 \
-  --reward-address <your_address>
+time-cli masternoderegister bronze <txid_from_step_2> 0 <your_address> <your_node_ip>
 ```
 
 ### 5. Verify
@@ -100,12 +96,12 @@ time-cli masternodelist
 
 TIME Coin has four masternode tiers with different collateral requirements and reward weights:
 
-| Tier | Collateral | Reward Weight | Voting Power | Sampling Weight |
-|------|-----------|---------------|--------------|-----------------|
-| **Free** | 0 TIME | 1x | 0x | 1x |
-| **Bronze** | 1,000 TIME | 10x | 1x | 10x |
-| **Silver** | 10,000 TIME | 100x | 10x | 100x |
-| **Gold** | 100,000 TIME | 1000x | 100x | 1000x |
+| Tier | Collateral | Reward Weight | Governance | Sampling Weight |
+|------|-----------|---------------|------------|-----------------|
+| **Free** | 0 TIME | 0.1x | None | 1x |
+| **Bronze** | 1,000 TIME (exact) | 1x | 1 vote | 10x |
+| **Silver** | 10,000 TIME (exact) | 10x | 10 votes | 100x |
+| **Gold** | 100,000 TIME (exact) | 100x | 100 votes | 1000x |
 
 ### Tier Benefits
 
@@ -217,12 +213,15 @@ time-cli listunspent
 #### Step 4: Register with Locked Collateral
 
 ```bash
-time-cli masternoderegister \
-  --tier Bronze \
-  --collateral-txid abc123def456789... \
-  --vout 0 \
-  --reward-address <your_address>
+time-cli masternoderegister bronze abc123def456789... 0 <your_address> <your_node_ip>
 ```
+
+**Parameters (positional):**
+1. `tier` — bronze, silver, or gold
+2. `collateral_txid` — Transaction ID from Step 2 (hex)
+3. `vout` — Output index (usually 0)
+4. `reward_address` — Your address for receiving rewards
+5. `node_address` — Your node's public IP
 
 **Output:**
 ```
