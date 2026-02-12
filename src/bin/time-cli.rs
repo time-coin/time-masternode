@@ -259,12 +259,12 @@ enum Commands {
     /// Register a new masternode with locked collateral
     #[command(next_help_heading = "Masternode")]
     MasternodeRegister {
-        /// Masternode tier (bronze, silver, gold)
+        /// Masternode tier (free, bronze, silver, gold)
         tier: String,
-        /// Collateral transaction ID (hex)
-        collateral_txid: String,
-        /// Collateral output index
-        vout: u32,
+        /// Collateral transaction ID (hex) — not needed for free tier
+        collateral_txid: Option<String>,
+        /// Collateral output index — not needed for free tier
+        vout: Option<u32>,
         /// Reward address for masternode payments
         reward_address: String,
         /// Node address/identifier
@@ -440,7 +440,13 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             node_address,
         } => (
             "masternoderegister",
-            json!([tier, collateral_txid, vout, reward_address, node_address]),
+            json!([
+                tier,
+                collateral_txid.as_deref().unwrap_or(""),
+                vout.unwrap_or(0),
+                reward_address,
+                node_address
+            ]),
         ),
         Commands::MasternodeUnlock { node_address } => (
             "masternodeunlock",
