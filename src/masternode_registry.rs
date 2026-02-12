@@ -222,7 +222,7 @@ impl MasternodeRegistry {
             MasternodeTier::Gold => 100_000,
         };
 
-        if masternode.collateral < required {
+        if masternode.collateral != required {
             return Err(RegistryError::InvalidCollateral);
         }
 
@@ -828,7 +828,7 @@ impl MasternodeRegistry {
             .map_err(|_| RegistryError::CollateralNotFound)?;
 
         // Verify amount meets requirement
-        if utxo.value < required_collateral {
+        if utxo.value != required_collateral {
             return Err(RegistryError::InvalidCollateral);
         }
 
