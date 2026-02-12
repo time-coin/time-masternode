@@ -360,12 +360,14 @@ impl MessageHandler {
                 reward_address,
                 tier,
                 public_key,
+                collateral_outpoint,
             } => {
                 self.handle_masternode_announcement(
                     address.clone(),
                     reward_address.clone(),
                     *tier,
                     *public_key,
+                    collateral_outpoint.clone(),
                     context,
                 )
                 .await
@@ -470,14 +472,27 @@ impl MessageHandler {
             }
 
             // === TimeVote Consensus Messages (§7 Transaction Finality) ===
-            NetworkMessage::TimeVoteRequest { txid, tx_hash_commitment, slot_index, tx } => {
-                self.handle_timevote_request(*txid, *tx_hash_commitment, *slot_index, tx.clone(), context).await
+            NetworkMessage::TimeVoteRequest {
+                txid,
+                tx_hash_commitment,
+                slot_index,
+                tx,
+            } => {
+                self.handle_timevote_request(
+                    *txid,
+                    *tx_hash_commitment,
+                    *slot_index,
+                    tx.clone(),
+                    context,
+                )
+                .await
             }
             NetworkMessage::TimeVoteResponse { vote } => {
                 self.handle_timevote_response(vote.clone(), context).await
             }
             NetworkMessage::TimeProofBroadcast { proof } => {
-                self.handle_timeproof_broadcast(proof.clone(), context).await
+                self.handle_timeproof_broadcast(proof.clone(), context)
+                    .await
             }
 
             // === Gossip-based Status Tracking ===
@@ -1863,54 +1878,161 @@ impl MessageHandler {
     /// Handle MasternodeAnnouncement
     async fn handle_masternode_announcement(
         &self,
-        address: String,
+        _address: String,
         reward_address: String,
         tier: crate::types::MasternodeTier,
         public_key: ed25519_dalek::VerifyingKey,
+        collateral_outpoint: Option<crate::types::OutPoint>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        // Use peer IP instead of announced address for security
         let peer_ip = self.peer_ip.clone();
 
-        debug!(
-            "📨 [{}] Received masternode announcement from {} (announced: {})",
-            self.direction, peer_ip, address
+        info!(
+            "📨 [{}] Received masternode announcement from {} (tier: {:?})",
+            self.direction, peer_ip, tier
         );
 
-        let mn = crate::types::Masternode::new_legacy(
-            peer_ip.clone(),
-            reward_address.clone(),
-            tier.collateral(),
-            public_key,
-            tier,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-        match context
-            .masternode_registry
-            .register(mn, reward_address)
-            .await
-        {
-            Ok(()) => {
-                let count = context.masternode_registry.total_count().await;
-                debug!(
-                    "✅ [{}] Registered masternode {} (total: {})",
-                    self.direction, peer_ip, count
+        if tier != crate::types::MasternodeTier::Free {
+            // Staked tiers MUST include collateral_outpoint
+            let outpoint = match collateral_outpoint {
+                Some(op) => op,
+                None => {
+                    warn!(
+                        "❌ [{}] Rejecting {:?} masternode from {} — no collateral outpoint",
+                        self.direction, tier, peer_ip
+                    );
+                    return Ok(None);
+                }
+            };
+
+            // Verify collateral UTXO on-chain
+            if let Some(utxo_manager) = &context.utxo_manager {
+                match utxo_manager.get_utxo(&outpoint).await {
+                    Ok(utxo) => {
+                        let required = tier.collateral();
+                        if utxo.value < required {
+                            warn!(
+                                "❌ [{}] Rejecting {:?} masternode from {} — collateral {} < required {}",
+                                self.direction, tier, peer_ip, utxo.value, required
+                            );
+                            return Ok(None);
+                        }
+                        if utxo_manager.is_collateral_locked(&outpoint) {
+                            let existing = utxo_manager.get_locked_collateral(&outpoint);
+                            if existing
+                                .map(|info| info.masternode_address != peer_ip)
+                                .unwrap_or(false)
+                            {
+                                warn!(
+                                    "❌ [{}] Rejecting masternode from {} — collateral already locked by another",
+                                    self.direction, peer_ip
+                                );
+                                return Ok(None);
+                            }
+                        }
+                        info!(
+                            "✅ [{}] Collateral verified for {:?} masternode {} ({} TIME)",
+                            self.direction,
+                            tier,
+                            peer_ip,
+                            utxo.value as f64 / 100_000_000.0
+                        );
+                    }
+                    Err(_) => {
+                        warn!(
+                            "❌ [{}] Rejecting {:?} masternode from {} — collateral UTXO not found on-chain",
+                            self.direction, tier, peer_ip
+                        );
+                        return Ok(None);
+                    }
+                }
+
+                // Lock the collateral
+                let lock_height = context.blockchain.get_height();
+                let _ = utxo_manager.lock_collateral(
+                    outpoint.clone(),
+                    peer_ip.clone(),
+                    lock_height,
+                    tier.collateral(),
                 );
+            } else {
+                warn!(
+                    "⚠️ [{}] Cannot verify collateral for {} — no UTXO manager available",
+                    self.direction, peer_ip
+                );
+                return Ok(None);
+            }
 
-                // Add to peer_manager for connections
-                if let Some(peer_manager) = &context.peer_manager {
-                    peer_manager.add_peer(peer_ip).await;
+            // Create masternode with verified collateral
+            let mn = crate::types::Masternode::new_with_collateral(
+                peer_ip.clone(),
+                reward_address.clone(),
+                tier.collateral(),
+                outpoint,
+                public_key,
+                tier,
+                now,
+            );
+
+            match context
+                .masternode_registry
+                .register(mn, reward_address)
+                .await
+            {
+                Ok(()) => {
+                    let count = context.masternode_registry.total_count().await;
+                    info!(
+                        "✅ [{}] Registered {:?} masternode {} (total: {})",
+                        self.direction, tier, peer_ip, count
+                    );
+                    if let Some(peer_manager) = &context.peer_manager {
+                        peer_manager.add_peer(peer_ip).await;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "❌ [{}] Failed to register masternode {}: {}",
+                        self.direction, peer_ip, e
+                    );
                 }
             }
-            Err(e) => {
-                warn!(
-                    "❌ [{}] Failed to register masternode {}: {}",
-                    self.direction, peer_ip, e
-                );
+        } else {
+            // Free tier — no collateral verification needed
+            let mn = crate::types::Masternode::new_legacy(
+                peer_ip.clone(),
+                reward_address.clone(),
+                0,
+                public_key,
+                tier,
+                now,
+            );
+
+            match context
+                .masternode_registry
+                .register(mn, reward_address)
+                .await
+            {
+                Ok(()) => {
+                    let count = context.masternode_registry.total_count().await;
+                    info!(
+                        "✅ [{}] Registered Free masternode {} (total: {})",
+                        self.direction, peer_ip, count
+                    );
+                    if let Some(peer_manager) = &context.peer_manager {
+                        peer_manager.add_peer(peer_ip).await;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "❌ [{}] Failed to register masternode {}: {}",
+                        self.direction, peer_ip, e
+                    );
+                }
             }
         }
 
@@ -3305,7 +3427,9 @@ impl MessageHandler {
         tx_from_request: Option<crate::types::Transaction>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        let consensus = context.consensus.as_ref()
+        let consensus = context
+            .consensus
+            .as_ref()
             .ok_or("No consensus engine available for TimeVoteRequest")?;
 
         tracing::info!(
@@ -3313,7 +3437,11 @@ impl MessageHandler {
             self.peer_ip,
             hex::encode(txid),
             slot_index,
-            if tx_from_request.is_some() { " [TX included]" } else { "" }
+            if tx_from_request.is_some() {
+                " [TX included]"
+            } else {
+                ""
+            }
         );
 
         // Step 1: Get TX from mempool or from request
@@ -3324,7 +3452,11 @@ impl MessageHandler {
                 let input_sum: u64 = {
                     let mut sum = 0u64;
                     for input in &tx_from_req.inputs {
-                        if let Ok(utxo) = consensus.utxo_manager.get_utxo(&input.previous_output).await {
+                        if let Ok(utxo) = consensus
+                            .utxo_manager
+                            .get_utxo(&input.previous_output)
+                            .await
+                        {
                             sum += utxo.value;
                         }
                     }
@@ -3333,7 +3465,11 @@ impl MessageHandler {
                 let output_sum: u64 = tx_from_req.outputs.iter().map(|o| o.value).sum();
                 let fee = input_sum.saturating_sub(output_sum);
 
-                if consensus.tx_pool.add_pending(tx_from_req.clone(), fee).is_ok() {
+                if consensus
+                    .tx_pool
+                    .add_pending(tx_from_req.clone(), fee)
+                    .is_ok()
+                {
                     tx_opt = Some(tx_from_req);
                 }
             }
@@ -3342,15 +3478,15 @@ impl MessageHandler {
         let decision = if let Some(tx) = tx_opt {
             let actual_commitment = crate::types::TimeVote::calculate_tx_commitment(&tx);
             if actual_commitment != tx_hash_commitment {
-                tracing::warn!(
-                    "⚠️  TX {:?} commitment mismatch",
-                    hex::encode(txid)
-                );
+                tracing::warn!("⚠️  TX {:?} commitment mismatch", hex::encode(txid));
                 crate::types::VoteDecision::Reject
             } else {
                 match consensus.validate_transaction(&tx).await {
                     Ok(_) => {
-                        tracing::info!("✅ TX {:?} validated successfully for vote", hex::encode(txid));
+                        tracing::info!(
+                            "✅ TX {:?} validated successfully for vote",
+                            hex::encode(txid)
+                        );
                         crate::types::VoteDecision::Accept
                     }
                     Err(e) => {
@@ -3360,7 +3496,10 @@ impl MessageHandler {
                 }
             }
         } else {
-            tracing::debug!("⚠️  TX {:?} not found in mempool and not included in request", hex::encode(txid));
+            tracing::debug!(
+                "⚠️  TX {:?} not found in mempool and not included in request",
+                hex::encode(txid)
+            );
             crate::types::VoteDecision::Reject
         };
 
@@ -3388,7 +3527,9 @@ impl MessageHandler {
         vote: crate::types::TimeVote,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        let consensus = context.consensus.as_ref()
+        let consensus = context
+            .consensus
+            .as_ref()
             .ok_or("No consensus engine available for TimeVoteResponse")?;
 
         let txid = vote.txid;
@@ -3405,7 +3546,11 @@ impl MessageHandler {
         let accumulated_weight = match consensus.timevote.accumulate_timevote(vote) {
             Ok(weight) => weight,
             Err(e) => {
-                tracing::warn!("Failed to accumulate vote for TX {:?}: {}", hex::encode(txid), e);
+                tracing::warn!(
+                    "Failed to accumulate vote for TX {:?}: {}",
+                    hex::encode(txid),
+                    e
+                );
                 return Ok(None);
             }
         };
@@ -3441,12 +3586,17 @@ impl MessageHandler {
             use dashmap::mapref::entry::Entry;
             match consensus.timevote.finalized_txs.entry(txid) {
                 Entry::Vacant(e) => {
-                    e.insert((crate::consensus::Preference::Accept, std::time::Instant::now()));
+                    e.insert((
+                        crate::consensus::Preference::Accept,
+                        std::time::Instant::now(),
+                    ));
 
                     if consensus.tx_pool.finalize_transaction(txid) {
                         tracing::info!("✅ TX {:?} moved to finalized pool", hex::encode(txid));
 
-                        consensus.timevote.record_finalization(txid, accumulated_weight);
+                        consensus
+                            .timevote
+                            .record_finalization(txid, accumulated_weight);
 
                         match consensus.timevote.assemble_timeproof(txid) {
                             Ok(timeproof) => {
@@ -3456,22 +3606,39 @@ impl MessageHandler {
                                     timeproof.votes.len()
                                 );
 
-                                if let Err(e) = consensus.finality_proof_mgr.store_timeproof(timeproof.clone()) {
-                                    tracing::error!("❌ Failed to store TimeProof for TX {:?}: {}", hex::encode(txid), e);
+                                if let Err(e) = consensus
+                                    .finality_proof_mgr
+                                    .store_timeproof(timeproof.clone())
+                                {
+                                    tracing::error!(
+                                        "❌ Failed to store TimeProof for TX {:?}: {}",
+                                        hex::encode(txid),
+                                        e
+                                    );
                                 }
 
                                 consensus.broadcast_timeproof(timeproof).await;
                             }
                             Err(e) => {
-                                tracing::error!("❌ Failed to assemble TimeProof for TX {:?}: {}", hex::encode(txid), e);
+                                tracing::error!(
+                                    "❌ Failed to assemble TimeProof for TX {:?}: {}",
+                                    hex::encode(txid),
+                                    e
+                                );
                             }
                         }
                     } else {
-                        tracing::warn!("⚠️  Failed to finalize TX {:?} - not found in pending pool", hex::encode(txid));
+                        tracing::warn!(
+                            "⚠️  Failed to finalize TX {:?} - not found in pending pool",
+                            hex::encode(txid)
+                        );
                     }
                 }
                 Entry::Occupied(_) => {
-                    tracing::debug!("TX {:?} already finalized by another task", hex::encode(txid));
+                    tracing::debug!(
+                        "TX {:?} already finalized by another task",
+                        hex::encode(txid)
+                    );
                 }
             }
         }
@@ -3484,7 +3651,9 @@ impl MessageHandler {
         proof: crate::types::TimeProof,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        let consensus = context.consensus.as_ref()
+        let consensus = context
+            .consensus
+            .as_ref()
             .ok_or("No consensus engine available for TimeProofBroadcast")?;
 
         tracing::info!(

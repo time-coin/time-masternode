@@ -1528,10 +1528,7 @@ impl RpcHandler {
             })?;
 
         // Optional 3rd param: subtract_fee_from_amount (default: false)
-        let subtract_fee = params
-            .get(2)
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let subtract_fee = params.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
 
         // Convert TIME to smallest unit (like satoshis)
         let amount_units = (amount * 100_000_000.0) as u64;
@@ -1590,7 +1587,11 @@ impl RpcHandler {
         for utxo in &utxos {
             estimated_input += utxo.value;
             temp_fee = (estimated_input / 1000).max(1_000);
-            let needed = if subtract_fee { amount_units } else { amount_units + temp_fee };
+            let needed = if subtract_fee {
+                amount_units
+            } else {
+                amount_units + temp_fee
+            };
             if estimated_input >= needed {
                 break;
             }
@@ -1605,7 +1606,11 @@ impl RpcHandler {
         for utxo in utxos {
             selected_utxos.push(utxo.clone());
             total_input += utxo.value;
-            let needed = if subtract_fee { amount_units } else { amount_units + fee };
+            let needed = if subtract_fee {
+                amount_units
+            } else {
+                amount_units + fee
+            };
             if total_input >= needed {
                 break;
             }
@@ -1625,10 +1630,7 @@ impl RpcHandler {
             if amount_units <= fee {
                 return Err(RpcError {
                     code: -6,
-                    message: format!(
-                        "Amount too small to cover fee ({} units fee)",
-                        fee
-                    ),
+                    message: format!("Amount too small to cover fee ({} units fee)", fee),
                 });
             }
             amount_units - fee
