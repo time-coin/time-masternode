@@ -129,30 +129,35 @@ curl http://localhost:24101/rpc \
 
 ## 🖥️ Masternode Setup
 
-### 1. Generate Wallet Address
+### 1. Configure Masternode
 
-```bash
-# Create a wallet (requires TIME Coin wallet software)
-# For testing, use a test address like:
-wallet_address = "tcoin1q2wndu3zk0l0w6hlmlxl7l4c3q0aql5p0r9rqe"
-```
-
-### 2. Configure Masternode
-
-Edit config file (`~/.timecoin/testnet/config.toml`):
+Edit config file (`config.toml` or `~/.timecoin/testnet/config.toml`):
 
 ```toml
 [masternode]
 enabled = true
 tier = "free"  # Options: free, bronze, silver, gold
 collateral_txid = ""  # Leave empty for free tier
+collateral_vout = 0
 ```
 
 **Tier Requirements:**
 - **free**: No collateral, can receive rewards, cannot vote
-- **bronze**: 1,000 TIME collateral, 1,000x rewards, voting enabled
-- **silver**: 10,000 TIME collateral, 10,000x rewards, voting enabled  
-- **gold**: 100,000 TIME collateral, 100,000x rewards, voting enabled
+- **bronze**: 1,000 TIME collateral (exact), voting enabled
+- **silver**: 10,000 TIME collateral (exact), voting enabled  
+- **gold**: 100,000 TIME collateral (exact), voting enabled
+
+### 2. For Staked Tiers (Bronze/Silver/Gold)
+
+```bash
+# Create collateral UTXO
+time-cli sendtoaddress <your_address> 1000.0  # Bronze example
+
+# Wait for confirmations, then note the txid and vout
+time-cli listunspent
+
+# Update config.toml with collateral_txid and collateral_vout, then restart
+```
 
 ### 3. Run as Masternode
 
@@ -160,10 +165,12 @@ collateral_txid = ""  # Leave empty for free tier
 ./target/release/timed
 
 # Expected output
-Jan 02 01:00:00 timed[12345]:  INFO 🎯 Masternode enabled: free tier
-Jan 02 01:00:00 timed[12345]:  INFO 📡 Broadcasting masternode announcement
-Jan 02 01:00:00 timed[12345]:  INFO ✅ Registered as active masternode
+Feb 12 01:00:00 timed[12345]:  INFO 🎯 Masternode enabled: free tier
+Feb 12 01:00:00 timed[12345]:  INFO 📡 Broadcasting masternode announcement
+Feb 12 01:00:00 timed[12345]:  INFO ✅ Registered as active masternode
 ```
+
+To deregister: set `enabled = false` in config.toml and restart.
 
 ---
 

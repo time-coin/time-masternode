@@ -155,7 +155,7 @@ Without this, consensus engine cannot communicate with the network and transacti
 - Collateral UTXOs are **locked on-chain** (Dash-style), not just tracked off-chain
 - States: `Locked` UTXO state prevents accidental spending
 - Registration: Transaction creates locked UTXO → Wait 30 min confirmation → Register masternode
-- Cleanup: `masternodeunlock` command transitions back to `Unspent`
+- Cleanup: Set `enabled = false` in config.toml and restart to deregister and unlock collateral
 
 ### Transaction Pool Management
 
