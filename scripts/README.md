@@ -203,17 +203,18 @@ time-cli sendtoaddress <your_address> 1000.0
 time-cli listunspent
 ```
 
-**Step 4: Register Masternode**
-```bash
-time-cli masternoderegister \
-  --tier Bronze \
-  --collateral-txid <txid> \
-  --vout 0 \
-  --reward-address <your_address>
+**Step 4: Update config.toml**
+```toml
+[masternode]
+enabled = true
+tier = "bronze"
+collateral_txid = "<txid from step 3>"
+collateral_vout = 0
 ```
 
-**Step 5: Verify**
+**Step 5: Restart and Verify**
 ```bash
+sudo systemctl restart timed
 time-cli masternodelist
 time-cli getbalance
 ```

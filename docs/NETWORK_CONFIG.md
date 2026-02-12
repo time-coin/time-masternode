@@ -86,7 +86,6 @@ Output will show:
 ```toml
 [masternode]
 enabled = true
-wallet_address = "TIME0qz9x2k3j4c5m6n7b8v9c0x1z2a3s4d5f6g7h"  # Testnet address
 tier = "free"
 ```
 
@@ -95,8 +94,8 @@ tier = "free"
 ```toml
 [masternode]
 enabled = true
-wallet_address = "TIME1abc123..." # Mainnet address
 collateral_txid = "a1b2c3d4..."
+collateral_vout = 0
 tier = "bronze"  # or "silver", "gold"
 ```
 

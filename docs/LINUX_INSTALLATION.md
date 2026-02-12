@@ -290,7 +290,6 @@ Update the masternode section:
 ```toml
 [masternode]
 enabled = true
-wallet_address = "TIME1your_address_here"
 tier = "free"  # Options: free, bronze, silver, gold
 ```
 
@@ -646,8 +645,9 @@ cache_size_mb = 512
 
 [masternode]
 enabled = false
-wallet_address = ""
 tier = "free"
+collateral_txid = ""
+collateral_vout = 0
 ```
 
 See [Network Configuration Guide](./NETWORK_CONFIG.md) for full reference.

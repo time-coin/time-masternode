@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 ![Protocol](https://img.shields.io/badge/protocol-v6.2-green.svg)
-![Version](https://img.shields.io/badge/version-1.1.0-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)
 ![Security](https://img.shields.io/badge/security-audited-success.svg)
 
 **TIME Coin** is a next-generation cryptocurrency built from the ground up in Rust, featuring AI-powered optimizations and sub-second transaction finality.
@@ -61,7 +61,7 @@
   - All 27 normative sections complete
   - Liveness Fallback (§7.6) fully operational as of v6.2
   - Security audit completed (January 2026)
-- **Implementation**: ✅ **v1.1.0 PRODUCTION** (January 2026)
+- **Implementation**: ✅ **v1.2.0 PRODUCTION** (February 2026)
   - Core consensus: TimeVote + TimeLock ✅
   - Liveness fallback: TimeGuard Protocol ✅
   - Network layer: P2P + RPC ✅
@@ -121,57 +121,43 @@ For complete deployment guide, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
 
 ### Run as a Masternode
 
-#### Quick Configuration
+#### Configuration
 
-Use the interactive configuration script:
-
-```bash
-# Linux/macOS - Configure mainnet (default)
-./scripts/configure-masternode.sh
-
-# Configure testnet
-./scripts/configure-masternode.sh testnet
-
-# Windows - Configure mainnet (default)
-scripts\configure-masternode.bat
-
-# Configure testnet
-scripts\configure-masternode.bat testnet
-```
-
-#### Manual Configuration
-
-Edit `~/.timecoin/config.toml` (or `~/.timecoin/testnet/config.toml` for testnet):
+Edit `config.toml` (or `~/.timecoin/testnet/config.toml` for testnet):
 
 ```toml
 [masternode]
 enabled = true
 tier = "bronze"  # free, bronze, silver, or gold
-reward_address = "TIMEyouraddresshere"
-collateral_txid = ""  # Set after creating collateral
+collateral_txid = ""  # Set after creating collateral (not needed for free tier)
 collateral_vout = 0
 ```
 
-#### Register with Locked Collateral
+#### Setting Up a Staked Masternode (Bronze/Silver/Gold)
 
 ```bash
-# 1. Create collateral UTXO
+# 1. Create collateral UTXO (send exact amount to yourself)
 time-cli sendtoaddress <your_address> 1000.0  # For Bronze
 
 # 2. Wait for confirmations (30 minutes)
-time-cli listunspent
+time-cli listunspent  # Note the txid and vout
 
-# 3. Register masternode
-time-cli masternoderegister \
-  --tier bronze \
-  --collateral-txid <txid> \
-  --vout 0 \
-  --reward-address <your_address>
+# 3. Update config.toml with collateral info
+#    tier = "bronze"
+#    collateral_txid = "<txid from step 2>"
+#    collateral_vout = 0
 
-# 4. Verify
-time-cli getbalance  # Shows locked collateral
-time-cli masternodelist  # Shows 🔒 Locked
+# 4. Restart the daemon
+sudo systemctl restart timed
+
+# 5. Verify
+time-cli getbalance       # Shows locked collateral
+time-cli masternodelist   # Shows 🔒 Locked
 ```
+
+#### Deregistering a Masternode
+
+Set `enabled = false` in `config.toml` and restart the daemon. Collateral is automatically unlocked.
 
 See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup guide.
 
@@ -195,24 +181,17 @@ See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup 
 # List masternodes
 ./target/release/time-cli masternodelist
 
-# Register masternode with locked collateral
-./target/release/time-cli masternoderegister \
-  --tier bronze \
-  --collateral-txid <txid> \
-  --vout <vout> \
-  --reward-address <address>
-
 # List all locked collaterals
 ./target/release/time-cli listlockedcollaterals
-
-# Unlock masternode collateral
-./target/release/time-cli masternodeunlock
 
 # Get network info
 ./target/release/time-cli getnetworkinfo
 
 # Get consensus info
 ./target/release/time-cli getconsensusinfo
+
+# Use testnet (default is mainnet)
+./target/release/time-cli --testnet getblockchaininfo
 
 # Check uptime
 ./target/release/time-cli uptime
@@ -223,11 +202,14 @@ See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup 
 An interactive terminal UI for real-time masternode monitoring:
 
 ```bash
-# Launch dashboard (connects to local RPC by default)
+# Launch dashboard (auto-detects mainnet/testnet)
 ./target/release/time-dashboard
 
+# Force testnet
+./target/release/time-dashboard --testnet
+
 # Connect to remote node
-./target/release/time-dashboard http://192.168.1.100:24101
+./target/release/time-dashboard http://192.168.1.100:24001
 ```
 
 **Dashboard Features:**
@@ -476,27 +458,26 @@ Create `config.toml`:
 ```toml
 [node]
 network = "mainnet"  # or "testnet"
-data_dir = "./data"
-log_level = "info"
 
 [network]
-p2p_bind = "0.0.0.0:24100"
-rpc_bind = "127.0.0.1:24101"
+listen_address = "0.0.0.0"
+external_address = ""  # Your public IP (required for masternodes)
 max_peers = 50
 
 [masternode]
-enabled = false
-tier = "Free"
-wallet_address = ""
+enabled = true
+tier = "free"          # free, bronze, silver, or gold
+collateral_txid = ""   # TXID of collateral UTXO (staked tiers only)
+collateral_vout = 0    # Output index of collateral UTXO
 
 [consensus]
-min_confirmations = 1
-finality_timeout = 3000  # milliseconds
+min_masternodes = 3
+quorum_percentage = 51
 ```
 
 ## 🛣️ Development Status
 
-**Current Status:** ✅ **v1.1.0 Production Release** (January 2026)
+**Current Status:** ✅ **v1.2.0 Production Release** (February 2026)
 
 ### ✅ Completed Features
 
@@ -545,10 +526,11 @@ finality_timeout = 3000  # milliseconds
 ### 🔮 Future Roadmap
 
 **v1.2.0** (Q2 2026):
+- [x] Config-based masternode management (auto-registration from config.toml)
+- [x] Network-aware CLI and dashboard (--testnet flag)
 - [ ] TLS encryption for P2P (infrastructure ready)
 - [ ] Hot/cold wallet separation
 - [ ] Enhanced monitoring dashboard
-- [ ] Auto-registration from config.toml
 - [ ] Performance benchmarking suite
 
 **v2.0.0** (Q3-Q4 2026):

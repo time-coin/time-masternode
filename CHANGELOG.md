@@ -5,6 +5,29 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-02-12
+
+### Changed - Config-Based Masternode Management
+- **BREAKING: Removed `masternoderegister` and `masternodeunlock` RPC/CLI commands**
+  - Masternode registration is now entirely config-based via `config.toml`
+  - Set `[masternode] enabled = true`, `tier`, `collateral_txid`, `collateral_vout`
+  - Daemon auto-registers on startup; deregister by setting `enabled = false`
+  - Eliminates security vulnerability where anyone with RPC access could deregister masternodes
+- **`MasternodeUnlock` network messages are now ignored** (logged as deprecated)
+  - Variant kept in `NetworkMessage` enum for bincode serialization compatibility
+- **Exact collateral amounts required** (was >=, now must be exactly 1000/10000/100000 TIME)
+- **CLI defaults to mainnet** (port 24001); use `--testnet` flag for testnet (port 24101)
+- **Dashboard auto-detects network** (tries mainnet first); `--testnet` reverses priority
+
+### Added
+- `collateral_vout` field in `[masternode]` config section
+- `--testnet` flag for `time-cli` and `time-dashboard`
+- Fee breakdown documentation for collateral transactions (0.1% fee)
+
+### Security
+- Removed unauthenticated `masternodeunlock` RPC endpoint (anyone could deregister any masternode)
+- Removed unsigned `MasternodeUnlock` network message handling (any peer could forge deregistration)
+
 ## [Unreleased]
 
 ### Fixed - Critical Security and Compatibility Issues
