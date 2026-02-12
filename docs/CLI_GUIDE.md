@@ -177,62 +177,13 @@ time-cli masternodestatus
 ```
 Returns status of this node's masternode (if configured).
 
-#### Register Masternode with Locked Collateral
-```bash
-time-cli masternoderegister <tier> <collateral_txid> <vout> <reward_address> <node_address>
-```
-Registers a new masternode with locked collateral (Dash-style).
-
-**Parameters:**
-- `tier`: Masternode tier (free, bronze, silver, or gold)
-- `collateral_txid`: Transaction ID containing collateral UTXO (hex) — not needed for free tier
-- `vout`: Output index of collateral UTXO — not needed for free tier
-- `reward_address`: Address to receive masternode rewards
-- `node_address`: Node identifier/address
-
-**Collateral Requirements (exact amounts):**
-- Free: 0 TIME (no collateral needed)
-- Bronze: 1,000 TIME
-- Silver: 10,000 TIME
-- Gold: 100,000 TIME
-
-**Requirements:**
-- UTXO must have 3 block confirmations (~30 minutes)
-- UTXO amount must match tier requirement
-- UTXO must not be already locked
-
-**Examples:**
-```bash
-# Free tier (no collateral needed)
-time-cli masternoderegister free "" 0 TIMEyouraddress 1.2.3.4
-
-# Bronze tier (1,000 TIME collateral)
-time-cli masternoderegister bronze abc123def456... 0 TIMEyouraddress 1.2.3.4
-```
-
-#### Unlock Masternode Collateral
-```bash
-time-cli masternodeunlock [node_address]
-```
-Unlocks collateral and deregisters the masternode.
-
-**Parameters:**
-- `node_address` (optional): Specific node to unlock. If omitted, unlocks local masternode.
-
-**Warning:** This deregisters your masternode and stops reward eligibility.
+> **Note:** Masternode registration and deregistration are managed via `config.toml`, not CLI commands. See the [Masternode Guide](MASTERNODE_GUIDE.md) for details.
 
 #### List Locked Collaterals
 ```bash
 time-cli listlockedcollaterals
 ```
 Lists all currently locked collaterals with masternode details.
-
-**Output includes:**
-- Outpoint (txid:vout)
-- Masternode address
-- Amount (TIME)
-- Lock height
-- Lock timestamp
 
 ---
 
@@ -317,18 +268,22 @@ Returns list of transactions in the memory pool.
 
 ### Default RPC URL
 ```
-http://127.0.0.1:24101
+Mainnet: http://127.0.0.1:24001 (default)
+Testnet: http://127.0.0.1:24101 (use --testnet flag)
+```
+
+### Network Selection
+```bash
+# Mainnet (default)
+time-cli getblockcount
+
+# Testnet
+time-cli --testnet getblockcount
 ```
 
 ### Custom RPC URL
 ```bash
-time-cli --rpc-url http://node.example.com:24101 getblockcount
-```
-
-Or set environment variable:
-```bash
-export TIME_RPC_URL=http://node.example.com:24101
-time-cli getblockcount
+time-cli --rpc-url http://node.example.com:24001 getblockcount
 ```
 
 ### Output Format Options

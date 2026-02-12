@@ -2,47 +2,67 @@
 
 ## Overview
 
-TIME Coin supports tiered masternodes with locked collateral (Dash-style). This guide covers setup, operation, and management of masternodes.
+TIME Coin supports tiered masternodes with locked collateral (Dash-style). Masternode management is **config-based** — you configure your masternode in `config.toml` and the daemon handles registration on startup.
 
 ---
 
-## 🚀 Quick Start (5 Steps)
+## 🚀 Quick Start
 
-**Want to set up a masternode right now?** Follow these steps:
+### Free Tier (No Collateral)
 
-### 1. Check Balance
-```bash
-time-cli getbalance
-# Need: 1,000 TIME (Bronze), 10,000 (Silver), or 100,000 (Gold)
+1. Edit `config.toml`:
+```toml
+[masternode]
+enabled = true
+tier = "free"
 ```
 
-### 2. Create Collateral UTXO
+2. Start/restart the daemon:
+```bash
+./target/release/timed
+```
+
+3. Verify:
+```bash
+time-cli masternodelist
+```
+
+### Staked Tier (Bronze/Silver/Gold)
+
+1. Send exact collateral to yourself:
 ```bash
 time-cli sendtoaddress <your_address> 1000.0
-# Sends collateral to yourself, creates lockable UTXO
+# Note the TXID from the output
 ```
 
-### 3. Wait 30 Minutes
+2. Wait for 3 confirmations (~30 minutes):
 ```bash
 time-cli listunspent
-# Check confirmations >= 3
+# Check confirmations >= 3, note the txid and vout
 ```
 
-### 4. Register Masternode
+3. Edit `config.toml`:
+```toml
+[masternode]
+enabled = true
+tier = "bronze"
+collateral_txid = "abc123def456..."
+collateral_vout = 0
+```
+
+4. Restart the daemon:
 ```bash
-time-cli masternoderegister bronze <txid_from_step_2> 0 <your_address> <your_node_ip>
+sudo systemctl restart timed
 ```
 
-### 5. Verify
+5. Verify:
 ```bash
-time-cli getbalance
-# Should show locked collateral
-
-time-cli masternodelist
-# Should show your masternode with 🔒 Locked
+time-cli getbalance          # Should show locked collateral
+time-cli masternodelist      # Should show your masternode with 🔒 Locked
+time-cli listlockedcollaterals
 ```
 
-**Done!** Your masternode is now active and earning rewards. Read below for details.
+**Done!** Your masternode is now active and earning rewards.
 
 ---
 
@@ -55,9 +75,9 @@ time-cli masternodelist
 
 1. PREPARE FUNDS                    2. CREATE UTXO
    ┌──────────────┐                    ┌──────────────┐
-   │ Total: 1500  │                    │ Total: 1500  │
+   │ Total: 1501  │                    │ Total: 1501  │
    │ Locked: 0    │ ──sendtoaddress──> │ Locked: 0    │
-   │ Avail: 1500  │                    │ Avail: 1500  │
+   │ Avail: 1501  │   (1000 + fee)     │ Avail: 1501  │
    └──────────────┘                    └──────────────┘
                                               │
                                        Wait 3 blocks
@@ -70,7 +90,8 @@ time-cli masternodelist
    │ amount: 1000 TIME       │
    └─────────────────────────┘
             │
-            │ masternoderegister
+            │ Edit config.toml
+            │ Restart daemon
             ▼
 4. LOCK COLLATERAL                   5. MASTERNODE ACTIVE
    ┌──────────────┐                    ┌────────────────┐
@@ -82,10 +103,10 @@ time-cli masternodelist
                                        Earning Rewards
                                               │
                                               ▼
-6. RECEIVE REWARDS                     7. UNLOCK (OPTIONAL)
+6. RECEIVE REWARDS                     7. DEREGISTER (OPTIONAL)
    ┌──────────────┐                    ┌──────────────┐
-   │ Total: 2500  │                    │ Total: 2500  │
-   │ Locked: 1000 │ masternodeunlock   │ Locked: 0    │
+   │ Total: 2500  │  Set enabled=false │ Total: 2500  │
+   │ Locked: 1000 │  Restart daemon    │ Locked: 0    │
    │ Avail: 1500  │ ───────────────>   │ Avail: 2500  │
    └──────────────┘                    └──────────────┘
 ```
@@ -111,53 +132,46 @@ TIME Coin has four masternode tiers with different collateral requirements and r
 
 ---
 
-## Setup Methods
+## Configuration
 
-### Method 1: Legacy Masternode (No Locked Collateral)
+All masternode management is done through `config.toml`. No RPC commands are needed.
 
-**Pros:**
-- Simple setup
-- No UTXO locking
-- Backward compatible
+### config.toml Settings
 
-**Cons:**
-- Can accidentally spend collateral
-- No on-chain proof of stake
+```toml
+[masternode]
+enabled = true                          # Enable/disable masternode
+tier = "bronze"                         # free, bronze, silver, or gold
+collateral_txid = "abc123def456..."     # TXID of collateral UTXO (staked tiers only)
+collateral_vout = 0                     # Output index of collateral UTXO
+```
 
-**Setup:**
+### Free Tier (No Collateral)
 
-1. Edit `config.toml`:
 ```toml
 [masternode]
 enabled = true
-tier = "Bronze"  # or Silver, Gold
-wallet_address = "TIMEyouraddresshere"
+tier = "free"
+collateral_txid = ""
+collateral_vout = 0
 ```
 
-2. Start node:
-```bash
-./target/release/timed
+### Staked Tier (Bronze Example)
+
+```toml
+[masternode]
+enabled = true
+tier = "bronze"
+collateral_txid = "abc123def456789012345678901234567890123456789012345678901234abcd"
+collateral_vout = 0
 ```
 
 ---
 
-### Method 2: Locked Collateral Masternode (Recommended)
+## Setup Guide (Staked Tiers)
 
-**Pros:**
-- ✅ Prevents accidental spending
-- ✅ On-chain proof of stake
-- ✅ Dash-style security model
-- ✅ Automatic validation
+### Step 1: Check Your Balance
 
-**Cons:**
-- UTXO locked while masternode active
-- Must deregister to unlock
-
-**Setup:**
-
-#### Step 1: Check Your Balance
-
-First, verify you have enough funds:
 ```bash
 time-cli getbalance
 ```
@@ -170,12 +184,7 @@ Wallet Balance:
   Available:     1500.00000000 TIME (spendable)
 ```
 
-**Requirements:**
-- Bronze: 1,000 TIME
-- Silver: 10,000 TIME
-- Gold: 100,000 TIME
-
-#### Step 2: Create Collateral UTXO
+### Step 2: Create Collateral UTXO
 
 Send the exact collateral amount to yourself. A 0.1% network fee applies, so your wallet needs slightly more than the collateral amount:
 
@@ -191,9 +200,6 @@ time-cli getnewaddress
 
 # Send collateral to yourself (fee is added on top)
 time-cli sendtoaddress <your_address> 1000.0
-
-# Or use --subtract-fee to deduct fee from the amount
-# (NOT recommended — the resulting UTXO will be less than 1000 and collateral will fail)
 ```
 
 > ⚠️ **Do NOT use `--subtract-fee`** when creating collateral UTXOs. The collateral amount must be exactly 1,000 / 10,000 / 100,000 TIME. The fee must be paid on top.
@@ -203,7 +209,7 @@ time-cli sendtoaddress <your_address> 1000.0
 - Easier to track and manage
 - Standard practice (Dash-style)
 
-#### Step 3: Wait for Confirmations
+### Step 3: Wait for Confirmations
 
 The UTXO needs 3 confirmations (~30 minutes):
 ```bash
@@ -217,37 +223,33 @@ time-cli listunspent
 # confirmations: 3  ← Must be 3+
 ```
 
-**Note the txid and vout** - you'll need these for registration.
+**Note the txid and vout** — you'll need these for the config file.
 
-#### Step 4: Register with Locked Collateral
+### Step 4: Update config.toml
+
+```toml
+[masternode]
+enabled = true
+tier = "bronze"
+collateral_txid = "abc123def456..."   # From Step 2
+collateral_vout = 0                    # From Step 3
+```
+
+### Step 5: Restart the Daemon
 
 ```bash
-time-cli masternoderegister bronze abc123def456789... 0 <your_address> <your_node_ip>
+sudo systemctl restart timed
+# Or: ./target/release/timed
 ```
 
-**Parameters (positional):**
-1. `tier` — bronze, silver, or gold
-2. `collateral_txid` — Transaction ID from Step 2 (hex)
-3. `vout` — Output index (usually 0)
-4. `reward_address` — Your address for receiving rewards
-5. `node_address` — Your node's public IP
+The daemon will automatically:
+1. Parse the collateral UTXO from config
+2. Verify the UTXO exists and has the correct amount
+3. Lock the collateral
+4. Register the masternode on the network
+5. Begin participating in consensus
 
-**Output:**
-```
-✅ Masternode Registered Successfully
-
-Masternode Address: node1.example.com
-Tier: Bronze
-Collateral: 1,000 TIME
-Collateral UTXO: abc123def456...:0
-Reward Address: TIMEyourrewardaddress
-
-⚠️  IMPORTANT: Your collateral is now LOCKED
-   - Cannot spend this UTXO while masternode is active
-   - Use 'masternodeunlock' to deregister and unlock
-```
-
-#### Step 5: Verify Registration
+### Step 6: Verify Registration
 
 ```bash
 # Check your balance (should show locked collateral)
@@ -291,69 +293,45 @@ time-cli masternodelist
 time-cli getbalance
 ```
 
-**Output:**
-```
-Wallet Balance:
-  Total:         2500.00000000 TIME
-  Locked:        1000.00000000 TIME (collateral)
-  Available:     1500.00000000 TIME (spendable)
-```
-
 **What you see:**
 - **Total**: All funds in your wallet
 - **Locked**: Collateral locked for masternode(s)
 - **Available**: Spendable funds (includes rewards)
 
-```bash
-# Get detailed wallet info
-time-cli getwalletinfo
-
-# List recent transactions
-time-cli listunspent
-```
-
 ### View Locked Collaterals
 
 ```bash
-# List all locked collaterals
 time-cli listlockedcollaterals
-```
-
-**Output:**
-```
-Locked Collaterals:
-Outpoint                                                           Masternode            Amount (TIME)  Height
-abc123def456...:0                                                  node1.example.com     1000.00000000  12345
-
-Total Locked: 1
 ```
 
 ---
 
-## Deregistering & Unlocking Collateral
+## Deregistering Your Masternode
 
-To stop your masternode and unlock collateral:
+To stop your masternode and unlock collateral, edit `config.toml`:
 
+```toml
+[masternode]
+enabled = false
+```
+
+Then restart the daemon:
 ```bash
-# Unlock local masternode
-time-cli masternodeunlock
-
-# Or unlock specific masternode
-time-cli masternodeunlock node1.example.com
+sudo systemctl restart timed
 ```
-
-**Output:**
-```
-✅ Masternode Unlocked Successfully
-
-Masternode Address: node1.example.com
-Collateral UTXO: abc123def456...:0
-Status: Deregistered
 
 Your collateral is now unlocked and spendable.
-```
 
 **⚠️ Warning:** Deregistering stops your masternode and ends reward eligibility.
+
+### Changing Tiers
+
+To upgrade or downgrade your tier:
+
+1. Set `enabled = false` in config.toml and restart (unlocks current collateral)
+2. Create a new collateral UTXO for the new tier amount
+3. Update `tier`, `collateral_txid`, and `collateral_vout` in config.toml
+4. Set `enabled = true` and restart
 
 ---
 
@@ -373,13 +351,6 @@ If there are more than 10 masternodes:
 - Block 2: Nodes 11-20 receive rewards
 - Block N: Rotation continues through all masternodes
 - Each node receives rewards every `N/10` blocks (where N = total masternodes)
-
-### Example
-
-With 50 masternodes:
-- 10 selected per block
-- Your masternode receives rewards every 5 blocks
-- At 10 minutes per block = rewards every 50 minutes
 
 ---
 
@@ -405,11 +376,6 @@ If collateral becomes invalid:
 2. Removed from reward rotation
 3. Logged in system
 
-**Example log:**
-```
-🗑️ Auto-deregistered 1 masternode(s) with invalid collateral at height 12345
-```
-
 ---
 
 ## Troubleshooting
@@ -420,97 +386,39 @@ If collateral becomes invalid:
 
 **Solution:**
 ```bash
-# Check your UTXOs
 time-cli listunspent
-
-# Use a valid UTXO from the list
+# Verify the txid and vout in config.toml match an unspent UTXO
 ```
+
+### Error: "Invalid collateral_txid hex"
+
+**Cause:** The `collateral_txid` in config.toml is not valid hex.
+
+**Solution:** Ensure the txid is a 64-character hex string (no 0x prefix).
 
 ### Error: "Insufficient collateral confirmations"
 
 **Cause:** UTXO needs 3 confirmations (~30 minutes).
 
-**Solution:**
-```bash
-# Check confirmations
-time-cli listunspent
-
-# Wait for 3+ confirmations
-time-cli getblockcount
-```
-
-### Error: "Collateral UTXO already locked"
-
-**Cause:** This UTXO is already used by another masternode.
-
-**Solution:**
-```bash
-# Find locked collaterals
-time-cli listlockedcollaterals
-
-# Use a different UTXO
-time-cli listunspent
-```
-
-### Error: "Collateral has been spent"
-
-**Cause:** The UTXO was spent (no longer exists).
-
-**Solution:**
-```bash
-# Find unspent UTXOs
-time-cli listunspent
-
-# Register with an unspent UTXO
-```
+**Solution:** Wait for more blocks, then restart the daemon.
 
 ### Masternode Not Receiving Rewards
 
 **Possible causes:**
-1. **Not active:** Check `masternodelist` - must show `Active: true`
-2. **Collateral spent:** Run `listlockedcollaterals` - verify it's locked
+1. **Not active:** Check `masternodelist` — must show `Active: true`
+2. **Collateral spent:** Run `listlockedcollaterals` — verify it's locked
 3. **Rotation:** With many masternodes, you receive rewards periodically
 4. **Just registered:** Wait 1 hour for eligibility
 
-**Debug steps:**
-```bash
-# Check if active
-time-cli masternodelist | grep youraddress
-
-# Verify collateral locked
-time-cli listlockedcollaterals
-
-# Check node uptime
-time-cli masternodestatus
-```
-
 ---
 
-## Migration Guide
+## Security
 
-### Upgrading Legacy → Locked Collateral
-
-If you have an existing legacy masternode:
-
-1. **Optional:** Legacy masternodes continue to work indefinitely
-2. **No deadline:** Migrate at your convenience
-3. **No penalties:** Both types receive rewards
-
-**To migrate:**
-
-```bash
-# Step 1: Identify collateral UTXO
-time-cli listunspent
-
-# Step 2: Register with locked collateral
-time-cli masternoderegister <tier> <txid> <vout> <reward_addr> <node_addr>
-
-# Step 3: Verify
-time-cli masternodelist
-time-cli listlockedcollaterals
-```
-
-**Note:** Your old legacy masternode and new locked masternode are separate. You can run both.
+Masternode management is **local only**:
+- Registration and deregistration are done via `config.toml` on the node
+- No RPC commands can register or deregister masternodes
+- The signing key is derived from your node's wallet
+- No one can remotely deregister your masternode
 
 ---
 
@@ -521,13 +429,12 @@ time-cli listlockedcollaterals
 ✅ **Do:**
 - Keep private keys secure
 - Monitor collateral status regularly
-- Verify UTXOs before locking
 - Keep node software updated
+- Use a dedicated server for masternodes
 
 ❌ **Don't:**
 - Share private keys
-- Lock wrong UTXO
-- Forget collateral is locked
+- Spend collateral UTXOs manually
 - Ignore validation errors
 
 ### Operations
@@ -536,83 +443,31 @@ time-cli listlockedcollaterals
 - **Check rewards** regularly with `getbalance`
 - **Verify collateral** with `listlockedcollaterals`
 - **Maintain uptime** for maximum rewards
-- **Use locked collateral** for better security
-
-### Economics
-
-- **Bronze:** Good starting point, 10x rewards
-- **Silver:** Serious operators, 100x rewards
-- **Gold:** Largest operators, 1000x rewards
-- **Higher tiers:** More voting power and consensus weight
-
----
-
-## Technical Details
-
-### Collateral Lock Mechanism
-
-When you register with locked collateral:
-1. UTXO marked as "locked" in UTXO manager
-2. Prevents spending in transactions
-3. Validated after each block
-4. Automatic cleanup if spent
-
-### Network Protocol
-
-- Collateral info included in masternode announcements
-- Peers synchronize locked collateral data
-- Conflict detection for double-locks
-- Broadcast unlock events to network
-
-### Storage
-
-- Collateral locks stored in DashMap (thread-safe)
-- Persisted with UTXO state
-- Survives node restarts
-- Binary compatible (no migration needed)
 
 ---
 
 ## FAQ
 
-### Q: Do I need to migrate immediately?
-**A:** No. Legacy masternodes work indefinitely. Migrate when convenient.
+### Q: How do I register a masternode?
+**A:** Edit `config.toml` with your tier and collateral info, then start/restart the daemon.
 
-### Q: Can I have both legacy and locked masternodes?
-**A:** Yes. You can run multiple masternodes of different types.
+### Q: How do I deregister a masternode?
+**A:** Set `enabled = false` in `config.toml` and restart the daemon.
 
 ### Q: What happens if I spend locked collateral?
 **A:** Your masternode is automatically deregistered and removed from rewards.
 
-### Q: Can I unlock collateral anytime?
-**A:** Yes, use `masternodeunlock`. This deregisters your masternode.
-
 ### Q: How long to wait for rewards?
 **A:** Depends on total masternodes. With 50 MNs, expect rewards every ~50 minutes.
 
-### Q: What's the benefit of locked collateral?
-**A:** Prevents accidental spending, provides on-chain proof of stake, aligns with Dash security model.
-
-### Q: Do locked masternodes get more rewards?
-**A:** No. Both legacy and locked masternodes receive equal rewards based on tier.
-
 ### Q: Can I change tier after registration?
-**A:** No. You must unlock, then register with new tier.
+**A:** Yes. Deregister (set `enabled = false`, restart), create new collateral UTXO, update config, restart.
 
 ### Q: What if my node goes offline?
 **A:** After 5 missed heartbeats (5 minutes), marked inactive. No rewards while inactive.
 
-### Q: How do I backup my masternode?
-**A:** Backup your wallet private keys. The masternode registration is on-chain.
-
----
-
-## Support
-
-For questions or issues:
-- **GitHub Issues:** https://github.com/time-coin/timecoin/issues
-- **Documentation:** https://github.com/time-coin/timecoin/tree/main/docs
-- **Protocol Spec:** docs/TIMECOIN_PROTOCOL.md
+### Q: Do I need to save a signing key?
+**A:** No. The signing key is derived from your node's wallet automatically.
 
 ---
 
@@ -620,12 +475,6 @@ For questions or issues:
 
 ### Commands
 ```bash
-# Register with locked collateral
-time-cli masternoderegister <tier> <txid> <vout> <reward_addr> <node_addr>
-
-# Unlock collateral
-time-cli masternodeunlock [node_addr]
-
 # List masternodes
 time-cli masternodelist
 
@@ -639,15 +488,24 @@ time-cli masternodestatus
 time-cli getbalance
 ```
 
+### Config
+```toml
+[masternode]
+enabled = true
+tier = "bronze"                    # free, bronze, silver, gold
+collateral_txid = "abc123..."      # TXID of collateral UTXO
+collateral_vout = 0                # Output index
+```
+
 ### Collateral Requirements
-- **Bronze:** 1,000 TIME
-- **Silver:** 10,000 TIME
-- **Gold:** 100,000 TIME
+- **Free:** 0 TIME
+- **Bronze:** 1,000 TIME (exact)
+- **Silver:** 10,000 TIME (exact)
+- **Gold:** 100,000 TIME (exact)
 - **Confirmations:** 3 blocks (~30 minutes)
 
 ### Key Points
+- ✅ Config-based management (no RPC commands needed)
 - ✅ Locked collateral prevents accidental spending
 - ✅ Automatic validation and cleanup
-- ✅ Full backward compatibility
-- ✅ No forced migration timeline
-- ✅ 202 tests passing (production-ready)
+- ✅ Local-only security (no remote deregistration)
