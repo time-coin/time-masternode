@@ -674,15 +674,24 @@ async fn handle_peer(
                                             // Only send OUR masternode announcement, not all masternodes
                                             let local_masternodes = masternode_registry.get_all().await;
                                             if let Some(our_mn) = local_masternodes.iter().find(|mn| mn.masternode.address == our_address) {
-                                                let announcement = NetworkMessage::MasternodeAnnouncementV2 {
+                                                // Send V1 for backward compat with old nodes
+                                                let announcement_v1 = NetworkMessage::MasternodeAnnouncement {
+                                                    address: our_mn.masternode.address.clone(),
+                                                    reward_address: our_mn.reward_address.clone(),
+                                                    tier: our_mn.masternode.tier,
+                                                    public_key: our_mn.masternode.public_key,
+                                                };
+                                                let _ = peer_registry.send_to_peer(&ip_str, announcement_v1).await;
+                                                // Send V2 with collateral for updated nodes
+                                                let announcement_v2 = NetworkMessage::MasternodeAnnouncementV2 {
                                                     address: our_mn.masternode.address.clone(),
                                                     reward_address: our_mn.reward_address.clone(),
                                                     tier: our_mn.masternode.tier,
                                                     public_key: our_mn.masternode.public_key,
                                                     collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
                                                 };
-                                                let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
-                                                tracing::info!("📢 Sent our masternode announcement to newly connected peer {}", ip_str);
+                                                let _ = peer_registry.send_to_peer(&ip_str, announcement_v2).await;
+                                                tracing::info!("📢 Sent masternode announcement (V1+V2) to peer {}", ip_str);
                                             }
                                         }
 
