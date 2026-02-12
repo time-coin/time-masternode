@@ -1527,6 +1527,12 @@ impl RpcHandler {
                 message: "Invalid params: expected amount".to_string(),
             })?;
 
+        // Optional 3rd param: subtract_fee_from_amount (default: false)
+        let subtract_fee = params
+            .get(2)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         // Convert TIME to smallest unit (like satoshis)
         let amount_units = (amount * 100_000_000.0) as u64;
 
@@ -1580,11 +1586,12 @@ impl RpcHandler {
         let mut estimated_input = 0u64;
         let mut temp_fee = 1_000u64; // Start with minimum
 
-        // Find UTXOs needed (including fee)
+        // Find UTXOs needed (including fee unless subtracted from amount)
         for utxo in &utxos {
             estimated_input += utxo.value;
             temp_fee = (estimated_input / 1000).max(1_000);
-            if estimated_input >= amount_units + temp_fee {
+            let needed = if subtract_fee { amount_units } else { amount_units + temp_fee };
+            if estimated_input >= needed {
                 break;
             }
         }
@@ -1598,17 +1605,42 @@ impl RpcHandler {
         for utxo in utxos {
             selected_utxos.push(utxo.clone());
             total_input += utxo.value;
-            if total_input >= amount_units + fee {
+            let needed = if subtract_fee { amount_units } else { amount_units + fee };
+            if total_input >= needed {
                 break;
             }
         }
 
-        if total_input < amount_units + fee {
-            return Err(RpcError {
-                code: -6,
-                message: "Insufficient funds".to_string(),
-            });
-        }
+        // When subtract_fee_from_amount is set, deduct fee from the send amount
+        // so the user only needs to have `amount_units` (not amount + fee)
+        let send_amount = if subtract_fee {
+            if total_input < amount_units {
+                return Err(RpcError {
+                    code: -6,
+                    message: "Insufficient funds".to_string(),
+                });
+            }
+            // Recalculate fee based on actual input
+            let fee = (total_input / 1000).max(1_000);
+            if amount_units <= fee {
+                return Err(RpcError {
+                    code: -6,
+                    message: format!(
+                        "Amount too small to cover fee ({} units fee)",
+                        fee
+                    ),
+                });
+            }
+            amount_units - fee
+        } else {
+            if total_input < amount_units + fee {
+                return Err(RpcError {
+                    code: -6,
+                    message: "Insufficient funds".to_string(),
+                });
+            }
+            amount_units
+        };
 
         // Create transaction
         use crate::types::{Transaction, TxInput, TxOutput};
@@ -1623,12 +1655,12 @@ impl RpcHandler {
             .collect();
 
         let mut outputs = vec![TxOutput {
-            value: amount_units,
+            value: send_amount,
             script_pubkey: to_address.as_bytes().to_vec(),
         }];
 
         // Add change output if necessary
-        let change = total_input - amount_units - fee;
+        let change = total_input - send_amount - fee;
         if change > 0 {
             // Send change back to our wallet address
             outputs.push(TxOutput {

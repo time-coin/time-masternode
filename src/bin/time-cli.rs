@@ -179,6 +179,9 @@ enum Commands {
         address: String,
         /// Amount to send (in TIME)
         amount: f64,
+        /// Subtract fee from amount (recipient gets amount minus fee)
+        #[arg(long, default_value = "false")]
+        subtract_fee: bool,
     },
 
     /// Merge UTXOs to reduce UTXO set size
@@ -462,7 +465,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ForceUnlockAll => ("forceunlockall", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
-        Commands::SendToAddress { address, amount } => ("sendtoaddress", json!([address, amount])),
+        Commands::SendToAddress { address, amount, subtract_fee } => ("sendtoaddress", json!([address, amount, subtract_fee])),
         Commands::MergeUtxos {
             min_count,
             max_count,
