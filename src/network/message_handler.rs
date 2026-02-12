@@ -829,7 +829,16 @@ impl MessageHandler {
             self.direction, address, self.peer_ip
         );
 
-        // Mark the masternode as inactive in our registry
+        // Don't mark as inactive if we have a live connection to this node
+        let ip_only = address.split(':').next().unwrap_or(&address);
+        if context.peer_registry.is_connected(ip_only) {
+            debug!(
+                "⏭️ [{}] Ignoring inactive gossip for {} — we have a live connection",
+                self.direction, address
+            );
+            return Ok(None);
+        }
+
         match context
             .masternode_registry
             .mark_inactive_on_disconnect(&address)
