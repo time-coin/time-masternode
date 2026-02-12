@@ -208,17 +208,51 @@ async fn main() {
             .unwrap_or(&full_address)
             .to_string();
 
-        let masternode = types::Masternode::new_legacy(
-            ip_only,
-            wallet_address.clone(),
-            tier.collateral(),
-            *wallet.public_key(),
-            tier,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        );
+        // Parse collateral outpoint if provided (for staked tiers)
+        let has_collateral = !config.masternode.collateral_txid.is_empty();
+        let masternode = if has_collateral && tier != types::MasternodeTier::Free {
+            let txid_bytes = hex::decode(&config.masternode.collateral_txid).unwrap_or_else(|_| {
+                eprintln!(
+                    "❌ Error: Invalid collateral_txid hex '{}'",
+                    config.masternode.collateral_txid
+                );
+                std::process::exit(1);
+            });
+            if txid_bytes.len() != 32 {
+                eprintln!("❌ Error: collateral_txid must be 32 bytes (64 hex chars)");
+                std::process::exit(1);
+            }
+            let mut txid = [0u8; 32];
+            txid.copy_from_slice(&txid_bytes);
+            let outpoint = types::OutPoint {
+                txid,
+                vout: config.masternode.collateral_vout,
+            };
+            types::Masternode::new_with_collateral(
+                ip_only,
+                wallet_address.clone(),
+                tier.collateral(),
+                outpoint,
+                *wallet.public_key(),
+                tier,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            )
+        } else {
+            types::Masternode::new_legacy(
+                ip_only,
+                wallet_address.clone(),
+                tier.collateral(),
+                *wallet.public_key(),
+                tier,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            )
+        };
 
         println!("✓ Running as {:?} masternode", tier);
         println!("  └─ Wallet: {}", wallet_address);
