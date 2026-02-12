@@ -756,7 +756,7 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
             // Broadcast announcement immediately (don't wait for sync)
-            let announcement = NetworkMessage::MasternodeAnnouncement {
+            let announcement = NetworkMessage::MasternodeAnnouncementV2 {
                 address: mn_for_announcement.address.clone(),
                 reward_address: mn_for_announcement.wallet_address.clone(),
                 tier: mn_for_announcement.tier,

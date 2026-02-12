@@ -64,7 +64,6 @@ pub enum NetworkMessage {
         reward_address: String,
         tier: MasternodeTier,
         public_key: VerifyingKey,
-        collateral_outpoint: Option<OutPoint>,
     },
     /// Announce masternode deregistration and collateral unlock
     MasternodeUnlock {
@@ -231,6 +230,16 @@ pub enum NetworkMessage {
         visible_masternodes: Vec<String>, // List of masternode IPs they can see
         timestamp: u64,
     },
+    /// V2 masternode announcement with collateral verification
+    MasternodeAnnouncementV2 {
+        address: String,
+        reward_address: String,
+        tier: MasternodeTier,
+        public_key: VerifyingKey,
+        collateral_outpoint: Option<OutPoint>,
+    },
+    /// Placeholder for messages from newer protocol versions that we can't parse
+    UnknownMessage,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -343,6 +352,8 @@ impl NetworkMessage {
             NetworkMessage::FinalityProposal { .. } => "FinalityProposal",
             NetworkMessage::FallbackVote { .. } => "FallbackVote",
             NetworkMessage::MasternodeStatusGossip { .. } => "MasternodeStatusGossip",
+            NetworkMessage::MasternodeAnnouncementV2 { .. } => "MasternodeAnnouncementV2",
+            NetworkMessage::UnknownMessage => "UnknownMessage",
         }
     }
 

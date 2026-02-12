@@ -91,8 +91,17 @@ pub async fn read_message<R: AsyncRead + Unpin>(
         .await
         .map_err(|e| format!("Failed to read frame payload: {}", e))?;
 
-    let message: NetworkMessage = bincode::deserialize(&payload)
-        .map_err(|e| format!("Failed to deserialize message: {}", e))?;
+    let message: NetworkMessage = match bincode::deserialize(&payload) {
+        Ok(msg) => msg,
+        Err(e) => {
+            tracing::debug!(
+                "⚠️ Received unrecognized message ({} bytes), skipping: {}",
+                payload.len(),
+                e
+            );
+            NetworkMessage::UnknownMessage
+        }
+    };
 
     Ok(Some(message))
 }
