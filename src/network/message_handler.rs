@@ -469,6 +469,17 @@ impl MessageHandler {
                 self.handle_fallback_vote(vote.clone(), context).await
             }
 
+            // === TimeVote Consensus Messages (§7 Transaction Finality) ===
+            NetworkMessage::TimeVoteRequest { txid, tx_hash_commitment, slot_index, tx } => {
+                self.handle_timevote_request(*txid, *tx_hash_commitment, *slot_index, tx.clone(), context).await
+            }
+            NetworkMessage::TimeVoteResponse { vote } => {
+                self.handle_timevote_response(vote.clone(), context).await
+            }
+            NetworkMessage::TimeProofBroadcast { proof } => {
+                self.handle_timeproof_broadcast(proof.clone(), context).await
+            }
+
             // === Gossip-based Status Tracking ===
             NetworkMessage::MasternodeStatusGossip {
                 reporter,
@@ -3278,6 +3289,223 @@ impl MessageHandler {
                     );
                 }
                 _ => {}
+            }
+        }
+
+        Ok(None)
+    }
+
+    // === TimeVote Consensus Handlers ===
+
+    async fn handle_timevote_request(
+        &self,
+        txid: [u8; 32],
+        tx_hash_commitment: [u8; 32],
+        slot_index: u64,
+        tx_from_request: Option<crate::types::Transaction>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let consensus = context.consensus.as_ref()
+            .ok_or("No consensus engine available for TimeVoteRequest")?;
+
+        tracing::info!(
+            "🗳️  TimeVoteRequest from {} for TX {:?} (slot {}){}",
+            self.peer_ip,
+            hex::encode(txid),
+            slot_index,
+            if tx_from_request.is_some() { " [TX included]" } else { "" }
+        );
+
+        // Step 1: Get TX from mempool or from request
+        let mut tx_opt = consensus.tx_pool.get_pending(&txid);
+
+        if tx_opt.is_none() {
+            if let Some(tx_from_req) = tx_from_request {
+                let input_sum: u64 = {
+                    let mut sum = 0u64;
+                    for input in &tx_from_req.inputs {
+                        if let Ok(utxo) = consensus.utxo_manager.get_utxo(&input.previous_output).await {
+                            sum += utxo.value;
+                        }
+                    }
+                    sum
+                };
+                let output_sum: u64 = tx_from_req.outputs.iter().map(|o| o.value).sum();
+                let fee = input_sum.saturating_sub(output_sum);
+
+                if consensus.tx_pool.add_pending(tx_from_req.clone(), fee).is_ok() {
+                    tx_opt = Some(tx_from_req);
+                }
+            }
+        }
+
+        let decision = if let Some(tx) = tx_opt {
+            let actual_commitment = crate::types::TimeVote::calculate_tx_commitment(&tx);
+            if actual_commitment != tx_hash_commitment {
+                tracing::warn!(
+                    "⚠️  TX {:?} commitment mismatch",
+                    hex::encode(txid)
+                );
+                crate::types::VoteDecision::Reject
+            } else {
+                match consensus.validate_transaction(&tx).await {
+                    Ok(_) => {
+                        tracing::info!("✅ TX {:?} validated successfully for vote", hex::encode(txid));
+                        crate::types::VoteDecision::Accept
+                    }
+                    Err(e) => {
+                        tracing::warn!("⚠️  TX {:?} validation failed: {}", hex::encode(txid), e);
+                        crate::types::VoteDecision::Reject
+                    }
+                }
+            }
+        } else {
+            tracing::debug!("⚠️  TX {:?} not found in mempool and not included in request", hex::encode(txid));
+            crate::types::VoteDecision::Reject
+        };
+
+        // Sign TimeVote with our masternode key
+        let vote_opt = consensus.sign_timevote(txid, tx_hash_commitment, slot_index, decision);
+
+        if let Some(vote) = vote_opt {
+            tracing::info!(
+                "✅ TimeVoteResponse ready for TX {:?} (decision: {:?})",
+                hex::encode(txid),
+                decision
+            );
+            Ok(Some(NetworkMessage::TimeVoteResponse { vote }))
+        } else {
+            tracing::warn!(
+                "⚠️ TimeVote signing skipped for TX {:?} (not a masternode or identity not set)",
+                hex::encode(txid)
+            );
+            Ok(None)
+        }
+    }
+
+    async fn handle_timevote_response(
+        &self,
+        vote: crate::types::TimeVote,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let consensus = context.consensus.as_ref()
+            .ok_or("No consensus engine available for TimeVoteResponse")?;
+
+        let txid = vote.txid;
+
+        tracing::info!(
+            "📥 TimeVoteResponse from {} for TX {:?} (decision: {:?}, weight: {})",
+            self.peer_ip,
+            hex::encode(txid),
+            vote.decision,
+            vote.voter_weight
+        );
+
+        // Step 1: Accumulate the vote
+        let accumulated_weight = match consensus.timevote.accumulate_timevote(vote) {
+            Ok(weight) => weight,
+            Err(e) => {
+                tracing::warn!("Failed to accumulate vote for TX {:?}: {}", hex::encode(txid), e);
+                return Ok(None);
+            }
+        };
+
+        tracing::info!(
+            "Vote accumulated for TX {:?}, total weight: {}",
+            hex::encode(txid),
+            accumulated_weight
+        );
+
+        // Step 2: Check if finality threshold reached (51% simple majority)
+        let validators = consensus.timevote.get_validators();
+        let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
+        let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
+
+        tracing::info!(
+            "Finality check for TX {:?}: accumulated={}, threshold={} (51% of {})",
+            hex::encode(txid),
+            accumulated_weight,
+            finality_threshold,
+            total_avs_weight
+        );
+
+        // Step 3: If threshold met, finalize transaction
+        if accumulated_weight >= finality_threshold {
+            tracing::info!(
+                "🎉 TX {:?} reached finality threshold! ({} >= {})",
+                hex::encode(txid),
+                accumulated_weight,
+                finality_threshold
+            );
+
+            use dashmap::mapref::entry::Entry;
+            match consensus.timevote.finalized_txs.entry(txid) {
+                Entry::Vacant(e) => {
+                    e.insert((crate::consensus::Preference::Accept, std::time::Instant::now()));
+
+                    if consensus.tx_pool.finalize_transaction(txid) {
+                        tracing::info!("✅ TX {:?} moved to finalized pool", hex::encode(txid));
+
+                        consensus.timevote.record_finalization(txid, accumulated_weight);
+
+                        match consensus.timevote.assemble_timeproof(txid) {
+                            Ok(timeproof) => {
+                                tracing::info!(
+                                    "📜 TimeProof assembled for TX {:?} with {} votes",
+                                    hex::encode(txid),
+                                    timeproof.votes.len()
+                                );
+
+                                if let Err(e) = consensus.finality_proof_mgr.store_timeproof(timeproof.clone()) {
+                                    tracing::error!("❌ Failed to store TimeProof for TX {:?}: {}", hex::encode(txid), e);
+                                }
+
+                                consensus.broadcast_timeproof(timeproof).await;
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to assemble TimeProof for TX {:?}: {}", hex::encode(txid), e);
+                            }
+                        }
+                    } else {
+                        tracing::warn!("⚠️  Failed to finalize TX {:?} - not found in pending pool", hex::encode(txid));
+                    }
+                }
+                Entry::Occupied(_) => {
+                    tracing::debug!("TX {:?} already finalized by another task", hex::encode(txid));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn handle_timeproof_broadcast(
+        &self,
+        proof: crate::types::TimeProof,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let consensus = context.consensus.as_ref()
+            .ok_or("No consensus engine available for TimeProofBroadcast")?;
+
+        tracing::info!(
+            "📜 Received TimeProof from {} for TX {:?} with {} votes",
+            self.peer_ip,
+            hex::encode(proof.txid),
+            proof.votes.len()
+        );
+
+        match consensus.timevote.verify_timeproof(&proof) {
+            Ok(_) => {
+                tracing::info!("✅ TimeProof verified for TX {:?}", hex::encode(proof.txid));
+
+                if let Err(e) = consensus.finality_proof_mgr.store_timeproof(proof) {
+                    tracing::error!("❌ Failed to store TimeProof: {}", e);
+                } else {
+                    tracing::info!("💾 TimeProof stored successfully");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("⚠️  Invalid TimeProof from {}: {}", self.peer_ip, e);
             }
         }
 
