@@ -465,7 +465,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ForceUnlockAll => ("forceunlockall", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
-        Commands::SendToAddress { address, amount, subtract_fee } => ("sendtoaddress", json!([address, amount, subtract_fee])),
+        Commands::SendToAddress {
+            address,
+            amount,
+            subtract_fee,
+        } => ("sendtoaddress", json!([address, amount, subtract_fee])),
         Commands::MergeUtxos {
             min_count,
             max_count,

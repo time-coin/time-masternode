@@ -777,7 +777,10 @@ impl PeerConnectionRegistry {
         // replaced by a speculative outbound writer that may be rejected.
         if let Some(existing) = writers.get(&peer_ip) {
             if !existing.is_closed() {
-                debug!("🔄 Outbound peer {} already has a live writer, skipping overwrite", peer_ip);
+                debug!(
+                    "🔄 Outbound peer {} already has a live writer, skipping overwrite",
+                    peer_ip
+                );
                 return;
             }
             debug!("♻️ Replacing dead writer for peer {}", peer_ip);

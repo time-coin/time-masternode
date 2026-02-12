@@ -761,6 +761,7 @@ async fn main() {
                 reward_address: mn_for_announcement.wallet_address.clone(),
                 tier: mn_for_announcement.tier,
                 public_key: mn_for_announcement.public_key,
+                collateral_outpoint: mn_for_announcement.collateral_outpoint.clone(),
             };
 
             peer_registry_for_announcement

@@ -64,6 +64,7 @@ pub enum NetworkMessage {
         reward_address: String,
         tier: MasternodeTier,
         public_key: VerifyingKey,
+        collateral_outpoint: Option<OutPoint>,
     },
     /// Announce masternode deregistration and collateral unlock
     MasternodeUnlock {
