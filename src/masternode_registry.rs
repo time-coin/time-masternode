@@ -1151,26 +1151,14 @@ impl MasternodeRegistry {
             }
         }
 
-        // Remove dead masternodes and broadcast unlock messages
+        // Remove dead masternodes
         for address in &to_remove {
-            if let Some(info) = masternodes.remove(address) {
+            if let Some(_info) = masternodes.remove(address) {
                 // Remove from disk
                 let key = format!("masternode:{}", address);
                 let _ = self.db.remove(key.as_bytes());
 
                 info!("🗑️  Removed masternode {} from registry", address);
-
-                // Broadcast unlock if has collateral
-                if let Some(collateral_outpoint) = info.masternode.collateral_outpoint {
-                    let unlock_msg = crate::network::message::NetworkMessage::MasternodeUnlock {
-                        address: address.clone(),
-                        collateral_outpoint,
-                        timestamp: now,
-                    };
-                    drop(masternodes); // Release lock before async operation
-                    self.broadcast_message(unlock_msg).await;
-                    masternodes = self.masternodes.write().await; // Re-acquire
-                }
             }
         }
 

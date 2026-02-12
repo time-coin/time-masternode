@@ -98,8 +98,13 @@ file_path = "./logs/testnet-node.log"
 #   - silver: Can vote on governance, 10,000x rewards (10000 TIME collateral)
 #   - gold: Can vote on governance, 100,000x rewards (100000 TIME collateral)
 enabled = true
-collateral_txid = ""
 tier = "free"  # Options: "free", "bronze", "silver", "gold"
+# For staked tiers (bronze/silver/gold), set collateral UTXO:
+# 1. Send exact collateral to yourself: time-cli sendtoaddress <your_address> 1000.0
+# 2. Find the TXID and output index from the transaction
+# 3. Set both fields below, change tier, and restart the daemon
+collateral_txid = ""
+collateral_vout = 0
 
 [security]
 # Security settings

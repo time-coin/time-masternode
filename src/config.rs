@@ -221,6 +221,8 @@ pub struct MasternodeConfig {
     pub enabled: bool,
     // wallet_address is auto-generated from the node's wallet - no config needed
     pub collateral_txid: String,
+    #[serde(default)]
+    pub collateral_vout: u32,
     pub tier: String,
 }
 
@@ -546,6 +548,7 @@ impl Config {
             masternode: MasternodeConfig {
                 enabled: false,
                 collateral_txid: String::new(),
+                collateral_vout: 0,
                 tier: "silver".to_string(),
             },
             security: SecurityConfig {
