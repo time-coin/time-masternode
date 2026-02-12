@@ -2224,24 +2224,12 @@ impl RpcHandler {
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing tier parameter (bronze/silver/gold)".to_string(),
+                message: "Missing tier parameter (free/bronze/silver/gold)".to_string(),
             })?;
 
-        let collateral_txid = params
-            .get(1)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing collateral_txid parameter".to_string(),
-            })?;
+        let collateral_txid = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
 
-        let vout = params
-            .get(2)
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing vout parameter".to_string(),
-            })? as u32;
+        let vout = params.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
         let reward_address = params
             .get(3)
@@ -2261,26 +2249,73 @@ impl RpcHandler {
 
         // Parse tier
         let tier = match tier_str.to_lowercase().as_str() {
+            "free" => MasternodeTier::Free,
             "bronze" => MasternodeTier::Bronze,
             "silver" => MasternodeTier::Silver,
             "gold" => MasternodeTier::Gold,
             _ => {
                 return Err(RpcError {
                     code: -32602,
-                    message: "Invalid tier. Must be bronze, silver, or gold".to_string(),
+                    message: "Invalid tier. Must be free, bronze, silver, or gold".to_string(),
                 });
             }
         };
 
-        // Get tier requirement (for validation logic, not returned)
-        let _required_collateral = match tier {
-            MasternodeTier::Free => 0,
-            MasternodeTier::Bronze => 1_000 * 100_000_000, // 1,000 TIME in units
-            MasternodeTier::Silver => 10_000 * 100_000_000, // 10,000 TIME in units
-            MasternodeTier::Gold => 100_000 * 100_000_000, // 100,000 TIME in units
-        };
+        // Generate masternode keypair
+        use rand::rngs::OsRng;
+        let mut csprng = OsRng;
+        let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
+        let public_key = signing_key.verifying_key();
+        let signing_key_hex = hex::encode(signing_key.to_bytes());
 
-        // Parse collateral outpoint
+        if tier == MasternodeTier::Free {
+            // Free tier: no collateral needed
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            let masternode = Masternode::new_legacy(
+                node_address.to_string(),
+                reward_address.to_string(),
+                0,
+                public_key,
+                MasternodeTier::Free,
+                now,
+            );
+
+            self.registry
+                .register(masternode, reward_address.to_string())
+                .await
+                .map_err(|e| RpcError {
+                    code: -5,
+                    message: format!("Failed to register masternode: {:?}", e),
+                })?;
+
+            self.registry
+                .set_local_masternode(node_address.to_string())
+                .await;
+
+            return Ok(json!({
+                "result": "success",
+                "masternode_address": node_address,
+                "reward_address": reward_address,
+                "tier": "Free",
+                "collateral": 0,
+                "public_key": hex::encode(public_key.to_bytes()),
+                "signing_key": signing_key_hex,
+                "message": "Free tier masternode registered. Transaction voting weight: 1. SAVE THE SIGNING KEY SECURELY!"
+            }));
+        }
+
+        // Staked tiers: require collateral
+        if collateral_txid.is_empty() {
+            return Err(RpcError {
+                code: -32602,
+                message: "Staked tiers require collateral_txid and vout parameters".to_string(),
+            });
+        }
+
         let txid_bytes = hex::decode(collateral_txid).map_err(|_| RpcError {
             code: -32602,
             message: "Invalid collateral_txid hex".to_string(),
@@ -2327,12 +2362,6 @@ impl RpcHandler {
             });
         }
 
-        // Generate masternode keypair
-        use rand::rngs::OsRng;
-        let mut csprng = OsRng;
-        let signing_key = SigningKey::from_bytes(&rand::Rng::gen(&mut csprng));
-        let public_key = signing_key.verifying_key();
-
         // Lock the UTXO atomically
         self.utxo_manager
             .lock_collateral(
@@ -2359,7 +2388,7 @@ impl RpcHandler {
 
         // Register with registry
         self.registry
-            .register(masternode.clone(), reward_address.to_string())
+            .register(masternode, reward_address.to_string())
             .await
             .map_err(|e| RpcError {
                 code: -5,
@@ -2370,10 +2399,6 @@ impl RpcHandler {
         self.registry
             .set_local_masternode(node_address.to_string())
             .await;
-
-        // Save signing key (in production, this should be saved securely)
-        // For now, we'll return it to the user
-        let signing_key_hex = hex::encode(signing_key.to_bytes());
 
         Ok(json!({
             "result": "success",
