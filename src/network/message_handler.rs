@@ -360,6 +360,23 @@ impl MessageHandler {
                 reward_address,
                 tier,
                 public_key,
+            } => {
+                // Legacy announcement — no collateral verification
+                self.handle_masternode_announcement(
+                    address.clone(),
+                    reward_address.clone(),
+                    *tier,
+                    *public_key,
+                    None,
+                    context,
+                )
+                .await
+            }
+            NetworkMessage::MasternodeAnnouncementV2 {
+                address,
+                reward_address,
+                tier,
+                public_key,
                 collateral_outpoint,
             } => {
                 self.handle_masternode_announcement(
