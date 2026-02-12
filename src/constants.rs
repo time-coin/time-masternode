@@ -24,7 +24,7 @@ pub mod blockchain {
     /// SECURITY: Blocks deeper than this are considered FINAL and cannot be reorged
     /// This protects against long-range attacks where an attacker creates a fake longer chain
     /// 6 blocks = 1 hour of blocks (at 10 min/block) - provides reasonable finality
-    pub const MAX_REORG_DEPTH: u64 = 6;
+    pub const MAX_REORG_DEPTH: u64 = 100;
 
     /// Maximum depth to search for common ancestor in fork resolution
     pub const MAX_FORK_SEARCH_DEPTH: u64 = 2_000;
