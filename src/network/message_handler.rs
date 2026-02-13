@@ -125,6 +125,9 @@ impl MessageContext {
         // Get AI system from blockchain if available
         let ai_system = blockchain.ai_system().cloned();
 
+        // Populate utxo_manager from consensus engine if available
+        let utxo_manager = consensus.as_ref().map(|c| Arc::clone(&c.utxo_manager));
+
         Self {
             blockchain,
             peer_registry,
@@ -132,7 +135,7 @@ impl MessageContext {
             consensus,
             block_cache,
             broadcast_tx,
-            utxo_manager: None,
+            utxo_manager,
             peer_manager: None,
             seen_blocks: None,
             seen_transactions: None,
