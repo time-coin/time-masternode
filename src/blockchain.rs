@@ -5109,8 +5109,14 @@ impl Blockchain {
         }
 
         // Reject blocks that exceed the maximum expected height
-        // The blockchain cannot have more blocks than elapsed time since genesis allows
-        let max_expected_height = self.calculate_expected_height();
+        // Allow 10s grace for minor clock skew between nodes (only one leader per height via VRF)
+        let now_with_grace = Utc::now().timestamp() + 10;
+        let genesis_timestamp = self.genesis_timestamp();
+        let max_expected_height = if now_with_grace < genesis_timestamp {
+            0
+        } else {
+            ((now_with_grace - genesis_timestamp) / BLOCK_TIME_SECONDS) as u64
+        };
         if block.header.height > max_expected_height {
             return Err(format!(
                 "Block {} exceeds maximum expected height {} (genesis-based calculation)",
