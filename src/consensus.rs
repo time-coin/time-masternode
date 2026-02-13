@@ -535,6 +535,10 @@ pub struct TimeVoteConsensus {
     /// (txid, slot_index, timestamp) -> conflict details for AI anomaly detector
     timeproof_conflicts: DashMap<(Hash256, u64), TimeProofConflictInfo>,
 
+    /// Preserved voters from finalized blocks (block_hash -> voter list)
+    /// Saved before cleanup so block production can reference previous block's voters
+    last_block_voters: DashMap<Hash256, Vec<String>>,
+
     /// Metrics
     rounds_executed: AtomicUsize,
     txs_finalized: AtomicUsize,
@@ -582,6 +586,7 @@ impl TimeVoteConsensus {
             byzantine_nodes: DashMap::new(),
             competing_timeproofs: DashMap::new(),
             timeproof_conflicts: DashMap::new(),
+            last_block_voters: DashMap::new(),
             active_vote_requests: Arc::new(AtomicUsize::new(0)),
             rounds_executed: AtomicUsize::new(0),
             txs_finalized: AtomicUsize::new(0),
@@ -1327,9 +1332,23 @@ impl TimeVoteConsensus {
     }
 
     /// Clean up votes after block finalization (Phase 3E.6)
+    /// Preserves voter list before clearing so block production can reference it
     pub fn cleanup_block_votes(&self, block_hash: Hash256) {
+        // Save precommit voters before clearing
+        let voters = self.precommit_votes.get_voters(block_hash);
+        if !voters.is_empty() {
+            self.last_block_voters.insert(block_hash, voters);
+        }
         self.prepare_votes.clear(block_hash);
         self.precommit_votes.clear(block_hash);
+    }
+
+    /// Get preserved voters from a finalized block
+    pub fn get_finalized_block_voters(&self, block_hash: Hash256) -> Vec<String> {
+        self.last_block_voters
+            .get(&block_hash)
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 
     /// Get metrics

@@ -2725,17 +2725,25 @@ impl Blockchain {
             // Get voters from previous block (who voted to accept it)
             let prev_block_hash = prev_hash;
             // Use precommit voters (final voting phase before block acceptance)
-            let precommit_voters = self
+            // First try live votes, then preserved voters (saved before cleanup)
+            let mut precommit_voters = self
                 .consensus
                 .timevote
                 .precommit_votes
                 .get_voters(prev_block_hash);
 
+            if precommit_voters.is_empty() {
+                precommit_voters = self
+                    .consensus
+                    .timevote
+                    .get_finalized_block_voters(prev_block_hash);
+            }
+
             // CRITICAL: If no voters recorded, use all active masternodes as fallback
             // This prevents bitmap from becoming empty and breaking participation tracking
             if precommit_voters.is_empty() {
-                tracing::error!(
-                    "🚨 No precommit voters found for block {} (hash: {}) - using all active masternodes as fallback",
+                tracing::warn!(
+                    "⚠️ No precommit voters found for block {} (hash: {}) - using all active masternodes as fallback",
                     next_height - 1,
                     hex::encode(&prev_block_hash[..8])
                 );
