@@ -336,12 +336,23 @@ async fn main() {
         );
         let available_memory = sys.available_memory();
 
-        // Use 10% of available memory per database, cap at 256MB each
-        let cache_size = std::cmp::min(available_memory / 10, 256 * 1024 * 1024);
+        // Check cgroup memory limit (common in containers/systemd services)
+        let cgroup_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+            .or_else(|_| std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes"))
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+
+        let effective_memory = match cgroup_limit {
+            Some(limit) if limit < available_memory => limit,
+            _ => available_memory,
+        };
+
+        // Use 10% of effective memory per database, cap at 256MB each
+        let cache_size = std::cmp::min(effective_memory / 10, 256 * 1024 * 1024);
 
         tracing::info!(
             cache_mb = cache_size / (1024 * 1024),
-            available_mb = available_memory / (1024 * 1024),
+            available_mb = effective_memory / (1024 * 1024),
             "Configuring sled cache"
         );
 
