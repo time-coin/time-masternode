@@ -778,6 +778,8 @@ async fn main() {
         let health_peer_manager = peer_manager.clone();
         let health_shutdown = shutdown_token.clone();
         let health_handle = tokio::spawn(async move {
+            // Wait for peers to connect before first health check
+            tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Every 2 minutes
             loop {
                 tokio::select! {
