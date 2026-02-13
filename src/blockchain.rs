@@ -5109,9 +5109,9 @@ impl Blockchain {
         }
 
         // Reject blocks that exceed the maximum expected height
-        // Allow 1 block tolerance for minor clock differences between nodes
+        // The blockchain cannot have more blocks than elapsed time since genesis allows
         let max_expected_height = self.calculate_expected_height();
-        if block.header.height > max_expected_height + 1 {
+        if block.header.height > max_expected_height {
             return Err(format!(
                 "Block {} exceeds maximum expected height {} (genesis-based calculation)",
                 block.header.height, max_expected_height
