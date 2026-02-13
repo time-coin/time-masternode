@@ -1907,7 +1907,7 @@ impl MessageHandler {
     ) -> Result<Option<NetworkMessage>, String> {
         let peer_ip = self.peer_ip.clone();
 
-        info!(
+        debug!(
             "📨 [{}] Received masternode announcement from {} (tier: {:?})",
             self.direction, peer_ip, tier
         );
@@ -1955,7 +1955,7 @@ impl MessageHandler {
                                 return Ok(None);
                             }
                         }
-                        info!(
+                        debug!(
                             "✅ [{}] Collateral verified for {:?} masternode {} ({} TIME)",
                             self.direction,
                             tier,
@@ -2006,7 +2006,7 @@ impl MessageHandler {
             {
                 Ok(()) => {
                     let count = context.masternode_registry.total_count().await;
-                    info!(
+                    debug!(
                         "✅ [{}] Registered {:?} masternode {} (total: {})",
                         self.direction, tier, peer_ip, count
                     );
@@ -2039,7 +2039,7 @@ impl MessageHandler {
             {
                 Ok(()) => {
                     let count = context.masternode_registry.total_count().await;
-                    info!(
+                    debug!(
                         "✅ [{}] Registered Free masternode {} (total: {})",
                         self.direction, peer_ip, count
                     );

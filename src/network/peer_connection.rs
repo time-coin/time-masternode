@@ -336,9 +336,9 @@ impl PeerConnection {
         let addr = format!("{}:{}", peer_ip, port);
 
         if is_whitelisted {
-            info!("🔗 [OUTBOUND-WHITELIST] Connecting to masternode {}", addr);
+            debug!("🔗 [OUTBOUND-WHITELIST] Connecting to masternode {}", addr);
         } else {
-            info!("🔗 [OUTBOUND] Connecting to {}", addr);
+            debug!("🔗 [OUTBOUND] Connecting to {}", addr);
         }
 
         let stream = tokio::time::timeout(
@@ -363,7 +363,7 @@ impl PeerConnection {
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         if let Some(tls) = tls_config {
-            info!("🔒 [OUTBOUND] TLS handshake with {}", addr);
+            debug!("🔒 [OUTBOUND] TLS handshake with {}", addr);
             let tls_stream = tls
                 .connect_client(stream, "timecoin.local")
                 .await
@@ -490,7 +490,7 @@ impl PeerConnection {
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
 
         if let Some(tls) = tls_config {
-            info!("🔒 [INBOUND] TLS handshake with {}", peer_addr);
+            debug!("🔒 [INBOUND] TLS handshake with {}", peer_addr);
             let tls_stream = tls
                 .accept_server(stream)
                 .await
@@ -977,7 +977,7 @@ impl PeerConnection {
             .peer_registry
             .register_peer_shared(self.peer_ip.clone(), self.shared_writer())
             .await;
-        info!(
+        debug!(
             "📝 [{:?}] Registered {} in PeerConnectionRegistry",
             self.direction, self.peer_ip
         );
@@ -997,7 +997,7 @@ impl PeerConnection {
             return Err(e);
         }
 
-        info!(
+        debug!(
             "🤝 [{:?}] Sent handshake to {}",
             self.direction, self.peer_ip
         );

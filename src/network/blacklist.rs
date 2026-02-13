@@ -36,7 +36,7 @@ impl IPBlacklist {
         self.permanent_blacklist.remove(&ip);
         self.temp_blacklist.remove(&ip);
         self.violations.remove(&ip);
-        tracing::info!("✅ Added {} to whitelist: {}", ip, reason);
+        tracing::debug!("✅ Added {} to whitelist: {}", ip, reason);
     }
 
     /// Check if an IP is whitelisted

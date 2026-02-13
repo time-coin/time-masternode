@@ -6271,12 +6271,12 @@ impl Blockchain {
         // AI Health Prediction: Log warnings if health is degraded
         let health = self.consensus_health.predict_health();
         if health.health_score < 0.7 {
-            warn!(
+            debug!(
                 "🧠 [AI] Consensus health warning: score={:.2}, fork_prob={:.2}, action={:?}",
                 health.health_score, health.fork_probability, health.recommended_action
             );
             for reason in &health.reasoning {
-                warn!("   Reason: {}", reason);
+                debug!("   Reason: {}", reason);
             }
         }
 

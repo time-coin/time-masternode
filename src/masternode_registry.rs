@@ -1108,7 +1108,7 @@ impl MasternodeRegistry {
 
             if was_active != info.is_active {
                 status_changes += 1;
-                tracing::info!(
+                tracing::debug!(
                     "Masternode {} status changed: {} ({} peer reports, {} required)",
                     addr,
                     if info.is_active { "ACTIVE" } else { "INACTIVE" },
@@ -1154,14 +1154,14 @@ impl MasternodeRegistry {
 
         if !to_remove.is_empty() || status_changes > 0 {
             if !to_remove.is_empty() {
-                tracing::info!(
+                tracing::debug!(
                     "🧹 Cleanup: {} status changes, {} removed, {} total active masternodes",
                     status_changes,
                     to_remove.len(),
                     total_active
                 );
             } else {
-                tracing::info!(
+                tracing::debug!(
                     "🧹 Cleanup: {} status changes, {} total active masternodes",
                     status_changes,
                     total_active

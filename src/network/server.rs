@@ -144,7 +144,7 @@ impl NetworkServer {
         for peer in &whitelisted_peers {
             if let Ok(ip) = peer.parse::<std::net::IpAddr>() {
                 blacklist.add_to_whitelist(ip, "Pre-configured whitelist");
-                tracing::info!("✅ Whitelisted peer before server start: {}", ip);
+                tracing::debug!("✅ Whitelisted peer before server start: {}", ip);
             } else {
                 tracing::warn!("⚠️  Invalid IP in whitelisted_peers: {}", peer);
             }
@@ -1037,7 +1037,7 @@ async fn handle_peer(
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
                                     if peer_ip.is_empty() { continue; }
 
-                                    tracing::info!("📨 Received V2 masternode announcement from {} (tier: {:?})", peer.addr, tier);
+                                    tracing::debug!("📨 Received V2 masternode announcement from {} (tier: {:?})", peer.addr, tier);
 
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -1067,7 +1067,7 @@ async fn handle_peer(
                                                         continue;
                                                     }
                                                 }
-                                                tracing::info!("✅ Collateral verified for {:?} masternode {} ({} TIME)", tier, peer_ip, utxo.value as f64 / 100_000_000.0);
+                                                tracing::debug!("✅ Collateral verified for {:?} masternode {} ({} TIME)", tier, peer_ip, utxo.value as f64 / 100_000_000.0);
                                             }
                                             Err(_) => {
                                                 tracing::warn!("❌ Rejecting {:?} masternode from {} — collateral UTXO not found", tier, peer_ip);
@@ -1091,7 +1091,7 @@ async fn handle_peer(
                                         match masternode_registry.register(mn, reward_address.clone()).await {
                                             Ok(()) => {
                                                 let count = masternode_registry.total_count().await;
-                                                tracing::info!("✅ Registered {:?} masternode {} (total: {})", tier, peer_ip, count);
+                                                tracing::debug!("✅ Registered {:?} masternode {} (total: {})", tier, peer_ip, count);
                                                 peer_manager.add_peer(peer_ip.clone()).await;
                                             },
                                             Err(e) => {
@@ -1111,7 +1111,7 @@ async fn handle_peer(
                                         match masternode_registry.register(mn, reward_address.clone()).await {
                                             Ok(()) => {
                                                 let count = masternode_registry.total_count().await;
-                                                tracing::info!("✅ Registered Free masternode {} (total: {})", peer_ip, count);
+                                                tracing::debug!("✅ Registered Free masternode {} (total: {})", peer_ip, count);
                                                 peer_manager.add_peer(peer_ip.clone()).await;
                                             },
                                             Err(e) => {

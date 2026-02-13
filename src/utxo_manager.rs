@@ -579,7 +579,7 @@ impl UTXOStateManager {
         self.locked_collaterals
             .insert(outpoint.clone(), locked_collateral);
 
-        tracing::info!(
+        tracing::debug!(
             "🔒 Locked collateral UTXO {:?} (amount: {})",
             outpoint,
             amount
