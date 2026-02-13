@@ -253,7 +253,7 @@ impl NetworkClient {
                 let outbound_count = connection_manager.connected_count();
                 let inbound_count = peer_registry.inbound_count();
 
-                tracing::info!(
+                tracing::debug!(
                     "🔍 Peer check: {} connected ({} out, {} in), {} known masternodes ({} active), {} total slots",
                     outbound_count + inbound_count,
                     outbound_count,
