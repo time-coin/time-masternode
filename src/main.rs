@@ -1766,24 +1766,16 @@ async fn main() {
             let next_block_scheduled_time = genesis_timestamp + (next_height as i64 * 600); // 600 seconds (10 min) per block
             let time_past_scheduled = now_timestamp - next_block_scheduled_time;
 
-            // Grace period: 10 seconds after scheduled time before we produce
-            const GRACE_PERIOD_SECS: i64 = 10;
-
             // Sync threshold: if more than this many blocks behind, try to sync first
             const SYNC_THRESHOLD_BLOCKS: u64 = 5;
 
-            // Case 1: Next block not due yet (more than grace period away) - wait
+            // Case 1: Next block not due yet - wait until scheduled time
             // BUT: Skip this check during catchup mode (when far behind)
             // CRITICAL: When catching up (>5 blocks behind), produce immediately without time check
             // This allows fast catchup instead of waiting 10 minutes per block
-            if time_past_scheduled < -GRACE_PERIOD_SECS && blocks_behind < SYNC_THRESHOLD_BLOCKS {
-                let wait_secs = (-time_past_scheduled) - GRACE_PERIOD_SECS;
-                tracing::debug!(
-                    "📅 Block {} not due for {}s (will produce at scheduled + {}s grace)",
-                    next_height,
-                    wait_secs,
-                    GRACE_PERIOD_SECS
-                );
+            if time_past_scheduled < 0 && blocks_behind < SYNC_THRESHOLD_BLOCKS {
+                let wait_secs = -time_past_scheduled;
+                tracing::debug!("📅 Block {} not due for {}s", next_height, wait_secs);
                 continue;
             }
 
