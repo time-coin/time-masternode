@@ -10,7 +10,11 @@ TIME Coin supports tiered masternodes with locked collateral (Dash-style). Maste
 
 ### Free Tier (No Collateral)
 
-1. Edit `config.toml`:
+1. In the [linux] root/.timecoin or .timecoin/testnet/ directory or
+[windows]
+%APPDATA%\timecoin\ or %APPDATA%\timecoin\testnet
+
+ Edit `config.toml`:
 ```toml
 [masternode]
 enabled = true
@@ -19,7 +23,7 @@ enabled = true
 
 2. Start/restart the daemon:
 ```bash
-./target/release/timed
+bash timecoin/target/release/timed
 ```
 
 3. Verify:

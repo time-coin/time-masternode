@@ -214,13 +214,8 @@ impl MasternodeRegistry {
             return Err(RegistryError::InvalidCollateral);
         }
 
-        // Validate collateral
-        let required = match masternode.tier {
-            MasternodeTier::Free => 0,
-            MasternodeTier::Bronze => 1_000,
-            MasternodeTier::Silver => 10_000,
-            MasternodeTier::Gold => 100_000,
-        };
+        // Validate collateral (in satoshi units)
+        let required = masternode.tier.collateral();
 
         if masternode.collateral != required {
             return Err(RegistryError::InvalidCollateral);
@@ -689,12 +684,7 @@ impl MasternodeRegistry {
         let masternode = Masternode::new_legacy(
             address.clone(),
             reward_address.clone(),
-            match tier {
-                MasternodeTier::Free => 0,
-                MasternodeTier::Bronze => 1_000,
-                MasternodeTier::Silver => 10_000,
-                MasternodeTier::Gold => 100_000,
-            },
+            tier.collateral(),
             public_key,
             tier,
             Self::now(),
@@ -1560,7 +1550,7 @@ mod tests {
         let masternode = crate::types::Masternode::new_with_collateral(
             "test_node".to_string(),
             "test_reward".to_string(),
-            1_000,
+            MasternodeTier::Bronze.collateral(),
             outpoint.clone(),
             public_key,
             MasternodeTier::Bronze,
@@ -1612,7 +1602,7 @@ mod tests {
         let masternode = crate::types::Masternode::new_with_collateral(
             "valid_node".to_string(),
             "valid_reward".to_string(),
-            1_000,
+            MasternodeTier::Bronze.collateral(),
             outpoint.clone(),
             public_key,
             MasternodeTier::Bronze,
@@ -1662,7 +1652,7 @@ mod tests {
         let masternode = crate::types::Masternode::new_legacy(
             "legacy_node".to_string(),
             "legacy_reward".to_string(),
-            1_000,
+            MasternodeTier::Bronze.collateral(),
             public_key,
             MasternodeTier::Bronze,
             MasternodeRegistry::now(),
@@ -1711,7 +1701,7 @@ mod tests {
         let masternode = crate::types::Masternode::new_legacy(
             "node1".to_string(),
             "reward1".to_string(),
-            1_000,
+            MasternodeTier::Bronze.collateral(),
             public_key,
             MasternodeTier::Bronze,
             MasternodeRegistry::now(),
@@ -1744,7 +1734,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{}", i),
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
@@ -1805,7 +1795,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{}", i),
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
@@ -1838,7 +1828,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{}", i),
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
@@ -1881,7 +1871,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{:03}", i), // Pad to ensure consistent sorting
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
@@ -1936,7 +1926,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{:04}", i),
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
@@ -1980,7 +1970,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{}", i),
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
@@ -2018,7 +2008,7 @@ mod tests {
             let masternode = crate::types::Masternode::new_legacy(
                 format!("node{}", i),
                 format!("reward{}", i),
-                1_000,
+                MasternodeTier::Bronze.collateral(),
                 public_key,
                 MasternodeTier::Bronze,
                 MasternodeRegistry::now(),
