@@ -2488,7 +2488,7 @@ async fn main() {
                             if tick_count % 5 == 0 && tick_count > 0 {
                                 let cache_stats = status_blockchain.get_cache_stats();
                                 let cache_memory_mb = status_blockchain.get_cache_memory_usage() / (1024 * 1024);
-                                tracing::info!(
+                                tracing::debug!(
                                     "💾 Block Cache: {} | Memory: {}MB",
                                     cache_stats,
                                     cache_memory_mb
@@ -2496,7 +2496,7 @@ async fn main() {
                             }
                         }
                     } else {
-                        tracing::info!(
+                        tracing::debug!(
                             "📊 Status: Height={}, Active Masternodes={}",
                             height,
                             mn_count
@@ -2506,7 +2506,7 @@ async fn main() {
                         if tick_count % 5 == 0 && tick_count > 0 {
                             let cache_stats = status_blockchain.get_cache_stats();
                             let cache_memory_mb = status_blockchain.get_cache_memory_usage() / (1024 * 1024);
-                            tracing::info!(
+                            tracing::debug!(
                                 "💾 Block Cache: {} | Memory: {}MB",
                                 cache_stats,
                                 cache_memory_mb
@@ -2519,7 +2519,7 @@ async fn main() {
                         // Collect metrics snapshot from all AI subsystems
                         status_ai_system.collect_and_record_metrics();
                         let ai_status = status_ai_system.brief_status();
-                        tracing::info!("🧠 AI System: {}", ai_status);
+                        tracing::debug!("🧠 AI System: {}", ai_status);
                     }
 
                     // AI attack detector cleanup (every 60 ticks / ~60 minutes)

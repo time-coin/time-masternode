@@ -6127,7 +6127,7 @@ impl Blockchain {
 
         if should_log {
             if num_chains == 1 {
-                tracing::info!("🔍 [CHAIN ANALYSIS] Network consensus: 1 chain detected");
+                tracing::debug!("🔍 [CHAIN ANALYSIS] Network consensus: 1 chain detected");
             } else {
                 tracing::info!(
                     "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
@@ -6135,13 +6135,23 @@ impl Blockchain {
                 );
             }
             for ((height, hash), peers) in &chain_counts {
-                tracing::info!(
-                    "   📊 Chain @ height {}, hash {}: {} peers {:?}",
-                    height,
-                    hex::encode(&hash[..8]),
-                    peers.len(),
-                    peers
-                );
+                if num_chains == 1 {
+                    tracing::debug!(
+                        "   📊 Chain @ height {}, hash {}: {} peers {:?}",
+                        height,
+                        hex::encode(&hash[..8]),
+                        peers.len(),
+                        peers
+                    );
+                } else {
+                    tracing::info!(
+                        "   📊 Chain @ height {}, hash {}: {} peers {:?}",
+                        height,
+                        hex::encode(&hash[..8]),
+                        peers.len(),
+                        peers
+                    );
+                }
             }
         }
 
@@ -6235,7 +6245,7 @@ impl Blockchain {
                     consensus_peers.len() - 3
                 )
             };
-            tracing::info!(
+            tracing::debug!(
                 "✅ [CONSENSUS SELECTED] Height {}, hash {}, {} peers: {}",
                 consensus_height,
                 hex::encode(&consensus_hash[..8]),
@@ -7807,7 +7817,7 @@ impl Blockchain {
         let current_height = self.get_height();
         let mut corrupt_blocks = Vec::new();
 
-        tracing::info!(
+        tracing::debug!(
             "🔍 Validating blockchain integrity (0-{})...",
             current_height
         );
@@ -7885,7 +7895,7 @@ impl Blockchain {
         }
 
         if corrupt_blocks.is_empty() {
-            tracing::info!("✅ Blockchain integrity validation passed");
+            tracing::debug!("✅ Blockchain integrity validation passed");
             Ok(Vec::new())
         } else {
             tracing::error!(

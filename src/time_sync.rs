@@ -6,7 +6,7 @@
 use chrono::Utc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 const NTP_SERVERS: &[&str] = &[
     "time.google.com:123",
@@ -90,7 +90,7 @@ impl TimeSync {
 
         let offset_ms = median_deviation * 1000;
 
-        info!(
+        debug!(
             "✓ NTP sync: {} servers | Median offset: {}s | Best: {} ({}ms)",
             results.len(),
             median_deviation,
