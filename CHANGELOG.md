@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed - Config-Based Masternode Management
 - **BREAKING: Removed `masternoderegister` and `masternodeunlock` RPC/CLI commands**
   - Masternode registration is now entirely config-based via `config.toml`
-  - Set `[masternode] enabled = true`, `tier`, `collateral_txid`, `collateral_vout`
+  - Set `[masternode] enabled = true`, `collateral_txid`, `collateral_vout`
+  - Tier is auto-detected from collateral UTXO value (or set explicitly with `tier`)
   - Daemon auto-registers on startup; deregister by setting `enabled = false`
   - Eliminates security vulnerability where anyone with RPC access could deregister masternodes
 - **`MasternodeUnlock` network messages are now ignored** (logged as deprecated)

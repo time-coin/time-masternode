@@ -77,7 +77,7 @@ file_path = "./logs/testnet-node.log"
 
 [masternode]
 enabled = false  # Set to true if running a masternode
-tier = "free"
+# tier defaults to "auto" (auto-detected from collateral UTXO value)
 
 [security]
 enable_rate_limiting = true
@@ -136,7 +136,7 @@ Edit config file (`config.toml` or `~/.timecoin/testnet/config.toml`):
 ```toml
 [masternode]
 enabled = true
-tier = "free"  # Options: free, bronze, silver, gold
+# tier is auto-detected from collateral UTXO value (defaults to "auto")
 collateral_txid = ""  # Leave empty for free tier
 collateral_vout = 0
 ```

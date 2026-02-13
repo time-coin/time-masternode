@@ -953,7 +953,8 @@ impl RpcHandler {
         };
 
         // Collect txids already in the on-chain UTXO set to avoid duplicates
-        let mut seen_outpoints: std::collections::HashSet<(Vec<u8>, u32)> = std::collections::HashSet::new();
+        let mut seen_outpoints: std::collections::HashSet<(Vec<u8>, u32)> =
+            std::collections::HashSet::new();
 
         let mut filtered: Vec<Value> = utxos
             .iter()
@@ -1031,7 +1032,10 @@ impl RpcHandler {
                     }
                     // Filter by specific addresses if provided
                     if let Some(addrs) = addresses {
-                        if !addrs.iter().any(|a| a.as_str() == Some(output_address.as_str())) {
+                        if !addrs
+                            .iter()
+                            .any(|a| a.as_str() == Some(output_address.as_str()))
+                        {
                             continue;
                         }
                     }
@@ -1491,7 +1495,7 @@ impl RpcHandler {
                     json!({
                         "address": mn.masternode.address,
                         "wallet_address": mn.masternode.wallet_address,
-                        "collateral": mn.masternode.collateral,
+                        "collateral": mn.masternode.collateral as f64 / 100_000_000.0,
                         "tier": format!("{:?}", mn.masternode.tier),
                         "registered_at": mn.masternode.registered_at,
                         "is_active": mn.is_active,

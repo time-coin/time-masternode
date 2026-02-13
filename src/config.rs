@@ -223,7 +223,12 @@ pub struct MasternodeConfig {
     pub collateral_txid: String,
     #[serde(default)]
     pub collateral_vout: u32,
+    #[serde(default = "default_tier")]
     pub tier: String,
+}
+
+fn default_tier() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

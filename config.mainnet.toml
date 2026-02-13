@@ -67,16 +67,17 @@ file_path = "./logs/mainnet-node.log"
 [masternode]
 # Masternode settings (if running as masternode)
 # Tiers:
-#   - free: Can receive block rewards, CANNOT vote on governance
-#   - bronze: Can vote on governance, 1,000x rewards (1000 TIME collateral)
-#   - silver: Can vote on governance, 10,000x rewards (10000 TIME collateral)
-#   - gold: Can vote on governance, 100,000x rewards (100000 TIME collateral)
+# Tiers (auto-detected from collateral amount, or set explicitly):
+#   - free: No collateral needed. Can receive block rewards, CANNOT vote on governance
+#   - bronze: 1,000 TIME collateral
+#   - silver: 10,000 TIME collateral
+#   - gold: 100,000 TIME collateral
 enabled = false
-tier = "free"  # Options: "free", "bronze", "silver", "gold"
-# For staked tiers (bronze/silver/gold), set collateral UTXO:
+# tier = "auto"  # Default: auto-detects from collateral UTXO value. Options: "auto", "free", "bronze", "silver", "gold"
+# For staked tiers, set collateral UTXO:
 # 1. Send exact collateral to yourself: time-cli sendtoaddress <your_address> 1000.0
 # 2. Find the TXID and output index from the transaction
-# 3. Set both fields below, change tier, and restart the daemon
+# 3. Set both fields below and restart the daemon (tier is auto-detected)
 collateral_txid = ""
 collateral_vout = 0
 

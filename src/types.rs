@@ -300,9 +300,19 @@ impl MasternodeTier {
     pub fn collateral(&self) -> u64 {
         match self {
             MasternodeTier::Free => 0,
-            MasternodeTier::Bronze => 1000,
-            MasternodeTier::Silver => 10000,
-            MasternodeTier::Gold => 100000,
+            MasternodeTier::Bronze => 1_000 * 100_000_000,
+            MasternodeTier::Silver => 10_000 * 100_000_000,
+            MasternodeTier::Gold => 100_000 * 100_000_000,
+        }
+    }
+
+    /// Determine tier from a collateral UTXO value (in satoshi units)
+    pub fn from_collateral_value(value: u64) -> Option<MasternodeTier> {
+        match value {
+            v if v >= MasternodeTier::Gold.collateral() => Some(MasternodeTier::Gold),
+            v if v >= MasternodeTier::Silver.collateral() => Some(MasternodeTier::Silver),
+            v if v >= MasternodeTier::Bronze.collateral() => Some(MasternodeTier::Bronze),
+            _ => None,
         }
     }
 
