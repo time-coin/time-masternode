@@ -930,7 +930,9 @@ impl RpcHandler {
     }
 
     async fn list_unspent(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let min_conf = params.first().and_then(|v| v.as_u64()).unwrap_or(1);
+        // Default min_conf=0: TIME Coin has instant finality via TimeVote,
+        // so finalized transaction outputs should be visible immediately
+        let min_conf = params.first().and_then(|v| v.as_u64()).unwrap_or(0);
         let max_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(9999999);
         let addresses = params.get(2).and_then(|v| v.as_array());
         let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
@@ -945,16 +947,19 @@ impl RpcHandler {
             .await
             .map(|mn| mn.reward_address);
 
+        let local_addr = match &local_address {
+            Some(addr) => addr.clone(),
+            None => return Ok(json!([])),
+        };
+
+        // Collect txids already in the on-chain UTXO set to avoid duplicates
+        let mut seen_outpoints: std::collections::HashSet<(Vec<u8>, u32)> = std::collections::HashSet::new();
+
         let mut filtered: Vec<Value> = utxos
             .iter()
             .filter(|u| {
                 // First filter by local wallet address (only show this node's UTXOs)
-                if let Some(ref local_addr) = local_address {
-                    if u.address != *local_addr {
-                        return false;
-                    }
-                } else {
-                    // If not a masternode, don't show any UTXOs
+                if u.address != local_addr {
                     return false;
                 }
 
@@ -966,6 +971,8 @@ impl RpcHandler {
                 }
             })
             .map(|u| {
+                seen_outpoints.insert((u.outpoint.txid.to_vec(), u.outpoint.vout));
+
                 // Get UTXO state
                 let state = self.utxo_manager.get_state(&u.outpoint);
                 let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
@@ -1008,6 +1015,44 @@ impl RpcHandler {
                 c >= min_conf && c <= max_conf
             })
             .collect();
+
+        // Include outputs from finalized transactions not yet in a block.
+        // TIME Coin achieves instant finality via TimeVote consensus (67% threshold),
+        // so finalized transaction outputs are safe to display before block inclusion.
+        if min_conf == 0 {
+            let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
+            for tx in &finalized_txs {
+                let txid = tx.txid();
+                for (vout, output) in tx.outputs.iter().enumerate() {
+                    // Decode address from script_pubkey
+                    let output_address = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    if output_address != local_addr {
+                        continue;
+                    }
+                    // Filter by specific addresses if provided
+                    if let Some(addrs) = addresses {
+                        if !addrs.iter().any(|a| a.as_str() == Some(output_address.as_str())) {
+                            continue;
+                        }
+                    }
+                    // Skip if already in the on-chain UTXO set
+                    if seen_outpoints.contains(&(txid.to_vec(), vout as u32)) {
+                        continue;
+                    }
+                    filtered.push(json!({
+                        "txid": hex::encode(txid),
+                        "vout": vout,
+                        "address": output_address,
+                        "amount": output.value as f64 / 100_000_000.0,
+                        "confirmations": 0,
+                        "spendable": false,
+                        "state": "finalized",
+                        "solvable": true,
+                        "safe": true
+                    }));
+                }
+            }
+        }
 
         // Sort by amount descending (largest first)
         filtered.sort_by(|a, b| {
