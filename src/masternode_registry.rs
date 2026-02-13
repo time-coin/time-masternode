@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collateral UTXO (30 minutes at 10 min/block)
 
@@ -309,7 +309,7 @@ impl MasternodeRegistry {
     pub async fn start_new_block_period(&self) {
         let now = Self::now();
         *self.block_period_start.write().await = now;
-        info!("✓ Started new block reward period at {}", now);
+        debug!("✓ Started new block reward period at {}", now);
     }
 
     /// Mark a masternode as inactive when connection is lost
