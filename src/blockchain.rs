@@ -6954,7 +6954,7 @@ impl Blockchain {
 
                     let peer_authority =
                         crate::masternode_authority::CanonicalChainSelector::analyze_peer_chain_authority(
-                            &[peer_addr.clone()],
+                            std::slice::from_ref(&peer_addr),
                             &self.masternode_registry,
                             self.peer_registry.read().await.as_ref().map(|v| &**v),
                         )
@@ -6969,8 +6969,10 @@ impl Blockchain {
                     // Rule: If our chain is backed by staked masternodes (Bronze+),
                     // the peer must have at least the same tier to reorg us.
                     // Free-tier nodes can never overturn a staked chain.
-                    let our_has_staked = our_authority.highest_tier >= crate::masternode_authority::AuthorityLevel::Bronze;
-                    let peer_has_staked = peer_authority.highest_tier >= crate::masternode_authority::AuthorityLevel::Bronze;
+                    let our_has_staked = our_authority.highest_tier
+                        >= crate::masternode_authority::AuthorityLevel::Bronze;
+                    let peer_has_staked = peer_authority.highest_tier
+                        >= crate::masternode_authority::AuthorityLevel::Bronze;
 
                     if our_has_staked && !peer_has_staked {
                         warn!(
@@ -6979,8 +6981,10 @@ impl Blockchain {
                         );
                         warn!(
                             "   Our authority: {:?} (score {}) | Peer authority: {:?} (score {})",
-                            our_authority.highest_tier, our_authority.authority_score,
-                            peer_authority.highest_tier, peer_authority.authority_score
+                            our_authority.highest_tier,
+                            our_authority.authority_score,
+                            peer_authority.highest_tier,
+                            peer_authority.authority_score
                         );
                         *self.fork_state.write().await = ForkResolutionState::None;
                         return Ok(());
@@ -7166,7 +7170,10 @@ impl Blockchain {
                     // The maximum legitimate block height is determined by elapsed time since genesis.
                     // An attacker cannot produce more blocks than time allows, regardless of timestamps.
                     let max_expected_height = self.calculate_expected_height();
-                    let peer_max_height = sorted_reorg_blocks.last().map(|b| b.header.height).unwrap_or(0);
+                    let peer_max_height = sorted_reorg_blocks
+                        .last()
+                        .map(|b| b.header.height)
+                        .unwrap_or(0);
                     if peer_max_height > max_expected_height {
                         warn!(
                             "🛡️ SECURITY: REJECTED REORG from {} - peer chain height {} exceeds maximum expected height {} (genesis-based calculation)",

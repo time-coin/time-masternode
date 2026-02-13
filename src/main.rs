@@ -182,23 +182,9 @@ async fn main() {
     println!();
 
     // Initialize masternode info for later registration
-    let masternode_info: Option<types::Masternode> = if config.masternode.enabled {
+    let mut masternode_info: Option<types::Masternode> = if config.masternode.enabled {
         // Always use the wallet's address (auto-generated per node)
         let wallet_address = wallet.address().to_string();
-
-        let tier = match config.masternode.tier.to_lowercase().as_str() {
-            "free" => types::MasternodeTier::Free,
-            "bronze" => types::MasternodeTier::Bronze,
-            "silver" => types::MasternodeTier::Silver,
-            "gold" => types::MasternodeTier::Gold,
-            _ => {
-                eprintln!(
-                    "❌ Error: Invalid masternode tier '{}' (must be free/bronze/silver/gold)",
-                    config.masternode.tier
-                );
-                std::process::exit(1);
-            }
-        };
 
         // Get external address and extract IP only (no port) for consistent masternode identification
         let full_address = config.network.full_external_address(&network_type);
@@ -210,7 +196,32 @@ async fn main() {
 
         // Parse collateral outpoint if provided (for staked tiers)
         let has_collateral = !config.masternode.collateral_txid.is_empty();
-        let masternode = if has_collateral && tier != types::MasternodeTier::Free {
+
+        // Determine tier: auto-detect from collateral UTXO, or use explicit config
+        let tier = match config.masternode.tier.to_lowercase().as_str() {
+            "" | "auto" => {
+                if has_collateral {
+                    // Tier will be determined after UTXO lookup — use placeholder
+                    // We'll resolve it below when we have the outpoint
+                    None
+                } else {
+                    Some(types::MasternodeTier::Free)
+                }
+            }
+            "free" => Some(types::MasternodeTier::Free),
+            "bronze" => Some(types::MasternodeTier::Bronze),
+            "silver" => Some(types::MasternodeTier::Silver),
+            "gold" => Some(types::MasternodeTier::Gold),
+            _ => {
+                eprintln!(
+                    "❌ Error: Invalid masternode tier '{}' (must be auto/free/bronze/silver/gold)",
+                    config.masternode.tier
+                );
+                std::process::exit(1);
+            }
+        };
+
+        let masternode = if has_collateral && tier != Some(types::MasternodeTier::Free) {
             let txid_bytes = hex::decode(&config.masternode.collateral_txid).unwrap_or_else(|_| {
                 eprintln!(
                     "❌ Error: Invalid collateral_txid hex '{}'",
@@ -228,25 +239,43 @@ async fn main() {
                 txid,
                 vout: config.masternode.collateral_vout,
             };
+
+            // If tier is auto (None), resolve from collateral UTXO value at startup.
+            // The UTXO manager isn't available yet, so we look up the value from storage.
+            // For now, use the explicit tier if set, or defer detection to registration.
+            let resolved_tier = match tier {
+                Some(t) => t,
+                None => {
+                    // Auto-detect: try to determine from on-chain UTXO after storage is ready.
+                    // At this point we don't have the UTXO manager yet, so we store None
+                    // and resolve after storage init. For now, log and defer.
+                    println!(
+                        "  ℹ️  Tier auto-detection enabled — will resolve from collateral UTXO"
+                    );
+                    types::MasternodeTier::Free // Placeholder, resolved below
+                }
+            };
+
             types::Masternode::new_with_collateral(
                 ip_only,
                 wallet_address.clone(),
-                tier.collateral(),
+                resolved_tier.collateral(),
                 outpoint,
                 *wallet.public_key(),
-                tier,
+                resolved_tier,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_secs(),
             )
         } else {
+            let resolved_tier = tier.unwrap_or(types::MasternodeTier::Free);
             types::Masternode::new_legacy(
                 ip_only,
                 wallet_address.clone(),
-                tier.collateral(),
+                resolved_tier.collateral(),
                 *wallet.public_key(),
-                tier,
+                resolved_tier,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
@@ -254,9 +283,13 @@ async fn main() {
             )
         };
 
-        println!("✓ Running as {:?} masternode", tier);
+        let display_tier = masternode.tier;
+        println!("✓ Running as {:?} masternode", display_tier);
         println!("  └─ Wallet: {}", wallet_address);
-        println!("  └─ Collateral: {} TIME", tier.collateral());
+        println!(
+            "  └─ Collateral: {} TIME",
+            display_tier.collateral() / 100_000_000
+        );
         Some(masternode)
     } else {
         println!("⚠ No masternode configured - node will run in observer mode");
@@ -340,6 +373,43 @@ async fn main() {
     tracing::info!("🔧 Initializing UTXO state manager from storage...");
     if let Err(e) = utxo_mgr.initialize_states().await {
         eprintln!("⚠️ Warning: Failed to initialize UTXO states: {}", e);
+    }
+
+    // Auto-detect masternode tier from collateral UTXO value
+    if let Some(ref mut mn) = masternode_info {
+        if let (types::MasternodeTier::Free, Some(outpoint)) =
+            (mn.tier, mn.collateral_outpoint.as_ref())
+        {
+            // Tier was set to Free as placeholder for auto-detection
+            match utxo_mgr.get_utxo(outpoint).await {
+                Ok(utxo) => {
+                    if let Some(detected_tier) =
+                        types::MasternodeTier::from_collateral_value(utxo.value)
+                    {
+                        println!(
+                            "✓ Auto-detected tier: {:?} (collateral: {} TIME)",
+                            detected_tier,
+                            utxo.value / 100_000_000
+                        );
+                        mn.tier = detected_tier;
+                        mn.collateral = detected_tier.collateral();
+                    } else {
+                        eprintln!(
+                            "❌ Error: Collateral UTXO value {} TIME doesn't match any tier (need 1000/10000/100000 TIME)",
+                            utxo.value / 100_000_000
+                        );
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠️ Warning: Could not look up collateral UTXO for tier auto-detection: {}",
+                        e
+                    );
+                    eprintln!("   Node will start as Free tier. Set tier explicitly in config.toml or ensure collateral UTXO exists.");
+                }
+            }
+        }
     }
 
     // Initialize peer manager

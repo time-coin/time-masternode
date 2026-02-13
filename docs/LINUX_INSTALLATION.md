@@ -290,7 +290,7 @@ Update the masternode section:
 ```toml
 [masternode]
 enabled = true
-tier = "free"  # Options: free, bronze, silver, gold
+# tier is auto-detected from collateral UTXO value (defaults to "auto")
 ```
 
 Restart the service:
@@ -645,7 +645,7 @@ cache_size_mb = 512
 
 [masternode]
 enabled = false
-tier = "free"
+# tier defaults to "auto" (auto-detected from collateral UTXO value)
 collateral_txid = ""
 collateral_vout = 0
 ```

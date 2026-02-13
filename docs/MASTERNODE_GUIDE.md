@@ -14,7 +14,7 @@ TIME Coin supports tiered masternodes with locked collateral (Dash-style). Maste
 ```toml
 [masternode]
 enabled = true
-tier = "free"
+# No tier or collateral needed for free tier
 ```
 
 2. Start/restart the daemon:
@@ -45,9 +45,9 @@ time-cli listunspent
 ```toml
 [masternode]
 enabled = true
-tier = "bronze"
 collateral_txid = "abc123def456..."
 collateral_vout = 0
+# tier is auto-detected from the collateral UTXO amount
 ```
 
 4. Restart the daemon:
@@ -141,17 +141,18 @@ All masternode management is done through `config.toml`. No RPC commands are nee
 ```toml
 [masternode]
 enabled = true                          # Enable/disable masternode
-tier = "bronze"                         # free, bronze, silver, or gold
+# tier = "auto"                         # Auto-detected from collateral (default). Options: auto, free, bronze, silver, gold
 collateral_txid = "abc123def456..."     # TXID of collateral UTXO (staked tiers only)
 collateral_vout = 0                     # Output index of collateral UTXO
 ```
+
+> **Tier auto-detection:** When `tier` is omitted or set to `"auto"` (default), the node automatically determines your tier from the collateral UTXO value on startup. You can still set `tier` explicitly if preferred.
 
 ### Free Tier (No Collateral)
 
 ```toml
 [masternode]
 enabled = true
-tier = "free"
 collateral_txid = ""
 collateral_vout = 0
 ```
@@ -161,7 +162,6 @@ collateral_vout = 0
 ```toml
 [masternode]
 enabled = true
-tier = "bronze"
 collateral_txid = "abc123def456789012345678901234567890123456789012345678901234abcd"
 collateral_vout = 0
 ```
@@ -230,9 +230,9 @@ time-cli listunspent
 ```toml
 [masternode]
 enabled = true
-tier = "bronze"
 collateral_txid = "abc123def456..."   # From Step 2
 collateral_vout = 0                    # From Step 3
+# tier is auto-detected from the collateral amount
 ```
 
 ### Step 5: Restart the Daemon
@@ -245,9 +245,10 @@ sudo systemctl restart timed
 The daemon will automatically:
 1. Parse the collateral UTXO from config
 2. Verify the UTXO exists and has the correct amount
-3. Lock the collateral
-4. Register the masternode on the network
-5. Begin participating in consensus
+3. Auto-detect the tier from the collateral amount
+4. Lock the collateral
+5. Register the masternode on the network
+6. Begin participating in consensus
 
 ### Step 6: Verify Registration
 
@@ -330,8 +331,8 @@ To upgrade or downgrade your tier:
 
 1. Set `enabled = false` in config.toml and restart (unlocks current collateral)
 2. Create a new collateral UTXO for the new tier amount
-3. Update `tier`, `collateral_txid`, and `collateral_vout` in config.toml
-4. Set `enabled = true` and restart
+3. Update `collateral_txid` and `collateral_vout` in config.toml
+4. Set `enabled = true` and restart (tier auto-detects from new collateral amount)
 
 ---
 
@@ -449,7 +450,7 @@ Masternode management is **local only**:
 ## FAQ
 
 ### Q: How do I register a masternode?
-**A:** Edit `config.toml` with your tier and collateral info, then start/restart the daemon.
+**A:** Edit `config.toml` with your collateral info (tier is auto-detected), then start/restart the daemon.
 
 ### Q: How do I deregister a masternode?
 **A:** Set `enabled = false` in `config.toml` and restart the daemon.
@@ -461,7 +462,7 @@ Masternode management is **local only**:
 **A:** Depends on total masternodes. With 50 MNs, expect rewards every ~50 minutes.
 
 ### Q: Can I change tier after registration?
-**A:** Yes. Deregister (set `enabled = false`, restart), create new collateral UTXO, update config, restart.
+**A:** Yes. Deregister (set `enabled = false`, restart), create new collateral UTXO, update `collateral_txid`/`collateral_vout`, restart. Tier auto-detects.
 
 ### Q: What if my node goes offline?
 **A:** After 5 missed heartbeats (5 minutes), marked inactive. No rewards while inactive.
@@ -492,7 +493,7 @@ time-cli getbalance
 ```toml
 [masternode]
 enabled = true
-tier = "bronze"                    # free, bronze, silver, gold
+# tier = "auto"                    # Auto-detected from collateral (default)
 collateral_txid = "abc123..."      # TXID of collateral UTXO
 collateral_vout = 0                # Output index
 ```

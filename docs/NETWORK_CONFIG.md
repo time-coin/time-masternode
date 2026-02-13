@@ -86,7 +86,7 @@ Output will show:
 ```toml
 [masternode]
 enabled = true
-tier = "free"
+# tier defaults to "auto" (auto-detected from collateral UTXO value)
 ```
 
 ### Paid Tier Example
@@ -96,7 +96,7 @@ tier = "free"
 enabled = true
 collateral_txid = "a1b2c3d4..."
 collateral_vout = 0
-tier = "bronze"  # or "silver", "gold"
+# tier is auto-detected from collateral UTXO value
 ```
 
 ## Reward Weights
