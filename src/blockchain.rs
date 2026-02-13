@@ -5100,6 +5100,16 @@ impl Blockchain {
             ));
         }
 
+        // Reject blocks that exceed the maximum expected height
+        // The blockchain cannot have more blocks than elapsed time since genesis allows
+        let max_expected_height = self.calculate_expected_height();
+        if block.header.height > max_expected_height {
+            return Err(format!(
+                "Block {} exceeds maximum expected height {} (genesis-based calculation)",
+                block.header.height, max_expected_height
+            ));
+        }
+
         // Note: Past timestamp check is done in add_block() where we know if we're syncing
 
         // Additional check: Verify timestamp aligns with blockchain timeline
@@ -6930,6 +6940,66 @@ impl Blockchain {
                         return Ok(());
                     }
 
+                    // SECURITY CHECK: Verify peer chain has sufficient masternode authority
+                    // Free-tier nodes cannot reorg a chain backed by staked masternodes (Bronze+)
+                    // This prevents Sybil attacks where an attacker spins up many free nodes
+                    // to create a longer chain and overturn the staked network
+                    let our_authority =
+                        crate::masternode_authority::CanonicalChainSelector::analyze_our_chain_authority(
+                            &self.masternode_registry,
+                            self.connection_manager.read().await.as_ref().map(|v| &**v),
+                            self.peer_registry.read().await.as_ref().map(|v| &**v),
+                        )
+                        .await;
+
+                    let peer_authority =
+                        crate::masternode_authority::CanonicalChainSelector::analyze_peer_chain_authority(
+                            &[peer_addr.clone()],
+                            &self.masternode_registry,
+                            self.peer_registry.read().await.as_ref().map(|v| &**v),
+                        )
+                        .await;
+
+                    info!(
+                        "📊 Masternode Authority Check:\n   Our chain: {}\n   Peer chain: {}",
+                        our_authority.format_summary(),
+                        peer_authority.format_summary()
+                    );
+
+                    // Rule: If our chain is backed by staked masternodes (Bronze+),
+                    // the peer must have at least the same tier to reorg us.
+                    // Free-tier nodes can never overturn a staked chain.
+                    let our_has_staked = our_authority.highest_tier >= crate::masternode_authority::AuthorityLevel::Bronze;
+                    let peer_has_staked = peer_authority.highest_tier >= crate::masternode_authority::AuthorityLevel::Bronze;
+
+                    if our_has_staked && !peer_has_staked {
+                        warn!(
+                            "🛡️ SECURITY: REJECTED REORG from {} - free-tier nodes cannot overturn staked chain",
+                            peer_addr
+                        );
+                        warn!(
+                            "   Our authority: {:?} (score {}) | Peer authority: {:?} (score {})",
+                            our_authority.highest_tier, our_authority.authority_score,
+                            peer_authority.highest_tier, peer_authority.authority_score
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Ok(());
+                    }
+
+                    // Even with both staked, reject if peer has strictly lower authority
+                    if let Some(false) = peer_authority.compare_authority(&our_authority) {
+                        warn!(
+                            "🛡️ SECURITY: REJECTED REORG from {} - our chain has higher masternode authority ({:?} vs {:?})",
+                            peer_addr, our_authority.highest_tier, peer_authority.highest_tier
+                        );
+                        warn!(
+                            "   Our authority score: {} | Peer authority score: {}",
+                            our_authority.authority_score, peer_authority.authority_score
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Ok(());
+                    }
+
                     info!("📊 Simplified resolver decided to accept peer chain (longest valid chain rule)");
                     info!(
                         "📊 Chain comparison: peer has {} blocks from ancestor {} vs our {} blocks",
@@ -7073,6 +7143,39 @@ impl Blockchain {
                             hex::encode(first_block.header.previous_hash),
                             common_ancestor,
                             hex::encode(our_ancestor_hash)
+                        ));
+                    }
+
+                    // Reject blocks with timestamps in the future
+                    let now = chrono::Utc::now().timestamp();
+                    for blk in &sorted_reorg_blocks {
+                        if blk.header.timestamp > now + TIMESTAMP_TOLERANCE_SECS {
+                            warn!(
+                                "🛡️ SECURITY: REJECTED REORG from {} - block {} has future timestamp {} (now: {}, tolerance: {}s)",
+                                peer_addr, blk.header.height, blk.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
+                            );
+                            *self.fork_state.write().await = ForkResolutionState::None;
+                            return Err(format!(
+                                "Reorg rejected: block {} timestamp {} is in the future",
+                                blk.header.height, blk.header.timestamp
+                            ));
+                        }
+                    }
+
+                    // CRITICAL SECURITY: Reject chains that exceed the expected height
+                    // The maximum legitimate block height is determined by elapsed time since genesis.
+                    // An attacker cannot produce more blocks than time allows, regardless of timestamps.
+                    let max_expected_height = self.calculate_expected_height();
+                    let peer_max_height = sorted_reorg_blocks.last().map(|b| b.header.height).unwrap_or(0);
+                    if peer_max_height > max_expected_height {
+                        warn!(
+                            "🛡️ SECURITY: REJECTED REORG from {} - peer chain height {} exceeds maximum expected height {} (genesis-based calculation)",
+                            peer_addr, peer_max_height, max_expected_height
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Err(format!(
+                            "Reorg rejected: chain height {} exceeds expected maximum {}",
+                            peer_max_height, max_expected_height
                         ));
                     }
 
