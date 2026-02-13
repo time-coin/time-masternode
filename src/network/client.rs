@@ -537,7 +537,7 @@ async fn maintain_peer_connection(
     // Phase 2: Mark whitelisted masternodes in connection_manager for protection
     if is_masternode {
         connection_manager.mark_whitelisted(&peer_ip);
-        tracing::info!(
+        tracing::debug!(
             "🛡️ Marked {} as whitelisted masternode with enhanced protection",
             peer_ip
         );
