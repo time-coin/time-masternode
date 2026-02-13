@@ -860,13 +860,6 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
             // Broadcast announcement immediately (don't wait for sync)
-            // Send both V1 (for old nodes) and V2 (for updated nodes with collateral verification)
-            let announcement_v1 = NetworkMessage::MasternodeAnnouncement {
-                address: mn_for_announcement.address.clone(),
-                reward_address: mn_for_announcement.wallet_address.clone(),
-                tier: mn_for_announcement.tier,
-                public_key: mn_for_announcement.public_key,
-            };
             let announcement_v2 = NetworkMessage::MasternodeAnnouncementV2 {
                 address: mn_for_announcement.address.clone(),
                 reward_address: mn_for_announcement.wallet_address.clone(),
@@ -876,19 +869,13 @@ async fn main() {
             };
 
             peer_registry_for_announcement
-                .broadcast(announcement_v1.clone())
-                .await;
-            peer_registry_for_announcement
                 .broadcast(announcement_v2.clone())
                 .await;
-            tracing::info!("📢 Broadcast masternode announcement to network (V1+V2)");
+            tracing::info!("📢 Broadcast masternode announcement to network");
 
             // Continue broadcasting every 60 seconds to ensure visibility
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                peer_registry_for_announcement
-                    .broadcast(announcement_v1.clone())
-                    .await;
                 peer_registry_for_announcement
                     .broadcast(announcement_v2.clone())
                     .await;

@@ -674,15 +674,6 @@ async fn handle_peer(
                                             // Only send OUR masternode announcement, not all masternodes
                                             let local_masternodes = masternode_registry.get_all().await;
                                             if let Some(our_mn) = local_masternodes.iter().find(|mn| mn.masternode.address == our_address) {
-                                                // Send V1 for backward compat with old nodes
-                                                let announcement_v1 = NetworkMessage::MasternodeAnnouncement {
-                                                    address: our_mn.masternode.address.clone(),
-                                                    reward_address: our_mn.reward_address.clone(),
-                                                    tier: our_mn.masternode.tier,
-                                                    public_key: our_mn.masternode.public_key,
-                                                };
-                                                let _ = peer_registry.send_to_peer(&ip_str, announcement_v1).await;
-                                                // Send V2 with collateral for updated nodes
                                                 let announcement_v2 = NetworkMessage::MasternodeAnnouncementV2 {
                                                     address: our_mn.masternode.address.clone(),
                                                     reward_address: our_mn.reward_address.clone(),
@@ -691,7 +682,7 @@ async fn handle_peer(
                                                     collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
                                                 };
                                                 let _ = peer_registry.send_to_peer(&ip_str, announcement_v2).await;
-                                                tracing::info!("📢 Sent masternode announcement (V1+V2) to peer {}", ip_str);
+                                                tracing::info!("📢 Sent masternode announcement to peer {}", ip_str);
                                             }
                                         }
 
@@ -1026,46 +1017,9 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&ip_str, response).await;
                                     }
                                 }
-                                NetworkMessage::MasternodeAnnouncement { address: _, reward_address, tier, public_key } => {
-                                    check_rate_limit!("masternode_announce");
-
-                                    // Legacy announcement (no collateral) — register as-is for backward compatibility
-                                    if !is_stable_connection {
-                                        let connection_age = connection_start.elapsed().as_secs();
-                                        if connection_age < 5 {
-                                            tracing::debug!("⏭️  Ignoring masternode announcement from short-lived connection {} (age: {}s)", peer.addr, connection_age);
-                                            continue;
-                                        }
-                                        is_stable_connection = true;
-                                    }
-
-                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
-                                    if peer_ip.is_empty() { continue; }
-
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs();
-
-                                    let mn = crate::types::Masternode::new_legacy(
-                                        peer_ip.clone(),
-                                        reward_address.clone(),
-                                        0,
-                                        *public_key,
-                                        *tier,
-                                        now,
-                                    );
-
-                                    match masternode_registry.register(mn, reward_address.clone()).await {
-                                        Ok(()) => {
-                                            let count = masternode_registry.total_count().await;
-                                            tracing::info!("✅ Registered {:?} masternode {} via legacy announcement (total: {})", tier, peer_ip, count);
-                                            peer_manager.add_peer(peer_ip.clone()).await;
-                                        },
-                                        Err(e) => {
-                                            tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);
-                                        }
-                                    }
+                                NetworkMessage::MasternodeAnnouncement { .. } => {
+                                    // V1 deprecated — all nodes use V2 now
+                                    tracing::debug!("⏭️  Ignoring deprecated V1 masternode announcement from {}", peer.addr);
                                 }
                                 NetworkMessage::MasternodeAnnouncementV2 { address: _, reward_address, tier, public_key, collateral_outpoint } => {
                                     check_rate_limit!("masternode_announce");

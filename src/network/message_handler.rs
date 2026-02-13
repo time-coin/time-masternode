@@ -355,22 +355,13 @@ impl MessageHandler {
 
             // === Masternode Messages ===
             NetworkMessage::GetMasternodes => self.handle_get_masternodes(context).await,
-            NetworkMessage::MasternodeAnnouncement {
-                address,
-                reward_address,
-                tier,
-                public_key,
-            } => {
-                // Legacy announcement — no collateral verification
-                self.handle_masternode_announcement(
-                    address.clone(),
-                    reward_address.clone(),
-                    *tier,
-                    *public_key,
-                    None,
-                    context,
-                )
-                .await
+            NetworkMessage::MasternodeAnnouncement { .. } => {
+                // V1 deprecated — all nodes use V2 now
+                debug!(
+                    "⏭️  [{}] Ignoring deprecated V1 masternode announcement from {}",
+                    self.direction, self.peer_ip
+                );
+                Ok(None)
             }
             NetworkMessage::MasternodeAnnouncementV2 {
                 address,
