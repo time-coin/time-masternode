@@ -507,6 +507,11 @@ impl Blockchain {
         self.peer_registry.read().await.clone()
     }
 
+    /// Get the list of peers currently on the consensus chain
+    pub async fn get_consensus_peers(&self) -> Vec<String> {
+        self.consensus_peers.read().await.clone()
+    }
+
     pub fn genesis_timestamp(&self) -> i64 {
         self.genesis_timestamp // Use cached value
     }

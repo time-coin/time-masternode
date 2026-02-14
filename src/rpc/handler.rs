@@ -1391,6 +1391,27 @@ impl RpcHandler {
         let masternodes = self.consensus.get_active_masternodes();
         let mn_count = masternodes.len();
 
+        // Filter to only masternodes on the consensus chain
+        let consensus_peers = self.blockchain.get_consensus_peers().await;
+        let on_chain_count = if consensus_peers.is_empty() {
+            // No consensus data yet — count all active as fallback
+            mn_count
+        } else {
+            masternodes
+                .iter()
+                .filter(|mn| {
+                    let ip = mn
+                        .address
+                        .split(':')
+                        .next()
+                        .unwrap_or(&mn.address);
+                    consensus_peers.iter().any(|p| p == ip)
+                })
+                .count()
+                // +1 for ourselves (we're not in the peer list but are on our own chain)
+                + 1
+        };
+
         // TimeVote consensus parameters
         let timevote_config = json!({
             "protocol": "TimeVote + TimeLock",
@@ -1405,7 +1426,7 @@ impl RpcHandler {
                 "leader_selection": "Verifiable Random Function (VRF)",
                 "description": "Deterministic 10-minute block production"
             },
-            "active_validators": mn_count,
+            "active_validators": on_chain_count,
             "finality_type": "TimeVote consensus (seconds) + TimeLock blocks (10 minutes)",
             "instant_finality": true,
             "average_finality_time_ms": self.consensus.get_avg_finality_time_ms()
