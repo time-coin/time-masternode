@@ -344,9 +344,19 @@ impl PrepareVoteAccumulator {
     /// and the total unique voters across ALL block hashes. This ensures that connected
     /// but non-participating nodes (e.g., on a fork, or failing to vote) don't inflate
     /// the quorum denominator and block finalization for the agreeing majority.
+    ///
+    /// SECURITY: A minimum of 2 unique voters is required to prevent solo finalization.
+    /// A single node voting for its own block cannot achieve consensus alone.
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
+
+            // SECURITY: Require at least 2 unique voters for this block.
+            // A solo node must never finalize its own block.
+            if vote_count < 2 {
+                return false;
+            }
+
             // Count unique voters across ALL block hashes (participating validators)
             let mut all_voters = std::collections::HashSet::new();
             for entry in self.votes.iter() {
@@ -420,9 +430,18 @@ impl PrecommitVoteAccumulator {
     /// ADAPTIVE QUORUM: Same logic as PrepareVoteAccumulator::check_consensus.
     /// Uses min(active_validators, total_unique_voters) as denominator so that
     /// non-participating nodes don't block finalization.
+    ///
+    /// SECURITY: A minimum of 2 unique voters is required to prevent solo finalization.
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
+
+            // SECURITY: Require at least 2 unique voters for this block.
+            // A solo node must never finalize its own block.
+            if vote_count < 2 {
+                return false;
+            }
+
             // Count unique voters across ALL block hashes (participating validators)
             let mut all_voters = std::collections::HashSet::new();
             for entry in self.votes.iter() {
