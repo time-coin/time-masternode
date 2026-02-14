@@ -1600,6 +1600,9 @@ impl RpcHandler {
         // Optional 3rd param: subtract_fee_from_amount (default: false)
         let subtract_fee = params.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
 
+        // Optional 4th param: nowait - return TXID immediately without waiting for finality
+        let nowait = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
+
         // Convert TIME to smallest unit (like satoshis)
         let amount_units = (amount * 100_000_000.0) as u64;
 
@@ -1754,6 +1757,14 @@ impl RpcHandler {
         // Submit transaction to consensus engine (broadcasts to network)
         match self.consensus.submit_transaction(tx).await {
             Ok(_) => {
+                let txid_hex = hex::encode(txid);
+
+                // If nowait is set, return TXID immediately after broadcast
+                if nowait {
+                    tracing::info!("📤 Transaction {} broadcast (nowait)", txid_hex);
+                    return Ok(json!(txid_hex));
+                }
+
                 // CRITICAL: Wait for instant finality before returning txid
                 // This ensures the transaction is confirmed by masternodes
                 let txid_hex = hex::encode(txid);
