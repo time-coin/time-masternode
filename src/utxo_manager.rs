@@ -244,11 +244,7 @@ impl UTXOStateManager {
                         txid,
                         locked_at: Self::current_timestamp(),
                     });
-                    tracing::debug!(
-                        "🔒 Locked UTXO {} for tx {}",
-                        outpoint,
-                        hex::encode(txid)
-                    );
+                    tracing::debug!("🔒 Locked UTXO {} for tx {}", outpoint, hex::encode(txid));
                     Ok(())
                 }
                 UTXOState::Locked {
@@ -260,7 +256,7 @@ impl UTXOStateManager {
                     }
 
                     if Self::is_lock_expired(*locked_at) {
-                    tracing::warn!("⏰ Expired lock on UTXO {}, allowing new lock", outpoint);
+                        tracing::warn!("⏰ Expired lock on UTXO {}, allowing new lock", outpoint);
                         entry.insert(UTXOState::Locked {
                             txid,
                             locked_at: Self::current_timestamp(),
@@ -391,7 +387,7 @@ impl UTXOStateManager {
         self.utxo_states.retain(|outpoint, state| {
             if let UTXOState::Locked { locked_at, txid } = state {
                 if Self::is_lock_expired(*locked_at) {
-                    tracing::info!(
+                    tracing::debug!(
                         "🧹 Cleaning expired lock on UTXO {} (tx {})",
                         outpoint,
                         hex::encode(txid)

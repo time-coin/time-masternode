@@ -443,7 +443,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             amount,
             subtract_fee,
             nowait,
-        } => ("sendtoaddress", json!([address, amount, subtract_fee, nowait])),
+        } => (
+            "sendtoaddress",
+            json!([address, amount, subtract_fee, nowait]),
+        ),
         Commands::MergeUtxos {
             min_count,
             max_count,
