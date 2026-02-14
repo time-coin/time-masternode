@@ -2744,20 +2744,58 @@ impl Blockchain {
                     .get_finalized_block_voters(prev_block_hash);
             }
 
-            // CRITICAL: If no voters recorded, use all active masternodes as fallback
+            // CRITICAL: If no voters recorded, use active masternodes on our chain as fallback
             // This prevents bitmap from becoming empty and breaking participation tracking
+            // Filter out masternodes that are on a fork or significantly behind
             if precommit_voters.is_empty() {
+                let all_active = self.masternode_registry.get_active_masternodes().await;
+
+                // Filter: only include masternodes near our chain tip
+                let our_height = self.get_height();
+                let max_behind = 10; // Allow up to 10 blocks behind
+                let mut on_chain_voters: Vec<String> = Vec::new();
+
+                if let Some(registry) = self.get_peer_registry().await {
+                    for mn in &all_active {
+                        let mn_ip = mn
+                            .masternode
+                            .address
+                            .split(':')
+                            .next()
+                            .unwrap_or(&mn.masternode.address);
+                        if let Some(peer_height) = registry.get_peer_height(mn_ip).await {
+                            if our_height.saturating_sub(peer_height) <= max_behind {
+                                on_chain_voters.push(mn.masternode.address.clone());
+                            }
+                        } else {
+                            // No height data — include local node, skip unknown peers
+                            if let Some(ref local_addr) =
+                                self.masternode_registry.get_local_address().await
+                            {
+                                let local_ip = local_addr.split(':').next().unwrap_or(local_addr);
+                                if mn_ip == local_ip {
+                                    on_chain_voters.push(mn.masternode.address.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // If filtering left too few, fall back to all active
+                if on_chain_voters.len() < 2 {
+                    on_chain_voters = all_active
+                        .into_iter()
+                        .map(|mn| mn.masternode.address)
+                        .collect();
+                }
+
                 tracing::warn!(
-                    "⚠️ No precommit voters found for block {} (hash: {}) - using all active masternodes as fallback",
+                    "⚠️ No precommit voters found for block {} (hash: {}) - using {} on-chain masternodes as fallback",
                     next_height - 1,
-                    hex::encode(&prev_block_hash[..8])
+                    hex::encode(&prev_block_hash[..8]),
+                    on_chain_voters.len()
                 );
-                self.masternode_registry
-                    .get_active_masternodes()
-                    .await
-                    .into_iter()
-                    .map(|mn| mn.masternode.address)
-                    .collect()
+                on_chain_voters
             } else {
                 tracing::debug!(
                     "📊 Block {}: using {} precommit voters from previous block",
