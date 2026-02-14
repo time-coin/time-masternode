@@ -31,6 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Fork Resolution Infinite Loop
+- **CRITICAL: Fork resolution stuck in infinite retry loop when peer splits block response**
+  - `handle_fork()` filtered the raw `blocks` parameter instead of the merged `all_blocks` set
+  - When a peer responds in multiple TCP messages (e.g., 3 blocks + 100 blocks), the second
+    `handle_fork()` call received blocks at heights ≤ common ancestor in its parameter, while
+    the blocks above the ancestor were only in the accumulated/merged set
+  - Filtering the wrong variable produced zero reorg candidates, triggering an infinite
+    request→filter→empty→request loop
+  - Fix: Filter `all_blocks` (merged set with accumulated blocks) instead of `blocks` (raw parameter)
+  - Also fixed `peer_tip_block` selection to use merged block set for correct hash comparison
+
 ### Removed
 - **Deleted 8 obsolete scripts** from `scripts/` directory:
   - `deploy_fork_fixes.sh`, `deploy_utxo_fix.sh` — one-time deployment scripts for past bug fixes
