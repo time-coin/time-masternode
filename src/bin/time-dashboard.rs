@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -81,6 +81,10 @@ struct MasternodeStatus {
     is_active: bool,
     #[serde(default)]
     total_uptime: u64,
+    #[serde(default)]
+    version: String,
+    #[serde(default)]
+    git_hash: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -618,6 +622,13 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                     Style::default().fg(Color::Green),
                 ),
             ]),
+            Line::from(vec![
+                Span::raw("Version: "),
+                Span::styled(
+                    format!("v{} ({})", mn.version, mn.git_hash),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
         ];
 
         let block = Paragraph::new(info)
@@ -769,7 +780,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -784,11 +795,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     if let Err(err) = res {
