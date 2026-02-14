@@ -1609,13 +1609,23 @@ async fn main() {
 
             // Early time gate: skip expensive masternode selection when next block isn't due yet
             // This prevents noisy fallback logging every second while waiting for the next slot
+            // CRITICAL: Also prevents producing blocks with future timestamps during catchup —
+            // receiving nodes reject blocks with timestamp > now + 60s tolerance
             {
                 let next_h = current_height + 1;
                 let genesis_ts = block_blockchain.genesis_timestamp();
                 let now_ts = chrono::Utc::now().timestamp();
                 let scheduled = genesis_ts + (next_h as i64 * 600);
-                if now_ts < scheduled && blocks_behind < 5 {
-                    tracing::debug!("📅 Block {} not due for {}s (early gate)", next_h, scheduled - now_ts);
+                let tolerance = constants::blockchain::TIMESTAMP_TOLERANCE_SECS;
+                if now_ts + tolerance < scheduled {
+                    if blocks_behind >= 5 {
+                        tracing::debug!(
+                            "⏳ Catchup paused: block {} scheduled at {} ({}s in future, tolerance {}s)",
+                            next_h, scheduled, scheduled - now_ts, tolerance
+                        );
+                    } else {
+                        tracing::debug!("📅 Block {} not due for {}s (early gate)", next_h, scheduled - now_ts);
+                    }
                     continue;
                 }
             }
