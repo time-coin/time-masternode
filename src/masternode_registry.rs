@@ -538,43 +538,30 @@ impl MasternodeRegistry {
         // Minimum 3 masternodes required for block production
         if eligible.len() < 3 {
             let active = self.get_active_masternodes().await;
-            tracing::error!(
-                "🚨 PARTICIPATION TRACKING FAILURE: Only {} masternodes eligible (minimum 3 required)",
-                eligible.len()
-            );
-            tracing::error!(
-                "   Block {} had {} participants: {:?}",
-                current_height,
-                participants.len(),
-                participants.iter().collect::<Vec<_>>()
-            );
-            tracing::error!(
-                "   Filtered to {} eligible masternodes, but need at least 3",
-                eligible.len()
-            );
-            tracing::error!(
-                "   Registry has {} active masternodes available",
-                active.len()
-            );
 
             // CRITICAL: If still insufficient active masternodes, return empty to prevent block production
-            // This forces the node to sync from network instead of creating competing forks
             if active.len() < 3 {
                 tracing::error!(
                     "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
                     active.len()
                 );
-                tracing::error!(
-                    "   Node will sync from network instead of producing blocks with inconsistent masternode set"
-                );
-                // Return empty vector to signal block production should be skipped
                 return Vec::new();
             }
 
-            tracing::warn!(
-                "⚠️  Falling back to {} active masternodes (participation tracking incomplete)",
-                active.len()
-            );
+            // Rate-limit participation recovery logs (once per 60s) to avoid spam during catchup
+            use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
+            static LAST_PARTICIPATION_WARN: AtomicI64 = AtomicI64::new(0);
+            let now_secs = chrono::Utc::now().timestamp();
+            let last = LAST_PARTICIPATION_WARN.load(AtomOrd::Relaxed);
+            if now_secs - last >= 60 {
+                LAST_PARTICIPATION_WARN.store(now_secs, AtomOrd::Relaxed);
+                tracing::warn!(
+                    "⚠️ Participation recovery: block {} bitmap had {} participants, falling back to {} active masternodes",
+                    current_height,
+                    participants.len(),
+                    active.len()
+                );
+            }
             return active;
         }
 

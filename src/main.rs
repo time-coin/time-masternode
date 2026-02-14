@@ -1605,11 +1605,24 @@ async fn main() {
             }
 
             let expected_height = block_blockchain.calculate_expected_height();
+            let blocks_behind = expected_height.saturating_sub(current_height);
+
+            // Early time gate: skip expensive masternode selection when next block isn't due yet
+            // This prevents noisy fallback logging every second while waiting for the next slot
+            {
+                let next_h = current_height + 1;
+                let genesis_ts = block_blockchain.genesis_timestamp();
+                let now_ts = chrono::Utc::now().timestamp();
+                let scheduled = genesis_ts + (next_h as i64 * 600);
+                if now_ts < scheduled && blocks_behind < 5 {
+                    tracing::debug!("📅 Block {} not due for {}s (early gate)", next_h, scheduled - now_ts);
+                    continue;
+                }
+            }
 
             // Get masternodes eligible for leader selection and rewards
             // CRITICAL: This MUST use the SAME logic as blockchain.rs produce_block_at_height()
             // to ensure selected leader is eligible for rewards (prevents participation chain break)
-            let blocks_behind = expected_height.saturating_sub(current_height);
             let is_bootstrap = current_height == 0; // Only block 1 (height 0→1) uses bootstrap
                                                     // During deep catchup, use all active masternodes (participation bitmap may be corrupted from fork)
             let is_deep_catchup = blocks_behind >= 50;
@@ -1687,8 +1700,8 @@ async fn main() {
             // 2. If < 3: fallback to ALL active masternodes
             // 3. If still < 3: emergency fallback to ALL registered (including inactive)
             if masternodes.len() < 3 {
-                tracing::warn!(
-                    "⚠️ Only {} eligible masternodes (need 3) - falling back to all active masternodes",
+                tracing::debug!(
+                    "📊 Only {} eligible masternodes from bitmap (need 3) - using participation fallback",
                     masternodes.len()
                 );
                 let active_infos = block_registry
@@ -1700,19 +1713,19 @@ async fn main() {
                     .collect();
 
                 // CRITICAL: If still insufficient, REFUSE to produce blocks (fork prevention)
-                // Using inconsistent masternode sets creates competing forks
                 if masternodes.len() < 3 {
-                    tracing::error!(
-                        "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required)",
-                        masternodes.len()
-                    );
-                    tracing::error!(
-                        "   Refusing to produce blocks - node will sync from network instead"
-                    );
-                    tracing::error!(
-                        "   This prevents emergency mode from creating competing forks"
-                    );
-                    // Skip this production cycle - continue to next iteration
+                    // Rate-limit this error (once per 60s)
+                    static LAST_FORK_WARN: std::sync::atomic::AtomicI64 =
+                        std::sync::atomic::AtomicI64::new(0);
+                    let now_secs = chrono::Utc::now().timestamp();
+                    let last = LAST_FORK_WARN.load(Ordering::Relaxed);
+                    if now_secs - last >= 60 {
+                        LAST_FORK_WARN.store(now_secs, Ordering::Relaxed);
+                        tracing::error!(
+                            "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
+                            masternodes.len()
+                        );
+                    }
                     continue;
                 }
             }
