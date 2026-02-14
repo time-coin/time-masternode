@@ -184,6 +184,9 @@ enum Commands {
         /// Subtract fee from amount (recipient gets amount minus fee)
         #[arg(long, default_value = "false")]
         subtract_fee: bool,
+        /// Return TXID immediately without waiting for finality
+        #[arg(long, default_value = "false")]
+        nowait: bool,
     },
 
     /// Merge UTXOs to reduce UTXO set size
@@ -439,7 +442,8 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             address,
             amount,
             subtract_fee,
-        } => ("sendtoaddress", json!([address, amount, subtract_fee])),
+            nowait,
+        } => ("sendtoaddress", json!([address, amount, subtract_fee, nowait])),
         Commands::MergeUtxos {
             min_count,
             max_count,

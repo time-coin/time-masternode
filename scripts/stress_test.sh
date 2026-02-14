@@ -213,7 +213,7 @@ for (( i=1; i<=TOTAL_TX; i++ )); do
 
     # Send transaction
     SEND_START=$(ms_now)
-    SEND_RESULT=$($CLI_CMD sendtoaddress "$RECIPIENT" "$AMOUNT" 2>&1) || true
+    SEND_RESULT=$($CLI_CMD sendtoaddress "$RECIPIENT" "$AMOUNT" --nowait 2>&1) || true
     SEND_END=$(ms_now)
     SEND_LATENCY=$(( SEND_END - SEND_START ))
 
