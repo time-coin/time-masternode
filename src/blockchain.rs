@@ -6213,16 +6213,37 @@ impl Blockchain {
         }
 
         // Find the LONGEST chain (highest height)
-        // Use peer count as tiebreaker when heights are equal
+        // Use weighted stake as tiebreaker when heights are equal (Bronze=10, Free=1)
+        // Pre-compute weighted stake for each chain
+        let mut chain_weights: std::collections::HashMap<(u64, [u8; 32]), u64> =
+            std::collections::HashMap::new();
+        for ((height, hash), peers) in &chain_counts {
+            let mut weight = 0u64;
+            for peer_ip in peers {
+                weight += match self.masternode_registry.get(peer_ip).await {
+                    Some(info) => info.masternode.tier.sampling_weight(),
+                    None => crate::types::MasternodeTier::Free.sampling_weight(),
+                };
+            }
+            chain_weights.insert((*height, *hash), weight);
+        }
+
         let consensus_chain = chain_counts
             .iter()
-            .max_by(|((h1, _), peers1), ((h2, _), peers2)| {
+            .max_by(|((h1, hash1), peers1), ((h2, hash2), peers2)| {
                 // Primary: higher height wins (longest chain rule)
                 let height_cmp = h1.cmp(h2);
                 if height_cmp != std::cmp::Ordering::Equal {
                     return height_cmp;
                 }
-                // Secondary: more peers wins (at same height)
+                // Secondary: higher weighted stake wins (at same height)
+                let w1 = chain_weights.get(&(*h1, *hash1)).copied().unwrap_or(0);
+                let w2 = chain_weights.get(&(*h2, *hash2)).copied().unwrap_or(0);
+                let weight_cmp = w1.cmp(&w2);
+                if weight_cmp != std::cmp::Ordering::Equal {
+                    return weight_cmp;
+                }
+                // Tertiary: more peers wins
                 peers1.len().cmp(&peers2.len())
             })
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
@@ -6235,7 +6256,7 @@ impl Blockchain {
         for peer_ip in peer_tips.keys() {
             let peer_weight = match self.masternode_registry.get(peer_ip).await {
                 Some(info) => info.masternode.tier.sampling_weight(),
-                None => crate::types::MasternodeTier::Bronze.sampling_weight(),
+                None => crate::types::MasternodeTier::Free.sampling_weight(),
             };
             total_responding_weight += peer_weight;
             if consensus_peers.contains(peer_ip) {
@@ -6381,80 +6402,17 @@ impl Blockchain {
         }
 
         // Case 2: Same height but different hash - fork at same height!
+        // The consensus chain was already selected by peer count (majority wins).
+        // If our hash doesn't match, we're in the minority — always switch.
         if consensus_height == our_height && consensus_hash != our_hash {
             warn!(
-                "🔀 Fork at same height {}: our hash {} vs consensus hash {} ({} peers)",
+                "🔀 Same-height fork at {}: switching to consensus chain ({} peers). Our hash {} vs consensus {}",
                 consensus_height,
+                consensus_peers.len(),
                 hex::encode(&our_hash[..8]),
                 hex::encode(&consensus_hash[..8]),
-                consensus_peers.len()
             );
-
-            // PHASE 1: Analyze masternode authority (PRIMARY DECISION)
-            let _our_chain_peers = chain_counts
-                .get(&(our_height, our_hash))
-                .cloned()
-                .unwrap_or_default();
-
-            // Analyze our chain's masternode support
-            let our_authority =
-                crate::masternode_authority::CanonicalChainSelector::analyze_our_chain_authority(
-                    &self.masternode_registry,
-                    self.connection_manager.read().await.as_ref().map(|v| &**v),
-                    self.peer_registry.read().await.as_ref().map(|v| &**v),
-                )
-                .await;
-
-            // Analyze consensus chain's masternode support
-            let consensus_authority =
-                crate::masternode_authority::CanonicalChainSelector::analyze_peer_chain_authority(
-                    &consensus_peers,
-                    &self.masternode_registry,
-                    self.peer_registry.read().await.as_ref().map(|v| &**v),
-                )
-                .await;
-
-            info!(
-                "📊 Masternode Authority Analysis:\n   Our chain: {}\n   Consensus: {}",
-                our_authority.format_summary(),
-                consensus_authority.format_summary()
-            );
-
-            // Determine canonical chain based on masternode authority
-            let our_chain_work = *self.cumulative_work.read().await;
-            let peer_chain_work = our_chain_work; // Same height = approximately equal work
-
-            let (should_switch, reason) =
-                crate::masternode_authority::CanonicalChainSelector::should_switch_to_peer_chain(
-                    &our_authority,
-                    &consensus_authority,
-                    our_chain_work,
-                    peer_chain_work,
-                    our_height,
-                    consensus_height,
-                    &our_hash,
-                    &consensus_hash,
-                );
-
-            // Fork resolution uses "lower hash wins" consistently across all code paths
-            // No VRF override needed - masternode_authority already uses hash tiebreaker
-            let (final_should_switch, final_reason) = (should_switch, reason);
-
-            warn!(
-                "   Decision: {} - {}",
-                if final_should_switch {
-                    "SWITCH to consensus"
-                } else {
-                    "KEEP our chain"
-                },
-                final_reason
-            );
-
-            if final_should_switch {
-                return Some((consensus_height, consensus_peers[0].clone()));
-            } else {
-                return None;
-            }
+            return Some((consensus_height, consensus_peers[0].clone()));
         }
 
         // Case 3: We're ahead of all known peers
@@ -7112,8 +7070,31 @@ impl Blockchain {
                     resolution.accept_peer_chain, reasoning_summary
                 );
 
-                // Decision: reorg or stay based on simplified resolver
-                if resolution.accept_peer_chain {
+                // Decision: determine whether to accept peer chain
+                // Two paths: (1) AI resolver accepts (longer chain), or
+                // (2) same-height fork where peer is on consensus chain (peer count wins)
+                let accept_reason = if resolution.accept_peer_chain {
+                    Some("longer valid chain".to_string())
+                } else {
+                    // Check if peer is on the consensus chain for same-height forks
+                    let consensus_peers = self.consensus_peers.read().await;
+                    let peer_ip = peer_addr.split(':').next().unwrap_or(&peer_addr);
+                    let peer_on_consensus = consensus_peers.iter().any(|p| p == peer_ip);
+                    let cp_len = consensus_peers.len();
+                    drop(consensus_peers);
+
+                    if peer_tip_height == our_height && peer_on_consensus && cp_len > 1 {
+                        info!(
+                            "📊 Overriding hash tiebreaker: peer {} is on consensus chain ({} peers)",
+                            peer_addr, cp_len
+                        );
+                        Some(format!("consensus chain ({} peers)", cp_len))
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(reason) = accept_reason {
                     // CRITICAL SAFETY CHECK: Common ancestor cannot be higher than our chain
                     if common_ancestor > our_height {
                         warn!(
@@ -7124,34 +7105,22 @@ impl Blockchain {
                         return Ok(());
                     }
 
-                    // CRITICAL SAFETY CHECK: Double-verify we're not reorging to a shorter chain
-                    // This is the LONGEST VALID CHAIN RULE - we must NEVER accept a shorter chain
+                    // Reject reorgs to strictly shorter chains (same height is OK for consensus switch)
                     if peer_tip_height < our_height {
                         warn!(
-                            "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}). Fork resolver bug detected!",
+                            "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}).",
                             peer_tip_height, our_height
                         );
                         *self.fork_state.write().await = ForkResolutionState::None;
                         return Ok(());
                     }
 
-                    // Also check that the resulting chain would actually be longer
-                    // Use saturating_sub to prevent underflow bugs
                     let peer_chain_length = peer_tip_height.saturating_sub(common_ancestor);
                     let our_chain_length = our_height.saturating_sub(common_ancestor);
-                    if peer_chain_length <= our_chain_length {
-                        warn!(
-                            "🚫 REJECTED REORG: Peer chain from ancestor {} is not longer ({} <= {}). Keeping our chain.",
-                            common_ancestor, peer_chain_length, our_chain_length
-                        );
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        return Ok(());
-                    }
 
-                    info!("📊 Fork resolver accepted peer chain (longest valid chain rule)");
                     info!(
-                        "📊 Chain comparison: peer has {} blocks from ancestor {} vs our {} blocks",
-                        peer_chain_length, common_ancestor, our_chain_length
+                        "📊 Accepting peer chain: {} (peer {} blocks vs our {} from ancestor {})",
+                        reason, peer_chain_length, our_chain_length, common_ancestor
                     );
 
                     // Filter ALL blocks (merged set) to only those after common ancestor.
@@ -7368,9 +7337,7 @@ impl Blockchain {
 
                     self.continue_fork_resolution().await
                 } else {
-                    info!(
-                        "📊 Simplified resolver decided to reject peer chain (our chain is longer)"
-                    );
+                    info!("📊 Fork resolver rejected peer chain");
                     *self.fork_state.write().await = ForkResolutionState::None;
                     Ok(())
                 }
