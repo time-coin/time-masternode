@@ -31,6 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Block Reward Mismatch on Double-Spend Exclusion
+- **CRITICAL: Blocks rejected by all nodes when containing double-spend transactions**
+  - Block producer calculated `block_reward` (base + fees) BEFORE filtering double-spend TXs
+  - After filtering, the block contained fewer TXs but the inflated `block_reward` remained
+  - Validators recalculated fees from the actual block TXs and got a lower total → rejection
+  - Caused all nodes to get stuck at the same height with infinite retry loops
+  - Fix: Move double-spend/duplicate filtering before fee calculation so `block_reward`
+    only includes fees from transactions that actually make it into the block
+
+### Improved - UTXO Log Readability
+- **OutPoint now displays as `hex_txid:vout` instead of raw byte arrays**
+  - Added `Display` impl for `OutPoint` struct
+  - Updated all UTXO manager log lines to use the new format
+
 ### Fixed - Fork Resolution Infinite Loop
 - **CRITICAL: Fork resolution stuck in infinite retry loop when peer splits block response**
   - `handle_fork()` filtered the raw `blocks` parameter instead of the merged `all_blocks` set

@@ -2515,14 +2515,70 @@ impl Blockchain {
         // Get finalized transactions with pre-computed fees from consensus layer
         // CRITICAL: Use pool-stored fees because input UTXOs are already removed from
         // storage by auto-finalization's spend_utxo before block production runs
-        let finalized_txs_with_fees = self
+        let raw_finalized = self
             .consensus
             .get_finalized_transactions_with_fees_for_block();
-        let finalized_txs: Vec<Transaction> = finalized_txs_with_fees
+
+        // CRITICAL: Filter double-spend/duplicate TXs BEFORE calculating fees.
+        // Fees must reflect only the transactions actually included in the block,
+        // otherwise block_reward will be inflated and fail validation.
+        let mut valid_finalized_with_fees = Vec::new();
+        let mut ds_invalid_count = 0;
+        let mut spent_outpoints = std::collections::HashSet::new();
+        let mut seen_txids = std::collections::HashSet::new();
+        for (tx, fee) in raw_finalized {
+            let txid = tx.txid();
+
+            if !seen_txids.insert(txid) {
+                tracing::warn!(
+                    "⚠️  Block {}: Skipping duplicate TX {}",
+                    next_height,
+                    hex::encode(txid)
+                );
+                ds_invalid_count += 1;
+                continue;
+            }
+
+            let mut has_double_spend = false;
+            for input in &tx.inputs {
+                let outpoint_key = (input.previous_output.txid, input.previous_output.vout);
+                if spent_outpoints.contains(&outpoint_key) {
+                    tracing::warn!(
+                        "⚠️  Block {}: Excluding TX {} - double-spend on UTXO {}:{}",
+                        next_height,
+                        hex::encode(txid),
+                        hex::encode(input.previous_output.txid),
+                        input.previous_output.vout
+                    );
+                    has_double_spend = true;
+                    break;
+                }
+            }
+
+            if has_double_spend {
+                ds_invalid_count += 1;
+                continue;
+            }
+
+            for input in &tx.inputs {
+                spent_outpoints.insert((input.previous_output.txid, input.previous_output.vout));
+            }
+            valid_finalized_with_fees.push((tx, fee));
+        }
+
+        if ds_invalid_count > 0 {
+            tracing::warn!(
+                "⚠️  Block {}: Excluded {} double-spend/duplicate transaction(s) before fee calculation",
+                next_height,
+                ds_invalid_count
+            );
+        }
+
+        let finalized_txs: Vec<Transaction> = valid_finalized_with_fees
             .iter()
             .map(|(tx, _)| tx.clone())
             .collect();
-        let finalized_txs_fees: u64 = finalized_txs_with_fees.iter().map(|(_, fee)| fee).sum();
+        let finalized_txs_fees: u64 = valid_finalized_with_fees.iter().map(|(_, fee)| fee).sum();
 
         if !finalized_txs.is_empty() {
             tracing::info!(
@@ -2531,7 +2587,7 @@ impl Blockchain {
                 finalized_txs.len(),
                 finalized_txs_fees
             );
-            for (i, (tx, fee)) in finalized_txs_with_fees.iter().enumerate() {
+            for (i, (tx, fee)) in valid_finalized_with_fees.iter().enumerate() {
                 tracing::debug!(
                     "  📝 [{}] TX {} (inputs: {}, outputs: {}, fee: {} satoshis)",
                     i + 1,
@@ -2648,66 +2704,10 @@ impl Blockchain {
         // Build transaction list: coinbase + reward distribution + finalized transactions
         let mut all_txs = vec![coinbase.clone(), reward_distribution];
 
-        // PHASE 3: Validate finalized transactions before including in block
-        // Check for double-spends: multiple TXs spending the same UTXO
-        let mut valid_finalized = Vec::new();
-        let mut invalid_count = 0;
-        let mut spent_outpoints = std::collections::HashSet::new();
-        let mut seen_txids = std::collections::HashSet::new();
-        for tx in finalized_txs {
-            let txid = tx.txid();
-
-            // Skip duplicate txids
-            if !seen_txids.insert(txid) {
-                tracing::warn!(
-                    "⚠️  Block {}: Skipping duplicate TX {}",
-                    next_height,
-                    hex::encode(txid)
-                );
-                invalid_count += 1;
-                continue;
-            }
-
-            // Check for double-spends within this block's transaction set
-            let mut has_double_spend = false;
-            for input in &tx.inputs {
-                let outpoint_key = (input.previous_output.txid, input.previous_output.vout);
-                if spent_outpoints.contains(&outpoint_key) {
-                    tracing::warn!(
-                        "⚠️  Block {}: Excluding TX {} - double-spend on UTXO {}:{}",
-                        next_height,
-                        hex::encode(txid),
-                        hex::encode(input.previous_output.txid),
-                        input.previous_output.vout
-                    );
-                    has_double_spend = true;
-                    break;
-                }
-            }
-
-            if has_double_spend {
-                invalid_count += 1;
-                continue;
-            }
-
-            // Mark all inputs as spent
-            for input in &tx.inputs {
-                spent_outpoints.insert((input.previous_output.txid, input.previous_output.vout));
-            }
-            valid_finalized.push(tx);
-        }
-
-        if invalid_count > 0 {
-            tracing::warn!(
-                "⚠️  Block {}: Excluded {} invalid finalized transaction(s)",
-                next_height,
-                invalid_count
-            );
-        }
-
         // CRITICAL: Sort finalized transactions deterministically by txid
         // This ensures all nodes compute the same merkle root for the same block
-        let mut sorted_finalized = valid_finalized;
+        // (Double-spend/duplicate filtering already done above before fee calculation)
+        let mut sorted_finalized = finalized_txs;
         sorted_finalized.sort_by_key(|a| a.txid());
         all_txs.extend(sorted_finalized);
 

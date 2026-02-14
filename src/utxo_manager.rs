@@ -209,12 +209,12 @@ impl UTXOStateManager {
                 | UTXOState::SpentPending { .. }
                 | UTXOState::Confirmed { .. } => {
                     // This is the rollback case - UTXO was spent but we're undoing it
-                    tracing::debug!("Restoring spent UTXO {:?} during rollback", outpoint);
+                    tracing::debug!("Restoring spent UTXO {} during rollback", outpoint);
                 }
                 UTXOState::Locked { txid, .. } => {
                     // Locked UTXO being restored - clear the lock
                     tracing::warn!(
-                        "Restoring locked UTXO {:?} (was locked by tx {:?})",
+                        "Restoring locked UTXO {} (was locked by tx {})",
                         outpoint,
                         hex::encode(txid)
                     );
@@ -245,7 +245,7 @@ impl UTXOStateManager {
                         locked_at: Self::current_timestamp(),
                     });
                     tracing::debug!(
-                        "🔒 Locked UTXO {:?} for tx {:?}",
+                        "🔒 Locked UTXO {} for tx {}",
                         outpoint,
                         hex::encode(txid)
                     );
@@ -260,7 +260,7 @@ impl UTXOStateManager {
                     }
 
                     if Self::is_lock_expired(*locked_at) {
-                        tracing::warn!("⏰ Expired lock on UTXO {:?}, allowing new lock", outpoint);
+                    tracing::warn!("⏰ Expired lock on UTXO {}, allowing new lock", outpoint);
                         entry.insert(UTXOState::Locked {
                             txid,
                             locked_at: Self::current_timestamp(),
@@ -296,7 +296,7 @@ impl UTXOStateManager {
                 } => {
                     if locked_txid == txid {
                         entry.insert(UTXOState::Unspent);
-                        tracing::debug!("🔓 Unlocked UTXO {:?}", outpoint);
+                        tracing::debug!("🔓 Unlocked UTXO {}", outpoint);
                         Ok(())
                     } else {
                         Err(UtxoError::LockMismatch)
@@ -344,7 +344,7 @@ impl UTXOStateManager {
                     Ok(())
                 }
                 UTXOState::Unspent => {
-                    tracing::warn!("⚠️ Spending unlocked UTXO {:?}", outpoint);
+                    tracing::warn!("⚠️ Spending unlocked UTXO {}", outpoint);
                     self.storage.remove_utxo(outpoint).await?;
                     entry.insert(UTXOState::Confirmed {
                         txid: *txid,
@@ -392,7 +392,7 @@ impl UTXOStateManager {
             if let UTXOState::Locked { locked_at, txid } = state {
                 if Self::is_lock_expired(*locked_at) {
                     tracing::info!(
-                        "🧹 Cleaning expired lock on UTXO {:?} (tx {:?})",
+                        "🧹 Cleaning expired lock on UTXO {} (tx {})",
                         outpoint,
                         hex::encode(txid)
                     );
