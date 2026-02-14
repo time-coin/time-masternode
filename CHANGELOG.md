@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Block Production Log Spam During Participation Recovery
+- **Block production loop ran expensive masternode selection every second even when next block wasn't due**
+  - Added early time gate before masternode selection — skips the entire masternode
+    bitmap/fallback logic when the next block's scheduled time hasn't arrived
+  - Rate-limited participation tracking failure logs to once per 60 seconds
+  - Downgraded bitmap fallback messages from WARN/ERROR to DEBUG when fallback succeeds
+  - Eliminates ~5 ERROR log lines per second during normal inter-block waiting periods
+
 ### Fixed - Block Reward Mismatch on Double-Spend Exclusion
 - **CRITICAL: Blocks rejected by all nodes when containing double-spend transactions**
   - Block producer calculated `block_reward` (base + fees) BEFORE filtering double-spend TXs
