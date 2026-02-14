@@ -6407,9 +6407,41 @@ impl Blockchain {
         // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical
         // This can only happen if we have blocks that no peer has yet
         //
-        // RECOVERY: Check if our top block is accessible (not corrupted)
-        // If it was corrupted and deleted, we'll have a gap that needs re-sync
+        // EXCEPTION: If we're only slightly ahead (1-5 blocks) and our chain diverges
+        // from what the majority of peers agree on, we're likely on a solo fork — not
+        // actually canonical. Compare our hash at consensus_height to detect this.
         if our_height > consensus_height {
+            // Check if our chain at consensus_height matches what peers have
+            // If it doesn't, we forked below consensus_height and built on a bad chain
+            if our_height - consensus_height <= 5 && consensus_peers.len() >= 2 {
+                match self.get_block_hash(consensus_height) {
+                    Ok(our_hash_at_consensus) => {
+                        if our_hash_at_consensus != consensus_hash {
+                            tracing::warn!(
+                                "🔀 SOLO FORK DETECTED: We're at {} but our hash at consensus height {} ({}) differs from {} peers ({})",
+                                our_height,
+                                consensus_height,
+                                hex::encode(&our_hash_at_consensus[..8]),
+                                consensus_peers.len(),
+                                hex::encode(&consensus_hash[..8])
+                            );
+                            tracing::warn!(
+                                "   Switching to consensus chain (we likely missed a block and forked)"
+                            );
+                            return Some((consensus_height, consensus_peers[0].clone()));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "🔄 Cannot verify our chain at height {}: {} — syncing to consensus",
+                            consensus_height,
+                            e
+                        );
+                        return Some((consensus_height, consensus_peers[0].clone()));
+                    }
+                }
+            }
+
             // Verify our top block is still retrievable
             match self.get_block(our_height) {
                 Ok(_) => {
@@ -6586,9 +6618,69 @@ impl Blockchain {
                                 consensus_peer
                             );
                         }
+                    } else {
+                        // consensus_height < our_height — solo fork detected
+                        // We advanced beyond peers on a divergent chain. Roll back and resync.
+                        tracing::warn!(
+                            "🔀 SOLO FORK RECOVERY: We're at {} but consensus is at {} — rolling back to resync from {}",
+                            our_height,
+                            consensus_height,
+                            consensus_peer
+                        );
+
+                        if let Some(peer_registry) = blockchain.peer_registry.read().await.as_ref()
+                        {
+                            let request_from = consensus_height.saturating_sub(20).max(1);
+                            match blockchain
+                                .sync_coordinator
+                                .request_sync(
+                                    consensus_peer.clone(),
+                                    request_from,
+                                    consensus_height,
+                                    crate::network::sync_coordinator::SyncSource::ForkResolution,
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    let req =
+                                        NetworkMessage::GetBlocks(request_from, consensus_height);
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&consensus_peer, req).await
+                                    {
+                                        blockchain
+                                            .sync_coordinator
+                                            .cancel_sync(&consensus_peer)
+                                            .await;
+                                        tracing::warn!(
+                                            "⚠️  Failed to request blocks from {}: {}",
+                                            consensus_peer,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "📤 Requested blocks {}-{} from {} for solo fork recovery",
+                                            request_from,
+                                            consensus_height,
+                                            consensus_peer
+                                        );
+                                    }
+                                }
+                                Ok(false) => {
+                                    tracing::debug!(
+                                        "⏸️ Solo fork recovery sync queued with {}",
+                                        consensus_peer
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "⏱️ Solo fork recovery sync throttled with {}: {}",
+                                        consensus_peer,
+                                        e
+                                    );
+                                }
+                            }
+                        }
                     }
-                    // Note: consensus_height < our_height case is handled by compare_chain_with_peers
-                    // returning None (we don't roll back a longer valid chain)
                 }
             }
         });

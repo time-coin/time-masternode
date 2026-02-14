@@ -752,6 +752,23 @@ async fn main() {
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Consensus engine identity configured with wallet key");
 
+                // Lock collateral UTXO so it shows as locked in wallet balance
+                if mn.tier != types::MasternodeTier::Free {
+                    if let Some(ref outpoint) = mn.collateral_outpoint {
+                        let lock_height = blockchain.get_height();
+                        let _ = consensus_engine.utxo_manager.lock_collateral(
+                            outpoint.clone(),
+                            mn.address.clone(),
+                            lock_height,
+                            mn.tier.collateral(),
+                        );
+                        tracing::info!(
+                            "🔒 Locked collateral UTXO for {} tier",
+                            format!("{:?}", mn.tier)
+                        );
+                    }
+                }
+
                 // Broadcast masternode announcement will happen after initial sync completes
                 // (see announcement task below)
             }
