@@ -1904,6 +1904,43 @@ async fn main() {
                 }
             }
 
+            // CRITICAL: Even when NOT far behind (< SYNC_THRESHOLD), verify peers
+            // agree with our chain before producing. Without this, a node that missed
+            // 1-2 blocks produces on a stale tip instead of syncing, creating a fork.
+            if blocks_behind < SYNC_THRESHOLD_BLOCKS {
+                let peers = block_peer_registry.get_compatible_peers().await;
+                if !peers.is_empty() {
+                    if let Some((consensus_height, _)) =
+                        block_blockchain.compare_chain_with_peers().await
+                    {
+                        if consensus_height > current_height {
+                            tracing::warn!(
+                                "🛡️ FORK PREVENTION: Peers at height {} > our {} - syncing instead of producing",
+                                consensus_height,
+                                current_height
+                            );
+                            let probe_start = current_height + 1;
+                            let probe_end = consensus_height.min(current_height + 50);
+                            for peer_ip in &peers {
+                                let msg = NetworkMessage::GetBlocks(probe_start, probe_end);
+                                let _ = block_peer_registry.send_to_peer(peer_ip, msg).await;
+                            }
+                            continue;
+                        }
+                        // Same height but different hash = fork, sync to majority
+                        tracing::warn!(
+                            "🔀 Fork detected at height {}: syncing to majority chain before producing",
+                            current_height
+                        );
+                        if let Err(e) = block_blockchain.sync_from_peers(None).await {
+                            tracing::warn!("⚠️  Sync to majority failed: {}", e);
+                        }
+                        continue;
+                    }
+                    // None = peers agree with us — safe to produce
+                }
+            }
+
             // Case 3: Within grace period or sync failed - time to produce
             // Use TimeLock consensus for leader election
 
