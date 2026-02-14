@@ -1617,198 +1617,241 @@ impl RpcHandler {
                 message: "Node is not configured as a masternode - no wallet address".to_string(),
             })?;
 
-        // Get UTXOs for this wallet
-        let all_utxos = self.utxo_manager.list_all_utxos().await;
+        // On UTXO contention, exclude contested outpoints and re-select different UTXOs
+        const MAX_RETRIES: u32 = 3;
+        let mut excluded: std::collections::HashSet<OutPoint> = std::collections::HashSet::new();
+        let mut last_error = String::new();
 
-        // Filter to only OUR spendable UTXOs (wallet address match, not locked, Unspent state)
-        let mut utxos: Vec<_> = all_utxos
-            .into_iter()
-            .filter(|u| {
-                // Only spend our own UTXOs
-                if u.address != wallet_address {
-                    return false;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                tracing::info!(
+                    "🔄 Retry {}/{} — selecting different UTXOs ({} excluded)",
+                    attempt,
+                    MAX_RETRIES,
+                    excluded.len()
+                );
+            }
+
+            // Get UTXOs for this wallet (fresh each attempt)
+            let all_utxos = self.utxo_manager.list_all_utxos().await;
+
+            // Filter: our address, unspent, not collateral, not in exclusion set
+            let mut utxos: Vec<_> = all_utxos
+                .into_iter()
+                .filter(|u| {
+                    if u.address != wallet_address {
+                        return false;
+                    }
+                    if excluded.contains(&u.outpoint) {
+                        return false;
+                    }
+                    if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                        return false;
+                    }
+                    matches!(
+                        self.utxo_manager.get_state(&u.outpoint),
+                        Some(crate::types::UTXOState::Unspent)
+                    )
+                })
+                .collect();
+
+            if utxos.is_empty() {
+                if excluded.is_empty() {
+                    return Err(RpcError {
+                        code: -6,
+                        message:
+                            "No spendable UTXOs available (all funds may be locked or in use by pending transactions)"
+                                .to_string(),
+                    });
                 }
-                // Check if locked as collateral
-                if self.utxo_manager.is_collateral_locked(&u.outpoint) {
-                    return false;
+                // All remaining UTXOs are excluded — contention too high
+                return Err(RpcError {
+                    code: -6,
+                    message: format!(
+                        "No spendable UTXOs available after excluding {} contested outputs",
+                        excluded.len()
+                    ),
+                });
+            }
+
+            // Sort by value descending (use largest UTXOs first for efficiency)
+            utxos.sort_by(|a, b| b.value.cmp(&a.value));
+
+            // Estimate fee
+            let mut estimated_input = 0u64;
+            let mut temp_fee = 1_000u64;
+            for utxo in &utxos {
+                estimated_input += utxo.value;
+                temp_fee = (estimated_input / 1000).max(1_000);
+                let needed = if subtract_fee {
+                    amount_units
+                } else {
+                    amount_units + temp_fee
+                };
+                if estimated_input >= needed {
+                    break;
                 }
-                // Check UTXO state - only accept Unspent
-                match self.utxo_manager.get_state(&u.outpoint) {
-                    Some(crate::types::UTXOState::Unspent) => true,
-                    _ => false, // Skip Locked, SpentPending, SpentFinalized, Confirmed
+            }
+            let fee = temp_fee;
+
+            // Select sufficient UTXOs
+            let mut selected_utxos = Vec::new();
+            let mut total_input = 0u64;
+            for utxo in &utxos {
+                selected_utxos.push(utxo.clone());
+                total_input += utxo.value;
+                let needed = if subtract_fee {
+                    amount_units
+                } else {
+                    amount_units + fee
+                };
+                if total_input >= needed {
+                    break;
                 }
-            })
-            .collect();
+            }
 
-        if utxos.is_empty() {
-            return Err(RpcError {
-                code: -6,
-                message:
-                    "No spendable UTXOs available (all funds may be locked or in use by pending transactions)"
-                        .to_string(),
-            });
-        }
-
-        // Sort by value descending (use largest UTXOs first for efficiency)
-        utxos.sort_by(|a, b| b.value.cmp(&a.value));
-
-        // Estimate UTXOs needed and calculate fee (0.1% of total input value)
-        let mut estimated_input = 0u64;
-        let mut temp_fee = 1_000u64; // Start with minimum
-
-        // Find UTXOs needed (including fee unless subtracted from amount)
-        for utxo in &utxos {
-            estimated_input += utxo.value;
-            temp_fee = (estimated_input / 1000).max(1_000);
-            let needed = if subtract_fee {
-                amount_units
+            let send_amount = if subtract_fee {
+                if total_input < amount_units {
+                    return Err(RpcError {
+                        code: -6,
+                        message: "Insufficient funds".to_string(),
+                    });
+                }
+                let fee = (total_input / 1000).max(1_000);
+                if amount_units <= fee {
+                    return Err(RpcError {
+                        code: -6,
+                        message: format!("Amount too small to cover fee ({} units fee)", fee),
+                    });
+                }
+                amount_units - fee
             } else {
-                amount_units + temp_fee
-            };
-            if estimated_input >= needed {
-                break;
-            }
-        }
-
-        let fee = temp_fee;
-
-        // Find sufficient UTXOs
-        let mut selected_utxos = Vec::new();
-        let mut total_input = 0u64;
-
-        for utxo in utxos {
-            selected_utxos.push(utxo.clone());
-            total_input += utxo.value;
-            let needed = if subtract_fee {
-                amount_units
-            } else {
-                amount_units + fee
-            };
-            if total_input >= needed {
-                break;
-            }
-        }
-
-        // When subtract_fee_from_amount is set, deduct fee from the send amount
-        // so the user only needs to have `amount_units` (not amount + fee)
-        let send_amount = if subtract_fee {
-            if total_input < amount_units {
-                return Err(RpcError {
-                    code: -6,
-                    message: "Insufficient funds".to_string(),
-                });
-            }
-            // Recalculate fee based on actual input
-            let fee = (total_input / 1000).max(1_000);
-            if amount_units <= fee {
-                return Err(RpcError {
-                    code: -6,
-                    message: format!("Amount too small to cover fee ({} units fee)", fee),
-                });
-            }
-            amount_units - fee
-        } else {
-            if total_input < amount_units + fee {
-                return Err(RpcError {
-                    code: -6,
-                    message: "Insufficient funds".to_string(),
-                });
-            }
-            amount_units
-        };
-
-        // Create transaction
-        use crate::types::{Transaction, TxInput, TxOutput};
-
-        let inputs: Vec<TxInput> = selected_utxos
-            .iter()
-            .map(|utxo| TxInput {
-                previous_output: utxo.outpoint.clone(),
-                script_sig: vec![], // TODO: Sign with wallet key
-                sequence: 0xFFFFFFFF,
-            })
-            .collect();
-
-        let mut outputs = vec![TxOutput {
-            value: send_amount,
-            script_pubkey: to_address.as_bytes().to_vec(),
-        }];
-
-        // Add change output if necessary
-        let change = total_input - send_amount - fee;
-        if change > 0 {
-            // Send change back to our wallet address
-            outputs.push(TxOutput {
-                value: change,
-                script_pubkey: wallet_address.as_bytes().to_vec(),
-            });
-        }
-
-        let tx = Transaction {
-            version: 1,
-            inputs,
-            outputs,
-            lock_time: 0,
-            timestamp: chrono::Utc::now().timestamp(),
-        };
-
-        let txid = tx.txid();
-
-        // Submit transaction to consensus engine (broadcasts to network)
-        match self.consensus.submit_transaction(tx).await {
-            Ok(_) => {
-                let txid_hex = hex::encode(txid);
-
-                // If nowait is set, return TXID immediately after broadcast
-                if nowait {
-                    tracing::info!("📤 Transaction {} broadcast (nowait)", txid_hex);
-                    return Ok(json!(txid_hex));
+                if total_input < amount_units + fee {
+                    return Err(RpcError {
+                        code: -6,
+                        message: "Insufficient funds".to_string(),
+                    });
                 }
+                amount_units
+            };
 
-                // CRITICAL: Wait for instant finality before returning txid
-                // This ensures the transaction is confirmed by masternodes
-                let txid_hex = hex::encode(txid);
+            let inputs: Vec<TxInput> = selected_utxos
+                .iter()
+                .map(|utxo| TxInput {
+                    previous_output: utxo.outpoint.clone(),
+                    script_sig: vec![],
+                    sequence: 0xFFFFFFFF,
+                })
+                .collect();
 
-                tracing::info!("⏳ Waiting for transaction {} to finalize...", txid_hex);
+            let mut outputs = vec![TxOutput {
+                value: send_amount,
+                script_pubkey: to_address.as_bytes().to_vec(),
+            }];
 
-                // Wait up to 30 seconds for finality
-                let timeout = Duration::from_secs(30);
-                let start = tokio::time::Instant::now();
+            let change = total_input - send_amount - fee;
+            if change > 0 {
+                outputs.push(TxOutput {
+                    value: change,
+                    script_pubkey: wallet_address.as_bytes().to_vec(),
+                });
+            }
 
-                loop {
-                    // Check if transaction is finalized
-                    if self.consensus.tx_pool.is_finalized(&txid) {
-                        tracing::info!("✅ Transaction {} finalized", txid_hex);
+            let tx = Transaction {
+                version: 1,
+                inputs,
+                outputs,
+                lock_time: 0,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+
+            let txid = tx.txid();
+
+            match self.consensus.submit_transaction(tx).await {
+                Ok(_) => {
+                    let txid_hex = hex::encode(txid);
+
+                    if attempt > 0 {
+                        tracing::info!(
+                            "✅ Transaction {} succeeded on retry {}",
+                            &txid_hex[..16],
+                            attempt
+                        );
+                    }
+
+                    if nowait {
+                        tracing::info!("📤 Transaction {} broadcast (nowait)", txid_hex);
                         return Ok(json!(txid_hex));
                     }
 
-                    // Check if transaction was rejected
-                    if let Some(reason) = self.consensus.tx_pool.get_rejection_reason(&txid) {
-                        tracing::warn!("❌ Transaction {} rejected: {}", txid_hex, reason);
-                        return Err(RpcError {
-                            code: -26,
-                            message: format!("Transaction rejected during finality: {}", reason),
-                        });
-                    }
+                    tracing::info!("⏳ Waiting for transaction {} to finalize...", txid_hex);
 
-                    // Check timeout
-                    if start.elapsed() > timeout {
-                        tracing::warn!("⏰ Transaction {} finality timeout", txid_hex);
-                        return Err(RpcError {
-                            code: -26,
-                            message: "Transaction finality timeout (30s) - transaction may still finalize later".to_string(),
-                        });
-                    }
+                    let timeout = Duration::from_secs(30);
+                    let start = tokio::time::Instant::now();
 
-                    // Wait a bit before checking again
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    loop {
+                        if self.consensus.tx_pool.is_finalized(&txid) {
+                            tracing::info!("✅ Transaction {} finalized", txid_hex);
+                            return Ok(json!(txid_hex));
+                        }
+
+                        if let Some(reason) = self.consensus.tx_pool.get_rejection_reason(&txid) {
+                            tracing::warn!("❌ Transaction {} rejected: {}", txid_hex, reason);
+                            return Err(RpcError {
+                                code: -26,
+                                message: format!(
+                                    "Transaction rejected during finality: {}",
+                                    reason
+                                ),
+                            });
+                        }
+
+                        if start.elapsed() > timeout {
+                            tracing::warn!("⏰ Transaction {} finality timeout", txid_hex);
+                            return Err(RpcError {
+                                code: -26,
+                                message: "Transaction finality timeout (30s) - transaction may still finalize later".to_string(),
+                            });
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+                Err(e) => {
+                    let is_contention = e.contains("double-spend prevented")
+                        || e.contains("AlreadyLocked")
+                        || e.contains("already locked")
+                        || e.contains("in use by");
+                    if is_contention && attempt < MAX_RETRIES {
+                        // Exclude the contested UTXOs so next attempt picks different ones
+                        for utxo in &selected_utxos {
+                            excluded.insert(utxo.outpoint.clone());
+                        }
+                        tracing::warn!(
+                            "⚠️ UTXO contention (attempt {}): {} — excluding {} outpoints",
+                            attempt + 1,
+                            e,
+                            selected_utxos.len()
+                        );
+                        last_error = e;
+                        continue;
+                    }
+                    return Err(RpcError {
+                        code: -26,
+                        message: format!("Transaction rejected: {}", e),
+                    });
                 }
             }
-            Err(e) => Err(RpcError {
-                code: -26,
-                message: format!("Transaction rejected: {}", e),
-            }),
         }
+
+        // All retries exhausted
+        Err(RpcError {
+            code: -26,
+            message: format!(
+                "Transaction failed after {} retries due to UTXO contention: {}",
+                MAX_RETRIES, last_error
+            ),
+        })
     }
 
     async fn merge_utxos(&self, params: &[Value]) -> Result<Value, RpcError> {
