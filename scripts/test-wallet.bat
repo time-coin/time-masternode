@@ -32,15 +32,15 @@ echo 3️⃣ Testing basic commands...
 echo.
 
 echo 📊 Blockchain info:
-%CLI% get-blockchain-info
+%CLI% getblockchaininfo
 echo.
 
 echo 🔗 Block count:
-%CLI% get-block-count
+%CLI% getblockcount
 echo.
 
 echo 🌐 Network info:
-%CLI% get-network-info
+%CLI% getnetworkinfo
 echo.
 
 REM Test wallet commands
@@ -48,15 +48,15 @@ echo 4️⃣ Testing wallet commands...
 echo.
 
 echo 💰 Get balance:
-%CLI% get-balance
+%CLI% getbalance
 echo.
 
 echo 📋 List unspent UTXOs:
-%CLI% list-unspent
+%CLI% listunspent
 echo.
 
 echo 🔍 Validate address:
-%CLI% validate-address TIME0K8wwmqtqkdG34pdjmMqrXX85TFH7bpM3X
+%CLI% validateaddress TIME0K8wwmqtqkdG34pdjmMqrXX85TFH7bpM3X
 echo.
 
 REM Test masternode commands
@@ -64,15 +64,15 @@ echo 5️⃣ Testing masternode commands...
 echo.
 
 echo 🏛️ Masternode list:
-%CLI% masternode-list
+%CLI% masternodelist
 echo.
 
 echo 📊 Masternode status:
-%CLI% masternode-status
+%CLI% masternodestatus
 echo.
 
 echo ⚖️ Consensus info:
-%CLI% get-consensus-info
+%CLI% getconsensusinfo
 echo.
 
 REM Test mempool
@@ -80,11 +80,11 @@ echo 6️⃣ Testing mempool commands...
 echo.
 
 echo 📦 Mempool info:
-%CLI% get-mempool-info
+%CLI% getmempoolinfo
 echo.
 
 echo 📋 Raw mempool:
-%CLI% get-raw-mempool
+%CLI% getrawmempool
 echo.
 
 REM Wait for block production
@@ -93,11 +93,11 @@ timeout /t 15 /nobreak > nul
 echo.
 
 echo 🧱 Block count after wait:
-%CLI% get-block-count
+%CLI% getblockcount
 echo.
 
 echo 🔍 Get block 1:
-%CLI% get-block 1
+%CLI% getblock 1
 echo.
 
 REM Test UTXO set
@@ -105,7 +105,7 @@ echo 9️⃣ Testing UTXO set info...
 echo.
 
 echo 📊 UTXO set info:
-%CLI% get-tx-out-set-info
+%CLI% gettxoutsetinfo
 echo.
 
 REM Uptime

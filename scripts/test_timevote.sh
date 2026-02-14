@@ -103,13 +103,14 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-AVAILABLE=$(echo "$BALANCE_JSON" | jq -r '.balance // 0')
+AVAILABLE=$(echo "$BALANCE_JSON" | jq -r '.available // 0')
 LOCKED=$(echo "$BALANCE_JSON" | jq -r '.locked // 0')
 
 log_info "Available: $AVAILABLE TIME"
 log_info "Locked: $LOCKED TIME"
 
-if (( $(echo "$AVAILABLE < $AMOUNT" | bc -l) )); then
+# Check if we have enough balance (using awk for portability instead of bc)
+if awk -v avail="$AVAILABLE" -v amt="$AMOUNT" 'BEGIN {exit !(avail < amt)}'; then
     log_error "Insufficient balance (need $AMOUNT TIME)"
     exit 1
 fi

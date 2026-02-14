@@ -32,15 +32,15 @@ echo "3️⃣ Testing basic commands..."
 echo ""
 
 echo "📊 Blockchain info:"
-$CLI get-blockchain-info | jq '.' 2>/dev/null || echo "Failed"
+$CLI getblockchaininfo | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 echo "🔗 Block count:"
-$CLI get-block-count 2>/dev/null || echo "Failed"
+$CLI getblockcount 2>/dev/null || echo "Failed"
 echo ""
 
 echo "🌐 Network info:"
-$CLI get-network-info | jq '.' 2>/dev/null || echo "Failed"
+$CLI getnetworkinfo | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 # Test wallet commands
@@ -48,15 +48,15 @@ echo "4️⃣ Testing wallet commands..."
 echo ""
 
 echo "💰 Get balance:"
-$CLI get-balance 2>/dev/null || echo "No balance yet"
+$CLI getbalance 2>/dev/null || echo "No balance yet"
 echo ""
 
 echo "📋 List unspent UTXOs:"
-$CLI list-unspent | jq '.' 2>/dev/null || echo "No UTXOs yet"
+$CLI listunspent | jq '.' 2>/dev/null || echo "No UTXOs yet"
 echo ""
 
 echo "🔍 Validate address TIME0K8wwmqtqkdG34pdjmMqrXX85TFH7bpM3X:"
-$CLI validate-address TIME0K8wwmqtqkdG34pdjmMqrXX85TFH7bpM3X | jq '.' 2>/dev/null || echo "Failed"
+$CLI validateaddress TIME0K8wwmqtqkdG34pdjmMqrXX85TFH7bpM3X | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 # Test masternode commands
@@ -64,15 +64,15 @@ echo "5️⃣ Testing masternode commands..."
 echo ""
 
 echo "🏛️ Masternode list:"
-$CLI masternode-list | jq '.' 2>/dev/null || echo "No masternodes"
+$CLI masternodelist | jq '.' 2>/dev/null || echo "No masternodes"
 echo ""
 
 echo "📊 Masternode status:"
-$CLI masternode-status | jq '.' 2>/dev/null || echo "Not a masternode"
+$CLI masternodestatus | jq '.' 2>/dev/null || echo "Not a masternode"
 echo ""
 
 echo "⚖️ Consensus info:"
-$CLI get-consensus-info | jq '.' 2>/dev/null || echo "Failed"
+$CLI getconsensusinfo | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 # Test mempool
@@ -80,11 +80,11 @@ echo "6️⃣ Testing mempool commands..."
 echo ""
 
 echo "📦 Mempool info:"
-$CLI get-mempool-info | jq '.' 2>/dev/null || echo "Failed"
+$CLI getmempoolinfo | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 echo "📋 Raw mempool:"
-$CLI get-raw-mempool | jq '.' 2>/dev/null || echo "Failed"
+$CLI getrawmempool | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 # Wait for block production
@@ -93,11 +93,11 @@ sleep 15
 echo ""
 
 echo "🧱 Block count after wait:"
-$CLI get-block-count 2>/dev/null || echo "Failed"
+$CLI getblockcount 2>/dev/null || echo "Failed"
 echo ""
 
 echo "🔍 Get block 1 (if exists):"
-$CLI get-block 1 | jq '.' 2>/dev/null || echo "Block 1 not found yet"
+$CLI getblock 1 | jq '.' 2>/dev/null || echo "Block 1 not found yet"
 echo ""
 
 # Test transaction sending
@@ -105,7 +105,7 @@ echo "8️⃣ Testing transaction creation..."
 echo ""
 
 echo "💸 Attempting to send 100 TIME to TIME0TestRecipient123456789012345:"
-$CLI send-to-address TIME0TestRecipient123456789012345 100 2>/dev/null || echo "Transaction failed (expected if no balance)"
+$CLI sendtoaddress TIME0TestRecipient123456789012345 100 2>/dev/null || echo "Transaction failed (expected if no balance)"
 echo ""
 
 # Check UTXO set
@@ -113,7 +113,7 @@ echo "9️⃣ Testing UTXO set info..."
 echo ""
 
 echo "📊 UTXO set info:"
-$CLI get-tx-out-set-info | jq '.' 2>/dev/null || echo "Failed"
+$CLI gettxoutsetinfo | jq '.' 2>/dev/null || echo "Failed"
 echo ""
 
 # Uptime

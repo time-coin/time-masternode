@@ -31,6 +31,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **Deleted 8 obsolete scripts** from `scripts/` directory:
+  - `deploy_fork_fixes.sh`, `deploy_utxo_fix.sh` — one-time deployment scripts for past bug fixes
+  - `check_block_hash.sh` — investigated specific fork at block 1723 (resolved)
+  - `diagnose_fork.sh` — diagnosed specific fork at heights 4388–4402 (resolved)
+  - `reset-blockchain.sh`, `reset-testnet-db.sh`, `reset-testnet-nodes.sh` — one-time reset scripts
+  - `cpctest.sh` — ad-hoc config copy utility with hardcoded paths
+
+### Fixed - Script Compatibility
+- **Fixed 5 transaction test scripts** with incorrect CLI command names or JSON parsing:
+  - `test-wallet.sh` / `test-wallet.bat` — all commands used wrong dashed format (e.g., `get-balance` → `getbalance`)
+  - `test_critical_flow.sh` — wrong masternode JSON path and version check format
+  - `test_finalization_propagation.sh` — used non-existent `getmasternodes` command
+  - `test_timevote.sh` — used total balance instead of available balance, replaced `bc` dependency with `awk`
+
 ### Fixed - Critical Security and Compatibility Issues
 
 - **CRITICAL: Old Genesis Format Incompatibility**
