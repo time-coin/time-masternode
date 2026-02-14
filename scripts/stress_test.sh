@@ -15,10 +15,11 @@
 #   -a, --amount       TIME per transaction (default: 0.001)
 #   -t, --timeout      Finality poll timeout per TX in seconds (default: 60)
 #   -o, --output       CSV output file (default: stress_results_<timestamp>.csv)
+#   --testnet          Use testnet (passes --testnet to time-cli)
 #   -h, --help         Show this help
 #
 # Example:
-#   bash scripts/stress_test.sh -n 200 -s 1 -m 10 -r 2 -i 20
+#   bash scripts/stress_test.sh --testnet -n 200 -s 1 -m 10 -r 2 -i 20
 
 set -euo pipefail
 
@@ -31,6 +32,7 @@ RAMP_INTERVAL=30
 AMOUNT="0.001"
 FINALITY_TIMEOUT=60
 OUTPUT=""
+CLI_FLAGS=""
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -65,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         -a|--amount)        AMOUNT="$2";          shift 2 ;;
         -t|--timeout)       FINALITY_TIMEOUT="$2"; shift 2 ;;
         -o|--output)        OUTPUT="$2";          shift 2 ;;
+        --testnet)          CLI_FLAGS="--testnet"; shift ;;
         -h|--help)          usage ;;
         *) log_error "Unknown option: $1"; usage ;;
     esac
@@ -87,6 +90,11 @@ elif [ -x "./time-cli" ]; then
 else
     log_error "time-cli not found. Set CLI_PATH or ensure it's in PATH."
     exit 1
+fi
+
+# Append network flag if specified
+if [ -n "$CLI_FLAGS" ]; then
+    CLI_CMD="$CLI_CMD $CLI_FLAGS"
 fi
 
 # ── Prerequisites ─────────────────────────────────────────────────────────────
