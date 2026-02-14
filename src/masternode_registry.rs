@@ -229,6 +229,13 @@ impl MasternodeRegistry {
 
         // If already registered, update status (treat as reconnection)
         if let Some(existing) = nodes.get_mut(&masternode.address) {
+            // Always update tier and collateral info (handles tier auto-detection on restart)
+            existing.masternode.tier = masternode.tier;
+            existing.masternode.collateral = masternode.collateral;
+            existing.masternode.collateral_outpoint = masternode.collateral_outpoint.clone();
+            existing.masternode.public_key = masternode.public_key;
+            existing.reward_address = reward_address.clone();
+
             if !existing.is_active && should_activate {
                 existing.is_active = true;
                 existing.uptime_start = now;
