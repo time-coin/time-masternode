@@ -6597,26 +6597,67 @@ impl Blockchain {
                             }
                         }
                     } else if consensus_height > our_height {
-                        // We're behind - normal sync
+                        // We're behind — could be simple lag OR behind-and-forked.
+                        // Request blocks starting from our_height-20 so overlapping blocks
+                        // reveal whether we're on the same chain. If forked, process_peer_blocks
+                        // will detect the mismatch and trigger handle_fork() automatically.
                         tracing::info!(
-                            "🔀 Periodic fork detection: consensus height {} > our height {}, syncing from {}",
+                            "🔀 Periodic fork detection: consensus height {} > our height {}, requesting blocks from {}",
                             consensus_height,
                             our_height,
                             consensus_peer
                         );
 
-                        // Trigger sync from the consensus peer
-                        if let Err(e) = blockchain.sync_from_specific_peer(&consensus_peer).await {
-                            tracing::warn!(
-                                "⚠️  Failed to sync from consensus peer {} during periodic check: {}",
-                                consensus_peer,
-                                e
-                            );
-                        } else {
-                            tracing::info!(
-                                "✅ Periodic chain sync completed from {}",
-                                consensus_peer
-                            );
+                        if let Some(peer_registry) = blockchain.peer_registry.read().await.as_ref()
+                        {
+                            let request_from = our_height.saturating_sub(20).max(1);
+
+                            match blockchain
+                                .sync_coordinator
+                                .request_sync(
+                                    consensus_peer.clone(),
+                                    request_from,
+                                    consensus_height,
+                                    crate::network::sync_coordinator::SyncSource::ForkResolution,
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    let req =
+                                        NetworkMessage::GetBlocks(request_from, consensus_height);
+                                    if let Err(e) =
+                                        peer_registry.send_to_peer(&consensus_peer, req).await
+                                    {
+                                        blockchain
+                                            .sync_coordinator
+                                            .cancel_sync(&consensus_peer)
+                                            .await;
+                                        tracing::warn!(
+                                            "⚠️  Failed to request blocks from {}: {}",
+                                            consensus_peer,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            "📤 Requested blocks {}-{} from {} (overlap from {} to detect forks)",
+                                            request_from,
+                                            consensus_height,
+                                            consensus_peer,
+                                            our_height
+                                        );
+                                    }
+                                }
+                                Ok(false) => {
+                                    tracing::debug!("⏸️ Sync queued with {}", consensus_peer);
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "⏱️ Sync throttled with {}: {}",
+                                        consensus_peer,
+                                        e
+                                    );
+                                }
+                            }
                         }
                     } else {
                         // consensus_height < our_height — solo fork detected
