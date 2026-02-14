@@ -7,32 +7,37 @@
 #   bash scripts/stress_test.sh [OPTIONS]
 #
 # Options:
-#   -n, --total        Total transactions to send (default: 100)
-#   -s, --start-rate   Starting TPS rate (default: 1)
-#   -m, --max-rate     Maximum TPS rate to ramp to (default: 20)
-#   -r, --ramp-step    TPS increase per ramp interval (default: 1)
-#   -i, --ramp-interval Seconds between rate increases (default: 30)
+#   -n, --total        Total transactions to send (default: auto from --per-step)
+#   -s, --start-rate   Starting TPS rate (default: 5)
+#   -m, --max-rate     Maximum TPS rate to ramp to (default: 50)
+#   -r, --ramp-step    TPS increase per ramp interval (default: 5)
+#   -i, --ramp-interval Seconds between rate increases (default: 30, ignored with --per-step)
+#   -p, --per-step     TXs to send at each rate level before stepping up (default: 20)
+#                       When set, ignores --ramp-interval and auto-calculates --total
 #   -a, --amount       TIME per transaction (default: 0.001)
 #   -t, --timeout      Finality poll timeout per TX in seconds (default: 60)
 #   -o, --output       CSV output file (default: stress_results_<timestamp>.csv)
 #   --testnet          Use testnet (passes --testnet to time-cli)
+#   --no-early-stop    Disable early termination on saturation
 #   -h, --help         Show this help
 #
 # Example:
-#   bash scripts/stress_test.sh --testnet -n 200 -s 1 -m 10 -r 2 -i 20
+#   bash scripts/stress_test.sh --testnet -p 30 -s 5 -m 100 -r 5
 
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
-TOTAL_TX=100
-START_RATE=1
-MAX_RATE=20
-RAMP_STEP=1
+TOTAL_TX=0
+START_RATE=5
+MAX_RATE=50
+RAMP_STEP=5
 RAMP_INTERVAL=30
+PER_STEP=20
 AMOUNT="0.001"
 FINALITY_TIMEOUT=60
 OUTPUT=""
 CLI_FLAGS=""
+EARLY_STOP=1
 
 # ── Colors ────────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -64,14 +69,22 @@ while [[ $# -gt 0 ]]; do
         -m|--max-rate)      MAX_RATE="$2";        shift 2 ;;
         -r|--ramp-step)     RAMP_STEP="$2";       shift 2 ;;
         -i|--ramp-interval) RAMP_INTERVAL="$2";   shift 2 ;;
+        -p|--per-step)      PER_STEP="$2";        shift 2 ;;
         -a|--amount)        AMOUNT="$2";          shift 2 ;;
         -t|--timeout)       FINALITY_TIMEOUT="$2"; shift 2 ;;
         -o|--output)        OUTPUT="$2";          shift 2 ;;
         --testnet)          CLI_FLAGS="--testnet"; shift ;;
+        --no-early-stop)    EARLY_STOP=0;         shift ;;
         -h|--help)          usage ;;
         *) log_error "Unknown option: $1"; usage ;;
     esac
 done
+
+# Auto-calculate total if not explicitly set
+if [ "$TOTAL_TX" -eq 0 ]; then
+    NUM_STEPS=$(( (MAX_RATE - START_RATE) / RAMP_STEP + 1 ))
+    TOTAL_TX=$(( NUM_STEPS * PER_STEP ))
+fi
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 if [ -z "$OUTPUT" ]; then
@@ -102,9 +115,10 @@ log_header "TIME Coin Network Stress Test"
 echo ""
 log_info "CLI:            $CLI_CMD"
 log_info "Total TX:       $TOTAL_TX"
-log_info "Rate ramp:      ${START_RATE} → ${MAX_RATE} TPS (step ${RAMP_STEP} every ${RAMP_INTERVAL}s)"
+log_info "Rate ramp:      ${START_RATE} → ${MAX_RATE} TPS (step ${RAMP_STEP}, ${PER_STEP} TX/step)"
 log_info "Amount/TX:      $AMOUNT TIME"
 log_info "Finality timeout: ${FINALITY_TIMEOUT}s"
+log_info "Early stop:     $([ "$EARLY_STOP" -eq 1 ] && echo "enabled" || echo "disabled")"
 log_info "Output:         $OUTPUT"
 echo ""
 
@@ -178,19 +192,25 @@ ms_now() {
 }
 
 # ── Send Phase ────────────────────────────────────────────────────────────────
-log_header "Phase 1: Sending $TOTAL_TX Transactions (Ramping Load)"
+log_header "Phase 1: Sending $TOTAL_TX Transactions (Ramping ${START_RATE}→${MAX_RATE} TPS)"
 echo ""
 
 PHASE1_START=$(ms_now)
-INTERVAL_TX_COUNT=0
-INTERVAL_START=$(date +%s)
+STEP_TX_COUNT=0
+STEP_SEND_FAILURES=0
+STOPPED_EARLY=0
 
 for (( i=1; i<=TOTAL_TX; i++ )); do
-    NOW_S=$(date +%s)
+    # Count-based ramp: step up after PER_STEP transactions at current rate
+    if [ "$STEP_TX_COUNT" -ge "$PER_STEP" ]; then
+        # Early stop: if >50% of this step's TXs failed to send, network is saturated
+        if [ "$EARLY_STOP" -eq 1 ] && [ "$STEP_SEND_FAILURES" -gt $(( PER_STEP / 2 )) ]; then
+            echo ""
+            log_warning "Early stop: ${STEP_SEND_FAILURES}/${PER_STEP} send failures at ${CURRENT_RATE} TPS"
+            STOPPED_EARLY=1
+            break
+        fi
 
-    # Ramp up rate
-    ELAPSED_IN_INTERVAL=$(( NOW_S - INTERVAL_START ))
-    if [ "$ELAPSED_IN_INTERVAL" -ge "$RAMP_INTERVAL" ]; then
         OLD_RATE=$CURRENT_RATE
         CURRENT_RATE=$(( CURRENT_RATE + RAMP_STEP ))
         if [ "$CURRENT_RATE" -gt "$MAX_RATE" ]; then
@@ -198,14 +218,14 @@ for (( i=1; i<=TOTAL_TX; i++ )); do
         fi
         if [ "$CURRENT_RATE" -ne "$OLD_RATE" ]; then
             echo ""
-            log_info "Rate increased: ${OLD_RATE} → ${CURRENT_RATE} TPS"
+            log_info "Rate increased: ${OLD_RATE} → ${CURRENT_RATE} TPS (sent ${STEP_TX_COUNT} @ ${OLD_RATE}, ${STEP_SEND_FAILURES} failures)"
         fi
-        INTERVAL_START=$NOW_S
-        INTERVAL_TX_COUNT=0
+        STEP_TX_COUNT=0
+        STEP_SEND_FAILURES=0
     fi
 
     # Rate limiting: sleep to maintain target TPS
-    if [ "$INTERVAL_TX_COUNT" -gt 0 ] && [ "$CURRENT_RATE" -gt 0 ]; then
+    if [ "$STEP_TX_COUNT" -gt 0 ] && [ "$CURRENT_RATE" -gt 0 ]; then
         TARGET_INTERVAL_MS=$(( 1000 / CURRENT_RATE ))
         SLEEP_S=$(awk -v ms="$TARGET_INTERVAL_MS" 'BEGIN { printf "%.3f", ms / 1000.0 }')
         sleep "$SLEEP_S"
@@ -221,9 +241,10 @@ for (( i=1; i<=TOTAL_TX; i++ )); do
 
     if [ -z "$TXID" ]; then
         SEND_FAILURES=$(( SEND_FAILURES + 1 ))
-        echo "$i,,${CURRENT_RATE},,${NOW_S},${SEND_LATENCY},,false,,,send_failed: $(echo "$SEND_RESULT" | tr ',' ';' | tr '\n' ' ')" >> "$OUTPUT"
+        STEP_SEND_FAILURES=$(( STEP_SEND_FAILURES + 1 ))
+        echo "$i,,${CURRENT_RATE},,${SEND_START},${SEND_LATENCY},,false,,,send_failed: $(echo "$SEND_RESULT" | tr ',' ';' | tr '\n' ' ')" >> "$OUTPUT"
         echo -ne "\r  TX $i/$TOTAL_TX @ ${CURRENT_RATE} TPS — ❌ SEND FAILED (${SEND_LATENCY}ms)            "
-        INTERVAL_TX_COUNT=$(( INTERVAL_TX_COUNT + 1 ))
+        STEP_TX_COUNT=$(( STEP_TX_COUNT + 1 ))
         continue
     fi
 
@@ -235,7 +256,7 @@ for (( i=1; i<=TOTAL_TX; i++ )); do
     TX_SEQS+=("$i")
 
     echo -ne "\r  TX $i/$TOTAL_TX @ ${CURRENT_RATE} TPS — ${TXID:0:12}... (${SEND_LATENCY}ms)            "
-    INTERVAL_TX_COUNT=$(( INTERVAL_TX_COUNT + 1 ))
+    STEP_TX_COUNT=$(( STEP_TX_COUNT + 1 ))
 done
 
 PHASE1_END=$(ms_now)
@@ -252,6 +273,7 @@ log_header "Phase 2: Polling Finality for $SENT Transactions"
 echo ""
 
 PHASE2_START=$(ms_now)
+CONSECUTIVE_TIMEOUTS=0
 
 for (( idx=0; idx<${#TX_IDS[@]}; idx++ )); do
     TXID="${TX_IDS[$idx]}"
@@ -295,12 +317,26 @@ for (( idx=0; idx<${#TX_IDS[@]}; idx++ )); do
 
     if [ "$FINALIZED" = true ]; then
         FINALIZED_COUNT=$(( FINALIZED_COUNT + 1 ))
+        CONSECUTIVE_TIMEOUTS=0
         echo -ne "\r  [$((idx+1))/$SENT] ${TXID:0:12}... ✅ ${FINALITY_TIME}ms            "
     else
         FINALITY_FAILURES=$(( FINALITY_FAILURES + 1 ))
+        CONSECUTIVE_TIMEOUTS=$(( CONSECUTIVE_TIMEOUTS + 1 ))
         ERROR="timeout"
         FINALITY_TIME=""
         echo -ne "\r  [$((idx+1))/$SENT] ${TXID:0:12}... ❌ TIMEOUT            "
+
+        # Early stop on finality: 10 consecutive timeouts means network is overwhelmed
+        if [ "$EARLY_STOP" -eq 1 ] && [ "$CONSECUTIVE_TIMEOUTS" -ge 10 ]; then
+            echo ""
+            log_warning "Early stop: $CONSECUTIVE_TIMEOUTS consecutive finality timeouts"
+            # Write remaining TXs as timeouts
+            for (( rem=idx+1; rem<${#TX_IDS[@]}; rem++ )); do
+                FINALITY_FAILURES=$(( FINALITY_FAILURES + 1 ))
+                echo "${TX_SEQS[$rem]},${TX_IDS[$rem]},${TX_TARGET_RATES[$rem]},,${TX_SEND_TIMES[$rem]},${TX_SEND_LATENCIES[$rem]},,false,,,,early_stop" >> "$OUTPUT"
+            done
+            break
+        fi
     fi
 
     # Compute actual TPS at time of send
@@ -421,6 +457,7 @@ echo "  Transactions sent:      $SENT / $TOTAL_TX"
 echo "  Send failures:          $SEND_FAILURES"
 echo "  Finalized:              $FINALIZED_COUNT / $SENT"
 echo "  Finality timeouts:      $FINALITY_FAILURES"
+echo "  Peak TPS attempted:     ${CURRENT_RATE} TPS"
 echo "  Effective send rate:    ${ACTUAL_OVERALL_TPS} TPS"
 echo "══════════════════════════════════════════════════════════════"
 echo "                   SEND LATENCY (RPC → TXID)"
@@ -447,7 +484,9 @@ echo "════════════════════════�
 echo ""
 
 # Final verdict
-if [ "$FINALITY_FAILURES" -gt 0 ]; then
+if [ "$STOPPED_EARLY" -eq 1 ]; then
+    log_error "Network saturated during send phase at ${CURRENT_RATE} TPS"
+elif [ "$FINALITY_FAILURES" -gt 0 ]; then
     FAIL_RATE=$(awk -v f="$FINALITY_FAILURES" -v s="$SENT" 'BEGIN { printf "%.1f", f/s*100 }')
     if [ "$FINALITY_FAILURES" -gt $(( SENT / 2 )) ]; then
         log_error "Network saturated: ${FAIL_RATE}% finality failures"
@@ -460,8 +499,24 @@ if [ "$FINALITY_FAILURES" -gt 0 ]; then
     if [ -n "$SATURATION_RATE" ]; then
         log_info "First failures appeared at ${SATURATION_RATE} TPS"
     fi
+
+    # Find the last rate with 100% finalization
+    LAST_GOOD_RATE=$(awk -F',' 'NR>1 {
+        rate=$3; fin=$8;
+        total[rate]++;
+        if (fin == "true") good[rate]++;
+    } END {
+        best=0;
+        for (r in total) {
+            if (good[r]+0 == total[r] && r+0 > best) best=r+0;
+        }
+        print best;
+    }' "$OUTPUT")
+    if [ "$LAST_GOOD_RATE" -gt 0 ] 2>/dev/null; then
+        log_success "Last clean rate: ${LAST_GOOD_RATE} TPS (100% finalization)"
+    fi
 else
-    log_success "All transactions finalized — network handled peak ${MAX_RATE} TPS"
+    log_success "All transactions finalized — network handled peak ${CURRENT_RATE} TPS"
 fi
 
 echo ""
