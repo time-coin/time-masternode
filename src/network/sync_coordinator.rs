@@ -134,21 +134,36 @@ impl SyncCoordinator {
 
         // Check if sync with this peer is already active
         if let Some(active) = &state.active_sync {
-            debug!(
-                "🔄 Sync already active with {} (heights {}-{}, source: {}), queuing new request",
-                peer_ip, active.start_height, active.end_height, active.source
-            );
+            // Auto-expire stale syncs that never completed (e.g., peer went offline)
+            if active.created_at.elapsed() > Duration::from_secs(60) {
+                warn!(
+                    "⚠️  Auto-expiring stale sync with {} (started {:?} ago, heights {}-{})",
+                    peer_ip,
+                    active.created_at.elapsed(),
+                    active.start_height,
+                    active.end_height
+                );
+                state.active_sync = None;
+                let mut active_count = self.active_sync_count.write().await;
+                *active_count = active_count.saturating_sub(1);
+                // Fall through to approve new sync below
+            } else {
+                debug!(
+                    "🔄 Sync already active with {} (heights {}-{}, source: {}), queuing new request",
+                    peer_ip, active.start_height, active.end_height, active.source
+                );
 
-            // Queue this request for later
-            state.queued_syncs.push(SyncRequest {
-                peer_ip: peer_ip.clone(),
-                start_height,
-                end_height,
-                source,
-                created_at: Instant::now(),
-            });
+                // Queue this request for later
+                state.queued_syncs.push(SyncRequest {
+                    peer_ip: peer_ip.clone(),
+                    start_height,
+                    end_height,
+                    source,
+                    created_at: Instant::now(),
+                });
 
-            return Ok(false);
+                return Ok(false);
+            }
         }
 
         // Check throttling - did we sync with this peer recently?
