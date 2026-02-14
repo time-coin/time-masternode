@@ -2467,14 +2467,20 @@ impl MessageHandler {
             consensus_peer_count
         );
 
-        // If we're on the minority fork, request consensus chain
-        if your_height == consensus_height && your_hash != consensus_hash {
-            warn!("   ⚠️ We appear to be on minority fork! Requesting consensus chain...");
+        // If we're on the minority fork, request consensus chain.
+        // Check both same-height forks and height mismatches (we may have
+        // advanced further on our fork, or fallen behind).
+        let our_hash_differs = your_hash != consensus_hash;
+        let heights_close = your_height.abs_diff(consensus_height) <= 5;
+
+        if our_hash_differs && heights_close {
+            warn!(
+                "   ⚠️ We appear to be on minority fork (our height {} vs consensus {})! Requesting consensus chain...",
+                your_height, consensus_height
+            );
             let request_from = consensus_height.saturating_sub(10);
-            return Ok(Some(NetworkMessage::GetBlocks(
-                request_from,
-                consensus_height + 5,
-            )));
+            let request_to = your_height.max(consensus_height) + 5;
+            return Ok(Some(NetworkMessage::GetBlocks(request_from, request_to)));
         }
 
         Ok(None)
