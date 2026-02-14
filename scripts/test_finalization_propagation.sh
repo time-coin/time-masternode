@@ -56,7 +56,7 @@ fi
 
 # Step 1: Send transaction
 log_info "Step 1: Sending transaction..."
-TEST_ADDR=$(time-cli getmasternodes 2>/dev/null | jq -r '.[0].address')
+TEST_ADDR=$(time-cli masternodelist 2>/dev/null | jq -r '.masternodes[0].wallet_address')
 if [ -z "$TEST_ADDR" ] || [ "$TEST_ADDR" == "null" ]; then
     log_fail "Cannot get test address"
     exit 1

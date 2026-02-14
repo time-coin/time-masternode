@@ -59,10 +59,10 @@ check_prerequisites() {
         exit 1
     fi
     
-    # Check version (from getnetworkinfo or skip version check)
-    VERSION=$(time-cli getnetworkinfo 2>/dev/null | jq -r '.version // "1.1.0"')
-    if [ "$VERSION" != "1.1.0" ]; then
-        log_fail "Wrong version: $VERSION (expected 1.1.0)"
+    # Check version (from getnetworkinfo — version is numeric, e.g. 110000 for v1.1.0)
+    VERSION=$(time-cli getnetworkinfo 2>/dev/null | jq -r '.version // 0')
+    if [ "$VERSION" -lt 110000 ]; then
+        log_fail "Wrong version: $VERSION (expected >= 110000 / v1.1.0)"
         exit 1
     fi
     
@@ -74,7 +74,7 @@ test_basic_transaction() {
     log_info "Test 1: Basic Transaction Creation"
     
     # Get test address
-    TEST_ADDR=$(time-cli masternodelist 2>/dev/null | jq -r '.[0].address')
+    TEST_ADDR=$(time-cli masternodelist 2>/dev/null | jq -r '.masternodes[0].wallet_address')
     if [ -z "$TEST_ADDR" ] || [ "$TEST_ADDR" == "null" ]; then
         log_fail "Cannot get test address (no masternodes?)"
         return 1
