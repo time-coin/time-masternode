@@ -2969,13 +2969,13 @@ impl Blockchain {
 
                 // Get peer's tier weight (default to Bronze if not found)
                 let peer_weight = match self.masternode_registry.get(peer_ip).await {
-                    Some(info) => info.masternode.tier.sampling_weight() as u64,
+                    Some(info) => info.masternode.tier.sampling_weight(),
                     None => {
                         tracing::debug!(
                             "Peer {} not in masternode registry, using Bronze weight",
                             peer_ip
                         );
-                        crate::types::MasternodeTier::Bronze.sampling_weight() as u64
+                        crate::types::MasternodeTier::Bronze.sampling_weight()
                     }
                 };
 
@@ -6183,8 +6183,8 @@ impl Blockchain {
         let mut total_responding_weight = 0u64;
         for peer_ip in peer_tips.keys() {
             let peer_weight = match self.masternode_registry.get(peer_ip).await {
-                Some(info) => info.masternode.tier.sampling_weight() as u64,
-                None => crate::types::MasternodeTier::Bronze.sampling_weight() as u64,
+                Some(info) => info.masternode.tier.sampling_weight(),
+                None => crate::types::MasternodeTier::Bronze.sampling_weight(),
             };
             total_responding_weight += peer_weight;
             if consensus_peers.contains(peer_ip) {

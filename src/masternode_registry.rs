@@ -1392,6 +1392,69 @@ impl Clone for MasternodeRegistry {
     }
 }
 
+/// Deterministic leader selection for a given block height.
+///
+/// This is the canonical implementation used by both block production (main.rs)
+/// and block validation (message_handler.rs). Both MUST use this function to
+/// ensure all nodes agree on the selected leader.
+///
+/// Returns the address of the selected leader, or None if masternodes is empty.
+pub fn select_leader(
+    masternodes: &[Masternode],
+    prev_block_hash: &[u8],
+    height: u64,
+    attempt: u64,
+    blocks_without_reward: &HashMap<String, u64>,
+) -> Option<String> {
+    if masternodes.is_empty() {
+        return None;
+    }
+
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(prev_block_hash);
+    hasher.update(height.to_le_bytes());
+    hasher.update(attempt.to_le_bytes());
+    let selection_hash: [u8; 32] = hasher.finalize().into();
+
+    // Build cumulative weight array for weighted selection
+    let mut cumulative_weights: Vec<u64> = Vec::with_capacity(masternodes.len());
+    let mut total_weight = 0u64;
+
+    for mn in masternodes {
+        let tier_weight = mn.tier.reward_weight();
+        let blocks_without = blocks_without_reward.get(&mn.address).copied().unwrap_or(0);
+
+        // Fairness bonus: +1 per 10 blocks without reward, capped at +20
+        let fairness_bonus = (blocks_without / 10).min(20);
+        let final_weight = tier_weight + fairness_bonus;
+
+        total_weight = total_weight.saturating_add(final_weight);
+        cumulative_weights.push(total_weight);
+    }
+
+    if total_weight == 0 {
+        return None;
+    }
+
+    // Convert hash to random value in range [0, total_weight)
+    let random_value = {
+        let mut val = 0u64;
+        for (i, &byte) in selection_hash.iter().take(8).enumerate() {
+            val |= (byte as u64) << (i * 8);
+        }
+        val % total_weight
+    };
+
+    // Binary search to find selected masternode based on weight
+    let producer_index = cumulative_weights
+        .iter()
+        .position(|&w| random_value < w)
+        .unwrap_or(masternodes.len() - 1);
+
+    Some(masternodes[producer_index].address.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

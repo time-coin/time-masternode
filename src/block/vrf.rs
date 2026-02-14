@@ -138,6 +138,31 @@ fn fallback_vrf(height: u64, previous_hash: &Hash256) -> (Vec<u8>, Hash256, u64)
     (Vec::new(), hash, score)
 }
 
+/// Check if a VRF score qualifies this node as a block proposer.
+///
+/// Uses Algorand-style sortition: each unit of sampling weight gets an
+/// independent "lottery ticket". The threshold is set so that on average
+/// ~1 proposer is selected per slot across the entire AVS.
+///
+/// A node with `node_weight / total_weight` fraction of stake has that
+/// probability of being selected.
+pub fn vrf_check_proposer_eligible(
+    vrf_score: u64,
+    node_sampling_weight: u64,
+    total_sampling_weight: u64,
+) -> bool {
+    if total_sampling_weight == 0 || node_sampling_weight == 0 {
+        return false;
+    }
+
+    // threshold = (node_weight / total_weight) * u64::MAX
+    // Use u128 to avoid overflow
+    let threshold =
+        (node_sampling_weight as u128 * u64::MAX as u128) / total_sampling_weight as u128;
+
+    (vrf_score as u128) < threshold
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

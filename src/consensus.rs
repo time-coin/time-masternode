@@ -280,7 +280,7 @@ impl std::fmt::Display for Preference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatorInfo {
     pub address: String,
-    pub weight: usize, // Sampling weight based on tier
+    pub weight: u64, // Sampling weight based on tier
 }
 
 /// Transaction voting state - tracks preference for fallback protocol
@@ -1170,7 +1170,7 @@ impl TimeVoteConsensus {
         // Calculate total AVS weight
         let total_avs_weight: u64 = masternodes
             .iter()
-            .map(|info| info.masternode.tier.sampling_weight() as u64)
+            .map(|info| info.masternode.tier.sampling_weight())
             .sum();
 
         // Create closure for public key lookup
@@ -1878,7 +1878,7 @@ impl ConsensusEngine {
         // Get masternode info to determine weight
         let masternodes = self.get_masternodes();
         let mn = masternodes.iter().find(|mn| mn.address == voter_mn_id)?;
-        let voter_weight = mn.tier.sampling_weight() as u64;
+        let voter_weight = mn.tier.sampling_weight();
 
         // Sign and create the vote
         let vote = identity.sign_finality_vote(

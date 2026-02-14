@@ -348,10 +348,9 @@ impl MasternodeTier {
         }
     }
 
-    /// Sampling weight for timevote consensus
-    /// Used for stake-weighted sampling: P(sample node_i) = Weight_i / Total_Weight
-    #[allow(dead_code)]
-    pub fn sampling_weight(&self) -> usize {
+    /// Sampling weight for VRF sortition and timevote consensus (§5.2)
+    /// Used for stake-weighted leader selection and sampling
+    pub fn sampling_weight(&self) -> u64 {
         match self {
             MasternodeTier::Free => 1,     // 1x weight
             MasternodeTier::Bronze => 10,  // 10x weight
@@ -684,7 +683,7 @@ pub struct AVSSnapshot {
 impl AVSSnapshot {
     /// Create a new AVS snapshot with shared validator reference
     pub fn new_with_ref(slot_index: u64, validators: Arc<Vec<ValidatorInfo>>) -> Self {
-        let total_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
+        let total_weight: u64 = validators.iter().map(|v| v.weight).sum();
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -730,7 +729,7 @@ impl AVSSnapshot {
             validators
                 .iter()
                 .find(|v| v.address == mn_id)
-                .map(|v| v.weight as u64)
+                .map(|v| v.weight)
         } else {
             self.validators
                 .iter()

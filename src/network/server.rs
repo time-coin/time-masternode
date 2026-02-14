@@ -1643,7 +1643,7 @@ async fn handle_peer(
 
                                         // Step 2: Check if finality threshold reached (51% simple majority)
                                         let validators = consensus_clone.timevote.get_validators();
-                                        let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
+                                        let total_avs_weight: u64 = validators.iter().map(|v| v.weight).sum();
                                         let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
 
                                         tracing::info!(
