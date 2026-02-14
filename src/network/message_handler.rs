@@ -3526,7 +3526,7 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         tracing::debug!(
-            "🔒 [{}] Received UTXO state update for {:?} -> {:?}",
+            "🔒 [{}] Received UTXO state update for {} -> {:?}",
             self.direction,
             outpoint,
             state
@@ -3542,7 +3542,7 @@ impl MessageHandler {
             match state {
                 UTXOState::Locked { txid, .. } => {
                     tracing::info!(
-                        "🔒 [{}] Locked UTXO {:?} for TX {:?}",
+                        "🔒 [{}] Locked UTXO {} for TX {}",
                         self.direction,
                         outpoint,
                         hex::encode(txid)
@@ -3550,7 +3550,7 @@ impl MessageHandler {
                 }
                 UTXOState::SpentPending { txid, .. } | UTXOState::SpentFinalized { txid, .. } => {
                     tracing::info!(
-                        "💸 [{}] Marked UTXO {:?} as spent by TX {:?}",
+                        "💸 [{}] Marked UTXO {} as spent by TX {}",
                         self.direction,
                         outpoint,
                         hex::encode(txid)
