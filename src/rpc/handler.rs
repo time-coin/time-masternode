@@ -124,8 +124,8 @@ impl RpcHandler {
 
     async fn get_blockchain_info(&self) -> Result<Value, RpcError> {
         let chain = match self.network {
-            NetworkType::Mainnet => "main",
-            NetworkType::Testnet => "test",
+            NetworkType::Mainnet => "mainnet",
+            NetworkType::Testnet => "testnet",
         };
         let height = self.blockchain.get_height();
         let best_hash = self.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);

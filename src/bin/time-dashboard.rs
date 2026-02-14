@@ -526,13 +526,18 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(block, chunks[0]);
     }
 
-    // Peer list
-    let peers: Vec<Row> = app
-        .data
-        .peers
+    // Peer list — sorted by fastest ping, numbered
+    let mut sorted_peers: Vec<&PeerInfo> = app.data.peers.iter().collect();
+    sorted_peers.sort_by(|a, b| {
+        let pa = a.pingtime.unwrap_or(f64::MAX);
+        let pb = b.pingtime.unwrap_or(f64::MAX);
+        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let peers: Vec<Row> = sorted_peers
         .iter()
         .take(20)
-        .map(|peer| {
+        .enumerate()
+        .map(|(i, peer)| {
             let ping = peer
                 .pingtime
                 .map(|p| format!("{:.0} ms", p * 1000.0))
@@ -540,6 +545,7 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
             let direction = if peer.inbound { "←" } else { "→" };
 
             Row::new(vec![
+                Cell::from(format!("{}", i + 1)),
                 Cell::from(direction),
                 Cell::from(peer.addr.clone()),
                 Cell::from(ping),
@@ -550,12 +556,13 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
     let peer_table = Table::new(
         peers,
         [
+            Constraint::Length(4),
             Constraint::Length(3),
             Constraint::Min(30),
             Constraint::Length(12),
         ],
     )
-    .header(Row::new(vec!["Dir", "Address", "Ping"]).style(Style::default().fg(Color::Yellow)))
+    .header(Row::new(vec!["#", "Dir", "Address", "Ping"]).style(Style::default().fg(Color::Yellow)))
     .block(
         Block::default()
             .borders(Borders::ALL)
