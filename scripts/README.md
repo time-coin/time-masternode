@@ -516,4 +516,35 @@ See [LICENSE](../LICENSE) file in the repository root.
 
 ---
 
-**Last Updated**: 2025-12-11
+**Last Updated**: 2026-02-14
+
+---
+
+## 🧪 Testing Scripts
+
+### stress_test.sh
+Network stress test that sends transactions at increasing rates to measure finalization performance and find the saturation point.
+
+**Features**:
+- ✅ Ramping load: starts at configurable TPS, increases to a max rate
+- ✅ Measures send latency (RPC round-trip) and finality time (send → confirmed)
+- ✅ Per-rate breakdown with P50/P95/P99 percentiles
+- ✅ CSV output for graphing and analysis
+- ✅ Detects saturation point (first rate where failures appear)
+
+**Usage**:
+```bash
+# Default: 100 TX, ramp 1→20 TPS
+bash scripts/stress_test.sh
+
+# Custom: 500 TX, ramp 2→50 TPS, step 5 every 15s
+bash scripts/stress_test.sh -n 500 -s 2 -m 50 -r 5 -i 15
+
+# Minimal test
+bash scripts/stress_test.sh -n 20 -s 1 -m 5 -a 0.001
+
+# All options
+bash scripts/stress_test.sh --help
+```
+
+**CSV Columns**: `tx_seq, txid, target_tps, actual_tps, send_time_unix, send_latency_ms, finality_time_ms, finalized, votes, accumulated_weight, confirmations, error`
