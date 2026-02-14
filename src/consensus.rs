@@ -330,23 +330,28 @@ impl PrepareVoteAccumulator {
         }
     }
 
-    /// Add a prepare vote for a block
+    /// Add a prepare vote for a block.
+    /// A voter can only vote for ONE block — first vote wins.
     pub fn add_vote(&self, block_hash: Hash256, voter_id: String, weight: u64) {
-        self.votes
-            .entry(block_hash)
-            .or_default()
-            .push((voter_id, weight));
+        // Check if this voter already voted for a DIFFERENT block
+        for entry in self.votes.iter() {
+            if *entry.key() != block_hash && entry.value().iter().any(|(id, _)| *id == voter_id) {
+                tracing::debug!(
+                    "⚠️ Ignoring duplicate prepare vote from {} — already voted for different block",
+                    voter_id
+                );
+                return;
+            }
+        }
+        // Also prevent double-voting for the same block
+        let mut votes = self.votes.entry(block_hash).or_default();
+        if votes.iter().any(|(id, _)| *id == voter_id) {
+            return;
+        }
+        votes.push((voter_id, weight));
     }
 
     /// Check if timevote consensus reached: majority of participating validators agree
-    ///
-    /// ADAPTIVE QUORUM: The denominator is the smaller of `sample_size` (active validators)
-    /// and the total unique voters across ALL block hashes. This ensures that connected
-    /// but non-participating nodes (e.g., on a fork, or failing to vote) don't inflate
-    /// the quorum denominator and block finalization for the agreeing majority.
-    ///
-    /// SECURITY: A minimum of 2 unique voters is required to prevent solo finalization.
-    /// A single node voting for its own block cannot achieve consensus alone.
     pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
@@ -417,12 +422,25 @@ impl PrecommitVoteAccumulator {
         }
     }
 
-    /// Add a precommit vote for a block
+    /// Add a precommit vote for a block.
+    /// A voter can only vote for ONE block — first vote wins.
     pub fn add_vote(&self, block_hash: Hash256, voter_id: String, weight: u64) {
-        self.votes
-            .entry(block_hash)
-            .or_default()
-            .push((voter_id, weight));
+        // Check if this voter already voted for a DIFFERENT block
+        for entry in self.votes.iter() {
+            if *entry.key() != block_hash && entry.value().iter().any(|(id, _)| *id == voter_id) {
+                tracing::debug!(
+                    "⚠️ Ignoring duplicate precommit vote from {} — already voted for different block",
+                    voter_id
+                );
+                return;
+            }
+        }
+        // Also prevent double-voting for the same block
+        let mut votes = self.votes.entry(block_hash).or_default();
+        if votes.iter().any(|(id, _)| *id == voter_id) {
+            return;
+        }
+        votes.push((voter_id, weight));
     }
 
     /// Check if timevote consensus reached: majority of participating validators agree

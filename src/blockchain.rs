@@ -6260,11 +6260,14 @@ impl Blockchain {
         let height_advantage = consensus_height.saturating_sub(second_highest);
 
         if height_advantage == 0 {
-            // Same-height fork — require 2/3 weighted support to pick a winner
-            let required_weight = (total_responding_weight * 2).div_ceil(3);
+            // Same-height fork — the chain with more peers is canonical.
+            // Simple majority (>50%) is sufficient because the minority MUST switch
+            // to resolve the fork. Requiring 2/3 causes permanent forks when the split
+            // is close (e.g., 3 vs 2 = 60% never meets 67% threshold).
+            let required_weight = total_responding_weight / 2 + 1; // strict majority
             if consensus_weight < required_weight {
                 tracing::warn!(
-                    "⚠️  Same-height fork at {}: consensus has insufficient weighted support: {}/{} weight ({:.1}%) - need 2/3 ({}).",
+                    "⚠️  Same-height fork at {}: consensus has insufficient weighted support: {}/{} weight ({:.1}%) - need majority ({}).",
                     consensus_height,
                     consensus_weight,
                     total_responding_weight,
