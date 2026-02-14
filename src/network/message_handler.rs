@@ -3279,12 +3279,31 @@ impl MessageHandler {
                 ));
             }
 
-            // Verify the proposer's VRF score qualifies them (sampling weight threshold)
-            let proposer_weight = proposer_info.masternode.tier.sampling_weight();
+            // Verify the proposer's VRF score qualifies them (sampling weight + fairness bonus)
+            let blocks_without_reward_map = context
+                .masternode_registry
+                .get_verifiable_reward_tracking(&context.blockchain)
+                .await;
+
+            let proposer_blocks_without = blocks_without_reward_map
+                .get(&proposer)
+                .copied()
+                .unwrap_or(0);
+            let proposer_fairness_bonus = (proposer_blocks_without / 10).min(20);
+            let proposer_weight =
+                proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
+
             let eligible_masternodes = context.masternode_registry.get_eligible_for_rewards().await;
             let total_sampling_weight: u64 = eligible_masternodes
                 .iter()
-                .map(|(mn, _)| mn.tier.sampling_weight())
+                .map(|(mn, _)| {
+                    let bonus = blocks_without_reward_map
+                        .get(&mn.address)
+                        .copied()
+                        .map(|b| (b / 10).min(20))
+                        .unwrap_or(0);
+                    mn.tier.sampling_weight() + bonus
+                })
                 .sum();
 
             if total_sampling_weight > 0 {

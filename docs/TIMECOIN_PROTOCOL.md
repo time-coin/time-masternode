@@ -118,9 +118,32 @@ Each tier has multiple weight types for different protocol functions:
 | Silver | 10,000 | 100 | 10,000 | 10 |
 | Gold | 100,000 | 1,000 | 100,000 | 100 |
 
-- **Sampling Weight (`w`):** Used for stake-weighted validator selection during TimeVote polling (§7.4)
+- **Sampling Weight (`w`):** Used for stake-weighted validator selection during TimeVote polling (§7.4) and VRF sortition threshold (§9.2)
 - **Reward Weight:** Used for proportional block reward distribution (§10.4). Scales 1:1 with collateral except Free tier (0.1x relative to Bronze)
 - **Voting Power:** Used for governance. Free tier nodes cannot vote on governance (voting power = 0)
+
+### 5.2.1 Fairness Bonus (Sortition Weight Adjustment)
+
+To prevent higher-tier masternodes from monopolizing block production, a **fairness bonus** is added to each masternode's sampling weight during VRF sortition (§9.2). The bonus increases the longer a masternode goes without producing a block:
+
+```
+fairness_bonus = min(blocks_without_reward / 10, 20)
+effective_weight = sampling_weight + fairness_bonus
+```
+
+| Blocks Without Reward | Fairness Bonus | Free Effective Weight | Bronze Effective Weight |
+|----------------------|----------------|----------------------|------------------------|
+| 0 | 0 | 1 | 10 |
+| 50 | 5 | 6 | 15 |
+| 100 | 10 | 11 | 20 |
+| 200+ | 20 (cap) | 21 | 30 |
+
+**Key properties:**
+- **On-chain verifiable:** All nodes independently scan blockchain history to compute `blocks_without_reward`, preventing local manipulation
+- **Additive, not multiplicative:** Prevents Gold tier from getting outsized bonuses
+- **Capped at +20:** Prevents unbounded weight inflation
+- **Resets on reward:** Counter returns to 0 when a masternode produces a block and receives a reward
+- **Tier crossover:** A Free tier node waiting 200+ blocks (effective weight 21) can outcompete a Bronze node (base weight 10) that recently produced
 
 ### 5.3 Collateral Enforcement (MUST CHOOSE ONE)
 1. **On-chain staking UTXO (RECOMMENDED):** stake locked by a staking script; weight derived from locked amount and tier mapping.
@@ -638,25 +661,50 @@ Checkpoint blocks exist to:
 - `BLOCK_INTERVAL = 600s`
 - `slot_time = slot_index * 600`
 
-### 9.2 Sortition (Deterministic Candidate Ranking)
-For each masternode `i` in the AVS at `slot_index`:
-- `vrf_input = SHA256("TIMECOIN_VRF_V2" || uint64_le(height) || prev_block_hash)`
-- `score_i = VRF(vrf_input, sk_i)`
+### 9.2 Sortition (VRF-based Self-Selection)
 
-Lower `score_i` is better.
+Each masternode `i` in the AVS independently evaluates whether it is eligible to propose a block:
+
+1. Compute VRF:
+   - `vrf_input = SHA256("TIMECOIN_VRF_V2" || uint64_le(height) || prev_block_hash)`
+   - `(vrf_output_i, vrf_proof_i) = VRF(vrf_input, sk_i)`
+   - `score_i = uint64_le(vrf_output_i[0..8])`
+
+2. Compute effective weight with fairness bonus (§5.2.1):
+   - `effective_weight_i = sampling_weight_i + min(blocks_without_reward_i / 10, 20)`
+   - `total_effective_weight = Σ effective_weight_j` for all `j ∈ AVS`
+
+3. Check eligibility threshold:
+   - `threshold_i = (effective_weight_i / total_effective_weight) × TARGET_PROPOSERS × 2^64`
+   - `TARGET_PROPOSERS = 3` (tuned for ≥95% probability of at least one proposer per slot)
+   - Node is eligible if `score_i < threshold_i`
+
+4. If eligible, broadcast `TimeLockBlockProposal` containing the block with `vrf_proof`, `vrf_output`, and `vrf_score` in the header.
+
+Lower `score_i` is better. Among multiple valid proposals, the one with the lowest `vrf_score` is selected as canonical (§9.3).
+
+**Properties:**
+- **Private selection:** Only the selected node knows it is eligible until it reveals the VRF proof (DDoS resistant)
+- **Verifiable:** Any node can verify the VRF proof using the proposer's public key
+- **Fair:** Fairness bonus ensures all tiers eventually produce blocks
+- **Reliable:** TARGET_PROPOSERS=3 ensures high probability (≥95%) of at least one proposer per slot
+
+**Timeout Fallback:**
+If no valid proposal is received within 10 seconds, nodes progressively relax the threshold by multiplying `effective_weight_i` by `2^attempt` (where attempt increments every 10s). After ~60 seconds, all nodes become eligible (emergency fallback).
 
 **Security Note (VRF Grinding Mitigation):**
 The VRF input MUST include `prev_block_hash` to prevent grinding attacks. The domain separator `"TIMECOIN_VRF_V2"` and block `height` are predictable, but `prev_block_hash` changes with each block and cannot be known in advance, making pre-computation attacks infeasible. This follows best practices from Algorand, Ethereum 2.0, and Cardano.
 
-### 9.3 Canonical block selection (no timeout proofs)
-Any AVS-active masternode MAY publish a candidate block for the slot.
+### 9.3 Canonical Block Selection
+
+Any VRF-eligible masternode MAY publish a candidate block for the slot.
 
 Nodes select the canonical block for a slot by:
-1. Validity first
-2. Lowest `vrf_output` second
+1. Validity first (VRF proof verifies, proposer in AVS, score below threshold)
+2. Lowest `vrf_score` second
 3. Tie-breaker: lowest block hash
 
-This eliminates unverifiable “leader timeout” behavior.
+When a node receives a valid proposal with a lower VRF score than a previously received proposal at the same height, it switches its vote to the better proposal.
 
 ### 9.4 Block Content
 A block MUST contain:
