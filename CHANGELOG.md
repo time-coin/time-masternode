@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fix: Filter `all_blocks` (merged set with accumulated blocks) instead of `blocks` (raw parameter)
   - Also fixed `peer_tip_block` selection to use merged block set for correct hash comparison
 
+### Fixed - UTXO Contention Under Concurrent Load
+- **`sendtoaddress` failed when multiple users sent transactions simultaneously**
+  - Coin selection picked UTXOs that were `Unspent` at query time but got `Locked` by
+    another concurrent transaction before `lock_and_validate_transaction` could lock them
+  - Fix: On UTXO contention errors, exclude the contested outpoints and immediately
+    re-select different UTXOs (up to 3 retries with growing exclusion set)
+  - Transparent to callers — retries happen internally within the RPC handler
+
 ### Fixed - TimeProof Threshold Mismatch
 - **TimeProof verification used 67% threshold instead of 51% (Protocol §8.3)**
   - `finality_proof.rs` correctly used 51% for local finalization checks
