@@ -6963,7 +6963,7 @@ impl Blockchain {
                 );
 
                 // Use AI fork resolver to make intelligent decision
-                let peer_tip_block = blocks.iter().max_by_key(|b| b.header.height).unwrap();
+                let peer_tip_block = all_blocks.iter().max_by_key(|b| b.header.height).unwrap();
                 let peer_tip_hash = peer_tip_block.hash();
                 let our_tip_hash = self.get_block_hash(our_height)?;
 
@@ -7151,8 +7151,12 @@ impl Blockchain {
                         peer_chain_length, common_ancestor, our_chain_length
                     );
 
-                    // Filter blocks to only those after common ancestor
-                    let reorg_blocks: Vec<Block> = blocks
+                    // Filter ALL blocks (merged set) to only those after common ancestor.
+                    // CRITICAL: Must use all_blocks (which includes accumulated blocks from
+                    // previous fetches), not just the latest batch from the peer, to avoid
+                    // an infinite loop when the peer splits its response across multiple messages.
+                    let all_blocks_count = all_blocks.len();
+                    let reorg_blocks: Vec<Block> = all_blocks
                         .into_iter()
                         .filter(|b| b.header.height > common_ancestor)
                         .collect();
@@ -7160,7 +7164,7 @@ impl Blockchain {
                     if reorg_blocks.is_empty() {
                         warn!(
                             "❌ No blocks to reorg with after filtering (common_ancestor: {}, peer_tip: {}, blocks_before_filter: {})",
-                            common_ancestor, peer_tip_height, all_blocks.len()
+                            common_ancestor, peer_tip_height, all_blocks_count
                         );
 
                         // Request blocks from common_ancestor+1 to peer_tip
