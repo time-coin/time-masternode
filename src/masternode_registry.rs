@@ -229,12 +229,17 @@ impl MasternodeRegistry {
 
         // If already registered, update status (treat as reconnection)
         if let Some(existing) = nodes.get_mut(&masternode.address) {
-            // Always update tier and collateral info (handles tier auto-detection on restart)
-            existing.masternode.tier = masternode.tier;
-            existing.masternode.collateral = masternode.collateral;
-            existing.masternode.collateral_outpoint = masternode.collateral_outpoint.clone();
-            existing.masternode.public_key = masternode.public_key;
-            existing.reward_address = reward_address.clone();
+            // Only update tier/collateral if the incoming data is an upgrade (or same)
+            // Never downgrade from a staked tier to Free via peer gossip
+            let dominated_by_incoming =
+                masternode.tier.collateral() >= existing.masternode.tier.collateral();
+            if dominated_by_incoming {
+                existing.masternode.tier = masternode.tier;
+                existing.masternode.collateral = masternode.collateral;
+                existing.masternode.collateral_outpoint = masternode.collateral_outpoint.clone();
+                existing.masternode.public_key = masternode.public_key;
+                existing.reward_address = reward_address.clone();
+            }
 
             if !existing.is_active && should_activate {
                 existing.is_active = true;

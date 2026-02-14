@@ -612,13 +612,6 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(&mn.reward_address, Style::default().fg(Color::Yellow)),
             ]),
             Line::from(vec![
-                Span::raw("Active: "),
-                Span::styled(
-                    if mn.is_active { "Yes" } else { "No" },
-                    Style::default().fg(status_color),
-                ),
-            ]),
-            Line::from(vec![
                 Span::raw("Uptime: "),
                 Span::styled(
                     format!("{} days, {} hours", uptime_days, uptime_hours % 24),
