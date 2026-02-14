@@ -640,8 +640,8 @@ impl TimeProof {
             accumulated_weight += vote.voter_weight;
         }
 
-        // 6. Check finality threshold (Protocol §8.3)
-        let finality_threshold = (total_avs_weight * 67) / 100;
+        // 6. Check finality threshold (Protocol §8.3: Q_finality = 51% simple majority)
+        let finality_threshold = (total_avs_weight * 51).div_ceil(100);
         if accumulated_weight < finality_threshold {
             return Err(format!(
                 "Insufficient weight: {} < {} (51% of {})",

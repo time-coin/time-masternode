@@ -42,6 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Fix: Filter `all_blocks` (merged set with accumulated blocks) instead of `blocks` (raw parameter)
   - Also fixed `peer_tip_block` selection to use merged block set for correct hash comparison
 
+### Fixed - TimeProof Threshold Mismatch
+- **TimeProof verification used 67% threshold instead of 51% (Protocol §8.3)**
+  - `finality_proof.rs` correctly used 51% for local finalization checks
+  - `types.rs` `TimeProof::verify()` incorrectly used 67%, causing peers to reject valid proofs
+  - With total AVS weight 15: local threshold was 8, but peer verification required 10
+  - Fix: Aligned `types.rs` to use 51% with `div_ceil` matching the protocol spec
+- **Auto-finalized transactions broadcast under-weight TimeProofs**
+  - After 5s timeout, TXs were auto-finalized and their TimeProofs broadcast regardless of weight
+  - Peers rejected these with "Insufficient weight" warnings
+  - Fix: Only broadcast TimeProof if accumulated weight meets 51% threshold; still finalize locally
+
 ### Removed
 - **Deleted 8 obsolete scripts** from `scripts/` directory:
   - `deploy_fork_fixes.sh`, `deploy_utxo_fix.sh` — one-time deployment scripts for past bug fixes

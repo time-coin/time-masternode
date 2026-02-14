@@ -2586,7 +2586,23 @@ impl ConsensusEngine {
                                     let _ = consensus_engine_clone
                                         .finality_proof_mgr
                                         .store_timeproof(proof.clone());
-                                    consensus_engine_clone.broadcast_timeproof(proof).await;
+
+                                    // Only broadcast if proof weight meets threshold;
+                                    // peers reject under-weight proofs with "Insufficient weight"
+                                    let total_avs_weight: u64 = consensus_engine_clone
+                                        .get_active_masternodes()
+                                        .iter()
+                                        .map(|mn| mn.tier.sampling_weight())
+                                        .sum();
+                                    let threshold = (total_avs_weight * 51).div_ceil(100);
+                                    if weight >= threshold {
+                                        consensus_engine_clone.broadcast_timeproof(proof).await;
+                                    } else {
+                                        tracing::debug!(
+                                            "⏭️ Skipping TimeProof broadcast for auto-finalized TX {:?} (weight {} < threshold {})",
+                                            hex::encode(txid), weight, threshold
+                                        );
+                                    }
                                 }
                                 Err(_) => {
                                     tracing::debug!(
