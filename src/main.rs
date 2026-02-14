@@ -1624,7 +1624,11 @@ async fn main() {
                             next_h, scheduled, scheduled - now_ts, tolerance
                         );
                     } else {
-                        tracing::debug!("📅 Block {} not due for {}s (early gate)", next_h, scheduled - now_ts);
+                        tracing::debug!(
+                            "📅 Block {} not due for {}s (early gate)",
+                            next_h,
+                            scheduled - now_ts
+                        );
                     }
                     continue;
                 }
