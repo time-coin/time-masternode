@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Future-Timestamp Blocks Rejected During Catchup
+- **CRITICAL: Catchup mode produced blocks with timestamps minutes in the future**
+  - During fast catchup (>5 blocks behind), the time gate was bypassed entirely
+  - This allowed producing blocks whose scheduled timestamp exceeded `now + 60s`
+  - Receiving nodes correctly rejected these blocks ("too far in future")
+  - Caused ~10 minute stalls as the network waited for the timestamp to arrive
+  - Fix: Early time gate now applies to ALL modes — blocks are never produced when
+    their scheduled timestamp exceeds `now + TIMESTAMP_TOLERANCE_SECS` (60s)
+  - Catchup still runs at full speed for past-due blocks, only pauses at the frontier
+
 ### Fixed - Block Production Log Spam During Participation Recovery
 - **Block production loop ran expensive masternode selection every second even when next block wasn't due**
   - Added early time gate before masternode selection — skips the entire masternode
