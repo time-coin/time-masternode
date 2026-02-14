@@ -229,11 +229,32 @@ impl MasternodeRegistry {
 
         // If already registered, update status (treat as reconnection)
         if let Some(existing) = nodes.get_mut(&masternode.address) {
-            // Only update tier/collateral if the incoming data is an upgrade (or same)
-            // Never downgrade from a staked tier to Free via peer gossip
-            let dominated_by_incoming =
-                masternode.tier.collateral() >= existing.masternode.tier.collateral();
-            if dominated_by_incoming {
+            // Protect local masternode entry from being overwritten by remote peers.
+            // Only the local node (via register() on startup) may update its own fields.
+            let is_local = self
+                .local_masternode_address
+                .read()
+                .await
+                .as_ref()
+                .map(|a| {
+                    let existing_ip = a.split(':').next().unwrap_or(a);
+                    let incoming_ip = masternode
+                        .address
+                        .split(':')
+                        .next()
+                        .unwrap_or(&masternode.address);
+                    existing_ip == incoming_ip
+                })
+                .unwrap_or(false);
+
+            if is_local && !should_activate {
+                // Remote peer trying to update our local entry — only allow activation
+                tracing::debug!(
+                    "🛡️ Ignoring remote update for local masternode {}",
+                    masternode.address
+                );
+            } else {
+                // Update tier and collateral info on re-registration
                 existing.masternode.tier = masternode.tier;
                 existing.masternode.collateral = masternode.collateral;
                 existing.masternode.collateral_outpoint = masternode.collateral_outpoint.clone();
