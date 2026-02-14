@@ -140,12 +140,12 @@ fn fallback_vrf(height: u64, previous_hash: &Hash256) -> (Vec<u8>, Hash256, u64)
 
 /// Check if a VRF score qualifies this node as a block proposer.
 ///
-/// Uses Algorand-style sortition: each unit of sampling weight gets an
-/// independent "lottery ticket". The threshold is set so that on average
-/// ~1 proposer is selected per slot across the entire AVS.
+/// Uses Algorand-style sortition: the threshold is set so that the expected
+/// number of proposers per slot is TARGET_PROPOSERS (default 3). With multiple
+/// eligible proposers, the lowest VRF score wins via best-proposal selection.
 ///
-/// A node with `node_weight / total_weight` fraction of stake has that
-/// probability of being selected.
+/// Higher TARGET_PROPOSERS = more reliable block production (fewer empty slots)
+/// but slightly more network traffic from competing proposals.
 pub fn vrf_check_proposer_eligible(
     vrf_score: u64,
     node_sampling_weight: u64,
@@ -155,10 +155,15 @@ pub fn vrf_check_proposer_eligible(
         return false;
     }
 
-    // threshold = (node_weight / total_weight) * u64::MAX
-    // Use u128 to avoid overflow
-    let threshold =
-        (node_sampling_weight as u128 * u64::MAX as u128) / total_sampling_weight as u128;
+    // Target ~3 proposers per slot on average for reliability
+    // P(at least 1 proposer) = 1 - (1 - 3/N)^N ≈ 95% for N=6
+    const TARGET_PROPOSERS: u128 = 3;
+
+    // threshold = (node_weight / total_weight) * TARGET_PROPOSERS * u64::MAX
+    // Capped at u64::MAX (100% probability)
+    let threshold = ((node_sampling_weight as u128 * u64::MAX as u128 * TARGET_PROPOSERS)
+        / total_sampling_weight as u128)
+        .min(u64::MAX as u128);
 
     (vrf_score as u128) < threshold
 }

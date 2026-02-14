@@ -1952,7 +1952,7 @@ async fn main() {
             let (_vrf_proof, _vrf_output, vrf_score) =
                 crate::block::vrf::generate_block_vrf(&signing_key, next_height, &prev_block_hash);
 
-            // Calculate total sampling weight across all eligible masternodes
+            // Find our masternode in the eligible set
             let our_addr = match &block_masternode_address {
                 Some(addr) => addr.clone(),
                 None => continue,
@@ -1964,9 +1964,32 @@ async fn main() {
                     continue;
                 }
             };
-            let our_sampling_weight = our_mn.tier.sampling_weight();
-            let total_sampling_weight: u64 =
-                masternodes.iter().map(|mn| mn.tier.sampling_weight()).sum();
+
+            // Calculate sampling weights with fairness bonus
+            // Fairness bonus: +1 per 10 blocks without reward, capped at +20
+            // This ensures nodes that haven't produced blocks get increasing priority
+            let blocks_without_reward_map = block_registry
+                .get_verifiable_reward_tracking(&block_blockchain)
+                .await;
+
+            let our_blocks_without = blocks_without_reward_map
+                .get(&our_addr)
+                .copied()
+                .unwrap_or(0);
+            let our_fairness_bonus = (our_blocks_without / 10).min(20);
+            let our_sampling_weight = our_mn.tier.sampling_weight() + our_fairness_bonus;
+
+            let total_sampling_weight: u64 = masternodes
+                .iter()
+                .map(|mn| {
+                    let bonus = blocks_without_reward_map
+                        .get(&mn.address)
+                        .copied()
+                        .map(|b| (b / 10).min(20))
+                        .unwrap_or(0);
+                    mn.tier.sampling_weight() + bonus
+                })
+                .sum();
 
             // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
             // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
