@@ -6821,28 +6821,25 @@ impl Blockchain {
             fork_height, peer_addr, blocks.len(), peer_tip_height, our_height
         );
 
-        // STRATEGY: Binary search requires we have enough blocks from the peer.
-        // If we don't have enough blocks, request more first.
-
-        // Calculate how many blocks we need to make an informed decision
-        // We need blocks going back far enough to find common ancestor
+        // STRATEGY: Request blocks covering MAX_REORG_DEPTH from our height.
+        // The common ancestor MUST be within MAX_REORG_DEPTH or we'd reject the reorg anyway.
+        // This prevents the old bug where fork_height shifted down each iteration,
+        // causing the node to download the entire blockchain back to genesis.
         let lowest_peer_block = all_blocks
             .iter()
             .map(|b| b.header.height)
             .min()
             .unwrap_or(fork_height);
-        let blocks_needed_for_search = 200.min(fork_height); // Go back at most 200 blocks or to genesis
+        let search_floor = our_height.saturating_sub(MAX_REORG_DEPTH);
 
-        if lowest_peer_block > fork_height.saturating_sub(blocks_needed_for_search)
-            && fork_height > 10
-        {
-            // We don't have enough block history - request more blocks from peer
-            let request_from = fork_height.saturating_sub(blocks_needed_for_search);
+        if lowest_peer_block > search_floor && search_floor > 0 {
+            // We don't have enough block history - request one batch covering the reorg window
+            let request_from = search_floor;
             let request_to = peer_tip_height;
 
             info!(
-                "📥 Requesting additional blocks {}-{} from {} for fork resolution (have {}-{})",
-                request_from, request_to, peer_addr, lowest_peer_block, peer_tip_height
+                "📥 Requesting blocks {}-{} from {} for fork resolution (need coverage back to {}, have {}-{})",
+                request_from, request_to, peer_addr, search_floor, lowest_peer_block, peer_tip_height
             );
 
             // Transition to fetching state
@@ -7056,71 +7053,7 @@ impl Blockchain {
                         return Ok(());
                     }
 
-                    // SECURITY CHECK: Verify peer chain has sufficient masternode authority
-                    // Free-tier nodes cannot reorg a chain backed by staked masternodes (Bronze+)
-                    // This prevents Sybil attacks where an attacker spins up many free nodes
-                    // to create a longer chain and overturn the staked network
-                    let our_authority =
-                        crate::masternode_authority::CanonicalChainSelector::analyze_our_chain_authority(
-                            &self.masternode_registry,
-                            self.connection_manager.read().await.as_ref().map(|v| &**v),
-                            self.peer_registry.read().await.as_ref().map(|v| &**v),
-                        )
-                        .await;
-
-                    let peer_authority =
-                        crate::masternode_authority::CanonicalChainSelector::analyze_peer_chain_authority(
-                            std::slice::from_ref(&peer_addr),
-                            &self.masternode_registry,
-                            self.peer_registry.read().await.as_ref().map(|v| &**v),
-                        )
-                        .await;
-
-                    info!(
-                        "📊 Masternode Authority Check:\n   Our chain: {}\n   Peer chain: {}",
-                        our_authority.format_summary(),
-                        peer_authority.format_summary()
-                    );
-
-                    // Rule: If our chain is backed by staked masternodes (Bronze+),
-                    // the peer must have at least the same tier to reorg us.
-                    // Free-tier nodes can never overturn a staked chain.
-                    let our_has_staked = our_authority.highest_tier
-                        >= crate::masternode_authority::AuthorityLevel::Bronze;
-                    let peer_has_staked = peer_authority.highest_tier
-                        >= crate::masternode_authority::AuthorityLevel::Bronze;
-
-                    if our_has_staked && !peer_has_staked {
-                        warn!(
-                            "🛡️ SECURITY: REJECTED REORG from {} - free-tier nodes cannot overturn staked chain",
-                            peer_addr
-                        );
-                        warn!(
-                            "   Our authority: {:?} (score {}) | Peer authority: {:?} (score {})",
-                            our_authority.highest_tier,
-                            our_authority.authority_score,
-                            peer_authority.highest_tier,
-                            peer_authority.authority_score
-                        );
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        return Ok(());
-                    }
-
-                    // Even with both staked, reject if peer has strictly lower authority
-                    if let Some(false) = peer_authority.compare_authority(&our_authority) {
-                        warn!(
-                            "🛡️ SECURITY: REJECTED REORG from {} - our chain has higher masternode authority ({:?} vs {:?})",
-                            peer_addr, our_authority.highest_tier, peer_authority.highest_tier
-                        );
-                        warn!(
-                            "   Our authority score: {} | Peer authority score: {}",
-                            our_authority.authority_score, peer_authority.authority_score
-                        );
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        return Ok(());
-                    }
-
-                    info!("📊 Simplified resolver decided to accept peer chain (longest valid chain rule)");
+                    info!("📊 Fork resolver accepted peer chain (longest valid chain rule)");
                     info!(
                         "📊 Chain comparison: peer has {} blocks from ancestor {} vs our {} blocks",
                         peer_chain_length, common_ancestor, our_chain_length
@@ -7344,16 +7277,19 @@ impl Blockchain {
                 }
             }
             Err(e) => {
-                warn!("⚠️  Binary search failed: {} - requesting more blocks", e);
+                warn!(
+                    "⚠️  Common ancestor search failed: {} - requesting blocks within reorg window",
+                    e
+                );
 
-                // Binary search failed - probably because peer blocks don't go back far enough
-                // Request deeper history from peer
-                let request_from = fork_height.saturating_sub(1000); // Go back up to 1000 blocks
+                // Request blocks covering MAX_REORG_DEPTH from our height.
+                // If the ancestor isn't within this range, we'd reject the reorg anyway.
+                let request_from = our_height.saturating_sub(MAX_REORG_DEPTH);
                 let request_to = peer_tip_height;
 
                 info!(
-                    "📥 Requesting deeper block history {}-{} from {}",
-                    request_from, request_to, peer_addr
+                    "📥 Requesting block history {}-{} from {} (MAX_REORG_DEPTH={})",
+                    request_from, request_to, peer_addr, MAX_REORG_DEPTH
                 );
 
                 *self.fork_state.write().await = ForkResolutionState::FetchingChain {
@@ -7362,7 +7298,7 @@ impl Blockchain {
                     peer_addr: peer_addr.clone(),
                     peer_height: peer_tip_height,
                     fetched_up_to: peer_tip_height,
-                    accumulated_blocks: Vec::new(), // Will accumulate as blocks arrive
+                    accumulated_blocks: all_blocks.clone(),
                     started_at: std::time::Instant::now(),
                 };
 
