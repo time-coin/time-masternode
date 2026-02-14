@@ -6132,8 +6132,16 @@ impl Blockchain {
                 false
             }
         } else {
-            // Always log when multiple chains detected (potential fork)
-            true
+            // For multiple chains (fork): log at most once per 60 seconds
+            static LAST_FORK_LOG: std::sync::atomic::AtomicI64 =
+                std::sync::atomic::AtomicI64::new(0);
+            let last_log = LAST_FORK_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs - last_log >= 60 {
+                LAST_FORK_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
         };
 
         if should_log {
