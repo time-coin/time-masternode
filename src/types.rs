@@ -24,6 +24,12 @@ pub struct OutPoint {
     pub vout: u32,
 }
 
+impl std::fmt::Display for OutPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", hex::encode(self.txid), self.vout)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::upper_case_acronyms)]
 pub struct UTXO {
