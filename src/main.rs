@@ -1916,20 +1916,20 @@ async fn main() {
                 }
             };
 
-            // Leader rotation timeout tracking
-            // Reset attempt counter when we move to a new height
+            // VRF timeout tracking: if no block is produced within LEADER_TIMEOUT_SECS,
+            // progressively relax the VRF threshold so more nodes become eligible.
+            // Each attempt doubles the effective threshold (exponential relaxation).
             if waiting_for_height != Some(next_height) {
                 waiting_for_height = Some(next_height);
                 waiting_since = Some(std::time::Instant::now());
                 leader_attempt = 0;
             } else if let Some(since) = waiting_since {
-                // Check if we've been waiting too long for this height
                 let elapsed = since.elapsed().as_secs();
                 let expected_attempt = elapsed / LEADER_TIMEOUT_SECS;
                 if expected_attempt > leader_attempt {
                     leader_attempt = expected_attempt;
                     tracing::warn!(
-                        "⏱️  Leader timeout for block {} ({}s elapsed) - rotating to backup leader (attempt {})",
+                        "⏱️  No block for height {} after {}s - relaxing VRF threshold (attempt {})",
                         next_height,
                         elapsed,
                         leader_attempt
@@ -1937,128 +1937,93 @@ async fn main() {
                 }
             }
 
-            // Deterministic leader selection using tier-based weighting + additive fairness bonus
-            // SECURITY: Fairness tracking is ON-CHAIN VERIFIABLE - all nodes scan blockchain history
-            // to calculate blocks_without_reward, preventing local modification attacks
-            //
-            // Hash(prev_block_hash || next_height || attempt) determines the leader
-            // Weight calculation:
-            // - Base tier weight: Free=1, Bronze=2, Silver=5, Gold=10
-            // - Fairness bonus: +1 per 10 blocks without reward (capped at +20)
-            // - Final weight = tier_weight + fairness_bonus
-            // This ensures lower tiers can compete when they've been waiting longer
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(prev_block_hash);
-            hasher.update(next_height.to_le_bytes());
-            hasher.update(leader_attempt.to_le_bytes()); // Include attempt for leader rotation
-            let selection_hash: [u8; 32] = hasher.finalize().into();
-
-            // Get VERIFIABLE reward tracking by scanning blockchain history
-            // All nodes independently calculate the same values from on-chain data
-            let blocks_without_reward_map = block_registry
-                .get_verifiable_reward_tracking(&block_blockchain)
-                .await;
-
-            // Build cumulative weight array for weighted selection
-            // Weight = tier_weight + fairness_bonus (additive, not multiplicative)
-            let mut cumulative_weights: Vec<u64> = Vec::with_capacity(masternodes.len());
-            let mut total_weight = 0u64;
-
-            for mn in &masternodes {
-                let tier_weight = mn.tier.reward_weight();
-                let blocks_without = blocks_without_reward_map
-                    .get(&mn.address)
-                    .copied()
-                    .unwrap_or(0);
-
-                // Fairness bonus: +1 per 10 blocks without reward, capped at +20
-                // Examples:
-                // - Free tier (weight 1) waiting 100 blocks: 1 + 10 = 11
-                // - Gold tier (weight 10) with recent reward: 10 + 0 = 10
-                // - Free tier can overtake Gold tier after 100 blocks!
-                let fairness_bonus = (blocks_without / 10).min(20);
-                let final_weight = tier_weight + fairness_bonus;
-
-                total_weight = total_weight.saturating_add(final_weight);
-                cumulative_weights.push(total_weight);
-
-                if blocks_without > 0 {
-                    tracing::debug!(
-                        "🎲 Masternode {} weight: tier={} + fairness={} ({}blocks) = {}",
-                        mn.address,
-                        tier_weight,
-                        fairness_bonus,
-                        blocks_without,
-                        final_weight
-                    );
+            // VRF-based self-selection (Algorand-style sortition, §9.2)
+            // Each node evaluates VRF with their own secret key to determine eligibility.
+            // Only the node itself knows if it's selected until it reveals the VRF proof.
+            let signing_key = match block_consensus_engine.get_signing_key() {
+                Some(key) => key,
+                None => {
+                    tracing::debug!("⏸️  No signing key available for VRF evaluation");
+                    continue;
                 }
-            }
-
-            // Convert hash to random value in range [0, total_weight)
-            let random_value = {
-                let mut val = 0u64;
-                for (i, &byte) in selection_hash.iter().take(8).enumerate() {
-                    val |= (byte as u64) << (i * 8);
-                }
-                val % total_weight
             };
 
-            // Binary search to find selected masternode based on weight
-            let producer_index = cumulative_weights
-                .iter()
-                .position(|&w| random_value < w)
-                .unwrap_or(masternodes.len() - 1);
+            // Compute our VRF output for this slot
+            let (_vrf_proof, _vrf_output, vrf_score) =
+                crate::block::vrf::generate_block_vrf(&signing_key, next_height, &prev_block_hash);
 
-            let selected_producer = &masternodes[producer_index];
-            let is_producer = block_masternode_address
-                .as_ref()
-                .map(|addr| addr == &selected_producer.address)
-                .unwrap_or(false);
+            // Calculate total sampling weight across all eligible masternodes
+            let our_addr = match &block_masternode_address {
+                Some(addr) => addr.clone(),
+                None => continue,
+            };
+            let our_mn = match masternodes.iter().find(|mn| mn.address == our_addr) {
+                Some(mn) => mn,
+                None => {
+                    tracing::debug!("⏸️  Our masternode not in eligible set");
+                    continue;
+                }
+            };
+            let our_sampling_weight = our_mn.tier.sampling_weight();
+            let total_sampling_weight: u64 =
+                masternodes.iter().map(|mn| mn.tier.sampling_weight()).sum();
 
-            // Log leader selection at INFO level every 30 seconds to help debug production issues
-            static LAST_LEADER_LOG: std::sync::atomic::AtomicI64 =
+            // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
+            // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
+            // After ~6 attempts (60s), all nodes become eligible (emergency fallback)
+            let effective_sampling_weight = if leader_attempt > 0 {
+                let multiplier = 1u64 << leader_attempt.min(20); // Cap to prevent overflow
+                our_sampling_weight
+                    .saturating_mul(multiplier)
+                    .min(total_sampling_weight)
+            } else {
+                our_sampling_weight
+            };
+
+            let is_eligible = crate::block::vrf::vrf_check_proposer_eligible(
+                vrf_score,
+                effective_sampling_weight,
+                total_sampling_weight,
+            );
+
+            // Log VRF evaluation periodically or on eligibility
+            static LAST_VRF_LOG: std::sync::atomic::AtomicI64 =
                 std::sync::atomic::AtomicI64::new(0);
-            static LAST_LEADER_ATTEMPT: std::sync::atomic::AtomicU64 =
-                std::sync::atomic::AtomicU64::new(0);
             let now_secs = chrono::Utc::now().timestamp();
-            let last_log = LAST_LEADER_LOG.load(Ordering::Relaxed);
-            let prev_attempt = LAST_LEADER_ATTEMPT.load(Ordering::Relaxed);
-            // Log every 30s, or immediately when leader attempt changes
-            if now_secs - last_log >= 30 || leader_attempt != prev_attempt {
-                LAST_LEADER_LOG.store(now_secs, Ordering::Relaxed);
-                LAST_LEADER_ATTEMPT.store(leader_attempt, Ordering::Relaxed);
+            let last_log = LAST_VRF_LOG.load(Ordering::Relaxed);
+            if is_eligible || now_secs - last_log >= 30 {
+                LAST_VRF_LOG.store(now_secs, Ordering::Relaxed);
                 tracing::info!(
-                    "🎲 Block {} leader selection: {} of {} masternodes, selected: {} (us: {}){}",
+                    "🎲 Block {} VRF sortition: score={}, weight={}/{}, eligible: {}",
                     next_height,
-                    producer_index + 1,
-                    masternodes.len(),
-                    selected_producer.address,
-                    if is_producer { "YES" } else { "NO" },
-                    if leader_attempt > 0 {
-                        format!(" [attempt {}]", leader_attempt)
-                    } else {
-                        String::new()
-                    }
+                    vrf_score,
+                    our_sampling_weight,
+                    total_sampling_weight,
+                    if is_eligible { "YES" } else { "NO" },
                 );
             }
 
-            if !is_producer {
+            if !is_eligible {
                 tracing::debug!(
-                    "⏸️  Not selected for block {} (producer: {}, attempt: {})",
+                    "⏸️  VRF score {} not below threshold for block {} (weight: {}/{})",
+                    vrf_score,
                     next_height,
-                    selected_producer.address,
-                    leader_attempt
+                    our_sampling_weight,
+                    total_sampling_weight,
                 );
                 continue;
             }
 
-            // We are the selected producer!
+            // We are VRF-eligible to propose!
             tracing::info!(
-                "🎯 Selected as block producer for height {} ({}s past scheduled time)",
+                "🎯 VRF selected as block proposer for height {} (score: {}, {}s past scheduled time)",
                 next_height,
+                vrf_score,
                 time_past_scheduled
             );
+
+            // Use our own identity for block production
+            let selected_producer = our_mn;
 
             // Safety checks before producing
             // Always require at least 3 peers to prevent isolated nodes from creating forks

@@ -890,6 +890,29 @@ impl MessageHandler {
             return Ok(None);
         }
 
+        // VRF best-proposal selection: if we already have a proposal at this height,
+        // only accept this one if it has a lower (better) VRF score
+        if let Some(cache) = &context.block_cache {
+            if let Some(existing) = cache.get_by_height(block_height) {
+                if existing.header.vrf_score > 0 && block.header.vrf_score > 0 {
+                    if block.header.vrf_score >= existing.header.vrf_score {
+                        debug!(
+                            "⏭️ [{}] Rejecting block at height {} with VRF score {} (already have score {})",
+                            self.direction, block_height, block.header.vrf_score, existing.header.vrf_score
+                        );
+                        return Ok(None);
+                    }
+                    info!(
+                        "🎲 [{}] Better VRF score at height {}: {} < {} — switching vote",
+                        self.direction,
+                        block_height,
+                        block.header.vrf_score,
+                        existing.header.vrf_score
+                    );
+                }
+            }
+        }
+
         // Get consensus engine or return error
         let consensus = context
             .consensus
@@ -3218,13 +3241,118 @@ impl MessageHandler {
             self.validate_block_rewards_structure(block)?;
         }
 
-        // 5. Get consensus engine for transaction validation
+        // 5. SECURITY: Verify VRF proof — confirms proposer is legitimately selected
+        // Skip for old blocks without VRF proof (backward compatibility)
+        if !block.header.vrf_proof.is_empty() && block.header.height > 0 {
+            // Look up the proposer's public key from masternode registry
+            let proposer = block.header.leader.clone();
+            if proposer.is_empty() {
+                return Err("Block has VRF proof but no leader set".to_string());
+            }
+
+            let proposer_info = context
+                .masternode_registry
+                .get(&proposer)
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "Block proposer {} not found in masternode registry",
+                        proposer
+                    )
+                })?;
+
+            // Verify the VRF proof using the proposer's public key
+            crate::block::vrf::verify_block_vrf(
+                &proposer_info.masternode.public_key,
+                block.header.height,
+                &block.header.previous_hash,
+                &block.header.vrf_proof,
+                &block.header.vrf_output,
+            )?;
+
+            // Verify vrf_score matches vrf_output
+            let expected_score = crate::block::vrf::vrf_output_to_score(&block.header.vrf_output);
+            if block.header.vrf_score != expected_score {
+                return Err(format!(
+                    "VRF score mismatch: header={}, computed={}",
+                    block.header.vrf_score, expected_score
+                ));
+            }
+
+            // Verify the proposer's VRF score qualifies them (sampling weight threshold)
+            let proposer_weight = proposer_info.masternode.tier.sampling_weight();
+            let eligible_masternodes = context.masternode_registry.get_eligible_for_rewards().await;
+            let total_sampling_weight: u64 = eligible_masternodes
+                .iter()
+                .map(|(mn, _)| mn.tier.sampling_weight())
+                .sum();
+
+            if total_sampling_weight > 0 {
+                let is_eligible = crate::block::vrf::vrf_check_proposer_eligible(
+                    block.header.vrf_score,
+                    proposer_weight,
+                    total_sampling_weight,
+                );
+
+                if !is_eligible {
+                    // Allow relaxed threshold during timeout (same exponential backoff)
+                    // Check if we've been waiting for this height
+                    let our_height = context.blockchain.get_height();
+                    let expected_height = our_height + 1;
+                    if block.header.height == expected_height {
+                        // Check how long since the slot started
+                        let genesis_ts = context.blockchain.genesis_timestamp();
+                        let slot_time = genesis_ts + (block.header.height as i64 * 600);
+                        let now = chrono::Utc::now().timestamp();
+                        let elapsed = (now - slot_time).max(0) as u64;
+                        let timeout_attempts = elapsed / 10; // Same 10s timeout as producer
+
+                        if timeout_attempts > 0 {
+                            let multiplier = 1u64 << timeout_attempts.min(20);
+                            let relaxed_weight = proposer_weight
+                                .saturating_mul(multiplier)
+                                .min(total_sampling_weight);
+                            let eligible_relaxed = crate::block::vrf::vrf_check_proposer_eligible(
+                                block.header.vrf_score,
+                                relaxed_weight,
+                                total_sampling_weight,
+                            );
+                            if !eligible_relaxed {
+                                return Err(format!(
+                                    "Proposer {} VRF score {} exceeds threshold (even with {}x relaxation)",
+                                    proposer, block.header.vrf_score, multiplier
+                                ));
+                            }
+                            debug!(
+                                "🎲 [{}] Block {} proposer {} accepted with relaxed VRF threshold (attempt {})",
+                                self.direction, block.header.height, proposer, timeout_attempts
+                            );
+                        } else {
+                            return Err(format!(
+                                "Proposer {} VRF score {} exceeds threshold (weight {}/{})",
+                                proposer,
+                                block.header.vrf_score,
+                                proposer_weight,
+                                total_sampling_weight
+                            ));
+                        }
+                    }
+                }
+            }
+
+            debug!(
+                "🎲 [{}] Block {} VRF verified: proposer={}, score={}",
+                self.direction, block.header.height, proposer, block.header.vrf_score
+            );
+        }
+
+        // 7. Get consensus engine for transaction validation
         let consensus = context
             .consensus
             .as_ref()
             .ok_or_else(|| "Consensus engine not available".to_string())?;
 
-        // 6. Validate all transactions (except coinbase and reward distribution)
+        // 8. Validate all transactions (except coinbase and reward distribution)
         // Transactions 0-1 are system transactions (coinbase + reward_distribution)
         // Transactions 2+ are user transactions that need full validation
         for (idx, tx) in block.transactions.iter().enumerate() {
@@ -3238,7 +3366,7 @@ impl MessageHandler {
             }
         }
 
-        // 7. Check for double-spends within the block
+        // 9. Check for double-spends within the block
         let mut spent_in_block = std::collections::HashSet::new();
         for (idx, tx) in block.transactions.iter().enumerate() {
             for input in &tx.inputs {
@@ -3540,7 +3668,7 @@ impl MessageHandler {
 
         // Step 2: Check if finality threshold reached (51% simple majority)
         let validators = consensus.timevote.get_validators();
-        let total_avs_weight: u64 = validators.iter().map(|v| v.weight as u64).sum();
+        let total_avs_weight: u64 = validators.iter().map(|v| v.weight).sum();
         let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
 
         tracing::info!(

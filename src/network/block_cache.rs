@@ -155,6 +155,16 @@ impl BlockCache {
             .any(|(_, cached)| cached.block.header.height == height)
     }
 
+    /// Get the cached block at the given height (if any)
+    /// Used for VRF best-proposal comparison
+    pub fn get_by_height(&self, height: u64) -> Option<Block> {
+        let cache = self.cache.lock();
+        cache
+            .iter()
+            .find(|(_, cached)| cached.block.header.height == height)
+            .map(|(_, cached)| cached.block.clone())
+    }
+
     /// Remove expired entries (if max_age is set)
     ///
     /// Returns the number of expired entries removed
