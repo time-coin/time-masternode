@@ -526,22 +526,26 @@ See [LICENSE](../LICENSE) file in the repository root.
 Network stress test that sends transactions at increasing rates to measure finalization performance and find the saturation point.
 
 **Features**:
-- ✅ Ramping load: starts at configurable TPS, increases to a max rate
+- ✅ Count-based rate ramp: sends N transactions at each TPS level, then steps up
+- ✅ Early stop: halts when >50% send failures at a rate or 10 consecutive finality timeouts
 - ✅ Measures send latency (RPC round-trip) and finality time (send → confirmed)
 - ✅ Per-rate breakdown with P50/P95/P99 percentiles
 - ✅ CSV output for graphing and analysis
-- ✅ Detects saturation point (first rate where failures appear)
+- ✅ Reports saturation point and last clean TPS rate
 
 **Usage**:
 ```bash
-# Default: 100 TX, ramp 1→20 TPS
-bash scripts/stress_test.sh
+# Default: ramp 5→50 TPS (step 5), 20 TX per step = 200 TX total
+bash scripts/stress_test.sh --testnet
 
-# Custom: 500 TX, ramp 2→50 TPS, step 5 every 15s
-bash scripts/stress_test.sh -n 500 -s 2 -m 50 -r 5 -i 15
+# Custom rate range with more samples per step
+bash scripts/stress_test.sh --testnet -s 5 -m 100 -r 10 -p 30
 
-# Minimal test
-bash scripts/stress_test.sh -n 20 -s 1 -m 5 -a 0.001
+# Fixed total count (overrides auto-calc)
+bash scripts/stress_test.sh --testnet -n 500 -s 10 -m 50
+
+# Disable early stop to run all TXs regardless
+bash scripts/stress_test.sh --testnet --no-early-stop
 
 # All options
 bash scripts/stress_test.sh --help
