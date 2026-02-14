@@ -1290,7 +1290,9 @@ impl RpcHandler {
                 "tier": format!("{:?}", local_mn.masternode.tier),
                 "total_uptime": local_mn.total_uptime,
                 "is_active": local_mn.is_active,
-                "public_key": hex::encode(local_mn.masternode.public_key.to_bytes())
+                "public_key": hex::encode(local_mn.masternode.public_key.to_bytes()),
+                "version": env!("CARGO_PKG_VERSION"),
+                "git_hash": option_env!("GIT_HASH").unwrap_or("unknown")
             }))
         } else {
             Ok(json!({
