@@ -2120,8 +2120,24 @@ impl MessageHandler {
         let current_height = context.blockchain.get_height();
         let is_bootstrap = current_height == 0;
 
+        // Get local masternode address to skip self-overwrites from peer gossip
+        let local_address = context.masternode_registry.get_local_address().await;
+
         let mut registered = 0;
         for mn_data in masternodes {
+            // Don't let peer gossip overwrite our own masternode entry
+            if let Some(ref local_addr) = local_address {
+                let mn_ip = mn_data
+                    .address
+                    .split(':')
+                    .next()
+                    .unwrap_or(&mn_data.address);
+                let local_ip = local_addr.split(':').next().unwrap_or(local_addr);
+                if mn_ip == local_ip {
+                    continue;
+                }
+            }
+
             let masternode = crate::types::Masternode::new_legacy(
                 mn_data.address.clone(),
                 mn_data.reward_address.clone(),
