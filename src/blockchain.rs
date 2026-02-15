@@ -7092,27 +7092,14 @@ impl Blockchain {
                 );
 
                 // Decision: determine whether to accept peer chain
-                // Two paths: (1) AI resolver accepts (longer chain), or
-                // (2) same-height fork where peer is on consensus chain (peer count wins)
+                // Only accept if the AI resolver says it's a longer valid chain.
+                // Same-height forks are resolved deterministically by the hash tiebreaker
+                // in fork_resolver.rs — do NOT override with peer-count consensus, as it
+                // causes reorg flip-flopping when peer counts shift during active forks.
                 let accept_reason = if resolution.accept_peer_chain {
                     Some("longer valid chain".to_string())
                 } else {
-                    // Check if peer is on the consensus chain for same-height forks
-                    let consensus_peers = self.consensus_peers.read().await;
-                    let peer_ip = peer_addr.split(':').next().unwrap_or(&peer_addr);
-                    let peer_on_consensus = consensus_peers.iter().any(|p| p == peer_ip);
-                    let cp_len = consensus_peers.len();
-                    drop(consensus_peers);
-
-                    if peer_tip_height == our_height && peer_on_consensus && cp_len > 1 {
-                        info!(
-                            "📊 Overriding hash tiebreaker: peer {} is on consensus chain ({} peers)",
-                            peer_addr, cp_len
-                        );
-                        Some(format!("consensus chain ({} peers)", cp_len))
-                    } else {
-                        None
-                    }
+                    None
                 };
 
                 if let Some(reason) = accept_reason {

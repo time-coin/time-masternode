@@ -1382,8 +1382,8 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 1200); // 400 * 3
 
-        // Test with insufficient weight (need 51% of 2000 = 1340, but only have 1200)
-        let result = timeproof.verify(2000, get_pubkey);
+        // Test with insufficient weight (need 51% of 2400 = 1224, but only have 1200)
+        let result = timeproof.verify(2400, get_pubkey);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Insufficient weight"));
     }

@@ -395,6 +395,15 @@ impl PrepareVoteAccumulator {
             .unwrap_or_default()
     }
 
+    /// Remove a voter's vote from all blocks.
+    /// Used when a leader needs to re-vote for its own block after the message
+    /// handler already voted for a peer's (inferior VRF) proposal at the same height.
+    pub fn remove_voter(&self, voter_id: &str) {
+        for mut entry in self.votes.iter_mut() {
+            entry.value_mut().retain(|(id, _)| id != voter_id);
+        }
+    }
+
     /// Clear votes for a block after finalization
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
