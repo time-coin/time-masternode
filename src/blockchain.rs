@@ -2994,6 +2994,7 @@ impl Blockchain {
         let mut total_weight = 0u64;
         let mut peers_responding = 0;
         let mut peers_ignored = 0;
+        let mut peers_agreeing = 0u32; // Count of peers agreeing on our exact (height, hash)
         let mut peer_states: Vec<(String, u64, [u8; 32], u64)> = Vec::new(); // (ip, height, hash, weight)
 
         for peer_ip in &connected_peers {
@@ -3017,10 +3018,10 @@ impl Blockchain {
                     Some(info) => info.masternode.tier.sampling_weight(),
                     None => {
                         tracing::debug!(
-                            "Peer {} not in masternode registry, using Bronze weight",
+                            "Peer {} not in masternode registry, using Free weight",
                             peer_ip
                         );
-                        crate::types::MasternodeTier::Bronze.sampling_weight()
+                        crate::types::MasternodeTier::Free.sampling_weight()
                     }
                 };
 
@@ -3032,6 +3033,7 @@ impl Blockchain {
                 // Check if peer agrees on our (height, hash)
                 if peer_height == our_height && peer_hash == our_hash {
                     weight_on_our_chain += peer_weight;
+                    peers_agreeing += 1;
                 }
             }
         }
@@ -3052,28 +3054,45 @@ impl Blockchain {
         let required_weight = (total_weight * 2).div_ceil(3); // Ceiling division for 2/3
         let has_consensus = weight_on_our_chain >= required_weight;
 
-        if has_consensus {
+        // CRITICAL: Also require a minimum NUMBER of peers in sync (not just weight).
+        // Prevents a single high-weight node from enabling block production.
+        // "3 nodes in sync" = us + at least 2 agreeing peers.
+        const MIN_AGREEING_PEERS: u32 = 2;
+        let enough_peers_in_sync = peers_agreeing >= MIN_AGREEING_PEERS;
+
+        if has_consensus && enough_peers_in_sync {
             tracing::debug!(
-                "✅ Block production allowed: {} weight agrees on height {} (need {} for 2/3 of {} total weight)",
+                "✅ Block production allowed: {}/{} weight, {}/{} peers agree on height {}",
                 weight_on_our_chain,
-                our_height,
-                required_weight,
-                total_weight
+                total_weight,
+                peers_agreeing,
+                peers_responding,
+                our_height
             );
             if peers_ignored > 0 {
                 tracing::debug!("   ({} peers with corrupted blocks ignored)", peers_ignored);
             }
         } else {
-            tracing::warn!(
-                "⚠️ Block production blocked: {} weight agrees on height {} (need {} for 2/3 of {} total). Peer responses: {}/{}{}",
-                weight_on_our_chain,
-                our_height,
-                required_weight,
-                total_weight,
-                peers_responding,
-                connected_peers.len(),
-                if peers_ignored > 0 { format!(", {} corrupted peers ignored", peers_ignored) } else { String::new() }
-            );
+            if !has_consensus {
+                tracing::warn!(
+                    "⚠️ Block production blocked: {} weight agrees on height {} (need {} for 2/3 of {} total). Peer responses: {}/{}{}",
+                    weight_on_our_chain,
+                    our_height,
+                    required_weight,
+                    total_weight,
+                    peers_responding,
+                    connected_peers.len(),
+                    if peers_ignored > 0 { format!(", {} corrupted peers ignored", peers_ignored) } else { String::new() }
+                );
+            }
+            if !enough_peers_in_sync {
+                tracing::warn!(
+                    "⚠️ Block production blocked: only {} peers in sync at height {} (need at least {} for 3-node minimum)",
+                    peers_agreeing,
+                    our_height,
+                    MIN_AGREEING_PEERS
+                );
+            }
             // Log detailed peer state for diagnostics (rate limited to once per minute)
             if should_log_details {
                 LAST_DETAILED_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
@@ -3100,7 +3119,7 @@ impl Blockchain {
             }
         }
 
-        has_consensus
+        has_consensus && enough_peers_in_sync
     }
 
     /// Add a block to the chain
@@ -7204,6 +7223,40 @@ impl Blockchain {
                         return Ok(());
                     }
 
+                    // Check for gaps in the middle of the chain (e.g., peer response
+                    // was capped at 100 blocks, leaving intermediate heights missing)
+                    let expected_block_count = (peer_tip_height - common_ancestor) as usize;
+                    if reorg_blocks.len() < expected_block_count {
+                        let heights: std::collections::HashSet<u64> =
+                            reorg_blocks.iter().map(|b| b.header.height).collect();
+                        let mut first_missing = peer_tip_height; // sentinel
+                        for h in expected_start..=peer_tip_height {
+                            if !heights.contains(&h) {
+                                first_missing = h;
+                                break;
+                            }
+                        }
+
+                        info!(
+                            "📥 Gap in fork chain: missing block {} (have {}/{} blocks from ancestor {} to peer tip {})",
+                            first_missing, reorg_blocks.len(), expected_block_count, common_ancestor, peer_tip_height
+                        );
+
+                        *self.fork_state.write().await = ForkResolutionState::FetchingChain {
+                            common_ancestor,
+                            fork_height,
+                            peer_addr: peer_addr.clone(),
+                            peer_height: peer_tip_height,
+                            fetched_up_to: peer_tip_height,
+                            accumulated_blocks: reorg_blocks,
+                            started_at: std::time::Instant::now(),
+                        };
+
+                        self.request_blocks_from_peer(&peer_addr, first_missing, peer_tip_height)
+                            .await?;
+                        return Ok(());
+                    }
+
                     // CRITICAL: Validate the entire chain is continuous before reorg
                     // Check that each block builds on the previous one
                     info!(
@@ -7505,11 +7558,13 @@ impl Blockchain {
         let our_height = self.get_height();
         let new_height = common_ancestor + alternate_blocks.len() as u64;
 
-        // CRITICAL SAFETY CHECK: NEVER reorg to a shorter chain
-        // This is the fundamental LONGEST VALID CHAIN rule
-        if new_height <= our_height {
+        // CRITICAL SAFETY CHECK: NEVER reorg to a shorter chain.
+        // Same-height reorgs ARE allowed for deterministic fork resolution
+        // (e.g., lower hash wins at same height). The caller (handle_fork)
+        // already validated that this reorg should be accepted.
+        if new_height < our_height {
             return Err(format!(
-                "REJECTED: Cannot reorg to equal or shorter chain! Current: {}, proposed: {} (from ancestor {})",
+                "REJECTED: Cannot reorg to shorter chain! Current: {}, proposed: {} (from ancestor {})",
                 our_height, new_height, common_ancestor
             ));
         }
