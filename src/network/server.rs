@@ -501,7 +501,7 @@ async fn handle_peer(
     let ip_str = ip.to_string();
 
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
-    let connection_start = std::time::Instant::now();
+    let _connection_start = std::time::Instant::now();
 
     // Wrap with TLS if configured
     // For TLS: spawn a dedicated I/O bridge task that owns the whole stream,
@@ -1025,12 +1025,10 @@ async fn handle_peer(
                                     check_rate_limit!("masternode_announce");
 
                                     // V2 announcement with collateral verification
+                                    // Note: masternode announcements are exempt from the
+                                    // stable-connection gate. Dropping a reconnecting peer's
+                                    // announcement leaves the masternode stuck as inactive.
                                     if !is_stable_connection {
-                                        let connection_age = connection_start.elapsed().as_secs();
-                                        if connection_age < 5 {
-                                            tracing::debug!("⏭️  Ignoring masternode announcement from short-lived connection {} (age: {}s)", peer.addr, connection_age);
-                                            continue;
-                                        }
                                         is_stable_connection = true;
                                     }
 
