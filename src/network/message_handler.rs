@@ -177,6 +177,8 @@ pub struct MessageHandler {
     peer_ip: String,
     direction: ConnectionDirection,
     recent_requests: Arc<RwLock<Vec<GetBlocksRequest>>>,
+    /// Tracks the last time a fork warning was logged for this peer (rate limiting)
+    last_fork_warning: std::sync::Mutex<Option<Instant>>,
 }
 
 impl MessageHandler {
@@ -186,6 +188,7 @@ impl MessageHandler {
             peer_ip,
             direction,
             recent_requests: Arc::new(RwLock::new(Vec::new())),
+            last_fork_warning: std::sync::Mutex::new(None),
         }
     }
 
@@ -2540,14 +2543,26 @@ impl MessageHandler {
             // Same height - check if same hash (on same chain)
             if peer_hash != our_hash {
                 // FORK DETECTED - same height but different blocks!
-                warn!(
-                    "🔀 [{}] FORK with {} at height {}: our {} vs their {}",
-                    self.direction,
-                    self.peer_ip,
-                    peer_height,
-                    hex::encode(&our_hash[..8]),
-                    hex::encode(&peer_hash[..8])
-                );
+                // Rate-limit: only log once per 60s per peer to avoid flooding
+                let now = Instant::now();
+                let should_log = {
+                    let last = self.last_fork_warning.lock().unwrap();
+                    match *last {
+                        Some(t) => now.duration_since(t) >= Duration::from_secs(60),
+                        None => true,
+                    }
+                };
+                if should_log {
+                    *self.last_fork_warning.lock().unwrap() = Some(now);
+                    warn!(
+                        "🔀 [{}] FORK with {} at height {}: our {} vs their {}",
+                        self.direction,
+                        self.peer_ip,
+                        peer_height,
+                        hex::encode(&our_hash[..8]),
+                        hex::encode(&peer_hash[..8])
+                    );
+                }
 
                 // Check consensus - if we have majority, alert the peer
                 // CRITICAL: Only count compatible peers (same genesis) for fork consensus

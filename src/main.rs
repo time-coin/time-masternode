@@ -2126,6 +2126,25 @@ async fn main() {
                 time_past_scheduled
             );
 
+            // RACE CONDITION PREVENTION: Check if a peer's block proposal at this height
+            // was already received (and voted for) by the message handler. If the cached
+            // proposal has a better or equal VRF score, skip production — our vote is already
+            // committed to that proposal and producing a competing block causes forks.
+            let (_, vrf_block_cache_opt, _) = block_peer_registry.get_timelock_resources().await;
+            if let Some(ref cache) = vrf_block_cache_opt {
+                if let Some(existing) = cache.get_by_height(next_height) {
+                    if existing.header.vrf_score > 0 && existing.header.vrf_score <= vrf_score {
+                        tracing::info!(
+                            "⏭️  Skipping block production for height {}: cached proposal has better VRF score ({} <= {})",
+                            next_height,
+                            existing.header.vrf_score,
+                            vrf_score
+                        );
+                        continue;
+                    }
+                }
+            }
+
             // Use our own identity for block production
             let selected_producer = our_mn;
 
@@ -2279,6 +2298,15 @@ async fn main() {
                             None => 1u64,
                         };
 
+                        // Clear any stale vote the message handler may have cast for a
+                        // peer's block at this height before our production completed.
+                        // Without this, add_vote's "first vote wins" rule silently
+                        // drops the leader's self-vote (root cause of prepare_weight=0).
+                        block_consensus_engine
+                            .timevote
+                            .prepare_votes
+                            .remove_voter(our_addr);
+
                         // Record our prepare vote in consensus engine
                         block_consensus_engine.timevote.accumulate_prepare_vote(
                             block_hash,
@@ -2364,9 +2392,10 @@ async fn main() {
 
                             let validator_count =
                                 block_consensus_engine.timevote.get_validators().len();
-                            let should_fallback = prepare_weight > 0
-                                || validator_count <= 2
-                                || (validator_count > 0 && prepare_weight == 0);
+                            // Only fallback when we have SOME consensus support or the
+                            // network is too small for normal voting. Never force-add a
+                            // block with zero votes — that creates forks.
+                            let should_fallback = prepare_weight > 0 || validator_count <= 2;
 
                             if should_fallback {
                                 tracing::warn!(
