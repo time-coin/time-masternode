@@ -2372,6 +2372,9 @@ async fn main() {
                     match consensus_reached {
                         Ok(true) => {
                             tracing::info!("✅ Block {} finalized via consensus!", block_height);
+                            block_consensus_engine
+                                .timevote
+                                .cleanup_block_votes(block_hash);
                         }
                         _ => {
                             // Timeout — use fallback: add block directly as leader

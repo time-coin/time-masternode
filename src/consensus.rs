@@ -23,7 +23,7 @@ use dashmap::DashMap;
 use ed25519_dalek::{Verifier, VerifyingKey};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -408,6 +408,11 @@ impl PrepareVoteAccumulator {
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
     }
+
+    /// Clear ALL votes (used when advancing to a new block height)
+    pub fn clear_all(&self) {
+        self.votes.clear();
+    }
 }
 
 /// Accumulates precommit votes for a block (Phase 3E)
@@ -506,6 +511,11 @@ impl PrecommitVoteAccumulator {
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
     }
+
+    /// Clear ALL votes (used when advancing to a new block height)
+    pub fn clear_all(&self) {
+        self.votes.clear();
+    }
 }
 
 /// Core TimeVote consensus engine - Progressive finality with vote accumulation
@@ -539,6 +549,9 @@ pub struct TimeVoteConsensus {
 
     /// Phase 3E: Precommit vote accumulator for timevote blocks
     pub precommit_votes: Arc<PrecommitVoteAccumulator>,
+
+    /// Last height for which votes were cast — used to clear stale votes on height advance
+    pub last_voted_height: AtomicU64,
 
     /// §7.6 Liveness Fallback: Transaction status tracking
     /// Per protocol §7.3 and §7.6 - explicit state machine
@@ -623,6 +636,7 @@ impl TimeVoteConsensus {
             accumulated_weight: DashMap::new(),
             prepare_votes: Arc::new(PrepareVoteAccumulator::new()),
             precommit_votes: Arc::new(PrecommitVoteAccumulator::new()),
+            last_voted_height: AtomicU64::new(0),
             tx_status: Arc::new(DashMap::new()),
             stall_timers: Arc::new(DashMap::new()),
             liveness_alerts: DashMap::new(),
@@ -1387,6 +1401,23 @@ impl TimeVoteConsensus {
         }
         self.prepare_votes.clear(block_hash);
         self.precommit_votes.clear(block_hash);
+    }
+
+    /// Clear all stale votes when advancing to a new block height.
+    /// Called when processing a proposal at a height greater than the last voted height.
+    /// Without this, votes from previous heights remain in the accumulator and the
+    /// "first vote wins" anti-double-voting rule silently rejects all future votes.
+    pub fn advance_vote_height(&self, new_height: u64) {
+        let prev = self.last_voted_height.swap(new_height, Ordering::SeqCst);
+        if new_height > prev {
+            self.prepare_votes.clear_all();
+            self.precommit_votes.clear_all();
+            tracing::debug!(
+                "🗳️  Cleared stale votes: height advanced {} → {}",
+                prev,
+                new_height
+            );
+        }
     }
 
     /// Get preserved voters from a finalized block

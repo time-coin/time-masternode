@@ -895,6 +895,7 @@ impl MessageHandler {
 
         // VRF best-proposal selection: if we already have a proposal at this height,
         // only accept this one if it has a lower (better) VRF score
+        let mut switching_vote = false;
         if let Some(cache) = &context.block_cache {
             if let Some(existing) = cache.get_by_height(block_height) {
                 if existing.header.vrf_score > 0 && block.header.vrf_score > 0 {
@@ -912,6 +913,7 @@ impl MessageHandler {
                         block.header.vrf_score,
                         existing.header.vrf_score
                     );
+                    switching_vote = true;
                 }
             }
         }
@@ -921,6 +923,10 @@ impl MessageHandler {
             .consensus
             .as_ref()
             .ok_or_else(|| "Consensus engine not available".to_string())?;
+
+        // Clear stale votes from previous heights so the "first vote wins"
+        // anti-double-voting rule doesn't reject votes for this new height.
+        consensus.timevote.advance_vote_height(block_height);
 
         // Phase 3E.1: Cache the block
         let block_hash = block.hash();
@@ -938,6 +944,12 @@ impl MessageHandler {
             Some(info) => info.masternode.collateral.max(1),
             None => 1u64, // Default to 1 if not found
         };
+
+        // If switching to a better VRF proposal, clear old vote first so
+        // add_vote's "first vote wins" rule doesn't silently drop the new one.
+        if switching_vote {
+            consensus.timevote.prepare_votes.remove_voter(&validator_id);
+        }
 
         consensus
             .timevote
@@ -1310,10 +1322,13 @@ impl MessageHandler {
             }
         }
 
+        // Clean up votes for this block after precommit processing
+        consensus.timevote.cleanup_block_votes(block_hash);
+
         Ok(None)
     }
 
-    /// Handle FinalityVoteBroadcast - verify signature and accumulate vote
+    /// Handle FinalityVoteBroadcast- verify signature and accumulate vote
     async fn handle_finality_vote_broadcast(
         &self,
         vote: crate::types::FinalityVote,
