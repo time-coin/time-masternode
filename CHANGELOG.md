@@ -31,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Incompatible Peers Poison Consensus and Fork Detection
+- **CRITICAL: Incompatible peers (wrong genesis hash) diluted 2/3 consensus threshold**
+  - `check_2_3_consensus_for_production()` used `get_connected_peers()` which includes
+    peers marked incompatible (e.g., genesis hash mismatch `0000260000000000`)
+  - These peers' weight inflated `total_weight` but they never agreed on our chain tip
+  - With 2 incompatible + 3 compatible peers, the 2/3 threshold became unreachable
+  - Result: Network stalled at height 10990, VRF relaxing for 8600+ seconds with no blocks produced
+  - Fix: Switch to `get_compatible_peers()` in consensus check, sync peer height check,
+    bootstrap scenario check, and fork detection peer counting
+  - Incompatible peers are still connected (for peer discovery) but excluded from all
+    consensus-critical decisions
+
 ### Fixed - Future-Timestamp Blocks Rejected During Catchup
 - **CRITICAL: Catchup mode produced blocks with timestamps minutes in the future**
   - During fast catchup (>5 blocks behind), the time gate was bypassed entirely

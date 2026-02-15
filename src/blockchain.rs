@@ -1309,7 +1309,7 @@ impl Blockchain {
         // Even when far behind time-based target, if no peer has more blocks than us,
         // syncing is futile — the blocks need to be produced, not downloaded.
         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
-            let connected_peers = peer_registry.get_connected_peers().await;
+            let connected_peers = peer_registry.get_compatible_peers().await;
             if !connected_peers.is_empty() {
                 let mut max_peer_height = current;
                 let mut peers_checked = 0u32;
@@ -1336,7 +1336,7 @@ impl Blockchain {
 
         if blocks_behind_target <= MAX_BOOTSTRAP_SHORTCUT_BEHIND {
             if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
-                let connected_peers = peer_registry.get_connected_peers().await;
+                let connected_peers = peer_registry.get_compatible_peers().await;
                 if !connected_peers.is_empty() {
                     // Try to get consensus - if available, check if everyone is at our height
                     if let Some((consensus_height, _)) = self.compare_chain_with_peers().await {
@@ -2949,7 +2949,9 @@ impl Blockchain {
             None => return true, // No registry = bootstrap mode allowed
         };
 
-        let connected_peers = peer_registry.get_connected_peers().await;
+        // CRITICAL: Only count compatible peers (same genesis hash) for consensus.
+        // Incompatible peers (different network) must NOT dilute the 2/3 threshold.
+        let connected_peers = peer_registry.get_compatible_peers().await;
 
         // Bootstrap mode: allow production with 0 peers ONLY if we've never had peers.
         // Once peers have been seen, losing all peers means network issue, not bootstrap.

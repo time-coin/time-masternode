@@ -2550,7 +2550,8 @@ impl MessageHandler {
                 );
 
                 // Check consensus - if we have majority, alert the peer
-                let all_peers = context.peer_registry.get_connected_peers().await;
+                // CRITICAL: Only count compatible peers (same genesis) for fork consensus
+                let all_peers = context.peer_registry.get_compatible_peers().await;
                 let mut our_chain_count = 1; // Count ourselves
                 let mut peer_chain_count = 0;
 
