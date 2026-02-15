@@ -31,6 +31,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed - Same-Height Fork Resolution Blocked by Reorg Guard
+- **CRITICAL: Deterministic same-height fork resolution never completed**
+  - `perform_reorg()` rejected reorgs where `new_height <= our_height`
+  - `handle_fork()` correctly decided to accept peer chain via hash tiebreaker,
+    but `perform_reorg()` then rejected it as "equal or shorter chain"
+  - This caused infinite fork resolution loops at same height (e.g., height 10999)
+  - Fix: Allow same-height reorgs (`<` instead of `<=`). The caller already
+    validated acceptance via deterministic tiebreaker (lower hash wins)
+
+### Fixed - Fork Resolution Gap When Peer Response Capped at 100 Blocks
+- **Fork resolution failed with "non-contiguous blocks" when block 10998 was missing**
+  - GetBlocks response capped at 100 blocks (e.g., 10898-10997), but block 10999
+    arrived separately, leaving a gap at 10998
+  - The start-height check passed (10997 == common_ancestor + 1) but the chain
+    had a hole: blocks 10997 and 10999 present, 10998 missing
+  - Fix: After start-height check, detect gaps by comparing block count to expected
+    count. If gap found, store current blocks as accumulated and request missing range
+
+### Fixed - Block Production Requires Minimum 3 Nodes In Sync
+- **Block production now requires at least 2 agreeing peers (3 nodes total)**
+  - Previously only checked weighted 2/3 threshold, which could be met by a single
+    high-tier masternode agreeing
+  - With network fragmented into 3 chains, no chain had enough peers to produce
+  - Fix: Added `MIN_AGREEING_PEERS = 2` count check alongside the weight threshold
+  - Also fixed unregistered peer default weight from Bronze (3) to Free (1) to match
+    `compare_chain_with_peers()` and prevent phantom weight inflation
+
 ### Fixed - Incompatible Peers Poison Consensus and Fork Detection
 - **CRITICAL: Incompatible peers (wrong genesis hash) diluted 2/3 consensus threshold**
   - `check_2_3_consensus_for_production()` used `get_connected_peers()` which includes
