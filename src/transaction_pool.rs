@@ -198,16 +198,26 @@ impl TransactionPool {
     /// Clear only specific finalized transactions that were included in a block
     /// This prevents clearing transactions that weren't actually in the block
     pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
-        let mut cleared = 0;
+        let mut cleared_finalized = 0;
+        let mut cleared_pending = 0;
         for txid in txids {
             if self.finalized.remove(txid).is_some() {
-                cleared += 1;
+                cleared_finalized += 1;
+            }
+            // Also remove from pending: a peer may have included a TX that was still
+            // pending locally (finalized on their side but not ours). Without this,
+            // pending entries leak and the mempool grows indefinitely.
+            if let Some((_, entry)) = self.pending.remove(txid) {
+                self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+                cleared_pending += 1;
             }
         }
-        if cleared > 0 {
+        if cleared_finalized > 0 || cleared_pending > 0 {
             tracing::info!(
-                "🧹 TxPool: Cleared {} finalized transaction(s) that were included in block",
-                cleared
+                "🧹 TxPool: Cleared {} finalized + {} pending transaction(s) included in block",
+                cleared_finalized,
+                cleared_pending
             );
         }
     }
@@ -220,6 +230,35 @@ impl TransactionPool {
     /// Get finalized transaction count
     pub fn finalized_count(&self) -> usize {
         self.finalized.len()
+    }
+
+    /// Remove stale pending transactions older than max_age.
+    /// Returns the number of transactions evicted.
+    pub fn cleanup_stale_pending(&self, max_age: std::time::Duration) -> usize {
+        let now = Instant::now();
+        let stale_txids: Vec<Hash256> = self
+            .pending
+            .iter()
+            .filter(|entry| now.duration_since(entry.value().added_at) > max_age)
+            .map(|entry| *entry.key())
+            .collect();
+
+        let mut evicted = 0;
+        for txid in &stale_txids {
+            if let Some((_, entry)) = self.pending.remove(txid) {
+                self.pending_count.fetch_sub(1, Ordering::Relaxed);
+                self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+                evicted += 1;
+            }
+        }
+        if evicted > 0 {
+            tracing::info!(
+                "🧹 TxPool: Evicted {} stale pending transaction(s) (older than {}s)",
+                evicted,
+                max_age.as_secs()
+            );
+        }
+        evicted
     }
 
     /// Check if transaction is pending
