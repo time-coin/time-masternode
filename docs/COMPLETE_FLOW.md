@@ -435,6 +435,17 @@ TimeCoin uses a hybrid consensus combining two mechanisms:
   - Hot: ~50 deserialized blocks for instant access
   - Warm: ~500 serialized blocks for fast deserialization
 - **Consensus Cache**: 2/3 consensus check results, 30s TTL
+- **Compatible Peers Cache**: 10s TTL on `get_compatible_peers()` result, avoids repeated lock acquisition across 15+ call sites
+
+### 8.4 Performance Optimizations
+
+| Optimization | Location | Impact |
+|-------------|----------|--------|
+| Per-connection MessageHandler | `peer_connection.rs` | Handler created once per peer connection, not per-message. Preserves rate limiter and loop-detection state across messages. |
+| Compatible peers cache | `peer_connection_registry.rs` | 10s TTL cache eliminates repeated write-lock + full-scan on `get_compatible_peers()` (called 15× across codebase). |
+| Skip duplicate block size check | `blockchain.rs` `add_block()` | `validate_block()` already performs `bincode::serialize()` for size check; removed duplicate serialization in `add_block()`. |
+| Parallel masternode reconnection | `main.rs` | Inactive masternode reconnection attempts spawned concurrently via `tokio::spawn` instead of sequential `add_peer()` loop. |
+| Global fork alert rate limiter | `message_handler.rs` | `OnceLock<DashMap<String, Instant>>` persists across MessageHandler instances; prevents fork alert spam (60s per peer). |
 
 ---
 
@@ -532,6 +543,7 @@ Without the sled flush, dirty pages are lost, causing block corruption ("unexpec
 | Ping interval | 30s | Peer heartbeat |
 | Pong timeout | 90s (300s in peer_connection.rs) | Max time without pong |
 | Fork alert rate limit | 60s | Max fork alert frequency per peer |
+| Compatible peers cache TTL | 10s | Cache duration for peer list lookups |
 | Cleanup interval | 600s (10 min) | Memory cleanup cycle |
 | Status interval | 60s | Status report cycle |
 | AI report interval | 300s (5 min) | AI metrics collection cycle |
