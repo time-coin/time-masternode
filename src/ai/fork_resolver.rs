@@ -21,6 +21,10 @@ pub struct ForkResolutionParams {
     pub peer_tip_timestamp: Option<i64>,
     pub our_tip_hash: Option<[u8; 32]>,
     pub peer_tip_hash: Option<[u8; 32]>,
+    /// Cumulative stake weight supporting our chain tip
+    pub our_stake_weight: u64,
+    /// Stake weight of the peer (based on masternode tier)
+    pub peer_stake_weight: u64,
 }
 
 /// Simple fork resolution result
@@ -89,8 +93,37 @@ impl ForkResolver {
             );
             false
         } else {
-            // Step 3: Same height - use deterministic tiebreaker (hash comparison)
-            if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
+            // Step 3: Same height - use stake weight first, then hash tiebreaker
+            // Higher stake weight wins to resist sybil attacks (many Free-tier
+            // nodes cannot outweigh a single Bronze/Silver/Gold node).
+            if params.our_stake_weight != params.peer_stake_weight
+                && (params.our_stake_weight > 0 || params.peer_stake_weight > 0)
+            {
+                if params.peer_stake_weight > params.our_stake_weight {
+                    reasoning.push(format!(
+                        "ACCEPT: Same height, peer stake weight {} > our weight {} (sybil-resistant tiebreaker)",
+                        params.peer_stake_weight, params.our_stake_weight
+                    ));
+                    info!(
+                        "✅ Fork Resolution: ACCEPT peer {} - higher stake weight at height {} (peer {} > ours {})",
+                        params.peer_ip, params.peer_height, params.peer_stake_weight, params.our_stake_weight
+                    );
+                    true
+                } else {
+                    reasoning.push(format!(
+                        "REJECT: Same height, our stake weight {} > peer weight {} (sybil-resistant tiebreaker)",
+                        params.our_stake_weight, params.peer_stake_weight
+                    ));
+                    info!(
+                        "❌ Fork Resolution: REJECT peer {} - our stake weight wins at height {} (ours {} > peer {})",
+                        params.peer_ip, params.peer_height, params.our_stake_weight, params.peer_stake_weight
+                    );
+                    false
+                }
+            } else if let (Some(our_hash), Some(peer_hash)) =
+                (params.our_tip_hash, params.peer_tip_hash)
+            {
+                // Equal stake weight or unknown — fall back to deterministic hash tiebreaker
                 if peer_hash == our_hash {
                     reasoning.push("No fork: identical chains".to_string());
                     info!("✅ No fork: peer {} has identical chain", params.peer_ip);

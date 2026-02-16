@@ -6249,6 +6249,20 @@ impl Blockchain {
             chain_weights.insert((*height, *hash), weight);
         }
 
+        // Log stake weights when there are multiple chains (fork)
+        if should_log && num_chains > 1 {
+            for ((height, hash), peers) in &chain_counts {
+                let w = chain_weights.get(&(*height, *hash)).copied().unwrap_or(0);
+                tracing::info!(
+                    "   ⚖️  Chain @ height {}, hash {}: stake_weight={} ({} peers)",
+                    height,
+                    hex::encode(&hash[..8]),
+                    w,
+                    peers.len()
+                );
+            }
+        }
+
         let consensus_chain = chain_counts
             .iter()
             .max_by(|((h1, hash1), peers1), ((h2, hash2), peers2)| {
@@ -6265,7 +6279,12 @@ impl Blockchain {
                     return weight_cmp;
                 }
                 // Tertiary: more peers wins
-                peers1.len().cmp(&peers2.len())
+                let peer_cmp = peers1.len().cmp(&peers2.len());
+                if peer_cmp != std::cmp::Ordering::Equal {
+                    return peer_cmp;
+                }
+                // Final: deterministic hash tiebreaker (lower hash wins)
+                hash2.cmp(hash1)
             })
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
 
@@ -7073,6 +7092,41 @@ impl Blockchain {
                 );
 
                 // Use simplified fork resolver (longest valid chain wins)
+                // Compute stake weights for sybil-resistant same-height resolution
+                let peer_stake_weight = match self.masternode_registry.get(&peer_addr).await {
+                    Some(info) => info.masternode.tier.sampling_weight(),
+                    None => crate::types::MasternodeTier::Free.sampling_weight(),
+                };
+                // Our weight: sum of all peers on our chain + ourselves
+                let our_stake_weight = {
+                    let mut w = 0u64;
+                    // Add our own weight
+                    if let Some(local_addr) = self.masternode_registry.get_local_address().await {
+                        if let Some(info) = self.masternode_registry.get(&local_addr).await {
+                            w += info.masternode.tier.sampling_weight();
+                        }
+                    }
+                    // Add weight of peers on our chain (same height, same hash)
+                    if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                        let peers = registry.get_compatible_peers().await;
+                        for pip in &peers {
+                            if pip == &peer_addr {
+                                continue; // don't count the forking peer
+                            }
+                            if let Some((ph, phash)) = registry.get_peer_chain_tip(pip).await {
+                                if ph == our_height && phash == our_tip_hash {
+                                    w += match self.masternode_registry.get(pip).await {
+                                        Some(info) => info.masternode.tier.sampling_weight(),
+                                        None => {
+                                            crate::types::MasternodeTier::Free.sampling_weight()
+                                        }
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    w
+                };
                 let resolution = self
                     .fork_resolver
                     .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
@@ -7082,6 +7136,8 @@ impl Blockchain {
                         peer_tip_timestamp: Some(peer_tip_timestamp),
                         our_tip_hash: Some(our_tip_hash),
                         peer_tip_hash: Some(peer_tip_hash),
+                        our_stake_weight,
+                        peer_stake_weight,
                     })
                     .await;
 
