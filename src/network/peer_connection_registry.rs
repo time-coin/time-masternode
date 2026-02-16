@@ -83,6 +83,8 @@ pub struct PeerConnectionRegistry {
     fork_error_counts: DashMap<String, u32>,
     // Notified when any peer's chain tip is updated (for event-driven consensus checks)
     chain_tip_updated: Arc<tokio::sync::Notify>,
+    // Cached result of get_compatible_peers() to avoid repeated lock acquisitions
+    compatible_peers_cache: Arc<RwLock<(Vec<String>, std::time::Instant)>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -115,6 +117,7 @@ impl PeerConnectionRegistry {
             incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
             fork_error_counts: DashMap::new(),
             chain_tip_updated: Arc::new(tokio::sync::Notify::new()),
+            compatible_peers_cache: Arc::new(RwLock::new((Vec::new(), std::time::Instant::now()))),
         }
     }
 
@@ -140,6 +143,8 @@ impl PeerConnectionRegistry {
     /// Duration after which incompatible peers are re-checked (5 minutes)
     /// Note: Genesis mismatch is PERMANENT and never rechecked
     const INCOMPATIBLE_RECHECK_SECS: u64 = 300;
+    /// TTL for the compatible peers cache (seconds)
+    const COMPATIBLE_PEERS_CACHE_TTL: u64 = 10;
 
     /// Mark a peer as incompatible (different chain/hash calculation)
     /// If `permanent` is true (genesis mismatch), peer is never rechecked
@@ -417,6 +422,29 @@ impl PeerConnectionRegistry {
 
     /// Get list of compatible connected peers (excludes currently incompatible ones)
     pub async fn get_compatible_peers(&self) -> Vec<String> {
+        // Return cached result if still fresh
+        {
+            let cache = self.compatible_peers_cache.read().await;
+            if cache.1.elapsed().as_secs() < Self::COMPATIBLE_PEERS_CACHE_TTL && !cache.0.is_empty()
+            {
+                return cache.0.clone();
+            }
+        }
+
+        // Cache miss — recompute
+        let result = self.get_compatible_peers_uncached().await;
+
+        // Store in cache
+        {
+            let mut cache = self.compatible_peers_cache.write().await;
+            *cache = (result.clone(), std::time::Instant::now());
+        }
+
+        result
+    }
+
+    /// Uncached implementation of compatible peer computation
+    async fn get_compatible_peers_uncached(&self) -> Vec<String> {
         // First, clean up expired incompatible entries (but NOT permanent ones)
         {
             let mut incompatible = self.incompatible_peers.write().await;

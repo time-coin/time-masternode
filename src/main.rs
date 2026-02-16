@@ -867,12 +867,15 @@ async fn main() {
                                 );
 
                                 for address in &inactive_addresses {
-                                    // Try to reconnect via peer manager
-                                    if health_peer_manager.add_peer(address.clone()).await {
-                                        tracing::info!("   ✓ Reconnection attempt to {}", address);
-                                    } else {
-                                        tracing::debug!("   ⚠️ Failed to reconnect to {}", address);
-                                    }
+                                    let pm = health_peer_manager.clone();
+                                    let addr = address.clone();
+                                    tokio::spawn(async move {
+                                        if pm.add_peer(addr.clone()).await {
+                                            tracing::info!("   ✓ Reconnection attempt to {}", addr);
+                                        } else {
+                                            tracing::debug!("   ⚠️ Failed to reconnect to {}", addr);
+                                        }
+                                    });
                                 }
                             }
                         }

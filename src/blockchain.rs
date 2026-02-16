@@ -3411,11 +3411,8 @@ impl Blockchain {
             }
         }
 
-        // Validate block size
-        let serialized = bincode::serialize(&block).map_err(|e| e.to_string())?;
-        if serialized.len() > MAX_BLOCK_SIZE {
-            return Err(format!("Block too large: {} bytes", serialized.len()));
-        }
+        // Block size check skipped here — validate_block() already performs this
+        // with bincode::serialize(). Avoiding double serialization on the hot path.
 
         // CRITICAL: Check if block already exists BEFORE processing UTXOs
         // This prevents AlreadySpent errors when block save fails but UTXO changes persist
