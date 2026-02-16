@@ -1554,7 +1554,6 @@ async fn main() {
         // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
         const LEADER_TIMEOUT_SECS: u64 = 10; // Wait 10s before rotating to backup leader (2x block production time)
         let mut waiting_for_height: Option<u64> = None;
-        let mut waiting_since: Option<std::time::Instant> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
 
         // CRITICAL: Periodic GetChainTip requests to keep peer_chain_tips cache fresh
@@ -2069,19 +2068,23 @@ async fn main() {
             // VRF timeout tracking: if no block is produced within LEADER_TIMEOUT_SECS,
             // progressively relax the VRF threshold so more nodes become eligible.
             // Each attempt doubles the effective threshold (exponential relaxation).
+            // CRITICAL: Track elapsed time from SLOT START, not from when we first saw
+            // the height. Otherwise, the 10-minute wait between blocks inflates
+            // leader_attempt and makes every node think it's eligible at t=0.
             if waiting_for_height != Some(next_height) {
                 waiting_for_height = Some(next_height);
-                waiting_since = Some(std::time::Instant::now());
                 leader_attempt = 0;
-            } else if let Some(since) = waiting_since {
-                let elapsed = since.elapsed().as_secs();
-                let expected_attempt = elapsed / LEADER_TIMEOUT_SECS;
-                if expected_attempt > leader_attempt {
-                    leader_attempt = expected_attempt;
+            }
+            // Compute elapsed from slot start (matches validator logic)
+            let slot_elapsed = time_past_scheduled.max(0) as u64;
+            let expected_attempt = slot_elapsed / LEADER_TIMEOUT_SECS;
+            if expected_attempt > leader_attempt {
+                leader_attempt = expected_attempt;
+                if leader_attempt > 0 {
                     tracing::warn!(
-                        "⏱️  No block for height {} after {}s - relaxing VRF threshold (attempt {})",
+                        "⏱️  No block for height {} after {}s past slot - relaxing VRF threshold (attempt {})",
                         next_height,
-                        elapsed,
+                        slot_elapsed,
                         leader_attempt
                     );
                 }
