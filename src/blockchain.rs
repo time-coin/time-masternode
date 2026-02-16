@@ -6556,6 +6556,20 @@ impl Blockchain {
             chain_weights.insert((*height, *hash), weight);
         }
 
+        // Add our own stake weight to the chain we're on
+        if let Some(w) = chain_weights.get_mut(&(our_height, our_hash)) {
+            let our_weight =
+                if let Some(local_addr) = self.masternode_registry.get_local_address().await {
+                    match self.masternode_registry.get(&local_addr).await {
+                        Some(info) => info.masternode.tier.sampling_weight(),
+                        None => crate::types::MasternodeTier::Free.sampling_weight(),
+                    }
+                } else {
+                    crate::types::MasternodeTier::Free.sampling_weight()
+                };
+            *w += our_weight;
+        }
+
         // Log stake weights when there are multiple chains (fork)
         if should_log && num_chains > 1 {
             for ((height, hash), peers) in &chain_counts {
