@@ -4642,6 +4642,7 @@ impl Blockchain {
         Ok(undo_log)
     }
 
+    #[allow(dead_code)]
     fn calculate_rewards_with_amount(
         &self,
         masternodes: &[MasternodeInfo],
