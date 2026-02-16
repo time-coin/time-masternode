@@ -526,7 +526,7 @@ impl MasternodeRegistry {
             .cloned()
             .collect();
 
-        tracing::info!(
+        tracing::debug!(
             "💰 Block {}: {} masternodes eligible for rewards (participated in block {})",
             current_height + 1,
             eligible.len(),
