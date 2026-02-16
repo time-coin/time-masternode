@@ -1,6 +1,6 @@
 # TimeCoin Complete System Flow
 
-**Last Updated**: 2026-02-09
+**Last Updated**: 2026-02-16
 **Codebase Version**: Based on actual code analysis, not design docs
 
 ---
@@ -85,14 +85,25 @@ The event-driven wake (branch 3) reduces catchup latency from ~1 second to near-
 **Phase 2a: Prepare Votes**
 1. Validators send `TimeVotePrepare { block_hash, voter_id, signature }`
 2. Ed25519 signature over `block_hash + voter_id + "PREPARE"`
-3. Votes accumulate by validator count (not weighted)
-4. Threshold: >50% of validator count (simple majority)
+3. Votes accumulate by validator count (simple majority)
+4. Threshold: >50% of participating validator count
 
 **Phase 2b: Precommit Votes**
 1. After prepare threshold met, send `TimeVotePrecommit { block_hash, voter_id, signature }`
 2. Ed25519 signature over `block_hash + voter_id + "PRECOMMIT"`
-3. Threshold: >50% of validator count (simple majority)
+3. Threshold: >50% of participating validator count
 4. Block is finalized after precommit threshold
+
+**TimeProof Finality (separate from 2PC):**
+- Transactions achieve instant finality via TimeProof with **51% weighted stake** threshold
+- Weight is tier-based: Free=1, Bronze=10, Silver=100, Gold=1000
+- This is distinct from block 2PC which uses validator count
+
+**Liveness Fallback:**
+- Stall detection timeout: 30 seconds without consensus progress
+- Broadcasts `LivenessAlert`, enters `FallbackResolution` state
+- Up to 5 fallback rounds with 10-second round timeout
+- Random leader selection per fallback round
 
 **Fallback**: If no votes received (early network, single node), block is added directly if validator count < 3.
 
@@ -227,14 +238,39 @@ FinalityVoteBroadcast
 
 ### 4.4 Fork Resolution
 
-Hierarchical fork resolution with masternode authority:
-1. **Masternode authority tiers** (primary): Gold > Silver > Bronze > WhitelistedFree > Free
-2. **Chain work** comparison (secondary)
-3. **Chain height** comparison (tertiary)
-4. **Deterministic hash tiebreaker** (final): lower block hash wins
+Stake-weighted longest-chain rule with tiered override:
+
+**Chain comparison in `compare_chain_with_peers()` (blockchain.rs):**
+1. **Height-first** (primary): longest chain wins
+2. **Stake weight override** (within small gap): if both chains are within `MAX_STAKE_OVERRIDE_DEPTH` (2 blocks) of the tallest, stake weight becomes the primary criterion
+3. **Stake tiebreaker** (same height): higher cumulative `sampling_weight()` wins
+4. **Peer count** (same height + weight): more supporting peers wins
+5. **Deterministic hash** (final): lexicographically lower block hash wins
+
+**Stake override constants (`fork_resolver.rs`):**
+- `MAX_STAKE_OVERRIDE_DEPTH = 2` — maximum height deficit stake can override
+- `MIN_STAKE_OVERRIDE_RATIO = 2` — shorter chain needs ≥2× the taller chain's cumulative stake
+
+**Masternode tier weights (`sampling_weight()`):**
+- Free = 1, Bronze = 10, Silver = 100, Gold = 1000
+- Cumulative stake = sum of all peers on that chain tip + our own weight
+
+**`handle_fork()` decision flow (blockchain.rs):**
+1. Find common ancestor via binary search
+2. Security checks: reject genesis reorgs, reject depth > 500 blocks
+3. Compute cumulative `our_stake_weight` and `peer_stake_weight`
+4. Call `fork_resolver.resolve_fork()` which applies the three-tier logic:
+   - Same height → stake tiebreaker, then hash
+   - Gap ≤ 2 blocks → shorter chain wins if it has ≥2× stake
+   - Gap > 2 blocks → longer chain always wins
+5. Accept reorg to shorter chain only if `stake_override = true`
+
+**Fork alert protocol (`message_handler.rs`):**
+- When we're ahead: send `ForkAlert` to lagging peers (rate-limited to once per 60s per peer)
+- When peer is ahead and in consensus: request blocks to sync
+- On receiving `ForkAlert`: request blocks from consensus chain if behind or hash differs
 - Validations: timestamp, merkle root, signatures, chain continuity
 - Finalized transaction protection: reject forks that would reverse finalized txs
-- Fork consensus uses 2/3 weighted stake threshold (aligned with block production gating)
 
 ---
 
@@ -357,18 +393,21 @@ TimeCoin uses a hybrid consensus combining two mechanisms:
    - Deterministic but unpredictable leader election
 
 2. **TimeVote** - Transaction and block finality (is this block accepted?)
-   - Two-phase commit: Prepare → Precommit
-   - Weight-based voting (masternode collateral = vote weight)
-   - Instant finality: once precommit threshold met, block is final
+   - Two-phase commit: Prepare → Precommit (validator count majority)
+   - TimeProof finality: 51% weighted stake threshold for transaction finality
+   - Weight-based tiers: Free=1, Bronze=10, Silver=100, Gold=1000
+   - Instant finality: once threshold met, transaction/block is final
    - No rollback of finalized blocks (critical security property)
 
 ### 7.2 Finality
 
-- **Instant finality** (<10 seconds typically)
-- Once a block receives 51% weighted stake agreement, it's finalized
-- Prepare/Precommit phases use >50% validator count; production gating uses 51% weighted stake
+- **Dual threshold system:**
+  - **Block 2PC (Prepare/Precommit):** >50% of participating **validator count** (simple majority)
+  - **TimeProof (transaction finality):** 51% of total **weighted stake**
+- Instant finality (<10 seconds typically)
 - Finalized transactions are protected during fork resolution
 - No probabilistic finality (unlike Bitcoin's 6-confirmation rule)
+- **Liveness fallback:** 30s stall timeout → LivenessAlert → up to 5 fallback rounds (10s each)
 
 ---
 
@@ -405,15 +444,61 @@ HTTP JSON-RPC server for node interaction.
 
 ### Key Endpoints
 
+**Blockchain:**
+- `getblockchaininfo` - Chain height, network, genesis hash
 - `getblockcount` - Current chain height
 - `getblock` - Block by height or hash
+- `getbestblockhash` - Tip block hash
+- `getblockhash` - Hash at height
+- `gettxoutsetinfo` - UTXO set statistics
+
+**Transactions:**
 - `gettransaction` - Transaction by ID
-- `getbalance` - Address balance
+- `gettransactions` - Batch fetch multiple transactions by ID array
+- `getrawtransaction` - Raw transaction data
 - `sendrawtransaction` - Submit transaction
+- `createrawtransaction` - Build unsigned transaction
+- `decoderawtransaction` - Decode raw transaction hex
+- `gettransactionfinality` - Check finality status of a transaction
+- `waittransactionfinality` - Wait for transaction to reach finality
+
+**Wallet:**
+- `getbalance` - Address balance
+- `listunspent` - Unspent outputs
+- `getnewaddress` - Generate new address
+- `getwalletinfo` - Wallet metadata
+- `sendtoaddress` - Send TIME to address
+- `mergeutxos` - Consolidate UTXOs
+- `listreceivedbyaddress` - Received amounts per address
+- `listtransactions` - Transaction history
+
+**Network:**
+- `getnetworkinfo` - Network status
 - `getpeerinfo` - Connected peer information
-- `getmininginfo` - Block production status
-- `getmasternodelist` - Active masternodes
+
+**Masternodes:**
+- `masternodelist` - Active masternodes
+- `masternodestatus` - This node's masternode status
+- `listlockedcollaterals` - Locked collateral UTXOs
+
+**Consensus:**
+- `getconsensusinfo` - Consensus engine state
+- `gettimevotestatus` - TimeVote protocol status
+
+**Mempool:**
+- `getmempoolinfo` - Transaction pool statistics
+- `getrawmempool` - Raw mempool contents
+
+**Admin:**
 - `validateaddress` - Address validation
+- `getinfo` - General node information
+- `uptime` - Node uptime
+- `stop` - Graceful shutdown
+- `reindex` / `reindextransactions` - Rebuild indexes
+- `gettxindexstatus` - Transaction index status
+- `getwhitelist` / `addwhitelist` / `removewhitelist` - Peer whitelist management
+- `getblacklist` - View banned peers
+- `cleanuplockedutxos` / `listlockedutxos` / `unlockutxo` / `unlockorphanedutxos` / `forceunlockall` - UTXO lock management
 
 ---
 
@@ -437,9 +522,16 @@ Without the sled flush, dirty pages are lost, causing block corruption ("unexpec
 | Max block size | Configurable | Block size limit |
 | Block cache size | ~500 blocks | Two-tier cache capacity |
 | Tx pool max | 100MB | Transaction pool memory limit |
-| Finality threshold | 51% weight | Weighted stake agreement for block production |
+| Prepare/Precommit threshold | >50% count | Validator count majority for block 2PC |
+| TimeProof finality threshold | 51% weight | Weighted stake for transaction finality |
+| Stall timeout | 30s | Time before liveness fallback triggers |
+| Fallback rounds | 5 max | Maximum fallback resolution rounds |
+| Max reorg depth | 500 blocks | Maximum fork rollback depth |
+| Stake override depth | 2 blocks | Max height gap for stake-weighted override |
+| Stake override ratio | 2× | Shorter chain needs ≥2× taller chain's stake |
 | Ping interval | 30s | Peer heartbeat |
 | Pong timeout | 90s (300s in peer_connection.rs) | Max time without pong |
+| Fork alert rate limit | 60s | Max fork alert frequency per peer |
 | Cleanup interval | 600s (10 min) | Memory cleanup cycle |
 | Status interval | 60s | Status report cycle |
 | AI report interval | 300s (5 min) | AI metrics collection cycle |
@@ -458,7 +550,7 @@ src/
 │   ├── attack_detector.rs     # Sybil/eclipse/fork bombing detection + enforcement
 │   ├── adaptive_reconnection.rs # Smart peer reconnection delays
 │   ├── consensus_health.rs    # Network consensus health monitoring
-│   ├── fork_resolver.rs       # Longest-chain-wins fork resolution
+│   ├── fork_resolver.rs       # Stake-weighted fork resolution (longest chain + stake override)
 │   ├── metrics_dashboard.rs   # AI metrics aggregation dashboard
 │   ├── network_optimizer.rs   # Connection/bandwidth optimization
 │   ├── peer_selector.rs       # AI-powered peer scoring
