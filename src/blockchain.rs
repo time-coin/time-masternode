@@ -3453,8 +3453,9 @@ impl Blockchain {
         let mut block = block.clone();
         block.header.leader = block.header.leader.trim().to_string();
 
-        // Normalize masternode rewards (sort by address for determinism)
-        block.masternode_rewards.sort_by(|a, b| a.0.cmp(&b.0));
+        // NOTE: Do NOT sort masternode_rewards — they must stay in the same
+        // positional order as the reward distribution transaction outputs so
+        // that blocks read back from storage still pass validation.
 
         // DIAGNOSTIC: Log block hash before storage
         let pre_storage_hash = block.hash();
@@ -4835,23 +4836,32 @@ impl Blockchain {
             ));
         }
 
-        // Verify each output matches metadata
-        for (i, (expected_addr, expected_amount)) in block.masternode_rewards.iter().enumerate() {
-            let output = &reward_dist.outputs[i];
+        // Verify each output matches metadata (position-independent to handle
+        // blocks stored with sorted masternode_rewards from older code)
+        let rewards_map: std::collections::HashMap<&str, u64> = block
+            .masternode_rewards
+            .iter()
+            .map(|(a, v)| (a.as_str(), *v))
+            .collect();
+
+        for output in &reward_dist.outputs {
             let output_addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
 
-            if &output_addr != expected_addr {
-                return Err(format!(
-                    "Block {} reward output {} address mismatch: expected {}, got {}",
-                    block.header.height, i, expected_addr, output_addr
-                ));
-            }
-
-            if output.value != *expected_amount {
-                return Err(format!(
-                    "Block {} reward output {} amount mismatch: expected {}, got {}",
-                    block.header.height, i, expected_amount, output.value
-                ));
+            match rewards_map.get(output_addr.as_str()) {
+                Some(&expected_amount) => {
+                    if output.value != expected_amount {
+                        return Err(format!(
+                            "Block {} reward output amount mismatch for {}: expected {}, got {}",
+                            block.header.height, output_addr, expected_amount, output.value
+                        ));
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "Block {} reward output address {} not found in masternode_rewards",
+                        block.header.height, output_addr
+                    ));
+                }
             }
         }
 

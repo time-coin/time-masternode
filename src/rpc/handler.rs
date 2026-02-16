@@ -100,6 +100,7 @@ impl RpcHandler {
             "unlockutxo" => self.unlock_utxo(&params_array).await,
             "unlockorphanedutxos" => self.unlock_orphaned_utxos().await,
             "forceunlockall" => self.force_unlock_all().await,
+            "gettransactions" => self.get_transactions_batch(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -2659,5 +2660,110 @@ impl RpcHandler {
             "unlocked": unlocked_count,
             "message": format!("Force unlocked all {} UTXOs", unlocked_count)
         }))
+    }
+
+    /// Batch query transaction status for multiple txids.
+    /// Params: [["txid1", "txid2", ...]] or ["txid1", "txid2", ...]
+    async fn get_transactions_batch(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txids: Vec<&str> = if let Some(arr) = params.first().and_then(|v| v.as_array()) {
+            arr.iter().filter_map(|v| v.as_str()).collect()
+        } else {
+            params.iter().filter_map(|v| v.as_str()).collect()
+        };
+
+        if txids.is_empty() {
+            return Err(RpcError {
+                code: -32602,
+                message: "Invalid params: expected array of txids".to_string(),
+            });
+        }
+
+        if txids.len() > 100 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Too many txids (max 100 per batch)".to_string(),
+            });
+        }
+
+        let current_height = self.blockchain.get_height();
+        let mut results = Vec::with_capacity(txids.len());
+
+        for txid_str in txids {
+            let txid = match hex::decode(txid_str) {
+                Ok(t) if t.len() == 32 => {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&t);
+                    arr
+                }
+                _ => {
+                    results.push(json!({
+                        "txid": txid_str,
+                        "error": "invalid txid format"
+                    }));
+                    continue;
+                }
+            };
+
+            // Check transaction index (confirmed in block)
+            if let Some(ref tx_index) = self.blockchain.tx_index {
+                if let Some(location) = tx_index.get_location(&txid) {
+                    let confirmations = current_height - location.block_height + 1;
+                    let timeproof_json = self
+                        .consensus
+                        .finality_proof_mgr
+                        .get_timeproof(&txid)
+                        .map(|proof| {
+                            json!({
+                                "votes": proof.votes.len(),
+                                "slot_index": proof.slot_index,
+                                "accumulated_weight": proof.votes.iter().map(|v| v.voter_weight).sum::<u64>(),
+                            })
+                        });
+                    let mut entry = json!({
+                        "txid": txid_str,
+                        "finalized": true,
+                        "confirmations": confirmations,
+                    });
+                    if let Some(tp) = timeproof_json {
+                        entry["timeproof"] = tp;
+                    }
+                    results.push(entry);
+                    continue;
+                }
+            }
+
+            // Check pool (pending/finalized but not yet in block)
+            let is_finalized = self.consensus.tx_pool.is_finalized(&txid);
+            if self.consensus.tx_pool.get_transaction(&txid).is_some() {
+                let timeproof_json = self
+                    .consensus
+                    .finality_proof_mgr
+                    .get_timeproof(&txid)
+                    .map(|proof| {
+                        json!({
+                            "votes": proof.votes.len(),
+                            "slot_index": proof.slot_index,
+                            "accumulated_weight": proof.votes.iter().map(|v| v.voter_weight).sum::<u64>(),
+                        })
+                    });
+                let mut entry = json!({
+                    "txid": txid_str,
+                    "finalized": is_finalized,
+                    "confirmations": 0,
+                });
+                if let Some(tp) = timeproof_json {
+                    entry["timeproof"] = tp;
+                }
+                results.push(entry);
+                continue;
+            }
+
+            results.push(json!({
+                "txid": txid_str,
+                "error": "not found"
+            }));
+        }
+
+        Ok(json!({ "transactions": results }))
     }
 }

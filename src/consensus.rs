@@ -2616,9 +2616,11 @@ impl ConsensusEngine {
             // The TimeVoteResponse handler in server.rs accumulates votes and
             // finalizes when 51% threshold is met. This loop monitors for that
             // finalization or auto-finalizes on timeout.
-            let vote_deadline = Duration::from_secs(5);
+            let initial_deadline = Duration::from_secs(5);
+            let max_deadline = Duration::from_secs(15);
             let poll_interval = Duration::from_millis(50);
             let start = Instant::now();
+            let mut vote_deadline = initial_deadline;
 
             loop {
                 // Check if already finalized (by server.rs TimeVoteResponse handler)
@@ -2649,13 +2651,36 @@ impl ConsensusEngine {
                         .map(|s| s.read().preference)
                         .unwrap_or(Preference::Accept);
 
+                    // Require minimum 25% of threshold weight before auto-finalizing.
+                    // If below floor, extend deadline to allow more votes to arrive.
+                    let total_avs_weight: u64 = consensus_engine_clone
+                        .get_active_masternodes()
+                        .iter()
+                        .map(|mn| mn.tier.sampling_weight())
+                        .sum();
+                    let threshold = (total_avs_weight * 51).div_ceil(100);
+                    let min_weight_floor = threshold.div_ceil(4); // 25% of threshold
+
+                    if weight < min_weight_floor && vote_deadline < max_deadline {
+                        vote_deadline += Duration::from_secs(5);
+                        tracing::info!(
+                            "⏳ TX {:?} weight {} < floor {} — extending deadline to {}s",
+                            hex::encode(txid),
+                            weight,
+                            min_weight_floor,
+                            vote_deadline.as_secs()
+                        );
+                        continue;
+                    }
+
                     if preference == Preference::Accept {
                         // Auto-finalize: UTXOs are locked, double-spend impossible
                         tracing::warn!(
-                            "⚠️ TX {:?} timed out after {}s (weight: {}). Auto-finalizing (UTXOs locked)",
+                            "⚠️ TX {:?} timed out after {}s (weight: {}, floor: {}). Auto-finalizing (UTXOs locked)",
                             hex::encode(txid),
                             vote_deadline.as_secs(),
-                            weight
+                            weight,
+                            min_weight_floor
                         );
 
                         let tx_for_broadcast = tx_pool.get_pending(&txid);
@@ -2682,12 +2707,6 @@ impl ConsensusEngine {
 
                                     // Only broadcast if proof weight meets threshold;
                                     // peers reject under-weight proofs with "Insufficient weight"
-                                    let total_avs_weight: u64 = consensus_engine_clone
-                                        .get_active_masternodes()
-                                        .iter()
-                                        .map(|mn| mn.tier.sampling_weight())
-                                        .sum();
-                                    let threshold = (total_avs_weight * 51).div_ceil(100);
                                     if weight >= threshold {
                                         consensus_engine_clone.broadcast_timeproof(proof).await;
                                     } else {
