@@ -841,6 +841,7 @@ impl PeerConnection {
         &mut self,
         message: NetworkMessage,
         config: &MessageLoopConfig,
+        handler: &MessageHandler,
     ) -> Result<(), String> {
         // Handle connection-level messages that need special state management
         match &message {
@@ -877,9 +878,6 @@ impl PeerConnection {
         }
 
         // Build context for MessageHandler
-        let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
-
-        // Create context with available components
         let context = if let Some(ref blockchain) = config.blockchain {
             let masternode_registry = config
                 .masternode_registry
@@ -1014,6 +1012,9 @@ impl PeerConnection {
         // Extract broadcast_rx before the loop to avoid borrow checker issues
         let mut broadcast_rx = config.broadcast_rx.take();
 
+        // Create handler once per connection (reused across all messages)
+        let handler = MessageHandler::new(self.peer_ip.clone(), self.direction);
+
         // Main message loop
         loop {
             tokio::select! {
@@ -1033,7 +1034,7 @@ impl PeerConnection {
                         }
                         Ok(Some(message)) => {
                             // Use unified message handler
-                            let handle_result = self.handle_message_unified(message, &config).await;
+                            let handle_result = self.handle_message_unified(message, &config, &handler).await;
 
                             if let Err(e) = handle_result {
                                 warn!("⚠️ [{:?}] Error handling message from {}: {}",
