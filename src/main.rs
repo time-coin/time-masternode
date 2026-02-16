@@ -1555,7 +1555,7 @@ async fn main() {
         let mut leader_attempt: u64 = 0; // Increments when leader times out
 
         // CRITICAL: Periodic GetChainTip requests to keep peer_chain_tips cache fresh
-        // This ensures block production can always verify 2/3 consensus on peer heights
+        // This ensures block production can always verify consensus on peer heights
         let mut last_chain_tip_request = std::time::Instant::now();
         const CHAIN_TIP_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -1579,7 +1579,7 @@ async fn main() {
             }
 
             // CRITICAL BOOTSTRAP FIX: Periodically request chain tips from peers
-            // This keeps peer_chain_tips cache fresh so block production can verify 2/3 consensus
+            // This keeps peer_chain_tips cache fresh so block production can verify consensus
             // Without this, nodes get stuck at bootstrap because check_2_3_consensus_for_production()
             // has no peer data to work with
             if last_chain_tip_request.elapsed() >= CHAIN_TIP_REQUEST_INTERVAL {
@@ -1598,6 +1598,7 @@ async fn main() {
 
             // Mark start of new block period (only once per period)
             let current_height = block_blockchain.get_height();
+            block_registry.update_height(current_height);
             let expected_period = current_height + 1;
             if expected_period > last_block_period_started {
                 block_registry.start_new_block_period().await;
@@ -1763,6 +1764,25 @@ async fn main() {
 
             // Sort deterministically by address for consistent leader election across all nodes
             sort_masternodes_canonical(&mut masternodes);
+
+            // Anti-sybil: filter immature Free-tier nodes from VRF sortition.
+            // Done after fallback logic so the maturity gate doesn't interfere with
+            // the "minimum 3 masternodes" threshold (paid tiers always pass).
+            {
+                let mut vrf_eligible = Vec::with_capacity(masternodes.len());
+                for mn in masternodes.iter() {
+                    if block_registry
+                        .is_address_vrf_eligible(&mn.address, current_height)
+                        .await
+                    {
+                        vrf_eligible.push(mn.clone());
+                    }
+                }
+                if vrf_eligible.len() >= 3 {
+                    masternodes = vrf_eligible;
+                }
+                // If filtering would drop below 3, keep all (safety: don't block production)
+            }
 
             // Calculate time-based values for block production
             let genesis_timestamp = block_blockchain.genesis_timestamp();
@@ -2209,9 +2229,9 @@ async fn main() {
                 continue;
             }
 
-            // Wait for 2/3 peer consensus before producing (event-driven).
+            // Wait for majority peer consensus before producing (event-driven).
             // After receiving a block from a peer, our height advances but peers
-            // may still report their old height. Instead of failing with "no 2/3
+            // may still report their old height. Instead of failing with "no majority
             // consensus" and retrying every second, wait for peer chain tips to update.
             if !block_blockchain.check_2_3_consensus_cached().await {
                 block_blockchain.invalidate_consensus_cache().await;
@@ -2235,7 +2255,7 @@ async fn main() {
 
                 if consensus_ok != Ok(true) {
                     tracing::warn!(
-                        "⏱️ No 2/3 peer consensus for block {} after 10s — skipping this attempt",
+                        "⏱️ No majority peer consensus for block {} after 10s — skipping this attempt",
                         next_height
                     );
                     is_producing.store(false, Ordering::SeqCst);

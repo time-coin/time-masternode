@@ -74,6 +74,12 @@ pub struct MasternodeInfo {
     #[serde(default)]
     pub blocks_without_reward: u64, // Counter: increments each block, resets when reward received
 
+    /// Block height at which this masternode was first registered.
+    /// Used for the anti-sybil maturity gate: Free-tier nodes must wait
+    /// FREE_MATURITY_BLOCKS before becoming eligible for rewards.
+    #[serde(default)]
+    pub registration_height: u64,
+
     /// Gossip-based status tracking (not serialized to disk)
     /// Maps peer_address -> last_seen_timestamp
     /// A masternode is active if seen by MIN_PEER_REPORTS different peers recently
@@ -92,6 +98,9 @@ pub struct MasternodeRegistry {
         RwLock<Option<tokio::sync::broadcast::Sender<crate::network::message::NetworkMessage>>>,
     >,
     started_at: u64,
+    /// Current blockchain height, updated externally. Used to set registration_height
+    /// on newly registered masternodes for the anti-sybil maturity gate.
+    current_height: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl MasternodeRegistry {
@@ -163,6 +172,7 @@ impl MasternodeRegistry {
             peer_manager: Arc::new(RwLock::new(None)),
             broadcast_tx: Arc::new(RwLock::new(None)),
             started_at: now,
+            current_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -171,6 +181,18 @@ impl MasternodeRegistry {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
+    }
+
+    /// Update the current blockchain height. Called from block production loop
+    /// so that newly registered masternodes get an accurate registration_height.
+    pub fn update_height(&self, height: u64) {
+        self.current_height
+            .store(height, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Get the network type this registry is configured for.
+    pub fn network(&self) -> crate::NetworkType {
+        self.network
     }
 
     /// Helper to serialize and store a masternode to disk
@@ -291,6 +313,9 @@ impl MasternodeRegistry {
             return Ok(());
         }
 
+        let current_h = self
+            .current_height
+            .load(std::sync::atomic::Ordering::Relaxed);
         let info = MasternodeInfo {
             masternode: masternode.clone(),
             reward_address: reward_address.clone(),
@@ -299,6 +324,7 @@ impl MasternodeRegistry {
             is_active: should_activate, // Only active if explicitly activated (true for connections, false for gossip)
             last_reward_height: 0,
             blocks_without_reward: 0,
+            registration_height: current_h, // Anti-sybil: track when node first appeared
             peer_reports: Arc::new(DashMap::new()),
         };
 
@@ -326,6 +352,19 @@ impl MasternodeRegistry {
         masternodes
             .values()
             .filter(|info| info.is_active)
+            .map(|info| (info.masternode.clone(), info.reward_address.clone()))
+            .collect()
+    }
+
+    /// Get active masternodes eligible for VRF sortition (excludes immature Free-tier nodes).
+    /// Paid tiers are always eligible; Free-tier must pass the maturity gate.
+    pub async fn get_vrf_eligible(&self, current_height: u64) -> Vec<(Masternode, String)> {
+        let masternodes = self.masternodes.read().await;
+        masternodes
+            .values()
+            .filter(|info| {
+                info.is_active && Self::is_mature_for_sortition(info, current_height, self.network)
+            })
             .map(|info| (info.masternode.clone(), info.reward_address.clone()))
             .collect()
     }
@@ -418,6 +457,69 @@ impl MasternodeRegistry {
             .filter(|info| info.is_active)
             .cloned()
             .collect()
+    }
+
+    /// Get mature Free-tier masternodes eligible for the participation pool.
+    /// On testnet, all active Free nodes are eligible (no maturity gate).
+    /// On mainnet, Free nodes must have been registered for ≥FREE_MATURITY_BLOCKS.
+    pub async fn get_eligible_free_nodes(&self, current_height: u64) -> Vec<MasternodeInfo> {
+        let maturity_required = match self.network {
+            crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
+            crate::NetworkType::Testnet => 0,
+        };
+        self.masternodes
+            .read()
+            .await
+            .values()
+            .filter(|info| {
+                info.is_active
+                    && matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                    && (info.registration_height == 0
+                        || current_height.saturating_sub(info.registration_height)
+                            >= maturity_required)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Check if a Free-tier masternode is mature enough for VRF sortition.
+    /// Paid tiers are always mature (collateral is their skin in the game).
+    pub fn is_mature_for_sortition(
+        info: &MasternodeInfo,
+        current_height: u64,
+        network: crate::NetworkType,
+    ) -> bool {
+        if !matches!(info.masternode.tier, crate::types::MasternodeTier::Free) {
+            return true; // Paid tiers always eligible
+        }
+        let maturity_required = match network {
+            crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
+            crate::NetworkType::Testnet => 0,
+        };
+        info.registration_height == 0
+            || current_height.saturating_sub(info.registration_height) >= maturity_required
+    }
+
+    /// Set registration height for a masternode (called once when first block is seen)
+    pub async fn set_registration_height(&self, address: &str, height: u64) {
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(address) {
+            if info.registration_height == 0 {
+                info.registration_height = height;
+                self.store_masternode(address, info).ok();
+            }
+        }
+    }
+
+    /// Check if a masternode at the given address is mature for VRF sortition.
+    /// Returns true for paid tiers (always eligible) and mature Free-tier nodes.
+    /// Returns true if address not found (conservative: don't block unknown nodes).
+    pub async fn is_address_vrf_eligible(&self, address: &str, current_height: u64) -> bool {
+        let nodes = self.masternodes.read().await;
+        match nodes.get(address) {
+            Some(info) => Self::is_mature_for_sortition(info, current_height, self.network),
+            None => true,
+        }
     }
 
     /// Get active masternodes that are currently connected
@@ -1417,6 +1519,7 @@ impl Clone for MasternodeRegistry {
             peer_manager: self.peer_manager.clone(),
             broadcast_tx: self.broadcast_tx.clone(),
             started_at: self.started_at,
+            current_height: self.current_height.clone(),
         }
     }
 }

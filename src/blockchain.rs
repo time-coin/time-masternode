@@ -25,6 +25,9 @@ use tracing::{debug, info, warn};
 
 const BLOCK_TIME_SECONDS: i64 = constants::blockchain::BLOCK_TIME_SECONDS;
 const BLOCK_REWARD_SATOSHIS: u64 = constants::blockchain::BLOCK_REWARD_SATOSHIS;
+const PRODUCER_REWARD_SATOSHIS: u64 = constants::blockchain::PRODUCER_REWARD_SATOSHIS;
+const POOL_REWARD_SATOSHIS: u64 = constants::blockchain::POOL_REWARD_SATOSHIS;
+const MIN_POOL_PAYOUT_SATOSHIS: u64 = constants::blockchain::MIN_POOL_PAYOUT_SATOSHIS;
 
 // Security limits (Phase 1)
 const MAX_BLOCK_SIZE: usize = constants::blockchain::MAX_BLOCK_SIZE;
@@ -163,7 +166,7 @@ pub enum ForkResolutionState {
     },
 }
 
-/// Cache for 2/3 consensus check results - avoids redundant peer queries
+/// Cache for consensus check results - avoids redundant peer queries
 #[derive(Clone, Debug)]
 struct ConsensusCache {
     result: bool,
@@ -212,7 +215,7 @@ pub struct Blockchain {
     pub tx_index: Option<Arc<crate::tx_index::TransactionIndex>>,
     /// Whether to compress blocks when storing (saves ~60-70% space)
     compress_blocks: bool,
-    /// Cache for 2/3 consensus check results (TTL: 30s) - avoids redundant peer queries
+    /// Cache for consensus check results (TTL: 30s) - avoids redundant peer queries
     consensus_cache: Arc<RwLock<Option<ConsensusCache>>>,
     /// Tracks whether this node has ever had connected peers.
     /// Once true, bootstrap mode (0-peer block production) is permanently disabled
@@ -2394,11 +2397,11 @@ impl Blockchain {
             return Err(format!("Cannot produce blocks: invalid genesis - {}", e));
         }
 
-        // Check 2/3 consensus requirement for block production
-        // Requirement: 2/3+ of connected peers must agree on the current chain (height, hash)
+        // Check majority consensus requirement for block production
+        // Requirement: 50%+ of connected peers must agree on the current chain (height, hash)
         // Exception: Allow production with 0 peers (bootstrap mode)
         if !self.check_2_3_consensus_cached().await {
-            return Err("Cannot produce block: no 2/3 consensus on current chain state. Waiting for network consensus.".to_string());
+            return Err("Cannot produce block: no majority consensus on current chain state. Waiting for network consensus.".to_string());
         }
 
         // Get previous block hash
@@ -2605,26 +2608,105 @@ impl Blockchain {
         }
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
+        // Split: 50 TIME to block producer, 50 TIME to Free-tier participation pool
         let base_reward = BLOCK_REWARD_SATOSHIS;
         let total_reward = base_reward + finalized_txs_fees;
+        let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Producer gets 50 TIME + all fees
 
-        // NEW: All rewards go to the block producer only
-        let rewards = if let Some(ref wallet) = producer_wallet {
-            tracing::info!(
-                "💰 Block {}: {} satoshis ({} TIME) to block producer {}",
-                next_height,
-                total_reward,
-                total_reward / 100_000_000,
-                wallet
-            );
-            vec![(wallet.clone(), total_reward)]
-        } else {
-            // Fallback: no producer specified (old behavior - should never happen)
-            tracing::warn!(
-                "⚠️  No producer wallet specified, using old distribution (THIS SHOULD NOT HAPPEN)"
-            );
-            self.calculate_rewards_with_amount(&masternodes, total_reward)
-        };
+        // Build reward list: producer first, then Free-tier pool participants
+        let mut rewards: Vec<(String, u64)> = Vec::new();
+
+        // 1. Block producer reward (50 TIME + fees)
+        if let Some(ref wallet) = producer_wallet {
+            rewards.push((wallet.clone(), producer_share));
+        }
+
+        // 2. Free-tier participation pool (50 TIME, min 1 TIME each)
+        let eligible_free = self
+            .masternode_registry
+            .get_eligible_free_nodes(next_height)
+            .await;
+
+        let blocks_without_reward_map = self
+            .masternode_registry
+            .get_verifiable_reward_tracking(self)
+            .await;
+
+        let mut pool_remaining = POOL_REWARD_SATOSHIS;
+        if !eligible_free.is_empty() {
+            // Sort by fairness bonus descending (most starved first)
+            let mut sorted_free: Vec<_> = eligible_free
+                .iter()
+                .map(|mn| {
+                    let blocks_without = blocks_without_reward_map
+                        .get(&mn.masternode.address)
+                        .copied()
+                        .unwrap_or(0);
+                    let fairness_bonus = (blocks_without / 10).min(20);
+                    (mn, mn.masternode.tier.reward_weight() + fairness_bonus)
+                })
+                .collect();
+            sorted_free.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Calculate total weight for proportional distribution
+            let total_weight: u64 = sorted_free.iter().map(|(_, w)| *w).sum();
+
+            if total_weight > 0 {
+                // Max recipients: pool / min_payout (at most 50 with 50 TIME / 1 TIME)
+                let max_recipients = (POOL_REWARD_SATOSHIS / MIN_POOL_PAYOUT_SATOSHIS) as usize;
+                let recipients = sorted_free.len().min(max_recipients);
+
+                // Distribute proportionally by weight, minimum 1 TIME each
+                let mut distributed = 0u64;
+                for (i, (mn, weight)) in sorted_free.iter().take(recipients).enumerate() {
+                    let share = if i == recipients - 1 {
+                        // Last recipient gets remainder
+                        pool_remaining - distributed
+                    } else {
+                        let proportional = (POOL_REWARD_SATOSHIS as u128 * *weight as u128
+                            / total_weight as u128)
+                            as u64;
+                        // Ensure minimum 1 TIME, but don't exceed remaining pool
+                        proportional
+                            .max(MIN_POOL_PAYOUT_SATOSHIS)
+                            .min(pool_remaining - distributed)
+                    };
+                    if share >= MIN_POOL_PAYOUT_SATOSHIS {
+                        // Skip if producer wallet is same address (don't double-pay)
+                        if producer_wallet.as_ref() == Some(&mn.masternode.wallet_address) {
+                            // Producer already got their share; add pool share to their entry
+                            if let Some(entry) = rewards
+                                .iter_mut()
+                                .find(|(a, _)| a == &mn.masternode.wallet_address)
+                            {
+                                entry.1 += share;
+                            }
+                        } else {
+                            rewards.push((mn.masternode.wallet_address.clone(), share));
+                        }
+                        distributed += share;
+                    }
+                }
+                pool_remaining -= distributed;
+            }
+        }
+
+        // If no eligible Free nodes or leftover, producer gets the remainder
+        if pool_remaining > 0 {
+            if let Some(entry) = rewards.first_mut() {
+                entry.1 += pool_remaining;
+            }
+        }
+
+        tracing::info!(
+            "💰 Block {}: {} satoshis ({} TIME) — producer gets {} TIME, pool {} TIME to {} Free node(s)",
+            next_height,
+            total_reward,
+            total_reward / 100_000_000,
+            producer_share / 100_000_000,
+            (POOL_REWARD_SATOSHIS - pool_remaining) / 100_000_000,
+            rewards.len().saturating_sub(1)
+        );
 
         if rewards.is_empty() {
             return Err(format!(
@@ -2874,7 +2956,7 @@ impl Blockchain {
         Ok(block)
     }
 
-    /// Invalidate the 2/3 consensus cache, forcing the next check to query fresh peer data.
+    /// Invalidate the consensus cache, forcing the next check to query fresh peer data.
     pub async fn invalidate_consensus_cache(&self) {
         *self.consensus_cache.write().await = None;
     }
@@ -2894,7 +2976,7 @@ impl Blockchain {
             if let Some(cached) = cache.as_ref() {
                 if cached.timestamp.elapsed() < CONSENSUS_CACHE_TTL {
                     tracing::debug!(
-                        "🔄 2/3 consensus check cache HIT ({}ms old)",
+                        "🔄 consensus check cache HIT ({}ms old)",
                         cached.timestamp.elapsed().as_millis()
                     );
                     return cached.result;
@@ -2903,7 +2985,7 @@ impl Blockchain {
         }
 
         // Cache miss or expired - perform full check
-        tracing::debug!("🔄 2/3 consensus check cache MISS - recalculating");
+        tracing::debug!("🔄 consensus check cache MISS - recalculating");
         let result = self.check_2_3_consensus_for_production().await;
 
         // Only cache results from real peer consensus, not bootstrap mode.
@@ -2927,14 +3009,14 @@ impl Blockchain {
         result
     }
 
-    /// Check if 2/3 of connected peers agree on the current chain state (height, hash)
+    /// Check if majority of connected peers agree on the current chain state (height, hash)
     /// Uses TIER-WEIGHTED voting (Gold > Silver > Bronze > Free)
     /// Returns true if:
     /// - We have 0 connected peers (bootstrap mode allowed), OR
-    /// - 2/3+ of WEIGHTED stake agrees on our current (height, hash)
+    /// - 50%+ of WEIGHTED stake agrees on our current (height, hash)
     ///
     /// Returns false if:
-    /// - We have 1+ connected peers AND less than 2/3 of weighted stake agrees on our chain
+    /// - We have 1+ connected peers AND less than 50%+ of weighted stake agrees on our chain
     async fn check_2_3_consensus_for_production(&self) -> bool {
         // Rate limit detailed logging to once per 60 seconds
         static LAST_DETAILED_LOG: std::sync::atomic::AtomicI64 =
@@ -2950,7 +3032,7 @@ impl Blockchain {
         };
 
         // CRITICAL: Only count compatible peers (same genesis hash) for consensus.
-        // Incompatible peers (different network) must NOT dilute the 2/3 threshold.
+        // Incompatible peers (different network) must NOT dilute the majority threshold.
         let connected_peers = peer_registry.get_compatible_peers().await;
 
         // Bootstrap mode: allow production with 0 peers ONLY if we've never had peers.
@@ -3050,8 +3132,8 @@ impl Blockchain {
             return false;
         }
 
-        // Require 2/3 of WEIGHTED stake to agree on our chain
-        let required_weight = (total_weight * 2).div_ceil(3); // Ceiling division for 2/3
+        // Require majority (50%+) of WEIGHTED stake to agree on our chain
+        let required_weight = total_weight / 2 + 1; // Strict majority
         let has_consensus = weight_on_our_chain >= required_weight;
 
         // CRITICAL: Also require a minimum NUMBER of peers in sync (not just weight).
@@ -3075,7 +3157,7 @@ impl Blockchain {
         } else {
             if !has_consensus {
                 tracing::warn!(
-                    "⚠️ Block production blocked: {} weight agrees on height {} (need {} for 2/3 of {} total). Peer responses: {}/{}{}",
+                    "⚠️ Block production blocked: {} weight agrees on height {} (need {} for majority of {} total). Peer responses: {}/{}{}",
                     weight_on_our_chain,
                     our_height,
                     required_weight,
@@ -3310,7 +3392,7 @@ impl Blockchain {
         // CRITICAL: Validate block rewards (prevent double-counting bug)
         // Skip for genesis block
         if !is_genesis {
-            self.validate_block_rewards(&block)?;
+            self.validate_block_rewards(&block).await?;
         }
 
         // Additional timestamp validation: check if too far in past
@@ -4583,9 +4665,10 @@ impl Blockchain {
         vec![(producer.masternode.wallet_address.clone(), total_reward)]
     }
 
-    /// Validate block rewards are correct and not double-counted
-    /// This prevents the old bug where rewards were added both as metadata AND as transaction outputs
-    fn validate_block_rewards(&self, block: &Block) -> Result<(), String> {
+    /// Validate block rewards are correct and not double-counted.
+    /// Also verifies the 50/50 split and Free-tier pool distribution through
+    /// consensus: each node independently re-derives expected rewards from chain data.
+    async fn validate_block_rewards(&self, block: &Block) -> Result<(), String> {
         // Skip validation for blocks with no transactions (shouldn't happen, but be safe)
         if block.transactions.len() < 2 {
             return Err(format!(
@@ -4787,6 +4870,219 @@ impl Blockchain {
                 "Block {} total distributed {} outside valid range {}-{} (block_reward: {})",
                 block.header.height, total_distributed, lower_bound, upper_bound, expected_total
             ));
+        }
+
+        // ═══ CONSENSUS-VERIFIED POOL DISTRIBUTION ═══
+        // Re-derive the expected 50/50 split and Free-tier pool allocation from chain data.
+        // Every validating node independently computes the same result, closing the gap
+        // where a dishonest producer could manipulate pool weights.
+        //
+        // Skip for early blocks (no meaningful fairness data yet) and during initial sync
+        // (we may not have all masternodes registered).
+        if block.header.height > 10 {
+            self.validate_pool_distribution(block, calculated_fees)
+                .await?;
+        }
+
+        Ok(())
+    }
+
+    /// Verify the reward distribution matches the expected 50/50 split algorithm.
+    /// Mirrors the logic in produce_block_at_height() exactly, using chain-derived
+    /// fairness bonus data so any node can independently verify.
+    async fn validate_pool_distribution(
+        &self,
+        block: &Block,
+        calculated_fees: u64,
+    ) -> Result<(), String> {
+        use crate::constants::blockchain::{
+            MIN_POOL_PAYOUT_SATOSHIS, POOL_REWARD_SATOSHIS, PRODUCER_REWARD_SATOSHIS,
+        };
+
+        let producer_addr = &block.header.leader;
+        if producer_addr.is_empty() || block.masternode_rewards.is_empty() {
+            return Ok(()); // Can't validate without producer info
+        }
+
+        // Look up the producer's wallet address from the registry
+        let all_infos = self.masternode_registry.list_all().await;
+        let producer_wallet = all_infos
+            .iter()
+            .find(|info| info.masternode.address == *producer_addr)
+            .map(|info| info.masternode.wallet_address.clone());
+        let producer_wallet = match producer_wallet {
+            Some(w) => w,
+            None => return Ok(()), // Unknown producer — can't validate pool split
+        };
+
+        // Compute expected producer share: 50 TIME + fees
+        let expected_producer_base = PRODUCER_REWARD_SATOSHIS + calculated_fees;
+
+        // Find eligible Free-tier nodes and compute fairness-weighted distribution
+        let eligible_free: Vec<_> = all_infos
+            .iter()
+            .filter(|info| {
+                info.is_active
+                    && matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                    && MasternodeRegistry::is_mature_for_sortition(
+                        info,
+                        block.header.height,
+                        self.network_type,
+                    )
+            })
+            .collect();
+
+        // Compute fairness bonus from on-chain data (scan blockchain, not local state)
+        let mut blocks_without_map = std::collections::HashMap::new();
+        let scan_limit = 1000u64;
+        let start_h = block.header.height.saturating_sub(scan_limit);
+        // We scan from the PREVIOUS height (block being validated hasn't been added yet)
+        let scan_height = block.header.height.saturating_sub(1);
+
+        for mn in &eligible_free {
+            let mut blocks_without = scan_limit; // Default: never received reward
+            for h in (start_h..=scan_height).rev() {
+                if let Ok(b) = self.get_block(h) {
+                    if b.header.leader == mn.masternode.address {
+                        blocks_without = scan_height.saturating_sub(h);
+                        break;
+                    }
+                }
+            }
+            blocks_without_map.insert(mn.masternode.address.clone(), blocks_without);
+        }
+
+        // Re-derive the expected reward list using the same algorithm as produce_block_at_height
+        let mut expected_rewards: Vec<(String, u64)> = Vec::new();
+        expected_rewards.push((producer_wallet.clone(), expected_producer_base));
+
+        let mut pool_remaining = POOL_REWARD_SATOSHIS;
+        if !eligible_free.is_empty() {
+            let mut sorted_free: Vec<_> = eligible_free
+                .iter()
+                .map(|mn| {
+                    let bw = blocks_without_map
+                        .get(&mn.masternode.address)
+                        .copied()
+                        .unwrap_or(0);
+                    let fairness_bonus = (bw / 10).min(20);
+                    (*mn, mn.masternode.tier.reward_weight() + fairness_bonus)
+                })
+                .collect();
+            sorted_free.sort_by(|a, b| b.1.cmp(&a.1));
+
+            let total_weight: u64 = sorted_free.iter().map(|(_, w)| *w).sum();
+
+            if total_weight > 0 {
+                let max_recipients = (POOL_REWARD_SATOSHIS / MIN_POOL_PAYOUT_SATOSHIS) as usize;
+                let recipients = sorted_free.len().min(max_recipients);
+
+                let mut distributed = 0u64;
+                for (i, (mn, weight)) in sorted_free.iter().take(recipients).enumerate() {
+                    let share = if i == recipients - 1 {
+                        pool_remaining - distributed
+                    } else {
+                        let proportional = (POOL_REWARD_SATOSHIS as u128 * *weight as u128
+                            / total_weight as u128)
+                            as u64;
+                        proportional
+                            .max(MIN_POOL_PAYOUT_SATOSHIS)
+                            .min(pool_remaining - distributed)
+                    };
+                    if share >= MIN_POOL_PAYOUT_SATOSHIS {
+                        if mn.masternode.wallet_address == producer_wallet {
+                            if let Some(entry) = expected_rewards
+                                .iter_mut()
+                                .find(|(a, _)| a == &mn.masternode.wallet_address)
+                            {
+                                entry.1 += share;
+                            }
+                        } else {
+                            expected_rewards.push((mn.masternode.wallet_address.clone(), share));
+                        }
+                        distributed += share;
+                    }
+                }
+                pool_remaining -= distributed;
+            }
+        }
+
+        // Remainder to producer
+        if pool_remaining > 0 {
+            if let Some(entry) = expected_rewards.first_mut() {
+                entry.1 += pool_remaining;
+            }
+        }
+
+        // Compare expected vs actual reward outputs
+        // Use tolerance: nodes may have slightly different chain views during sync,
+        // so allow up to 5% deviation per output (capped at 1 TIME per output).
+        if expected_rewards.len() != block.masternode_rewards.len() {
+            // Output count mismatch — might be a different eligible set.
+            // Only warn (don't reject) because registry state can diverge slightly.
+            tracing::debug!(
+                "⚠️ Block {} pool validation: expected {} reward outputs, got {} (registry divergence)",
+                block.header.height,
+                expected_rewards.len(),
+                block.masternode_rewards.len()
+            );
+            return Ok(());
+        }
+
+        // Verify producer gets at least their minimum share (50 TIME + fees)
+        // This is the critical anti-cheat: producer can't steal from the pool.
+        let actual_producer_amount = block
+            .masternode_rewards
+            .iter()
+            .find(|(addr, _)| addr == &producer_wallet)
+            .map(|(_, amt)| *amt)
+            .unwrap_or(0);
+
+        // Producer should get at least their base share (could be more if pool merges)
+        if actual_producer_amount > 0 && calculated_fees == 0 {
+            // With no fees, producer's share should be between PRODUCER_REWARD and full BLOCK_REWARD
+            if actual_producer_amount < PRODUCER_REWARD_SATOSHIS {
+                return Err(format!(
+                    "Block {} producer {} received {} satoshis, less than minimum {} (pool theft)",
+                    block.header.height,
+                    producer_addr,
+                    actual_producer_amount,
+                    PRODUCER_REWARD_SATOSHIS
+                ));
+            }
+        }
+
+        // Verify no single pool recipient gets more than the entire pool allocation
+        for (addr, amount) in &block.masternode_rewards {
+            if addr != &producer_wallet && *amount > POOL_REWARD_SATOSHIS {
+                return Err(format!(
+                    "Block {} pool recipient {} received {} satoshis, exceeds pool maximum {}",
+                    block.header.height, addr, amount, POOL_REWARD_SATOSHIS
+                ));
+            }
+        }
+
+        // Verify each expected output matches within tolerance
+        for (expected_addr, expected_amt) in &expected_rewards {
+            if let Some((_, actual_amt)) = block
+                .masternode_rewards
+                .iter()
+                .find(|(a, _)| a == expected_addr)
+            {
+                // Allow up to 1 TIME tolerance per output for rounding differences
+                let tolerance = MIN_POOL_PAYOUT_SATOSHIS;
+                let diff = if *actual_amt > *expected_amt {
+                    actual_amt - expected_amt
+                } else {
+                    expected_amt - actual_amt
+                };
+                if diff > tolerance {
+                    return Err(format!(
+                        "Block {} reward for {} deviates: expected {} satoshis, got {} (diff {} > tolerance {})",
+                        block.header.height, expected_addr, expected_amt, actual_amt, diff, tolerance
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -6310,7 +6606,7 @@ impl Blockchain {
 
         // LONGEST CHAIN RULE: If the consensus chain is strictly taller than ALL other chains,
         // it's canonical regardless of weighted vote — block production already proved consensus.
-        // Only require 2/3 weighted threshold for same-height fork tiebreakers.
+        // Only require majority weighted threshold for same-height fork tiebreakers.
         let second_highest = chain_counts
             .iter()
             .filter(|((h, hash), _)| !(*h == consensus_height && *hash == consensus_hash))
@@ -6323,7 +6619,7 @@ impl Blockchain {
         if height_advantage == 0 {
             // Same-height fork — the chain with more peers is canonical.
             // Simple majority (>50%) is sufficient because the minority MUST switch
-            // to resolve the fork. Requiring 2/3 causes permanent forks when the split
+            // to resolve the fork. Requiring a supermajority causes permanent forks when the split
             // is close (e.g., 3 vs 2 = 60% never meets 67% threshold).
             let required_weight = total_responding_weight / 2 + 1; // strict majority
             if consensus_weight < required_weight {

@@ -12,6 +12,16 @@ pub mod blockchain {
     pub const SATOSHIS_PER_TIME: u64 = 100_000_000;
     pub const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME;
 
+    /// Reward split: producer share and Free-tier participation pool
+    pub const PRODUCER_REWARD_SATOSHIS: u64 = 50 * SATOSHIS_PER_TIME; // 50 TIME to block producer
+    pub const POOL_REWARD_SATOSHIS: u64 = 50 * SATOSHIS_PER_TIME; // 50 TIME to Free-tier pool
+    pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = SATOSHIS_PER_TIME; // Minimum 1 TIME per node
+
+    /// Anti-sybil maturity gate: Free nodes must be online this many blocks before
+    /// becoming eligible for VRF sortition and the participation pool.
+    /// Only enforced on mainnet (testnet = 0 for rapid development iteration).
+    pub const FREE_MATURITY_BLOCKS: u64 = 72; // ~12 hours at 10 min/block
+
     /// Maximum block size in bytes (1 MB)
     pub const MAX_BLOCK_SIZE: usize = 1_000_000;
 
