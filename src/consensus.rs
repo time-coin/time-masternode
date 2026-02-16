@@ -4681,7 +4681,7 @@ mod fallback_tests {
         assert!(consensus.fallback_rounds.get(&txid).is_none());
     }
 
-    /// Test Q_finality calculation: 2/3 of total weight
+    /// Test Q_finality calculation: majority threshold
     #[test]
     fn test_q_finality_calculation() {
         // Test various total weights

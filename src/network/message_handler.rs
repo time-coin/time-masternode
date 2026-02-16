@@ -3314,6 +3314,18 @@ impl MessageHandler {
                     )
                 })?;
 
+            // Anti-sybil: reject blocks from immature Free-tier proposers
+            if !crate::masternode_registry::MasternodeRegistry::is_mature_for_sortition(
+                &proposer_info,
+                block.header.height,
+                context.masternode_registry.network(),
+            ) {
+                return Err(format!(
+                    "Block proposer {} is an immature Free-tier node (registered at height {}, current {})",
+                    proposer, proposer_info.registration_height, block.header.height
+                ));
+            }
+
             // Verify the VRF proof using the proposer's public key
             crate::block::vrf::verify_block_vrf(
                 &proposer_info.masternode.public_key,
@@ -3346,7 +3358,10 @@ impl MessageHandler {
             let proposer_weight =
                 proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
 
-            let eligible_masternodes = context.masternode_registry.get_eligible_for_rewards().await;
+            let eligible_masternodes = context
+                .masternode_registry
+                .get_vrf_eligible(block.header.height)
+                .await;
             let total_sampling_weight: u64 = eligible_masternodes
                 .iter()
                 .map(|(mn, _)| {
