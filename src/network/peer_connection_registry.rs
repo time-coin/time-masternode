@@ -900,7 +900,7 @@ impl PeerConnectionRegistry {
 
             Ok(())
         } else {
-            warn!(
+            tracing::debug!(
                 "❌ Peer {} not found in registry (available: {:?})",
                 ip_only,
                 writers.keys().collect::<Vec<_>>()
@@ -1056,7 +1056,7 @@ impl PeerConnectionRegistry {
 
         let writers = self.peer_writers.read().await;
         if !writers.contains_key(ip_only) {
-            warn!("❌ Peer {} not found in registry", ip_only);
+            tracing::debug!("❌ Peer {} not found in registry", ip_only);
             return Err(format!("Peer {} not connected", ip_only));
         }
 

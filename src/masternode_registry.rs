@@ -20,6 +20,7 @@ const REPORT_EXPIRY_SECS: u64 = 300; // Reports older than 5 minutes are stale
 const GOSSIP_INTERVAL_SECS: u64 = 30; // Broadcast status every 30 seconds
 const MIN_PARTICIPATION_SECS: u64 = 600; // 10 minutes minimum participation (prevents reward gaming)
 const AUTO_REMOVE_AFTER_SECS: u64 = 3600; // Auto-remove masternodes with no peer reports for 1 hour
+const STARTUP_GRACE_PERIOD_SECS: u64 = 120; // Skip auto-removal during first 2 minutes after startup
 
 /// Network health status levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,7 @@ pub struct MasternodeRegistry {
     broadcast_tx: Arc<
         RwLock<Option<tokio::sync::broadcast::Sender<crate::network::message::NetworkMessage>>>,
     >,
+    started_at: u64,
 }
 
 impl MasternodeRegistry {
@@ -160,6 +162,7 @@ impl MasternodeRegistry {
             block_period_start: Arc::new(RwLock::new(now)),
             peer_manager: Arc::new(RwLock::new(None)),
             broadcast_tx: Arc::new(RwLock::new(None)),
+            started_at: now,
         }
     }
 
@@ -1143,20 +1146,25 @@ impl MasternodeRegistry {
         }
 
         // Auto-remove masternodes with no peer reports for extended period
+        // Skip during startup grace period — peers haven't connected yet so
+        // masternodes loaded from disk still have stale timestamps.
+        let uptime = now.saturating_sub(self.started_at);
         let mut to_remove = Vec::new();
-        for (address, info) in masternodes.iter() {
-            if info.peer_reports.is_empty() {
-                // Check when last seen
-                let last_seen = info.uptime_start;
-                let time_since_last_seen = now.saturating_sub(last_seen);
+        if uptime >= STARTUP_GRACE_PERIOD_SECS {
+            for (address, info) in masternodes.iter() {
+                if info.peer_reports.is_empty() {
+                    // Check when last seen
+                    let last_seen = info.uptime_start;
+                    let time_since_last_seen = now.saturating_sub(last_seen);
 
-                if time_since_last_seen > AUTO_REMOVE_AFTER_SECS {
-                    warn!(
-                        "🗑️  Scheduling auto-removal of masternode {} (inactive for {} minutes)",
-                        address,
-                        time_since_last_seen / 60
-                    );
-                    to_remove.push(address.clone());
+                    if time_since_last_seen > AUTO_REMOVE_AFTER_SECS {
+                        warn!(
+                            "🗑️  Scheduling auto-removal of masternode {} (inactive for {} minutes)",
+                            address,
+                            time_since_last_seen / 60
+                        );
+                        to_remove.push(address.clone());
+                    }
                 }
             }
         }
@@ -1408,6 +1416,7 @@ impl Clone for MasternodeRegistry {
             block_period_start: self.block_period_start.clone(),
             peer_manager: self.peer_manager.clone(),
             broadcast_tx: self.broadcast_tx.clone(),
+            started_at: self.started_at,
         }
     }
 }
