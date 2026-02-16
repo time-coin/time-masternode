@@ -1312,6 +1312,9 @@ impl MessageHandler {
                             block.header.height
                         );
                     }
+                    // Save precommit voters for bitmap ONLY on first finalization
+                    // (cache.remove ensures this runs once — late precommits won't overwrite)
+                    consensus.timevote.cleanup_block_votes(block_hash);
                 } else {
                     debug!(
                         "[{}] Block {} not found in cache (likely already finalized)",
@@ -1321,9 +1324,6 @@ impl MessageHandler {
                 }
             }
         }
-
-        // Clean up votes for this block after precommit processing
-        consensus.timevote.cleanup_block_votes(block_hash);
 
         Ok(None)
     }

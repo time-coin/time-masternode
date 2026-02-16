@@ -516,6 +516,18 @@ impl PrecommitVoteAccumulator {
     pub fn clear_all(&self) {
         self.votes.clear();
     }
+
+    /// Get all voters across all block hashes (for merging into last_block_voters)
+    pub fn get_all_voters(&self) -> Vec<(Hash256, Vec<String>)> {
+        self.votes
+            .iter()
+            .map(|entry| {
+                let hash = *entry.key();
+                let voters = entry.value().iter().map(|(id, _)| id.clone()).collect();
+                (hash, voters)
+            })
+            .collect()
+    }
 }
 
 /// Core TimeVote consensus engine - Progressive finality with vote accumulation
@@ -1410,6 +1422,23 @@ impl TimeVoteConsensus {
     pub fn advance_vote_height(&self, new_height: u64) {
         let prev = self.last_voted_height.swap(new_height, Ordering::SeqCst);
         if new_height > prev {
+            // Merge any late-arriving precommit voters into last_block_voters
+            // before clearing. This captures votes that arrived after
+            // cleanup_block_votes saved the initial voter set at finalization.
+            for (hash, voters) in self.precommit_votes.get_all_voters() {
+                if !voters.is_empty() {
+                    self.last_block_voters
+                        .entry(hash)
+                        .and_modify(|existing| {
+                            for voter in &voters {
+                                if !existing.contains(voter) {
+                                    existing.push(voter.clone());
+                                }
+                            }
+                        })
+                        .or_insert(voters);
+                }
+            }
             self.prepare_votes.clear_all();
             self.precommit_votes.clear_all();
             tracing::debug!(
