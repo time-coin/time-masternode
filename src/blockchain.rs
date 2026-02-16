@@ -6570,17 +6570,36 @@ impl Blockchain {
             }
         }
 
+        // Find the maximum height to determine stake override eligibility
+        let max_chain_height = chain_counts.keys().map(|(h, _)| *h).max().unwrap_or(0);
+        let stake_override_threshold =
+            max_chain_height.saturating_sub(crate::ai::fork_resolver::MAX_STAKE_OVERRIDE_DEPTH);
+
         let consensus_chain = chain_counts
             .iter()
             .max_by(|((h1, hash1), peers1), ((h2, hash2), peers2)| {
-                // Primary: higher height wins (longest chain rule)
+                let w1 = chain_weights.get(&(*h1, *hash1)).copied().unwrap_or(0);
+                let w2 = chain_weights.get(&(*h2, *hash2)).copied().unwrap_or(0);
+                let both_eligible =
+                    *h1 >= stake_override_threshold && *h2 >= stake_override_threshold;
+
+                if both_eligible && h1 != h2 {
+                    // Both chains are within stake override depth of the tallest:
+                    // use stake weight as primary criterion (PoS principle)
+                    let weight_cmp = w1.cmp(&w2);
+                    if weight_cmp != std::cmp::Ordering::Equal {
+                        return weight_cmp;
+                    }
+                    // If stake is equal, taller chain wins
+                    return h1.cmp(h2);
+                }
+
+                // Outside stake override range or same height: height-first ordering
                 let height_cmp = h1.cmp(h2);
                 if height_cmp != std::cmp::Ordering::Equal {
                     return height_cmp;
                 }
-                // Secondary: higher weighted stake wins (at same height)
-                let w1 = chain_weights.get(&(*h1, *hash1)).copied().unwrap_or(0);
-                let w2 = chain_weights.get(&(*h2, *hash2)).copied().unwrap_or(0);
+                // Same height: higher weighted stake wins
                 let weight_cmp = w1.cmp(&w2);
                 if weight_cmp != std::cmp::Ordering::Equal {
                     return weight_cmp;
@@ -6738,13 +6757,13 @@ impl Blockchain {
 
         // Case 1: Longest chain is longer than us - sync to it
         if consensus_height > our_height {
-            tracing::warn!(
-                "🔀 FORK RESOLUTION TRIGGERED: longest chain height {} > our height {} ({} peers agree)",
+            tracing::debug!(
+                "🔀 Fork resolution: longest chain height {} > our height {} ({} peers agree), syncing from {}",
                 consensus_height,
                 our_height,
-                consensus_peers.len()
+                consensus_peers.len(),
+                consensus_peers[0]
             );
-            tracing::warn!("   Will attempt to sync from peer: {}", consensus_peers[0]);
             return Some((consensus_height, consensus_peers[0].clone()));
         }
 
@@ -7398,11 +7417,36 @@ impl Blockchain {
                     our_height, peer_tip_height, common_ancestor, fork_depth
                 );
 
-                // Use simplified fork resolver (longest valid chain wins)
-                // Compute stake weights for sybil-resistant same-height resolution
-                let peer_stake_weight = match self.masternode_registry.get(&peer_addr).await {
-                    Some(info) => info.masternode.tier.sampling_weight(),
-                    None => crate::types::MasternodeTier::Free.sampling_weight(),
+                // Use stake-weighted fork resolver
+                // Compute CUMULATIVE stake weights for fair comparison
+                // (both sides count all peers on their respective chains)
+                let peer_stake_weight = {
+                    let mut w = 0u64;
+                    // Add the forking peer's own weight
+                    w += match self.masternode_registry.get(&peer_addr).await {
+                        Some(info) => info.masternode.tier.sampling_weight(),
+                        None => crate::types::MasternodeTier::Free.sampling_weight(),
+                    };
+                    // Add weight of other peers on the peer's chain (same height/hash)
+                    if let Some(registry) = self.peer_registry.read().await.as_ref() {
+                        let peers = registry.get_compatible_peers().await;
+                        for pip in &peers {
+                            if pip == &peer_addr {
+                                continue; // already counted
+                            }
+                            if let Some((ph, phash)) = registry.get_peer_chain_tip(pip).await {
+                                if ph == peer_tip_height && phash == peer_tip_hash {
+                                    w += match self.masternode_registry.get(pip).await {
+                                        Some(info) => info.masternode.tier.sampling_weight(),
+                                        None => {
+                                            crate::types::MasternodeTier::Free.sampling_weight()
+                                        }
+                                    };
+                                }
+                            }
+                        }
+                    }
+                    w
                 };
                 // Our weight: sum of all peers on our chain + ourselves
                 let our_stake_weight = {
@@ -7450,17 +7494,22 @@ impl Blockchain {
 
                 let reasoning_summary = resolution.reasoning.join("; ");
                 info!(
-                    "🤖 [SIMPLIFIED] Fork resolution decision: accept={}, reasoning: {}",
-                    resolution.accept_peer_chain, reasoning_summary
+                    "🤖 Fork resolution decision: accept={}, stake_override={}, reasoning: {}",
+                    resolution.accept_peer_chain, resolution.stake_override, reasoning_summary
                 );
 
                 // Decision: determine whether to accept peer chain
-                // Only accept if the AI resolver says it's a longer valid chain.
-                // Same-height forks are resolved deterministically by the hash tiebreaker
-                // in fork_resolver.rs — do NOT override with peer-count consensus, as it
-                // causes reorg flip-flopping when peer counts shift during active forks.
+                // Accepts longer chains, same-height stake/hash tiebreakers, and
+                // stake-override decisions where a shorter chain has dominant stake.
                 let accept_reason = if resolution.accept_peer_chain {
-                    Some("longer valid chain".to_string())
+                    if resolution.stake_override {
+                        Some(
+                            "stake-weighted override (shorter chain with dominant stake)"
+                                .to_string(),
+                        )
+                    } else {
+                        Some("longer valid chain".to_string())
+                    }
                 } else {
                     None
                 };
@@ -7476,14 +7525,22 @@ impl Blockchain {
                         return Ok(());
                     }
 
-                    // Reject reorgs to strictly shorter chains (same height is OK for consensus switch)
+                    // Reject reorgs to strictly shorter chains unless stake override is active
                     if peer_tip_height < our_height {
-                        warn!(
-                            "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}).",
-                            peer_tip_height, our_height
-                        );
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        return Ok(());
+                        if resolution.stake_override {
+                            let depth = our_height - peer_tip_height;
+                            warn!(
+                                "⚖️  STAKE OVERRIDE REORG: Accepting shorter chain ({} < {}, depth {}) due to dominant stake (peer {} vs ours {})",
+                                peer_tip_height, our_height, depth, peer_stake_weight, our_stake_weight
+                            );
+                        } else {
+                            warn!(
+                                "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}).",
+                                peer_tip_height, our_height
+                            );
+                            *self.fork_state.write().await = ForkResolutionState::None;
+                            return Ok(());
+                        }
                     }
 
                     let peer_chain_length = peer_tip_height.saturating_sub(common_ancestor);

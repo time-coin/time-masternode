@@ -1559,6 +1559,11 @@ async fn main() {
         let mut last_chain_tip_request = std::time::Instant::now();
         const CHAIN_TIP_REQUEST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+        // Fork sync retry cooldown: avoid spamming when blocks repeatedly fail validation
+        let mut last_sync_attempt_height: u64 = 0;
+        let mut sync_attempt_count: u32 = 0;
+        let mut last_sync_attempt_time = std::time::Instant::now();
+
         loop {
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
@@ -1921,6 +1926,27 @@ async fn main() {
                             // Some() means peers are ahead or there's a fork we should switch to.
                             // compare_chain_with_peers() only returns Some when action is needed.
                             if consensus_height > current_height {
+                                // Cooldown: if we've been failing to sync the same height, back off
+                                if consensus_height == last_sync_attempt_height {
+                                    sync_attempt_count += 1;
+                                    if sync_attempt_count > 3
+                                        && last_sync_attempt_time.elapsed()
+                                            < std::time::Duration::from_secs(30)
+                                    {
+                                        tracing::debug!(
+                                            "⏳ Sync retry cooldown: height {} failed {} times, waiting 30s",
+                                            consensus_height,
+                                            sync_attempt_count
+                                        );
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(30))
+                                            .await;
+                                    }
+                                } else {
+                                    last_sync_attempt_height = consensus_height;
+                                    sync_attempt_count = 1;
+                                }
+                                last_sync_attempt_time = std::time::Instant::now();
+
                                 // Consensus is ahead of us - request blocks and loop back
                                 tracing::debug!(
                                     "Peers at height {} (we're at {}) - requesting blocks",
@@ -1978,6 +2004,26 @@ async fn main() {
                         block_blockchain.compare_chain_with_peers().await
                     {
                         if consensus_height > current_height {
+                            // Cooldown: if we've been failing to sync the same height, back off
+                            if consensus_height == last_sync_attempt_height {
+                                sync_attempt_count += 1;
+                                if sync_attempt_count > 3
+                                    && last_sync_attempt_time.elapsed()
+                                        < std::time::Duration::from_secs(30)
+                                {
+                                    tracing::debug!(
+                                        "⏳ Sync retry cooldown: height {} failed {} times, waiting 30s",
+                                        consensus_height,
+                                        sync_attempt_count
+                                    );
+                                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                                }
+                            } else {
+                                last_sync_attempt_height = consensus_height;
+                                sync_attempt_count = 1;
+                            }
+                            last_sync_attempt_time = std::time::Instant::now();
+
                             tracing::warn!(
                                 "🛡️ FORK PREVENTION: Peers at height {} > our {} - syncing instead of producing",
                                 consensus_height,
@@ -2192,8 +2238,8 @@ async fn main() {
                 }
             }
             if max_peer_height_final > current_height {
-                tracing::warn!(
-                    "🛡️ FORK PREVENTION: Peers have height {} > our height {} - syncing instead of producing",
+                tracing::debug!(
+                    "🛡️ Fork prevention: peers have height {} > our height {} - syncing instead of producing",
                     max_peer_height_final,
                     current_height
                 );
