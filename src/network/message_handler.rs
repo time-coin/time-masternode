@@ -2505,14 +2505,19 @@ impl MessageHandler {
         // Check both same-height forks and height mismatches (we may have
         // advanced further on our fork, or fallen behind).
         let our_hash_differs = your_hash != consensus_hash;
-        let heights_close = your_height.abs_diff(consensus_height) <= 5;
+        let we_are_behind = consensus_height > your_height;
 
-        if our_hash_differs && heights_close {
+        if our_hash_differs || we_are_behind {
             warn!(
                 "   ⚠️ We appear to be on minority fork (our height {} vs consensus {})! Requesting consensus chain...",
                 your_height, consensus_height
             );
-            let request_from = consensus_height.saturating_sub(10);
+            // Start request before our tip for chain validation overlap
+            let request_from = if we_are_behind {
+                your_height.saturating_sub(5)
+            } else {
+                consensus_height.saturating_sub(10)
+            };
             let request_to = your_height.max(consensus_height) + 5;
             return Ok(Some(NetworkMessage::GetBlocks(request_from, request_to)));
         }
@@ -2664,6 +2669,46 @@ impl MessageHandler {
             )));
         } else {
             // We're ahead - peer might need to sync from us
+            let height_diff = our_height - peer_height;
+
+            // If peer is significantly behind, check if we have consensus and send fork alert
+            if height_diff >= 2 {
+                let all_peers = context.peer_registry.get_compatible_peers().await;
+                let mut our_chain_count: usize = 1; // Count ourselves
+                let mut behind_count: usize = 0;
+
+                for peer_addr in &all_peers {
+                    if let Some((peer_h, _)) =
+                        context.peer_registry.get_peer_chain_tip(peer_addr).await
+                    {
+                        if peer_h >= our_height {
+                            our_chain_count += 1;
+                        } else if peer_h <= peer_height {
+                            behind_count += 1;
+                        }
+                    }
+                }
+
+                if our_chain_count >= 3 && our_chain_count > behind_count {
+                    info!(
+                        "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending fork alert.",
+                        self.direction, self.peer_ip, height_diff, peer_height,
+                        our_chain_count, our_height
+                    );
+                    return Ok(Some(NetworkMessage::ForkAlert {
+                        your_height: peer_height,
+                        your_hash: peer_hash,
+                        consensus_height: our_height,
+                        consensus_hash: our_hash,
+                        consensus_peer_count: our_chain_count,
+                        message: format!(
+                            "You're behind at height {} while {} peers are at height {}. Please sync.",
+                            peer_height, our_chain_count, our_height
+                        ),
+                    }));
+                }
+            }
+
             debug!(
                 "📉 [{}] Peer {} behind at height {} (we have {})",
                 self.direction, self.peer_ip, peer_height, our_height
