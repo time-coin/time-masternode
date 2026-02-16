@@ -275,75 +275,138 @@ echo ""
 PHASE2_START=$(ms_now)
 CONSECUTIVE_TIMEOUTS=0
 
+# Build associative arrays for batch tracking
+declare -A FINALITY_RESULT   # txid -> "true" or "false"
+declare -A FINALITY_VOTES    # txid -> votes count
+declare -A FINALITY_WEIGHT   # txid -> accumulated weight
+declare -A FINALITY_CONFS    # txid -> confirmations
+declare -A FINALITY_ERROR    # txid -> error string
+declare -A FINALITY_DETECT   # txid -> ms timestamp when finality detected
+
+for txid in "${TX_IDS[@]}"; do
+    FINALITY_RESULT["$txid"]="false"
+done
+
+REMAINING=${#TX_IDS[@]}
+POLL_DELAY="0.05"        # Start at 50ms
+MAX_POLL_DELAY="0.5"     # Cap at 500ms
+BATCH_SIZE=50            # TXIDs per batch RPC call
+GLOBAL_DEADLINE=$(( $(date +%s) + FINALITY_TIMEOUT ))
+
+while [ "$REMAINING" -gt 0 ] && [ "$(date +%s)" -lt "$GLOBAL_DEADLINE" ]; do
+    # Collect un-finalized txids into batches
+    UNFIN_TXIDS=()
+    for txid in "${TX_IDS[@]}"; do
+        if [ "${FINALITY_RESULT[$txid]}" = "false" ]; then
+            UNFIN_TXIDS+=("$txid")
+        fi
+    done
+    REMAINING=${#UNFIN_TXIDS[@]}
+    [ "$REMAINING" -eq 0 ] && break
+
+    # Try batch RPC first (gettransactions), fall back to single queries
+    for (( b=0; b<${#UNFIN_TXIDS[@]}; b+=BATCH_SIZE )); do
+        BATCH=("${UNFIN_TXIDS[@]:$b:$BATCH_SIZE}")
+        BATCH_JSON=$(printf '"%s",' "${BATCH[@]}")
+        BATCH_JSON="[${BATCH_JSON%,}]"
+
+        BATCH_RESULT=$($CLI_CMD gettransactions "$BATCH_JSON" 2>&1) || BATCH_RESULT=""
+
+        if echo "$BATCH_RESULT" | jq -e '.transactions' >/dev/null 2>&1; then
+            # Batch succeeded — parse results
+            for row in $(echo "$BATCH_RESULT" | jq -c '.transactions[]'); do
+                TXID=$(echo "$row" | jq -r '.txid')
+                IS_FIN=$(echo "$row" | jq -r '.finalized // false')
+                HAS_TP=$(echo "$row" | jq -r '.timeproof // null')
+                CONF=$(echo "$row" | jq -r '.confirmations // 0')
+
+                if [ "$IS_FIN" = "true" ] || [ "$HAS_TP" != "null" ] || [ "$CONF" -gt 0 ] 2>/dev/null; then
+                    FINALITY_RESULT["$TXID"]="true"
+                    FINALITY_DETECT["$TXID"]=$(ms_now)
+                    FINALITY_CONFS["$TXID"]="$CONF"
+                    if [ "$HAS_TP" != "null" ]; then
+                        FINALITY_VOTES["$TXID"]=$(echo "$row" | jq -r '.timeproof.votes // 0')
+                        FINALITY_WEIGHT["$TXID"]=$(echo "$row" | jq -r '.timeproof.accumulated_weight // 0')
+                    fi
+                fi
+            done
+        else
+            # Batch not supported — fall back to single queries
+            for TXID in "${BATCH[@]}"; do
+                TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
+                if echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
+                    IS_FIN=$(echo "$TX_INFO" | jq -r '.finalized // false')
+                    HAS_TP=$(echo "$TX_INFO" | jq -r '.timeproof // null')
+                    CONF=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
+
+                    if [ "$IS_FIN" = "true" ] || [ "$HAS_TP" != "null" ] || [ "$CONF" -gt 0 ] 2>/dev/null; then
+                        FINALITY_RESULT["$TXID"]="true"
+                        FINALITY_DETECT["$TXID"]=$(ms_now)
+                        FINALITY_CONFS["$TXID"]="$CONF"
+                        if [ "$HAS_TP" != "null" ]; then
+                            FINALITY_VOTES["$TXID"]=$(echo "$TX_INFO" | jq -r '.timeproof.votes // 0')
+                            FINALITY_WEIGHT["$TXID"]=$(echo "$TX_INFO" | jq -r '.timeproof.accumulated_weight // 0')
+                        fi
+                    fi
+                fi
+            done
+        fi
+    done
+
+    # Count finalized
+    NEW_REMAINING=0
+    FINALIZED_COUNT=0
+    for txid in "${TX_IDS[@]}"; do
+        if [ "${FINALITY_RESULT[$txid]}" = "true" ]; then
+            FINALIZED_COUNT=$(( FINALIZED_COUNT + 1 ))
+        else
+            NEW_REMAINING=$(( NEW_REMAINING + 1 ))
+        fi
+    done
+    REMAINING=$NEW_REMAINING
+
+    echo -ne "\r  [${FINALIZED_COUNT}/${SENT}] finalized, ${REMAINING} remaining (poll interval: ${POLL_DELAY}s)        "
+
+    # Exponential backoff: increase delay by 1.5x, cap at MAX_POLL_DELAY
+    if [ "$REMAINING" -gt 0 ]; then
+        sleep "$POLL_DELAY"
+        POLL_DELAY=$(awk -v d="$POLL_DELAY" -v m="$MAX_POLL_DELAY" 'BEGIN { nd=d*1.5; if (nd>m) nd=m; printf "%.3f", nd }')
+    fi
+done
+
+# Write results for each TX
+FINALITY_FAILURES=0
 for (( idx=0; idx<${#TX_IDS[@]}; idx++ )); do
     TXID="${TX_IDS[$idx]}"
     SEND_TIME="${TX_SEND_TIMES[$idx]}"
     SEND_LATENCY="${TX_SEND_LATENCIES[$idx]}"
     TARGET_RATE="${TX_TARGET_RATES[$idx]}"
     SEQ="${TX_SEQS[$idx]}"
+    ACTUAL_TPS="$TARGET_RATE"
+    VOTES="${FINALITY_VOTES[$TXID]:-}"
+    WEIGHT="${FINALITY_WEIGHT[$TXID]:-}"
+    CONFS="${FINALITY_CONFS[$TXID]:-}"
+    ERROR="${FINALITY_ERROR[$TXID]:-}"
+    FINALIZED="${FINALITY_RESULT[$TXID]}"
 
-    POLL_START=$(ms_now)
-    FINALIZED=false
-    VOTES=""
-    WEIGHT=""
-    CONFS=""
-    ERROR=""
-
-    DEADLINE=$(( $(date +%s) + FINALITY_TIMEOUT ))
-
-    while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-        TX_INFO=$($CLI_CMD gettransaction "$TXID" 2>&1) || true
-
-        if echo "$TX_INFO" | jq -e . >/dev/null 2>&1; then
-            IS_FINALIZED=$(echo "$TX_INFO" | jq -r '.finalized // false')
-            HAS_TIMEPROOF=$(echo "$TX_INFO" | jq -r '.timeproof // null')
-            CONFS=$(echo "$TX_INFO" | jq -r '.confirmations // 0')
-
-            if [ "$IS_FINALIZED" = "true" ] || [ "$HAS_TIMEPROOF" != "null" ] || [ "$CONFS" -gt 0 ] 2>/dev/null; then
-                FINALIZED=true
-                if [ "$HAS_TIMEPROOF" != "null" ]; then
-                    VOTES=$(echo "$TX_INFO" | jq -r '.timeproof.votes // 0')
-                    WEIGHT=$(echo "$TX_INFO" | jq -r '.timeproof.accumulated_weight // 0')
-                fi
-                break
-            fi
-        fi
-
-        sleep 0.2
-    done
-
-    POLL_END=$(ms_now)
-    FINALITY_TIME=$(( POLL_END - SEND_TIME ))
-
-    if [ "$FINALIZED" = true ]; then
-        FINALIZED_COUNT=$(( FINALIZED_COUNT + 1 ))
-        CONSECUTIVE_TIMEOUTS=0
-        echo -ne "\r  [$((idx+1))/$SENT] ${TXID:0:12}... ✅ ${FINALITY_TIME}ms            "
+    if [ "$FINALIZED" = "true" ]; then
+        DETECT_TIME="${FINALITY_DETECT[$TXID]}"
+        FINALITY_TIME=$(( DETECT_TIME - SEND_TIME ))
     else
         FINALITY_FAILURES=$(( FINALITY_FAILURES + 1 ))
-        CONSECUTIVE_TIMEOUTS=$(( CONSECUTIVE_TIMEOUTS + 1 ))
-        ERROR="timeout"
         FINALITY_TIME=""
-        echo -ne "\r  [$((idx+1))/$SENT] ${TXID:0:12}... ❌ TIMEOUT            "
-
-        # Early stop on finality: 10 consecutive timeouts means network is overwhelmed
-        if [ "$EARLY_STOP" -eq 1 ] && [ "$CONSECUTIVE_TIMEOUTS" -ge 10 ]; then
-            echo ""
-            log_warning "Early stop: $CONSECUTIVE_TIMEOUTS consecutive finality timeouts"
-            # Write remaining TXs as timeouts
-            for (( rem=idx+1; rem<${#TX_IDS[@]}; rem++ )); do
-                FINALITY_FAILURES=$(( FINALITY_FAILURES + 1 ))
-                echo "${TX_SEQS[$rem]},${TX_IDS[$rem]},${TX_TARGET_RATES[$rem]},,${TX_SEND_TIMES[$rem]},${TX_SEND_LATENCIES[$rem]},,false,,,,early_stop" >> "$OUTPUT"
-            done
-            break
-        fi
+        ERROR="timeout"
     fi
-
-    # Compute actual TPS at time of send
-    ACTUAL_TPS="$TARGET_RATE"
 
     echo "${SEQ},${TXID},${TARGET_RATE},${ACTUAL_TPS},${SEND_TIME},${SEND_LATENCY},${FINALITY_TIME},${FINALIZED},${VOTES},${WEIGHT},${CONFS},${ERROR}" >> "$OUTPUT"
 done
+
+# Show last TX result
+LAST_TXID="${TX_IDS[$((SENT-1))]}"
+if [ "${FINALITY_RESULT[$LAST_TXID]}" = "true" ]; then
+    LAST_FT=$(( ${FINALITY_DETECT[$LAST_TXID]} - ${TX_SEND_TIMES[$((SENT-1))]} ))
+    echo -ne "\r  [${FINALIZED_COUNT}/${SENT}] ${LAST_TXID:0:12}... ✅ ${LAST_FT}ms            "
+fi
 
 PHASE2_END=$(ms_now)
 echo ""

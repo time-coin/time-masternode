@@ -3688,11 +3688,24 @@ impl MessageHandler {
                 }
             }
         } else {
-            tracing::debug!(
-                "⚠️  TX {:?} not found in mempool and not included in request",
-                hex::encode(txid)
-            );
-            crate::types::VoteDecision::Reject
+            // TX not in pending pool and not included in request — check if already
+            // finalized (race condition: TX moved from pending to finalized between
+            // the vote request being sent and processed). Vote Accept for finalized TXs.
+            if consensus.tx_pool.is_finalized(&txid)
+                || consensus.timevote.finalized_txs.contains_key(&txid)
+            {
+                tracing::debug!(
+                    "✅ TX {:?} already finalized, voting Accept for late vote request",
+                    hex::encode(txid)
+                );
+                crate::types::VoteDecision::Accept
+            } else {
+                tracing::debug!(
+                    "⚠️  TX {:?} not found in mempool and not included in request",
+                    hex::encode(txid)
+                );
+                crate::types::VoteDecision::Reject
+            }
         };
 
         // Sign TimeVote with our masternode key
@@ -3706,8 +3719,8 @@ impl MessageHandler {
             );
             Ok(Some(NetworkMessage::TimeVoteResponse { vote }))
         } else {
-            tracing::warn!(
-                "⚠️ TimeVote signing skipped for TX {:?} (not a masternode or identity not set)",
+            tracing::info!(
+                "ℹ️ TimeVote signing skipped for TX {:?} (this node is not a registered masternode)",
                 hex::encode(txid)
             );
             Ok(None)
