@@ -22,6 +22,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
+/// Global rate limiter for fork alert sending, keyed by peer IP.
+/// Persists across MessageHandler instances (which are created per-message).
+fn fork_alert_rate_limit() -> &'static dashmap::DashMap<String, Instant> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, Instant>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
 /// Direction of the network connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionDirection {
@@ -177,8 +185,6 @@ pub struct MessageHandler {
     peer_ip: String,
     direction: ConnectionDirection,
     recent_requests: Arc<RwLock<Vec<GetBlocksRequest>>>,
-    /// Tracks the last time a fork warning was logged for this peer (rate limiting)
-    last_fork_warning: std::sync::Mutex<Option<Instant>>,
 }
 
 impl MessageHandler {
@@ -188,7 +194,6 @@ impl MessageHandler {
             peer_ip,
             direction,
             recent_requests: Arc::new(RwLock::new(Vec::new())),
-            last_fork_warning: std::sync::Mutex::new(None),
         }
     }
 
@@ -2565,15 +2570,12 @@ impl MessageHandler {
                 // FORK DETECTED - same height but different blocks!
                 // Rate-limit: only log once per 60s per peer to avoid flooding
                 let now = Instant::now();
-                let should_log = {
-                    let last = self.last_fork_warning.lock().unwrap();
-                    match *last {
-                        Some(t) => now.duration_since(t) >= Duration::from_secs(60),
-                        None => true,
-                    }
+                let should_log = match fork_alert_rate_limit().get(&self.peer_ip) {
+                    Some(last) => now.duration_since(*last) >= Duration::from_secs(60),
+                    None => true,
                 };
                 if should_log {
-                    *self.last_fork_warning.lock().unwrap() = Some(now);
+                    fork_alert_rate_limit().insert(self.peer_ip.clone(), now);
                     warn!(
                         "🔀 [{}] FORK with {} at height {}: our {} vs their {}",
                         self.direction,
@@ -2671,15 +2673,12 @@ impl MessageHandler {
             // We're ahead - peer might need to sync from us
             let height_diff = our_height - peer_height;
 
-            // Rate-limit fork alerts: at most once per 60s per peer
+            // Rate-limit fork alerts: at most once per 60s per peer (global, survives handler recreation)
             if height_diff >= 2 {
                 let now = Instant::now();
-                let should_alert = {
-                    let last = self.last_fork_warning.lock().unwrap();
-                    match *last {
-                        Some(t) => now.duration_since(t) >= Duration::from_secs(60),
-                        None => true,
-                    }
+                let should_alert = match fork_alert_rate_limit().get(&self.peer_ip) {
+                    Some(last) => now.duration_since(*last) >= Duration::from_secs(60),
+                    None => true,
                 };
 
                 if should_alert {
@@ -2700,7 +2699,7 @@ impl MessageHandler {
                     }
 
                     if our_chain_count >= 3 && our_chain_count > behind_count {
-                        *self.last_fork_warning.lock().unwrap() = Some(now);
+                        fork_alert_rate_limit().insert(self.peer_ip.clone(), now);
                         info!(
                             "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending fork alert.",
                             self.direction, self.peer_ip, height_diff, peer_height,
