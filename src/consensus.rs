@@ -1407,7 +1407,13 @@ impl TimeVoteConsensus {
     /// Preserves voter list before clearing so block production can reference it
     pub fn cleanup_block_votes(&self, block_hash: Hash256) {
         // Save precommit voters before clearing
-        let voters = self.precommit_votes.get_voters(block_hash);
+        let mut voters = self.precommit_votes.get_voters(block_hash);
+        // If no precommit voters, fall back to prepare voters.
+        // This handles the case where the block was added via sync before
+        // precommit voting completed (common on the block producer).
+        if voters.is_empty() {
+            voters = self.prepare_votes.get_voters(block_hash);
+        }
         if !voters.is_empty() {
             self.last_block_voters.insert(block_hash, voters);
         }
