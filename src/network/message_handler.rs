@@ -195,7 +195,7 @@ impl MessageHandler {
     /// Get voter weight from masternode registry, defaulting to 1 if not found
     async fn get_voter_weight(registry: &MasternodeRegistry, voter_id: &str) -> u64 {
         match registry.get(voter_id).await {
-            Some(info) => info.masternode.collateral,
+            Some(info) => info.masternode.tier.sampling_weight().max(1),
             None => 1u64,
         }
     }
@@ -941,7 +941,7 @@ impl MessageHandler {
             .clone()
             .unwrap_or_else(|| format!("node_{}", self.peer_ip));
         let validator_weight = match context.masternode_registry.get(&validator_id).await {
-            Some(info) => info.masternode.collateral.max(1),
+            Some(info) => info.masternode.tier.sampling_weight().max(1),
             None => 1u64, // Default to 1 if not found
         };
 
@@ -3162,10 +3162,10 @@ impl MessageHandler {
                 ));
             }
 
-            // Calculate total AVS weight (sum of all masternode stakes)
+            // Calculate total AVS weight (sum of all masternode sampling weights)
             let total_avs_weight: u64 = masternodes
                 .iter()
-                .map(|mn| mn.masternode.tier.collateral() / 1_000_000_000) // Convert to relative weight
+                .map(|mn| mn.masternode.tier.sampling_weight().max(1))
                 .sum();
 
             // Phase 4: Validate vote weight doesn't exceed total

@@ -2314,7 +2314,7 @@ async fn main() {
                     if let Some(ref our_addr) = block_masternode_address {
                         // Look up our weight from masternode registry
                         let our_weight = match block_registry.get(our_addr).await {
-                            Some(info) => info.masternode.collateral.max(1),
+                            Some(info) => info.masternode.tier.sampling_weight().max(1),
                             None => 1u64,
                         };
 
