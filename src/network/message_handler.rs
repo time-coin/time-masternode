@@ -2671,41 +2671,53 @@ impl MessageHandler {
             // We're ahead - peer might need to sync from us
             let height_diff = our_height - peer_height;
 
-            // If peer is significantly behind, check if we have consensus and send fork alert
+            // Rate-limit fork alerts: at most once per 60s per peer
             if height_diff >= 2 {
-                let all_peers = context.peer_registry.get_compatible_peers().await;
-                let mut our_chain_count: usize = 1; // Count ourselves
-                let mut behind_count: usize = 0;
+                let now = Instant::now();
+                let should_alert = {
+                    let last = self.last_fork_warning.lock().unwrap();
+                    match *last {
+                        Some(t) => now.duration_since(t) >= Duration::from_secs(60),
+                        None => true,
+                    }
+                };
 
-                for peer_addr in &all_peers {
-                    if let Some((peer_h, _)) =
-                        context.peer_registry.get_peer_chain_tip(peer_addr).await
-                    {
-                        if peer_h >= our_height {
-                            our_chain_count += 1;
-                        } else if peer_h <= peer_height {
-                            behind_count += 1;
+                if should_alert {
+                    let all_peers = context.peer_registry.get_compatible_peers().await;
+                    let mut our_chain_count: usize = 1; // Count ourselves
+                    let mut behind_count: usize = 0;
+
+                    for peer_addr in &all_peers {
+                        if let Some((peer_h, _)) =
+                            context.peer_registry.get_peer_chain_tip(peer_addr).await
+                        {
+                            if peer_h >= our_height {
+                                our_chain_count += 1;
+                            } else if peer_h <= peer_height {
+                                behind_count += 1;
+                            }
                         }
                     }
-                }
 
-                if our_chain_count >= 3 && our_chain_count > behind_count {
-                    info!(
-                        "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending fork alert.",
-                        self.direction, self.peer_ip, height_diff, peer_height,
-                        our_chain_count, our_height
-                    );
-                    return Ok(Some(NetworkMessage::ForkAlert {
-                        your_height: peer_height,
-                        your_hash: peer_hash,
-                        consensus_height: our_height,
-                        consensus_hash: our_hash,
-                        consensus_peer_count: our_chain_count,
-                        message: format!(
-                            "You're behind at height {} while {} peers are at height {}. Please sync.",
-                            peer_height, our_chain_count, our_height
-                        ),
-                    }));
+                    if our_chain_count >= 3 && our_chain_count > behind_count {
+                        *self.last_fork_warning.lock().unwrap() = Some(now);
+                        info!(
+                            "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending fork alert.",
+                            self.direction, self.peer_ip, height_diff, peer_height,
+                            our_chain_count, our_height
+                        );
+                        return Ok(Some(NetworkMessage::ForkAlert {
+                            your_height: peer_height,
+                            your_hash: peer_hash,
+                            consensus_height: our_height,
+                            consensus_hash: our_hash,
+                            consensus_peer_count: our_chain_count,
+                            message: format!(
+                                "You're behind at height {} while {} peers are at height {}. Please sync.",
+                                peer_height, our_chain_count, our_height
+                            ),
+                        }));
+                    }
                 }
             }
 
