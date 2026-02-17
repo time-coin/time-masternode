@@ -660,7 +660,7 @@ impl MasternodeRegistry {
             let last = LAST_PARTICIPATION_WARN.load(AtomOrd::Relaxed);
             if now_secs - last >= 60 {
                 LAST_PARTICIPATION_WARN.store(now_secs, AtomOrd::Relaxed);
-                tracing::warn!(
+                tracing::debug!(
                     "⚠️ Participation recovery: block {} bitmap had {} participants, falling back to {} active masternodes",
                     current_height,
                     participants.len(),

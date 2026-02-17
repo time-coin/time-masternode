@@ -413,6 +413,18 @@ impl PrepareVoteAccumulator {
     pub fn clear_all(&self) {
         self.votes.clear();
     }
+
+    /// Get all voters across all block hashes (for merging into last_block_voters)
+    pub fn get_all_voters(&self) -> Vec<(Hash256, Vec<String>)> {
+        self.votes
+            .iter()
+            .map(|entry| {
+                let hash = *entry.key();
+                let voters = entry.value().iter().map(|(id, _)| id.clone()).collect();
+                (hash, voters)
+            })
+            .collect()
+    }
 }
 
 /// Accumulates precommit votes for a block (Phase 3E)
@@ -1404,15 +1416,19 @@ impl TimeVoteConsensus {
     }
 
     /// Clean up votes after block finalization (Phase 3E.6)
-    /// Preserves voter list before clearing so block production can reference it
+    /// Preserves voter list before clearing so block production can reference it.
+    /// Merges BOTH prepare and precommit voters to maximize participation coverage.
+    /// This is critical because fast consensus (e.g., high-weight producer) can
+    /// finalize before all peers' precommit votes arrive, causing low bitmap counts.
     pub fn cleanup_block_votes(&self, block_hash: Hash256) {
-        // Save precommit voters before clearing
+        // Start with precommit voters
         let mut voters = self.precommit_votes.get_voters(block_hash);
-        // If no precommit voters, fall back to prepare voters.
-        // This handles the case where the block was added via sync before
-        // precommit voting completed (common on the block producer).
-        if voters.is_empty() {
-            voters = self.prepare_votes.get_voters(block_hash);
+        // Merge prepare voters — these are always more complete since prepare
+        // consensus is reached before precommit consensus begins
+        for voter in self.prepare_votes.get_voters(block_hash) {
+            if !voters.contains(&voter) {
+                voters.push(voter);
+            }
         }
         if !voters.is_empty() {
             self.last_block_voters.insert(block_hash, voters);
@@ -1428,10 +1444,24 @@ impl TimeVoteConsensus {
     pub fn advance_vote_height(&self, new_height: u64) {
         let prev = self.last_voted_height.swap(new_height, Ordering::SeqCst);
         if new_height > prev {
-            // Merge any late-arriving precommit voters into last_block_voters
+            // Merge any late-arriving votes (both phases) into last_block_voters
             // before clearing. This captures votes that arrived after
             // cleanup_block_votes saved the initial voter set at finalization.
             for (hash, voters) in self.precommit_votes.get_all_voters() {
+                if !voters.is_empty() {
+                    self.last_block_voters
+                        .entry(hash)
+                        .and_modify(|existing| {
+                            for voter in &voters {
+                                if !existing.contains(voter) {
+                                    existing.push(voter.clone());
+                                }
+                            }
+                        })
+                        .or_insert(voters);
+                }
+            }
+            for (hash, voters) in self.prepare_votes.get_all_voters() {
                 if !voters.is_empty() {
                     self.last_block_voters
                         .entry(hash)
