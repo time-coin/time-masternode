@@ -2811,20 +2811,39 @@ impl Blockchain {
         } else {
             // Get voters from previous block (who voted to accept it)
             let prev_block_hash = prev_hash;
-            // Use precommit voters (final voting phase before block acceptance)
-            // First try live votes, then preserved voters (saved before cleanup)
-            let mut precommit_voters = self
+            // Gather voters from both prepare and precommit phases for maximum coverage.
+            // Fast consensus (e.g., high-weight producer) can finalize before all peers'
+            // precommit votes arrive, so prepare voters fill the gap.
+            let mut voters_set = std::collections::HashSet::new();
+
+            // 1. Check live precommit votes
+            for v in self
                 .consensus
                 .timevote
                 .precommit_votes
-                .get_voters(prev_block_hash);
-
-            if precommit_voters.is_empty() {
-                precommit_voters = self
-                    .consensus
-                    .timevote
-                    .get_finalized_block_voters(prev_block_hash);
+                .get_voters(prev_block_hash)
+            {
+                voters_set.insert(v);
             }
+            // 2. Check preserved voters (saved at finalization by cleanup_block_votes)
+            for v in self
+                .consensus
+                .timevote
+                .get_finalized_block_voters(prev_block_hash)
+            {
+                voters_set.insert(v);
+            }
+            // 3. Check live prepare votes (more complete since prepare consensus is reached first)
+            for v in self
+                .consensus
+                .timevote
+                .prepare_votes
+                .get_voters(prev_block_hash)
+            {
+                voters_set.insert(v);
+            }
+
+            let precommit_voters: Vec<String> = voters_set.into_iter().collect();
 
             // CRITICAL: If no voters recorded, use active masternodes on our chain as fallback
             // This prevents bitmap from becoming empty and breaking participation tracking
@@ -6511,10 +6530,23 @@ impl Blockchain {
             if num_chains == 1 {
                 tracing::debug!("🔍 [CHAIN ANALYSIS] Network consensus: 1 chain detected");
             } else {
-                tracing::info!(
-                    "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
-                    num_chains
-                );
+                // Check if this is just a 1-block propagation lag (benign, not a real fork)
+                let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
+                let max_h = heights.iter().max().copied().unwrap_or(0);
+                let min_h = heights.iter().min().copied().unwrap_or(0);
+                let is_benign_lag = max_h - min_h <= 1;
+
+                if is_benign_lag {
+                    tracing::debug!(
+                        "🔍 [CHAIN ANALYSIS] {} chains detected (height diff ≤ 1, normal propagation delay)",
+                        num_chains
+                    );
+                } else {
+                    tracing::info!(
+                        "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
+                        num_chains
+                    );
+                }
             }
             for ((height, hash), peers) in &chain_counts {
                 if num_chains == 1 {
@@ -6526,13 +6558,26 @@ impl Blockchain {
                         peers
                     );
                 } else {
-                    tracing::info!(
-                        "   📊 Chain @ height {}, hash {}: {} peers {:?}",
-                        height,
-                        hex::encode(&hash[..8]),
-                        peers.len(),
-                        peers
-                    );
+                    let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
+                    let max_h = heights.iter().max().copied().unwrap_or(0);
+                    let min_h = heights.iter().min().copied().unwrap_or(0);
+                    if max_h - min_h <= 1 {
+                        tracing::debug!(
+                            "   📊 Chain @ height {}, hash {}: {} peers {:?}",
+                            height,
+                            hex::encode(&hash[..8]),
+                            peers.len(),
+                            peers
+                        );
+                    } else {
+                        tracing::info!(
+                            "   📊 Chain @ height {}, hash {}: {} peers {:?}",
+                            height,
+                            hex::encode(&hash[..8]),
+                            peers.len(),
+                            peers
+                        );
+                    }
                 }
             }
         }

@@ -362,14 +362,24 @@ impl NetworkServer {
             }
 
             let connection_type = if is_whitelisted { "[WHITELIST]" } else { "" };
-            tracing::info!(
-                "✅ {} Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
-                connection_type,
-                ip,
-                self.connection_manager.connected_count(),
-                self.connection_manager.inbound_count(),
-                self.connection_manager.count_whitelisted_connections()
-            );
+            if is_whitelisted {
+                tracing::info!(
+                    "✅ {} Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
+                    connection_type,
+                    ip,
+                    self.connection_manager.connected_count(),
+                    self.connection_manager.inbound_count(),
+                    self.connection_manager.count_whitelisted_connections()
+                );
+            } else {
+                tracing::debug!(
+                    "✅ Accepting inbound connection from {} (total: {}, inbound: {}, whitelisted: {})",
+                    ip,
+                    self.connection_manager.connected_count(),
+                    self.connection_manager.inbound_count(),
+                    self.connection_manager.count_whitelisted_connections()
+                );
+            }
 
             let peer = PeerInfo {
                 addr: addr_str.clone(),
@@ -607,17 +617,29 @@ async fn handle_peer(
                 let result = match result {
                     Some(r) => r,
                     None => {
-                        tracing::info!("🔌 Peer {} reader channel closed", peer.addr);
+                        if handshake_done {
+                            tracing::info!("🔌 Peer {} reader channel closed", peer.addr);
+                        } else {
+                            tracing::debug!("🔌 Peer {} reader channel closed (pre-handshake)", peer.addr);
+                        }
                         break;
                     }
                 };
                 match result {
                     Ok(None) => {
-                        tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
+                        if handshake_done {
+                            tracing::info!("🔌 Peer {} disconnected (EOF)", peer.addr);
+                        } else {
+                            tracing::debug!("🔌 Peer {} disconnected before handshake (EOF)", peer.addr);
+                        }
                         break;
                     }
                     Err(e) => {
-                        tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
+                        if handshake_done {
+                            tracing::info!("🔌 Connection from {} ended: {}", peer.addr, e);
+                        } else {
+                            tracing::debug!("🔌 Connection from {} ended before handshake: {}", peer.addr, e);
+                        }
                         break;
                     }
                     Ok(Some(msg)) => {
