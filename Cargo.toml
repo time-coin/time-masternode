@@ -56,7 +56,6 @@ aes-gcm = "0.10"                                    # AES-256-GCM encryption
 argon2 = "0.5"                                       # Password-based key derivation
 
 # Critical security enhancements
-blake3 = "1.5"                                      # Fast cryptographic hashing
 zeroize = { version = "1.7", features = ["derive"] }  # Secure memory cleanup
 subtle = "2.5"                                      # Constant-time comparisons
 tokio-rustls = "0.26"                              # TLS for encrypted transport

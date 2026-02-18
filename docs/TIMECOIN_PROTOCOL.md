@@ -86,7 +86,7 @@ Every 10 minutes -> TimeLock checkpoint block archives finalized txs + rewards
 All signed objects MUST include `chain_id` to prevent replay across networks.
 
 ### 4.2 Hashes
-- `Hash256`: 32-byte cryptographic hash (e.g., SHA-256d or BLAKE3; MUST be fixed by implementation).
+- `Hash256`: 32-byte SHA-256 cryptographic hash.
 - `txid = H(serialized_tx)`
 
 ### 4.3 Signatures
@@ -176,9 +176,10 @@ Validator selection SHOULD be without replacement per poll.
 
 ### 6.1 UTXO States (per outpoint)
 - `Unspent`
-- `Locked(txid)` (local reservation)
-- `Spent(txid)` (by Finalized tx)
-- `Archived(txid, height)` (spent + checkpointed)
+- `Locked { txid, locked_at }` (masternode collateral or local reservation)
+- `SpentPending { txid, votes, total_nodes, spent_at }` (in-flight TX with vote tracking)
+- `SpentFinalized { txid, finalized_at, votes }` (TX finalized via TimeVote)
+- `Archived { txid, block_height, archived_at }` (spent + checkpointed in block)
 
 ### 6.2 Transaction Validity Preconditions
 A node MUST treat a Tx as **invalid** (and vote `Invalid`) if:
@@ -710,28 +711,53 @@ When a node receives a valid proposal with a lower VRF score than a previously r
 ### 9.4 Block Content
 A block MUST contain:
 - Header:
-  - `height`
-  - `slot_index`, `slot_time`
-  - `prev_block_hash`
-  - `producer_id`
-  - `vrf_output`, `vrf_proof`
-  - `finalized_root` (Merkle root over entries; REQUIRED)
+  - `version: u32`
+  - `height: u64`
+  - `previous_hash: Hash256`
+  - `merkle_root: Hash256` (Merkle root over transactions)
+  - `timestamp: i64`
+  - `block_reward: u64`
+  - `leader: String` (block producer identity)
+  - `attestation_root: Hash256`
+  - `masternode_tiers: MasternodeTierCounts`
+  - `vrf_proof: Vec<u8>`, `vrf_output: Hash256`, `vrf_score: u64`
+  - `active_masternodes_bitmap: Vec<u8>`
+  - `liveness_recovery: Option<bool>` (TimeGuard recovery flag)
 - Body:
-  - `entries[]` sorted lexicographically by `txid`
+  - `transactions: Vec<Transaction>` (full transaction data)
+  - `masternode_rewards: Vec<(String, u64)>` (reward allocations)
+  - `time_attestations: Vec<TimeAttestation>`
+  - `consensus_participants_bitmap: Vec<u8>`
 
-Each entry:
-`FinalizedEntry = { txid, timeproof_hash }`
+Blocks include full transactions (not hashes/entries) so syncing nodes can reconstruct UTXO state. Transactions are sorted lexicographically by `txid`.
 
-Blocks MAY optionally include full `TimeProof` payloads; otherwise nodes fetch TimeProofs by hash.
-
-### 9.5 Block validity
+### 9.5 Block Validity
 A node MUST accept a block only if:
-1. `prev_block_hash` matches the current canonical chain tip.
-2. VRF proof verifies and binds to `(prev_block_hash, slot_time, chain_id)`.
-3. `entries[]` are sorted and unique by txid.
-4. For every entry, the referenced TimeProof is available and valid OR retrievable (implementation may mark as “pending” until fetched).
-5. No two included transactions conflict (no outpoint is spent twice).
-6. All included transactions are `Finalized` by TimeProof and pass base validity checks.
+1. `previous_hash` matches the current canonical chain tip.
+2. VRF proof verifies and binds to `(previous_hash, height, chain_id)`.
+3. Transactions are valid and unique by txid.
+4. No two included transactions conflict (no outpoint is spent twice).
+5. All included transactions pass base validity checks.
+6. Merkle root is correctly computed from included transactions.
+
+### 9.5.1 Two-Phase Commit (Block Consensus)
+
+In addition to VRF sortition, blocks achieve consensus via a Two-Phase Commit (2PC) protocol among validators:
+
+**Phase 1: Prepare**
+1. Leader assembles and broadcasts `TimeLockBlockProposal { block }`
+2. Validators verify: valid transactions, correct previous hash, valid merkle root, valid VRF proof
+3. Validators send `TimeVotePrepare { block_hash, voter_id, signature }` (Ed25519 over `block_hash + voter_id + "PREPARE"`)
+4. Threshold: >50% of participating validator count
+
+**Phase 2: Precommit**
+1. After prepare threshold met, validators send `TimeVotePrecommit { block_hash, voter_id, signature }` (Ed25519 over `block_hash + voter_id + "PRECOMMIT"`)
+2. Threshold: >50% of participating validator count
+3. Block is finalized after precommit threshold is met
+
+**Small Network Fallback:** If validator count < 3, blocks are added directly without 2PC (development/bootstrap mode).
+
+**Note:** Block 2PC uses validator **count** majority, distinct from transaction finality which uses **weighted stake** majority (§8.3).
 
 ### 9.6 Archival transition
 Upon block acceptance:
@@ -768,42 +794,64 @@ Payout MUST be represented as one or more on-chain reward transactions included 
 ## 11. Network Protocol
 
 ### 11.1 Message Types (Wire)
+
+The `NetworkMessage` enum defines all P2P wire messages. Key consensus-related categories shown below (73 total variants in code):
+
 ```rust
 pub enum NetworkMessage {
-    // Tx propagation
-    TxBroadcast { tx: Transaction },
+    // --- Transactions ---
+    TransactionBroadcast(Transaction),
+    TransactionFinalized { txid: Hash256, tx: Transaction },
+    GetPendingTransactions,
+    PendingTransactionsResponse(Vec<Transaction>),
 
-    // TimeVote polling (batched)
-    SampleQuery {
-        chain_id: u32,
-        request_id: u64,
-        txids: Vec<Hash256>,
-        want_votes: bool, // request signed FinalityVotes for Valid responses
-    },
-    SampleResponse {
-        chain_id: u32,
-        request_id: u64,
-        responses: Vec<TxVoteBundle>,
-    },
+    // --- TimeVote Protocol (transaction finality) ---
+    TimeVoteRequest { txid: Hash256, tx_hash_commitment: Hash256, slot_index: u64, tx: Option<Transaction> },
+    TimeVoteResponse { vote: TimeVote },
+    TimeVoteBroadcast { vote: TimeVote },
+    TimeProofBroadcast { proof: TimeProof },
 
-    // TimeProof gossip
-    TimeProofGossip { txid: Hash256, TimeProof: TimeProof },
+    // --- Finality Voting ---
+    FinalityVoteRequest { txid: Hash256, slot_index: u64 },
+    FinalityVoteResponse { vote: FinalityVote },
+    FinalityVoteBroadcast { vote: FinalityVote },
 
-    // Blocks
-    BlockBroadcast { block: Block },
+    // --- TimeLock Block Production (2PC) ---
+    TimeLockBlockProposal { block: Block },
+    TimeVotePrepare { block_hash: Hash256, voter_id: String, signature: Vec<u8> },
+    TimeVotePrecommit { block_hash: Hash256, voter_id: String, signature: Vec<u8> },
 
-    // Liveness
-    Heartbeat { hb: SignedHeartbeat },
-    Attestation { att: WitnessAttestation },
+    // --- Block Sync ---
+    BlockAnnouncement(Block),
+    GetBlocks(u64, u64),
+    BlocksResponse(Vec<Block>),
+    GetBlockHeight,
+    BlockHeightResponse(u64),
+
+    // --- Peer Exchange ---
+    GetPeers,
+    PeersResponse(Vec<String>),
+    Ping { nonce: u64, timestamp: i64, height: Option<u64> },
+    Pong { nonce: u64, timestamp: i64, height: Option<u64> },
+
+    // --- UTXO State ---
+    UTXOStateQuery(Vec<OutPoint>),
+    UTXOStateResponse(Vec<(OutPoint, UTXOState)>),
+    UTXOStateNotification(UTXOStateChange),
+
+    // --- Masternodes ---
+    MasternodeAnnouncement { address, reward_address, tier, public_key },
+    GetMasternodes,
+    MasternodesResponse(Vec<MasternodeAnnouncementData>),
+
+    // --- Liveness & Fork Resolution ---
+    LivenessAlert { alert: LivenessAlert },
+    FinalityProposal { proposal: FinalityProposal },
+    FallbackVote { vote: FallbackVote },
+    ForkAlert { your_height, your_hash, consensus_height, consensus_hash, ... },
+
+    // ... plus handshake, version, genesis, subscription, and chain-work variants
 }
-
-pub struct TxVoteBundle {
-    pub txid: Hash256,
-    pub vote: VoteResponse, // Valid/Invalid/Unknown
-    pub finality_vote: FinalityVote, // REQUIRED: signed vote (includes decision: Accept/Reject)
-}
-
-pub enum VoteResponse { Valid, Invalid, Unknown }
 ```
 
 **CRITICAL CHANGE (Security Enhancement):**
@@ -828,18 +876,23 @@ Nodes SHOULD rate-limit:
 ## 12. Mempool and Pooling Rules
 
 ### 12.1 Pools
-Nodes maintain:
-- `SeenPool`: known but not yet voting
-- `VotingPool`: active in TimeVote consensus
-- `FinalizedPool`: has TimeProof (`Finalized`)
-- `ArchivedPool`: checkpointed
+The `TransactionPool` uses a DashMap-based design with three concurrent maps:
+- **`pending`** (`DashMap<Hash256, Transaction>`): Unfinalized transactions (covers Seen, Voting, and FallbackResolution states)
+- **`finalized`** (`DashMap<Hash256, Transaction>`): Transactions with TimeProof (awaiting block inclusion)
+- **`rejected`** (`DashMap<Hash256, Transaction>`): Transactions that failed validation or consensus
+
+Pressure levels (by pending pool size relative to `MAX_MEMPOOL_SIZE = 100 MB`):
+- **Normal** (< 50%): Accept all valid transactions
+- **Warning** (50–75%): Log warnings, continue accepting
+- **Critical** (75–90%): Reject low-priority transactions
+- **Emergency** (> 90%): Reject all new transactions
 
 ### 12.2 Checkpoint inclusion eligibility
 Checkpoint blocks SHOULD include:
-- all `FinalizedPool` txs not yet archived,
+- all `finalized` pool transactions not yet archived,
 - subject to size limits.
 
-Blocks MUST only include transactions with TimeProof.
+Blocks MUST only include transactions with TimeProof. When a block is added, only the specific included transactions are removed from the finalized pool (not a full clear).
 
 ---
 
@@ -888,19 +941,16 @@ If honest weight dominates and the network is connected, honest transactions can
 ## 16. Cryptographic Bindings (NORMATIVE ADDITIONS)
 
 ### 16.1 Hash Function
-**REQUIREMENT:** This specification was written with algorithm-agnosticity. For production deployment, implementations MUST pin:
+**REQUIREMENT:** All cryptographic hashing uses SHA-256.
 
 ```
-HASH_FUNCTION = BLAKE3-256
-Alternative for compatibility: SHA-256d (two rounds of SHA-256)
+HASH_FUNCTION = SHA-256
 ```
 
-**Usage:** All cryptographic hashes (`txid`, `block_hash`, `tx_hash_commitment`, VRF input binding) MUST use the selected function consistently across all nodes.
+**Usage:** All cryptographic hashes (`txid`, `block_hash`, `merkle_root`, `tx_hash_commitment`, VRF input binding) MUST use SHA-256 consistently across all nodes.
 
-**Why BLAKE3 (not Ed25519)?**  
-BLAKE3 is a *hash function*, Ed25519 is a *signature scheme*. They serve different purposes:
-- Hash: Create deterministic content IDs (txid, block_hash)
-- Signature: Prove origin and integrity of messages
+**Why SHA-256?**
+SHA-256 provides universal compatibility with the Ed25519/ECVRF cryptographic suite (both SHA-family based), broad hardware acceleration support, and well-understood security properties. A single hash function simplifies consensus rules and eliminates algorithm mismatch risks.
 
 See **CRYPTOGRAPHY_RATIONALE.md** for detailed explanation.
 
@@ -958,9 +1008,9 @@ This mitigation follows proven approaches from:
 
 **Implementation Version:** TIMECOIN_VRF_V2 (grinding-resistant)
 
-**Why VRF (not Ed25519 or BLAKE3 alone)?**  
+**Why VRF (not Ed25519 or SHA-256 alone)?**  
 - Ed25519 signatures cannot be ranked (are just bytes, not sortition-ready)
-- BLAKE3 hashes are predictable to everyone (no privacy advantage from a privkey)
+- SHA-256 hashes are predictable to everyone (no privacy advantage from a privkey)
 - VRF combines: deterministic output + unpredictability + verifiability + rankability
 
 See **CRYPTOGRAPHY_RATIONALE.md** for detailed comparison.
@@ -999,7 +1049,7 @@ varint = variable-length integer (little-endian, 1-9 bytes)
 - Fields MUST be serialized in the above order.
 - No padding or alignment bytes.
 - Arrays ordered as specified; no reordering.
-- Hash computed as `txid = BLAKE3(canonical_bytes)`.
+- Hash computed as `txid = SHA256(canonical_bytes)`.
 
 ---
 
@@ -1097,7 +1147,7 @@ Frame = {
 ```
 
 **Max message size:** `4 MB`  
-**Connection limits:** `MAX_PEERS = 125` (inbound + outbound)
+**Connection limits:** `MAX_PEERS = 50` (configurable, inbound + outbound)
 
 ### 18.3 Serialization Format
 **REQUIREMENT:** Pin message serialization.
@@ -1391,7 +1441,7 @@ Implementations SHOULD expose a JSON-RPC 2.0 interface:
 
 ### 24.1 Mempool Size and Limits
 ```
-MAX_MEMPOOL_SIZE = 300 MB
+MAX_MEMPOOL_SIZE = 100 MB
 MAX_ENTRIES_PER_BLOCK = 10,000
 MAX_BLOCK_SIZE = 2 MB
 EVICTION_POLICY = lowest_fee_rate_first
@@ -1585,7 +1635,7 @@ See §10 for technical reward calculation details.
 
 Before shipping to mainnet, implementations MUST address:
 
-- [ ] Cryptographic primitives finalized (§16: BLAKE3, ECVRF, serialization)
+- [ ] Cryptographic primitives finalized (§16: SHA-256, ECVRF, serialization)
 - [ ] Transaction format fully specified and tested (§17.3)
 - [ ] Staking script semantics implemented (§17.2)
 - [ ] Network transport, framing, and serialization defined (§18)

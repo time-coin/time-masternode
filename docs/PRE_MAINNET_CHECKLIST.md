@@ -60,7 +60,7 @@
 #### 10. Partition recovery
 - **Issue:** TimeGuard fallback for network partitions implemented, but recovery timing not optimized
 - **Status:** Works but needs performance tuning (11.3min max recovery vs 2-3min target)
-- **Action:** Optimize fork resolution and catchup logic
+- **Action:** Optimize fork resolution and rapid block production logic
 
 #### 12. Reward test vectors
 - **Issue:** Masternode reward calculation implemented but test vectors incomplete

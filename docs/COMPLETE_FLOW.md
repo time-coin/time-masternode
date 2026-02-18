@@ -23,7 +23,7 @@
 8. **Initialize PeerManager** - Peer discovery and tracking
 9. **Initialize MasternodeRegistry** - With peer manager reference
 10. **Initialize ConsensusEngine** - With masternode registry and UTXO manager
-11. **Initialize AI System** - All 7 AI modules with shared sled Db
+11. **Initialize AI System** - All 7 AI modules in AISystem struct (+ 3 wired separately) with shared sled Db
 12. **Enable AI Transaction Validation** - On consensus engine
 13. **Initialize Blockchain** - With block storage, consensus, registry, UTXO, network type
 14. **Set AI System on Blockchain** - For intelligent decision recording
@@ -60,7 +60,7 @@
 
 - **Block interval**: 600 seconds (10 minutes)
 - **Leader selection**: VRF (Verifiable Random Function) using ECVRF
-  - Input: `BLAKE3("TIMECOIN_VRF_V2" || height_le_bytes || previous_hash)`
+  - Input: `SHA256("TIMECOIN_VRF_V2" || height_le_bytes || previous_hash)`
   - Each masternode evaluates VRF proof
   - Single leader per slot: highest VRF output wins
   - Fallback leader rotation uses `TimeLock-leader-selection-v2` input on timeout
@@ -69,11 +69,11 @@
 
 The main block production loop uses `tokio::select!` with 4 branches:
 1. **Shutdown signal** — graceful exit
-2. **Catchup trigger** — immediate wake for behind-chain scenarios
+2. **Production trigger** — immediate wake when status check detects chain is behind
 3. **`block_added_signal.notified()`** — event-driven wake when ANY block is added (from sync, consensus, or own production)
 4. **`interval.tick()`** — periodic 1-second fallback polling
 
-The event-driven wake (branch 3) reduces catchup latency from ~1 second to near-instant when blocks arrive from peers.
+The event-driven wake (branch 3) reduces latency from ~1 second to near-instant when blocks arrive from peers.
 
 ### 2.2 Two-Phase Commit (2PC)
 
@@ -96,14 +96,15 @@ The event-driven wake (branch 3) reduces catchup latency from ~1 second to near-
 
 **TimeProof Finality (separate from 2PC):**
 - Transactions achieve instant finality via TimeProof with **51% weighted stake** threshold
-- Weight is tier-based: Free=1, Bronze=10, Silver=100, Gold=1000
+- Weight is tier-based **sampling weight**: Free=1, Bronze=10, Silver=100, Gold=1000
+- Note: Sampling weight is distinct from reward weight (Free=100, Bronze=1000, Silver=10000, Gold=100000) and governance voting power (Free=0, Bronze=1, Silver=10, Gold=100)
 - This is distinct from block 2PC which uses validator count
 
 **Liveness Fallback:**
 - Stall detection timeout: 30 seconds without consensus progress
 - Broadcasts `LivenessAlert`, enters `FallbackResolution` state
 - Up to 5 fallback rounds with 10-second round timeout
-- Random leader selection per fallback round
+- Deterministic hash-based leader selection per fallback round: `leader = MN with min SHA256(txid || slot_index || round || mn_address)`
 
 **Fallback**: If no votes received (early network, single node), block is added directly if validator count < 3.
 
@@ -112,15 +113,26 @@ The event-driven wake (branch 3) reduces catchup latency from ~1 second to near-
 ```
 Block {
     header: BlockHeader {
-        height: u64,
-        timestamp: i64,
-        previous_hash: [u8; 32],
-        merkle_root: [u8; 32],
-        difficulty: u64,
-        nonce: u64,
         version: u32,
+        height: u64,
+        previous_hash: Hash256,
+        merkle_root: Hash256,
+        timestamp: i64,
+        block_reward: u64,
+        leader: String,
+        attestation_root: Hash256,
+        masternode_tiers: MasternodeTierCounts,
+        vrf_proof: Vec<u8>,
+        vrf_output: Hash256,
+        vrf_score: u64,
+        active_masternodes_bitmap: Vec<u8>,
+        liveness_recovery: Option<bool>,
     },
     transactions: Vec<Transaction>,
+    masternode_rewards: Vec<(String, u64)>,
+    time_attestations: Vec<TimeAttestation>,
+    consensus_participants_bitmap: Vec<u8>,
+    liveness_recovery: Option<bool>,
 }
 ```
 
@@ -164,8 +176,33 @@ TransactionType: Standard, CoinbaseReward, MasternodeReward,
 5. **Gossip**: Broadcast to other connected peers
 6. **TimeVote Finality**: Instant finality via TimeVote consensus
 
+### 3.2.1 Per-Transaction State Machine (TransactionStatus)
+
+```
+Seen → Voting → Finalized → Archived
+         │          ↑
+         │     (accumulated_weight ≥ Q_finality, TimeProof complete)
+         │
+         ├→ FallbackResolution → Finalized / Rejected
+         │   (stall > 30s, deterministic leader resolves)
+         │
+         └→ Rejected
+             (conflict lost or invalid)
+```
+
+- **Seen**: Transaction received, pending validation
+- **Voting**: Actively collecting signed FinalityVotes, tracking `accumulated_weight` and `confidence`
+- **FallbackResolution**: Stall detected, deterministic fallback round in progress (tracks round number and alert count)
+- **Finalized**: `accumulated_weight ≥ 51%` of AVS weight, TimeProof assembled
+- **Rejected**: Lost conflict resolution or deemed invalid
+- **Archived**: Included in TimeLock checkpoint block
+
 ### 3.3 Transaction Pool
 
+- Three-map structure:
+  - **pending**: Transactions in consensus (Seen + Voting states) — `DashMap<Hash256, PoolEntry>`
+  - **finalized**: Transactions ready for block inclusion — `DashMap<Hash256, PoolEntry>`
+  - **rejected**: Previously rejected transactions with reason and timestamp — `DashMap<Hash256, (String, Instant)>`
 - Max pool size: 100MB (configurable)
 - Pressure levels: Normal (0-60%), Warning (60-80%), Critical (80-90%), Emergency (90%+)
 - Priority scoring based on: fee rate, age, tx type
@@ -175,7 +212,7 @@ TransactionType: Standard, CoinbaseReward, MasternodeReward,
 ### 3.4 UTXO Management
 
 - UTXOStateManager tracks all unspent transaction outputs
-- States: `Unspent`, `Locked` (masternode collateral), `SpentPending` (in-flight TX with vote tracking), `SpentFinalized` (TX finalized with votes), `Confirmed` (included in block)
+- States: `Unspent`, `Locked` (masternode collateral), `SpentPending` (in-flight TX with vote tracking), `SpentFinalized` (TX finalized with votes), `Archived` (included in block)
 - Collateral locking for masternodes with timeout cleanup (10 minutes)
 - Double-spend prevention at UTXO level
 
@@ -308,7 +345,7 @@ TimeCoin integrates a centralized AI system (`AISystem` struct in `src/ai/mod.rs
                           ▼
                  ┌─────────────────┐
                  │    AISystem     │
-                 │  (9 modules)    │
+                 │  (7 modules)    │
                  └────────┬────────┘
                           │
           ┌───────────────┼───────────────┐
@@ -376,8 +413,14 @@ The AttackDetector's recommendations are now automatically enforced:
 
 ### 6.3 Block Rewards
 
-- CoinbaseReward for block producer
-- MasternodeReward distributed to active masternodes
+- **50/50 Split**: Total reward = 100 TIME + transaction fees per block
+  - **Block Producer**: 50 TIME + all transaction fees (VRF-selected proposer)
+  - **Free-Tier Participation Pool**: 50 TIME distributed to active, mature Free-tier masternodes
+    - Weighted by fairness_bonus (blocks_without_reward / 10, capped at 20)
+    - Minimum payout: 1 TIME per node (max 50 recipients per block)
+    - If no eligible Free nodes: full 50 TIME goes to producer
+- CoinbaseReward transaction for block producer
+- MasternodeReward transactions for Free-tier pool recipients
 - Reward eligibility based on active status and uptime
 
 ---
@@ -395,7 +438,7 @@ TimeCoin uses a hybrid consensus combining two mechanisms:
 2. **TimeVote** - Transaction and block finality (is this block accepted?)
    - Two-phase commit: Prepare → Precommit (validator count majority)
    - TimeProof finality: 51% weighted stake threshold for transaction finality
-   - Weight-based tiers: Free=1, Bronze=10, Silver=100, Gold=1000
+   - Sampling weight tiers: Free=1, Bronze=10, Silver=100, Gold=1000
    - Instant finality: once threshold met, transaction/block is final
    - No rollback of finalized blocks (critical security property)
 

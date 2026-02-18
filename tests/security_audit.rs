@@ -3,10 +3,10 @@
 /// This test suite validates:
 /// - ECVRF implementation (RFC 9381 compliance)
 /// - Ed25519 signature verification
-/// - BLAKE3 hash determinism and properties
+/// - SHA256 hash determinism and properties
 /// - Key derivation and management
 use ed25519_dalek::{Signer, SigningKey, Verifier};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 
 // Mock ECVRF and crypto functions for testing
 // In actual implementation, these would be imported from the main crate
@@ -194,79 +194,66 @@ fn test_ed25519_public_key_derivation() {
 }
 
 #[test]
-fn test_blake3_determinism() {
-    // BLAKE3 must be deterministic
+fn test_sha256_determinism() {
+    // SHA256 must be deterministic
     let data = b"test data for hashing";
 
-    let hash1 = blake3::hash(data);
-    let hash2 = blake3::hash(data);
+    let hash1: [u8; 32] = Sha256::digest(data).into();
+    let hash2: [u8; 32] = Sha256::digest(data).into();
 
-    assert_eq!(
-        hash1.as_bytes(),
-        hash2.as_bytes(),
-        "BLAKE3 must be deterministic"
-    );
+    assert_eq!(hash1, hash2, "SHA256 must be deterministic");
 }
 
 #[test]
-fn test_blake3_hash_length() {
-    // BLAKE3 output must be exactly 32 bytes (256 bits)
+fn test_sha256_hash_length() {
+    // SHA256 output must be exactly 32 bytes (256 bits)
     let data = b"test data";
-    let hash = blake3::hash(data);
+    let hash: [u8; 32] = Sha256::digest(data).into();
 
-    assert_eq!(
-        hash.as_bytes().len(),
-        32,
-        "BLAKE3 hash must be 256 bits (32 bytes)"
-    );
+    assert_eq!(hash.len(), 32, "SHA256 hash must be 256 bits (32 bytes)");
 }
 
 #[test]
-fn test_blake3_different_inputs() {
-    // Different inputs must produce different BLAKE3 hashes
+fn test_sha256_different_inputs() {
+    // Different inputs must produce different SHA256 hashes
     let data1 = b"input one";
     let data2 = b"input two";
 
-    let hash1 = blake3::hash(data1);
-    let hash2 = blake3::hash(data2);
+    let hash1: [u8; 32] = Sha256::digest(data1).into();
+    let hash2: [u8; 32] = Sha256::digest(data2).into();
 
     assert_ne!(
-        hash1.as_bytes(),
-        hash2.as_bytes(),
+        hash1, hash2,
         "Different inputs must produce different hashes"
     );
 }
 
 #[test]
-fn test_blake3_bit_sensitivity() {
+fn test_sha256_bit_sensitivity() {
     // Changing a single bit must change the entire hash
     let data1 = b"test";
-    let hash1 = blake3::hash(data1);
+    let hash1: [u8; 32] = Sha256::digest(data1).into();
 
     let mut data2 = data1.to_vec();
     data2[0] ^= 0x01; // Flip one bit
-    let hash2 = blake3::hash(&data2);
+    let hash2: [u8; 32] = Sha256::digest(&data2).into();
 
-    assert_ne!(
-        hash1.as_bytes(),
-        hash2.as_bytes(),
-        "Single bit change must affect entire hash"
-    );
+    assert_ne!(hash1, hash2, "Single bit change must affect entire hash");
 }
 
 #[test]
-fn test_blake3_avalanche_effect() {
+fn test_sha256_avalanche_effect() {
     // A small change in input should avalanche to large change in hash
     let data = b"The quick brown fox jumps over the lazy dog";
-    let hash1 = blake3::hash(data);
+    let hash1: [u8; 32] = Sha256::digest(data).into();
 
     let mut modified = data.to_vec();
     modified[11] = b'c'; // Change 'b' to 'c'
-    let hash2 = blake3::hash(&modified);
+    let hash2: [u8; 32] = Sha256::digest(&modified).into();
 
     // Count different bits (hamming distance)
     let mut different_bits = 0;
-    for (b1, b2) in hash1.as_bytes().iter().zip(hash2.as_bytes().iter()) {
+    for (b1, b2) in hash1.iter().zip(hash2.iter()) {
         different_bits += (b1 ^ b2).count_ones();
     }
 
@@ -279,19 +266,17 @@ fn test_blake3_avalanche_effect() {
 }
 
 #[test]
-fn test_sha512_blake3_compatibility() {
+fn test_sha512_sha256_compatibility() {
     // Both hash functions should work correctly
     let data = b"test compatibility";
 
     // SHA-512
-    let mut sha512_hasher = Sha512::new();
-    sha512_hasher.update(data);
-    let sha512_output = sha512_hasher.finalize();
+    let sha512_output = Sha512::digest(data);
     assert_eq!(sha512_output.len(), 64);
 
-    // BLAKE3
-    let blake3_output = blake3::hash(data);
-    assert_eq!(blake3_output.as_bytes().len(), 32);
+    // SHA-256
+    let sha256_output: [u8; 32] = Sha256::digest(data).into();
+    assert_eq!(sha256_output.len(), 32);
 }
 
 #[test]
@@ -329,8 +314,8 @@ fn test_nonce_generation() {
     for i in 0..1000 {
         let mut data = vec![0u8; 32];
         data[0..8].copy_from_slice(&(i as u64).to_le_bytes());
-        let hash = blake3::hash(&data);
-        let nonce = u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap());
+        let hash: [u8; 32] = Sha256::digest(&data).into();
+        let nonce = u64::from_le_bytes(hash[0..8].try_into().unwrap());
 
         assert!(!nonces.contains(&nonce), "Nonce collision detected");
         nonces.insert(nonce);
@@ -343,16 +328,16 @@ fn test_nonce_generation() {
 fn test_constant_time_comparison() {
     // Critical: signatures and hashes must use constant-time comparison
     // to prevent timing attacks
-    let hash1 = blake3::hash(b"test");
-    let hash2 = blake3::hash(b"test");
-    let hash3 = blake3::hash(b"other");
+    let hash1: [u8; 32] = Sha256::digest(b"test").into();
+    let hash2: [u8; 32] = Sha256::digest(b"test").into();
+    let hash3: [u8; 32] = Sha256::digest(b"other").into();
 
     // These should be equal byte-for-byte
-    assert_eq!(hash1.as_bytes(), hash2.as_bytes());
+    assert_eq!(hash1, hash2);
 
     // In production, use constant_time_eq or similar
     let mut equal = true;
-    for (b1, b2) in hash1.as_bytes().iter().zip(hash3.as_bytes().iter()) {
+    for (b1, b2) in hash1.iter().zip(hash3.iter()) {
         if b1 != b2 {
             equal = false;
         }
@@ -364,15 +349,15 @@ fn test_constant_time_comparison() {
 fn test_serialization_compatibility() {
     // Hashes and keys must serialize/deserialize correctly
     let data = b"serialization test";
-    let hash = blake3::hash(data);
+    let hash: [u8; 32] = Sha256::digest(data).into();
 
     // Hex serialization
-    let hex_str = hex::encode(hash.as_bytes());
+    let hex_str = hex::encode(hash);
     assert_eq!(hex_str.len(), 64); // 32 bytes * 2 hex chars/byte
 
     // Hex deserialization
     let decoded = hex::decode(&hex_str).unwrap();
-    assert_eq!(decoded.as_slice(), hash.as_bytes());
+    assert_eq!(decoded.as_slice(), &hash);
 }
 
 /// # Summary of cryptographic audit:
@@ -381,9 +366,9 @@ fn test_serialization_compatibility() {
 /// - ✅ ECVRF collision resistance
 /// - ✅ Ed25519 signature correctness
 /// - ✅ Ed25519 signature verification
-/// - ✅ BLAKE3 determinism
-/// - ✅ BLAKE3 bit sensitivity
-/// - ✅ BLAKE3 avalanche effect
+/// - ✅ SHA256 determinism
+/// - ✅ SHA256 bit sensitivity
+/// - ✅ SHA256 avalanche effect
 /// - ✅ Key derivation consistency
 /// - ✅ Nonce uniqueness
 /// - ✅ Constant-time operations

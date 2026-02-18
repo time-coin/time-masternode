@@ -96,10 +96,10 @@ pub enum UTXOState {
         finalized_at: i64,
         votes: u32,
     },
-    Confirmed {
+    Archived {
         txid: Hash256,
         block_height: u64,
-        confirmed_at: i64,
+        archived_at: i64,
     },
 }
 
@@ -143,17 +143,17 @@ impl std::fmt::Display for UTXOState {
                     votes
                 )
             }
-            UTXOState::Confirmed {
+            UTXOState::Archived {
                 txid,
                 block_height,
-                confirmed_at,
+                archived_at,
             } => {
                 write!(
                     f,
-                    "Confirmed (txid: {}, block_height: {}, confirmed_at: {})",
+                    "Archived (txid: {}, block_height: {}, archived_at: {})",
                     hex::encode(txid),
                     block_height,
-                    confirmed_at
+                    archived_at
                 )
             }
         }

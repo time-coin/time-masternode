@@ -45,7 +45,7 @@ fi
 # Copy config
 echo "⚙️  Installing configuration..."
 if [ ! -f "/etc/timecoin/config.toml" ]; then
-    cp config.toml /etc/timecoin/
+    cp config.testnet.toml /etc/timecoin/config.toml
     echo "✓ Config installed to /etc/timecoin/"
 else
     echo "⚠  Config already exists, skipping"

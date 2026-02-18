@@ -653,7 +653,7 @@ impl MasternodeRegistry {
                 return Vec::new();
             }
 
-            // Rate-limit participation recovery logs (once per 60s) to avoid spam during catchup
+            // Rate-limit participation recovery logs (once per 60s) to avoid spam
             use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
             static LAST_PARTICIPATION_WARN: AtomicI64 = AtomicI64::new(0);
             let now_secs = chrono::Utc::now().timestamp();
@@ -682,7 +682,7 @@ impl MasternodeRegistry {
     }
 
     /// Count all registered masternodes (not just active ones)
-    /// Used during genesis and catchup when heartbeat requirements are relaxed
+    /// Used during genesis and bootstrap when heartbeat requirements are relaxed
     pub async fn total_count(&self) -> usize {
         self.masternodes.read().await.len()
     }

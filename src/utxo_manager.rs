@@ -207,7 +207,7 @@ impl UTXOStateManager {
                 }
                 UTXOState::SpentFinalized { .. }
                 | UTXOState::SpentPending { .. }
-                | UTXOState::Confirmed { .. } => {
+                | UTXOState::Archived { .. } => {
                     // This is the rollback case - UTXO was spent but we're undoing it
                     tracing::debug!("Restoring spent UTXO {} during rollback", outpoint);
                 }
@@ -268,7 +268,7 @@ impl UTXOStateManager {
                 }
                 UTXOState::SpentPending { .. }
                 | UTXOState::SpentFinalized { .. }
-                | UTXOState::Confirmed { .. } => Err(UtxoError::AlreadySpent),
+                | UTXOState::Archived { .. } => Err(UtxoError::AlreadySpent),
             },
             Entry::Vacant(entry) => {
                 entry.insert(UTXOState::Locked {
@@ -326,10 +326,10 @@ impl UTXOStateManager {
 
                     self.storage.remove_utxo(outpoint).await?;
 
-                    entry.insert(UTXOState::Confirmed {
+                    entry.insert(UTXOState::Archived {
                         txid: *txid,
                         block_height,
-                        confirmed_at: Self::current_timestamp(),
+                        archived_at: Self::current_timestamp(),
                     });
 
                     tracing::info!(
@@ -342,10 +342,10 @@ impl UTXOStateManager {
                 UTXOState::Unspent => {
                     tracing::warn!("⚠️ Spending unlocked UTXO {}", outpoint);
                     self.storage.remove_utxo(outpoint).await?;
-                    entry.insert(UTXOState::Confirmed {
+                    entry.insert(UTXOState::Archived {
                         txid: *txid,
                         block_height,
-                        confirmed_at: Self::current_timestamp(),
+                        archived_at: Self::current_timestamp(),
                     });
                     Ok(())
                 }
@@ -908,13 +908,13 @@ mod tests {
 
         // Verify state is now confirmed
         match manager.get_state(&outpoint) {
-            Some(UTXOState::Confirmed {
+            Some(UTXOState::Archived {
                 txid, block_height, ..
             }) => {
                 assert_eq!(txid, tx1);
                 assert_eq!(block_height, 1000);
             }
-            _ => panic!("Expected confirmed state"),
+            _ => panic!("Expected archived state"),
         }
     }
 
