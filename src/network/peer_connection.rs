@@ -239,6 +239,9 @@ pub struct PeerConnection {
 
     /// Whitelist status - whitelisted masternodes get relaxed ping/pong timeouts
     is_whitelisted: bool,
+
+    /// Network type (mainnet/testnet) for handshake
+    network_type: crate::network_type::NetworkType,
 }
 
 /// Configuration for peer connection message loop
@@ -332,6 +335,7 @@ impl PeerConnection {
         port: u16,
         is_whitelisted: bool,
         tls_config: Option<Arc<TlsConfig>>,
+        network_type: crate::network_type::NetworkType,
     ) -> Result<Self, String> {
         let addr = format!("{}:{}", peer_ip, port);
 
@@ -455,6 +459,7 @@ impl PeerConnection {
             local_port: local_addr.port(),
             remote_port: remote_addr.port(),
             is_whitelisted,
+            network_type,
         })
     }
 
@@ -464,6 +469,7 @@ impl PeerConnection {
         stream: TcpStream,
         is_whitelisted: bool,
         tls_config: Option<Arc<TlsConfig>>,
+        network_type: crate::network_type::NetworkType,
     ) -> Result<Self, String> {
         let peer_addr = stream
             .peer_addr()
@@ -579,6 +585,7 @@ impl PeerConnection {
             local_port: local_addr.port(),
             remote_port: peer_addr.port(),
             is_whitelisted,
+            network_type,
         })
     }
 
@@ -982,9 +989,9 @@ impl PeerConnection {
 
         // Send initial handshake
         let handshake = NetworkMessage::Handshake {
-            magic: *b"TIME",
+            magic: self.network_type.magic_bytes(),
             protocol_version: 1,
-            network: "mainnet".to_string(),
+            network: format!("{}", self.network_type).to_lowercase(),
         };
 
         if let Err(e) = Self::send_message(&self.writer_tx, &handshake) {

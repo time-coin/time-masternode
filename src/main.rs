@@ -2752,6 +2752,7 @@ async fn main() {
         local_ip.clone(),
         config.network.blacklisted_peers.clone(),
         combined_whitelist,
+        network_type,
     )
     .await
     {

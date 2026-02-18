@@ -44,6 +44,8 @@ pub struct NetworkClient {
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
     /// TLS configuration for encrypted connections
     tls_config: Option<Arc<TlsConfig>>,
+    /// Network type (mainnet/testnet)
+    network_type: NetworkType,
 }
 
 impl NetworkClient {
@@ -81,6 +83,7 @@ impl NetworkClient {
             ip_blacklist,
             reconnection_ai,
             tls_config: None,
+            network_type,
         }
     }
 
@@ -117,6 +120,7 @@ impl NetworkClient {
             reconnection_ai: self.reconnection_ai.clone(),
             ip_blacklist: self.ip_blacklist.clone(),
             tls_config: self.tls_config.clone(),
+            network_type: self.network_type,
         };
 
         tokio::spawn(async move {
@@ -341,6 +345,7 @@ struct ConnectionResources {
     reconnection_ai: Arc<AdaptiveReconnectionAI>,
     ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     tls_config: Option<Arc<TlsConfig>>,
+    network_type: NetworkType,
 }
 
 impl ConnectionResources {
@@ -383,6 +388,7 @@ impl ConnectionResources {
                     is_masternode,
                     res.ip_blacklist.clone(),
                     res.tls_config.clone(),
+                    res.network_type,
                 )
                 .await
                 {
@@ -506,6 +512,7 @@ async fn maintain_peer_connection(
     is_masternode: bool,
     ip_blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     tls_config: Option<Arc<TlsConfig>>,
+    network_type: NetworkType,
 ) -> Result<(), String> {
     // Mark in peer_registry BEFORE attempting connection to prevent race with inbound
     if !peer_registry.mark_connecting(ip) {
@@ -516,15 +523,22 @@ async fn maintain_peer_connection(
     }
 
     // Create outbound connection with whitelist status
-    let peer_conn =
-        match PeerConnection::new_outbound(ip.to_string(), port, is_masternode, tls_config).await {
-            Ok(conn) => conn,
-            Err(e) => {
-                // Failed to connect - clean up peer_registry mark
-                peer_registry.unregister_peer(ip).await;
-                return Err(e);
-            }
-        };
+    let peer_conn = match PeerConnection::new_outbound(
+        ip.to_string(),
+        port,
+        is_masternode,
+        tls_config,
+        network_type,
+    )
+    .await
+    {
+        Ok(conn) => conn,
+        Err(e) => {
+            // Failed to connect - clean up peer_registry mark
+            peer_registry.unregister_peer(ip).await;
+            return Err(e);
+        }
+    };
 
     tracing::info!("✓ Connected to peer: {}", ip);
 
