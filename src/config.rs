@@ -547,10 +547,10 @@ impl Config {
                 file_path: "./logs/node.log".to_string(),
             },
             masternode: MasternodeConfig {
-                enabled: false,
+                enabled: true,
                 collateral_txid: String::new(),
                 collateral_vout: 0,
-                tier: "silver".to_string(),
+                tier: "free".to_string(),
             },
             security: SecurityConfig {
                 enable_rate_limiting: true,
