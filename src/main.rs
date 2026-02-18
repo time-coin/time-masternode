@@ -614,9 +614,7 @@ async fn main() {
         Err(e) => {
             tracing::error!("❌ Chain time validation failed: {}", e);
             tracing::error!("❌ Network is ahead of schedule - this indicates a consensus bug");
-            tracing::error!(
-                "❌ Manual intervention required: see analysis/CATCHUP_CONSENSUS_FIX.md"
-            );
+            tracing::error!("❌ Manual intervention required: see analysis/CONSENSUS_FIX.md");
             // Don't panic - allow node to participate in network but log the issue
         }
     }
@@ -1362,9 +1360,9 @@ async fn main() {
     let is_producing_block = Arc::new(AtomicBool::new(false));
     let is_producing_block_clone = is_producing_block.clone();
 
-    // Trigger for immediate catchup block production (when 5-min status check detects need)
-    let catchup_trigger = Arc::new(tokio::sync::Notify::new());
-    let catchup_trigger_producer = catchup_trigger.clone();
+    // Trigger for immediate block production (when status check detects chain is behind)
+    let production_trigger = Arc::new(tokio::sync::Notify::new());
+    let production_trigger_producer = production_trigger.clone();
 
     let block_production_handle = tokio::spawn(async move {
         let is_producing = is_producing_block_clone;
@@ -1482,8 +1480,8 @@ async fn main() {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
         }
 
-        // Time-based catchup trigger: Check if we're behind schedule
-        // Use time rather than block count to determine when to trigger catchup
+        // Time-based production trigger: Check if we're behind schedule
+        // When behind expected height, normal consensus produces blocks rapidly
         let current_height = block_blockchain.get_height();
         let expected_height = block_blockchain.calculate_expected_height();
         let blocks_behind = expected_height.saturating_sub(current_height);
@@ -1495,33 +1493,31 @@ async fn main() {
         let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
         let time_since_expected = now_timestamp - expected_block_time;
 
-        // Smart catchup trigger:
-        // - If many blocks behind (>3): Start immediately regardless of time
-        // - If few blocks behind (1-3): Use 5-minute grace period
-        let catchup_delay_threshold = 300; // 5 minutes in seconds
+        // Smart initial wait:
+        // - If many blocks behind (>2): Start immediately — consensus drives rapid production
+        // - If few blocks behind (1-2): Use 5-minute grace period for normal schedule
+        let grace_period = 300; // 5 minutes in seconds
 
         let initial_wait = if blocks_behind > 2 {
-            // More than 2 blocks behind - start catchup immediately
+            // More than 2 blocks behind - start producing immediately via normal consensus
             tracing::info!(
-                "⚡ {} blocks behind - starting immediate TimeLock catchup (>2 blocks threshold)",
+                "⚡ {} blocks behind - starting immediate block production (>2 blocks threshold)",
                 blocks_behind
             );
             0
-        } else if blocks_behind > 0 && time_since_expected >= catchup_delay_threshold {
+        } else if blocks_behind > 0 && time_since_expected >= grace_period {
             // 1-2 blocks behind AND 5+ minutes past when block should have been produced
-            // Start catchup immediately - normal production had its chance
             tracing::info!(
-                "⚡ {} blocks behind, {}s past expected block time - starting immediate TimeLock catchup",
+                "⚡ {} blocks behind, {}s past expected block time - starting immediate production",
                 blocks_behind,
                 time_since_expected
             );
             0
         } else if blocks_behind > 0 {
-            // Exactly 1 block behind and within the 5-minute grace period
-            // Wait a bit longer to give normal production a chance
-            let remaining_grace = catchup_delay_threshold - time_since_expected;
+            // 1 block behind and within the 5-minute grace period
+            let remaining_grace = grace_period - time_since_expected;
             tracing::info!(
-                "⏳ {} blocks behind but only {}s past expected time - waiting {}s before catchup",
+                "⏳ {} blocks behind but only {}s past expected time - waiting {}s before production",
                 blocks_behind,
                 time_since_expected,
                 remaining_grace
@@ -1535,13 +1531,13 @@ async fn main() {
             (600 - seconds_into_period) as u64
         };
 
-        // Wait until the appropriate time (or start immediately if past catchup threshold)
+        // Wait until the appropriate time (or start immediately if behind)
         if initial_wait > 0 {
             tokio::time::sleep(tokio::time::Duration::from_secs(initial_wait as u64)).await;
         }
 
         // Use a short interval (1 second) and check timing internally
-        // This allows rapid catchup when behind while still respecting 10-minute marks when synced
+        // This allows rapid production when behind while still respecting 10-minute marks when synced
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_block_period_started: u64 = 0; // Track which block period we've started
@@ -1572,9 +1568,9 @@ async fn main() {
                     tracing::debug!("🛑 Block production task shutting down gracefully");
                     break;
                 }
-                _ = catchup_trigger_producer.notified() => {
-                    // Triggered by status check - immediate check
-                    tracing::info!("🔔 Catchup production triggered by status check");
+                _ = production_trigger_producer.notified() => {
+                    // Triggered by status check — immediate re-evaluation
+                    tracing::info!("🔔 Block production triggered by status check");
                 }
                 _ = block_signal.notified() => {
                     // A block was added (from peer or self) - immediately re-evaluate
@@ -1617,7 +1613,7 @@ async fn main() {
 
             // Early time gate: skip expensive masternode selection when next block isn't due yet
             // This prevents noisy fallback logging every second while waiting for the next slot
-            // CRITICAL: Also prevents producing blocks with future timestamps during catchup —
+            // CRITICAL: Also prevents producing blocks with future timestamps —
             // receiving nodes reject blocks with timestamp > now + 60s tolerance
             {
                 let next_h = current_height + 1;
@@ -1628,7 +1624,7 @@ async fn main() {
                 if now_ts + tolerance < scheduled {
                     if blocks_behind >= 5 {
                         tracing::debug!(
-                            "⏳ Catchup paused: block {} scheduled at {} ({}s in future, tolerance {}s)",
+                            "⏳ Production paused: block {} scheduled at {} ({}s in future, tolerance {}s)",
                             next_h, scheduled, scheduled - now_ts, tolerance
                         );
                     } else {
@@ -1646,30 +1642,19 @@ async fn main() {
             // CRITICAL: This MUST use the SAME logic as blockchain.rs produce_block_at_height()
             // to ensure selected leader is eligible for rewards (prevents participation chain break)
             let is_bootstrap = current_height == 0; // Only block 1 (height 0→1) uses bootstrap
-                                                    // During deep catchup, use all active masternodes (participation bitmap may be corrupted from fork)
-            let is_deep_catchup = blocks_behind >= 50;
 
-            let eligible = if is_bootstrap || is_deep_catchup {
-                // Bootstrap mode (height 0 ONLY) OR deep catchup
-                if is_bootstrap {
-                    let all_nodes = block_registry.get_all_for_bootstrap().await;
-                    tracing::info!(
-                        "🌱 Bootstrap mode (height {}): using ALL {} registered masternodes (including inactive, no bitmap yet)",
-                        current_height,
-                        all_nodes.len()
-                    );
-                    // At height 0 (producing block 1), use ALL registered masternodes
-                    // After block 1, the bitmap from block 1 will be used for block 2
-                    all_nodes
-                } else {
-                    tracing::debug!(
-                        "🔄 Deep catchup mode ({} blocks behind): using all active masternodes (bypassing potentially corrupted bitmap)",
-                        blocks_behind
-                    );
-                    block_registry.get_eligible_for_rewards().await
-                }
+            let eligible = if is_bootstrap {
+                let all_nodes = block_registry.get_all_for_bootstrap().await;
+                tracing::info!(
+                    "🌱 Bootstrap mode (height {}): using ALL {} registered masternodes (including inactive, no bitmap yet)",
+                    current_height,
+                    all_nodes.len()
+                );
+                // At height 0 (producing block 1), use ALL registered masternodes
+                // After block 1, the bitmap from block 1 will be used for block 2
+                all_nodes
             } else {
-                // Normal/catchup mode (height > 3): use participation-based selection
+                // Normal mode: use participation-based selection from previous block's bitmap
                 // This matches blockchain.rs get_masternodes_for_rewards() logic
                 let prev_block = block_blockchain
                     .get_block_by_height(current_height)
@@ -1852,19 +1837,17 @@ async fn main() {
             const SYNC_THRESHOLD_BLOCKS: u64 = 5;
 
             // Case 1: Next block not due yet - wait until scheduled time
-            // BUT: Skip this check during catchup mode (when far behind)
-            // CRITICAL: When catching up (>5 blocks behind), produce immediately without time check
-            // This allows fast catchup instead of waiting 10 minutes per block
+            // When far behind (>5 blocks), skip time gate so consensus can produce rapidly
             if time_past_scheduled < 0 && blocks_behind < SYNC_THRESHOLD_BLOCKS {
                 let wait_secs = -time_past_scheduled;
                 tracing::debug!("📅 Block {} not due for {}s", next_height, wait_secs);
                 continue;
             }
 
-            // Fast catchup: When far behind, produce as fast as consensus allows
+            // Rapid production: When far behind, normal consensus produces as fast as it allows
             if blocks_behind >= SYNC_THRESHOLD_BLOCKS {
                 tracing::debug!(
-                    "⚡ Fast catchup mode: {} blocks behind, producing without time delay",
+                    "⚡ {} blocks behind, producing rapidly via normal consensus",
                     blocks_behind
                 );
             }
@@ -1979,7 +1962,7 @@ async fn main() {
                         // None means all peers agree on our chain (same height, same hash).
                         // This is a POSITIVE confirmation — safe to proceed to block production.
                         tracing::debug!(
-                            "Catchup: peers agree at height {} - proceeding to production",
+                            "Peers agree at height {} - proceeding to production",
                             current_height
                         );
                     }
@@ -2222,7 +2205,7 @@ async fn main() {
 
             // Safety checks before producing
             // Always require at least 3 peers to prevent isolated nodes from creating forks
-            // Even during catchup, we need network consensus to produce valid blocks
+            // We need network consensus to produce valid blocks
             let connected_peers = block_peer_registry.get_compatible_peers().await;
             let min_peers_required = 3;
             if connected_peers.len() < min_peers_required {
@@ -2421,7 +2404,7 @@ async fn main() {
                     // instead of polling, so consensus completes instantly when votes arrive.
 
                     let consensus_timeout = if blocks_behind > 0 {
-                        std::time::Duration::from_secs(10) // Catchup: shorter timeout
+                        std::time::Duration::from_secs(10) // Behind: shorter timeout
                     } else {
                         std::time::Duration::from_secs(15) // Normal: wait for consensus signal
                     };
@@ -2542,7 +2525,7 @@ async fn main() {
                         match wait_result {
                             Ok(true) => {
                                 tracing::debug!(
-                                    "✅ Peers confirmed height {} — continuing catchup",
+                                    "✅ Peers confirmed height {} — continuing production",
                                     new_height
                                 );
                             }
@@ -2574,10 +2557,10 @@ async fn main() {
     println!("🌐 Starting P2P network server...");
 
     // Periodic status report - logs every 1 minute for immediate sync detection
-    // Also handles responsive catchup checks more frequently than 10-minute block production interval
+    // Also handles responsive behind-chain checks more frequently than 10-minute block production interval
     let status_blockchain = blockchain_server.clone();
     let status_registry = registry.clone();
-    let status_catchup_trigger = catchup_trigger.clone(); // Trigger to wake up block production
+    let status_production_trigger = production_trigger.clone(); // Trigger to wake up block production
     let status_ai_system = ai_system.clone();
     let shutdown_token_status = shutdown_token.clone();
     let status_handle = tokio::spawn(async move {
@@ -2595,7 +2578,7 @@ async fn main() {
                     let height = status_blockchain.get_height();
                     let mn_count = status_registry.list_active().await.len();
 
-                    // Check if we need responsive catchup (between 10-minute block production checks)
+                    // Check if we need rapid production (between 10-minute block production checks)
                     let expected_height = status_blockchain.calculate_expected_height();
                     let blocks_behind = expected_height.saturating_sub(height);
 
@@ -2605,11 +2588,11 @@ async fn main() {
                         let expected_block_time = genesis_timestamp + (expected_height as i64 * 600);
                         let time_since_expected = now_timestamp - expected_block_time;
 
-                        // Check if catchup conditions are met (>2 blocks OR >5min past)
-                        let should_catchup = blocks_behind > 2
+                        // Check if production should be triggered (>2 blocks OR >5min past)
+                        let should_produce = blocks_behind > 2
                             || time_since_expected >= 300;
 
-                        if should_catchup {
+                        if should_produce {
                             let registered_count = status_registry.total_count().await;
                             tracing::warn!(
                                 "📊 ═══════════════════════════════════════════════════════════════",
@@ -2636,10 +2619,9 @@ async fn main() {
                                 }
                                 Err(_) => {
                                     // Sync failed - peers don't have blocks
-                                    // The main block production loop will handle catchup via TimeLock leader selection
-                                    // Wake up the block production task to check if we should produce
-                                    tracing::debug!("⏰ Responsive sync found no peer blocks - notifying block production to check catchup");
-                                    status_catchup_trigger.notify_one();
+                                    // Wake up the block production loop to produce via normal consensus
+                                    tracing::debug!("⏰ Responsive sync found no peer blocks - notifying block production");
+                                    status_production_trigger.notify_one();
                                 }
                             }
                         } else {

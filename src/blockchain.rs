@@ -2407,19 +2407,12 @@ impl Blockchain {
         // Get previous block hash
         let current_height = self.current_height.load(Ordering::Acquire);
 
-        // Note: Previously had a safeguard preventing block production when >50 behind
-        // This is no longer needed because:
-        // 1. TimeLock leader selection ensures only ONE node produces catchup blocks
-        // 2. All nodes agree on the leader deterministically
-        // 3. Non-leaders wait for leader's blocks
-        // This prevents forks while allowing coordinated catchup when network is behind
-
         let expected_height = self.calculate_expected_height();
         let blocks_behind = expected_height.saturating_sub(current_height);
 
         if blocks_behind > 10 {
             tracing::debug!(
-                "📦 Producing catchup block: {} blocks behind (TimeLock leader coordinated)",
+                "📦 Producing block: {} blocks behind expected height (consensus-driven rapid production)",
                 blocks_behind
             );
         }
@@ -2437,7 +2430,6 @@ impl Blockchain {
 
         // Determine the height to produce
         let next_height = if let Some(target) = target_height {
-            // Catchup mode: produce block at specific height
             if target <= current_height {
                 return Err(format!(
                     "Cannot produce block at height {}: already have block at height {}",
@@ -5515,16 +5507,17 @@ impl Blockchain {
 
         // Additional check: Verify timestamp aligns with blockchain timeline
         // Expected time = genesis_time + (height * block_time)
-        // This check is DISABLED during initial sync because catchup blocks use current time
+        // This check is DISABLED during initial sync because historical blocks may have
+        // timestamps that don't match the original schedule
         // Only enforce this for recently produced blocks (within a few blocks of chain tip)
         // This prevents accepting entire fake chains that are too far ahead of schedule
         let genesis_time = self.genesis_timestamp();
         let expected_time = genesis_time + (block.header.height as i64 * BLOCK_TIME_SECONDS);
         let time_drift = block.header.timestamp - expected_time;
 
-        // Only check schedule drift if block is recent (not historical/catchup)
-        // If we're syncing old blocks, they may have catchup timestamps that don't match original schedule
-        // Skip the check during sync to avoid blocking - catchup blocks use historical timestamps
+        // Only check schedule drift if block is recent (not historical)
+        // If we're syncing old blocks, they may have timestamps that don't match original schedule
+        // Skip the check during sync to avoid blocking
         // NOTE: Hardcoded to false - would need atomic height counter to determine if syncing
         let is_recent_block = false;
 

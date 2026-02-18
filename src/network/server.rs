@@ -805,7 +805,7 @@ async fn handle_peer(
                                             lock_id.push(4);
                                             lock_id.extend_from_slice(txid);
                                         }
-                                        UTXOState::Confirmed { txid, .. } => {
+                                        UTXOState::Archived { txid, .. } => {
                                             lock_id.push(5);
                                             lock_id.extend_from_slice(txid);
                                         }

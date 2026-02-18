@@ -987,7 +987,7 @@ impl RpcHandler {
                     Some(crate::types::UTXOState::Locked { .. }) => (false, "locked"),
                     Some(crate::types::UTXOState::SpentPending { .. }) => (false, "spending"),
                     Some(crate::types::UTXOState::SpentFinalized { .. }) => (false, "spent"),
-                    Some(crate::types::UTXOState::Confirmed { .. }) => (false, "confirmed"),
+                    Some(crate::types::UTXOState::Archived { .. }) => (false, "archived"),
                     None => (false, "unknown"),
                     _ => (false, "unavailable"),
                 };

@@ -27,7 +27,7 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 
 /// Compute merkle root from a list of transactions
-/// Uses BLAKE3 hashing for speed and security
+/// Uses SHA256 hashing for consistency with block/tx hashing
 fn compute_merkle_root(transactions: &[Transaction]) -> Hash256 {
     if transactions.is_empty() {
         return [0u8; 32]; // Empty merkle root for blocks with no transactions
@@ -39,8 +39,8 @@ fn compute_merkle_root(transactions: &[Transaction]) -> Hash256 {
         .map(|tx| {
             // Serialize transaction and hash it
             let tx_bytes = bincode::serialize(tx).unwrap_or_default();
-            let hash = blake3::hash(&tx_bytes);
-            *hash.as_bytes()
+            let hash: [u8; 32] = Sha256::digest(&tx_bytes).into();
+            hash
         })
         .collect();
 
@@ -55,15 +55,15 @@ fn compute_merkle_root(transactions: &[Transaction]) -> Hash256 {
                 let mut combined = Vec::with_capacity(64);
                 combined.extend_from_slice(&chunk[0]);
                 combined.extend_from_slice(&chunk[1]);
-                let hash = blake3::hash(&combined);
-                *hash.as_bytes()
+                let hash: [u8; 32] = Sha256::digest(&combined).into();
+                hash
             } else {
                 // Odd number of hashes - duplicate the last one
                 let mut combined = Vec::with_capacity(64);
                 combined.extend_from_slice(&chunk[0]);
                 combined.extend_from_slice(&chunk[0]);
-                let hash = blake3::hash(&combined);
-                *hash.as_bytes()
+                let hash: [u8; 32] = Sha256::digest(&combined).into();
+                hash
             };
             next_level.push(combined_hash);
         }
@@ -328,14 +328,14 @@ impl TSCDConsensus {
         })
     }
 
-    /// Select leader for catchup based on target height (deterministic across all nodes)
-    /// This version uses target_height instead of chain_head to ensure all nodes agree
-    /// on the leader even when their local chains differ during catchup
+    /// Select leader for a target height deterministically across all nodes.
+    /// Uses target_height instead of chain_head to ensure all nodes agree
+    /// on the leader even when their local chains differ.
     ///
     /// The `attempt` parameter allows selecting backup leaders:
     /// - attempt 0: Primary leader
     /// - attempt 1+: Backup leaders (in case primary is offline)
-    pub async fn select_leader_for_catchup(
+    pub async fn select_leader_for_height(
         &self,
         attempt: u64,
         target_height: u64,
@@ -364,7 +364,7 @@ impl TSCDConsensus {
 
         if masternodes.is_empty() {
             return Err(TSCDError::ConfigError(format!(
-                "No active masternodes available for catchup (need at least 1 of {} registered)",
+                "No active masternodes available for leader selection (need at least 1 of {} registered)",
                 all_masternodes.len()
             )));
         }
@@ -374,14 +374,11 @@ impl TSCDConsensus {
         // masternodes in different orders, leading to different leader selections.
         masternodes.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
-        // CRITICAL FIX: Use target_height as slot for deterministic leader selection
-        // Previously used wall-clock based slot which caused rotating leadership during catchup
-        // causing deadlock where nodes kept waiting for different leaders as time progressed.
-        // Now all nodes will consistently select the same leader based on the target height.
+        // Use target_height as slot for deterministic leader selection
         let deterministic_slot = target_height;
 
         let mut hasher = Sha256::new();
-        hasher.update(b"catchup_leader_selection");
+        hasher.update(b"height_leader_selection");
         hasher.update(deterministic_slot.to_le_bytes());
         hasher.update(target_height.to_le_bytes());
         hasher.update(attempt.to_le_bytes()); // Include attempt for backup leader selection
@@ -399,7 +396,7 @@ impl TSCDConsensus {
 
         // Log leader selection details for debugging
         tracing::debug!(
-            "Catchup leader selection for deterministic slot {} (target height {}, attempt {}): leader_index={}/{}, selected={}",
+            "Leader selection for deterministic slot {} (target height {}, attempt {}): leader_index={}/{}, selected={}",
             deterministic_slot,
             target_height,
             attempt,

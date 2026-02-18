@@ -1886,8 +1886,8 @@ impl ConsensusEngine {
                         // Input already spent by finalized tx
                         return false;
                     }
-                    UTXOState::Confirmed { .. } => {
-                        // Input spent and confirmed in block
+                    UTXOState::Archived { .. } => {
+                        // Input spent and archived in block
                         return false;
                     }
                     _ => {
@@ -1976,12 +1976,11 @@ impl ConsensusEngine {
         // Get voter weight from snapshot
         let voter_weight = snapshot.get_validator_weight(&voter_mn_id)?;
 
-        // Compute transaction hash commitment (BLAKE3 hash of canonical tx bytes)
+        // Compute transaction hash commitment (SHA256 hash of canonical tx bytes)
         let tx_bytes = bincode::serialize(tx).ok()?;
-        let tx_hash = blake3::hash(&tx_bytes);
+        let tx_hash: [u8; 32] = Sha256::digest(&tx_bytes).into();
 
-        // Convert blake3 hash to Hash256 (both are [u8; 32])
-        let tx_hash_commitment: Hash256 = *tx_hash.as_bytes();
+        let tx_hash_commitment: Hash256 = tx_hash;
 
         // Sign and create the vote using identity
         let vote = identity.sign_finality_vote(
