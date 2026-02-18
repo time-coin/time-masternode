@@ -70,6 +70,7 @@ pub struct NetworkServer {
     pub peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Track peers on incompatible forks
     pub ai_system: Option<Arc<crate::ai::AISystem>>, // AI attack detection & mitigation
     pub tls_config: Option<Arc<crate::network::tls::TlsConfig>>, // TLS for encrypted connections
+    pub network_type: crate::network_type::NetworkType,
 }
 
 #[allow(dead_code)] // Used by binary, not visible to library check
@@ -92,6 +93,7 @@ impl NetworkServer {
         peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
         peer_state: Arc<PeerStateManager>,
         local_ip: Option<String>,
+        network_type: crate::network_type::NetworkType,
     ) -> Result<Self, std::io::Error> {
         Self::new_with_blacklist(
             bind_addr,
@@ -106,6 +108,7 @@ impl NetworkServer {
             local_ip,
             vec![],
             vec![],
+            network_type,
         )
         .await
     }
@@ -125,6 +128,7 @@ impl NetworkServer {
         local_ip: Option<String>,
         blacklisted_peers: Vec<String>,
         whitelisted_peers: Vec<String>,
+        network_type: crate::network_type::NetworkType,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(bind_addr).await?;
         let (tx, _) = broadcast::channel(1024);
@@ -177,6 +181,7 @@ impl NetworkServer {
             peer_fork_status: Arc::new(DashMap::new()), // Phase 2: Track fork status
             ai_system: None,
             tls_config: None,
+            network_type,
         })
     }
 
@@ -407,6 +412,7 @@ impl NetworkServer {
             let block_cache = self.block_cache.clone();
             let fork_status = self.peer_fork_status.clone();
             let tls_config = self.tls_config.clone();
+            let network_type = self.network_type;
 
             tokio::spawn(async move {
                 let _ = handle_peer(
@@ -434,6 +440,7 @@ impl NetworkServer {
                     fork_status,
                     is_whitelisted,
                     tls_config,
+                    network_type,
                 )
                 .await;
             });
@@ -499,6 +506,7 @@ async fn handle_peer(
     _peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker (no longer used - periodic resolution handles forks)
     _is_whitelisted: bool,
     tls_config: Option<Arc<crate::network::tls::TlsConfig>>,
+    network_type: crate::network_type::NetworkType,
 ) -> Result<(), std::io::Error> {
     // Extract IP from address
     let ip: IpAddr = peer
@@ -609,7 +617,7 @@ async fn handle_peer(
     let mut handshake_done = false;
     let mut is_stable_connection = false;
 
-    const MAGIC_BYTES: [u8; 4] = *b"TIME";
+    let magic_bytes = network_type.magic_bytes();
 
     loop {
         tokio::select! {
@@ -647,7 +655,7 @@ async fn handle_peer(
                             if !handshake_done {
                                 match &msg {
                                     NetworkMessage::Handshake { magic, protocol_version, network } => {
-                                        if magic != &MAGIC_BYTES {
+                                        if magic != &magic_bytes {
                                             tracing::warn!("🚫 Rejecting {} - invalid magic bytes: {:?}", peer.addr, magic);
                                             blacklist.write().await.record_violation(
                                                 ip,
