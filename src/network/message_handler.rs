@@ -1266,6 +1266,16 @@ impl MessageHandler {
                                     "✅ [{}] Block {} finalized via consensus!",
                                     self.direction, block_height
                                 );
+                                // Update all connected peers' chain tips to the new height.
+                                // All peers participated in consensus, so they should all
+                                // have this block — prevents stale tips causing phantom forks.
+                                let connected = context.peer_registry.get_connected_peers().await;
+                                for peer in &connected {
+                                    context
+                                        .peer_registry
+                                        .update_peer_chain_tip(peer, block_height, block_hash)
+                                        .await;
+                                }
                             }
                             Ok(false) => {
                                 debug!(
