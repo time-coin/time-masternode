@@ -322,15 +322,15 @@ impl MasternodeTier {
         }
     }
 
-    /// Reward weight for block reward distribution
-    /// Free nodes get 0.1x weight compared to Bronze (100 vs 1000)
-    /// But if ONLY free nodes exist, they share 100% of rewards
+    /// Reward weight for block reward distribution (§10.4 unified model)
+    /// Softened ratios (1:5:20:60) reduce sybil incentive for Free-tier
+    /// while still rewarding higher collateral tiers proportionally.
     pub fn reward_weight(&self) -> u64 {
         match self {
-            MasternodeTier::Free => 100,     // 0.1x relative to Bronze
-            MasternodeTier::Bronze => 1000,  // 1x (baseline)
-            MasternodeTier::Silver => 10000, // 10x
-            MasternodeTier::Gold => 100000,  // 100x
+            MasternodeTier::Free => 1,    // baseline
+            MasternodeTier::Bronze => 5,  // 5x
+            MasternodeTier::Silver => 20, // 20x
+            MasternodeTier::Gold => 60,   // 60x
         }
     }
 

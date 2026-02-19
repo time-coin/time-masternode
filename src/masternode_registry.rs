@@ -482,6 +482,33 @@ impl MasternodeRegistry {
             .collect()
     }
 
+    /// Get ALL active masternodes eligible for the weighted reward pool (§10.4).
+    /// Paid tiers (Bronze/Silver/Gold) are always eligible.
+    /// Free tier requires maturity gate on mainnet.
+    pub async fn get_eligible_pool_nodes(&self, current_height: u64) -> Vec<MasternodeInfo> {
+        let maturity_required = match self.network {
+            crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
+            crate::NetworkType::Testnet => 0,
+        };
+        self.masternodes
+            .read()
+            .await
+            .values()
+            .filter(|info| {
+                info.is_active
+                    && (
+                        // Paid tiers always eligible
+                        !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                        // Free tier requires maturity
+                        || info.registration_height == 0
+                        || current_height.saturating_sub(info.registration_height)
+                            >= maturity_required
+                    )
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Check if a Free-tier masternode is mature enough for VRF sortition.
     /// Paid tiers are always mature (collateral is their skin in the game).
     pub fn is_mature_for_sortition(
