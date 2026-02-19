@@ -619,19 +619,15 @@ impl PeerConnectionRegistry {
                 self.outbound_count.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(mut e) => {
-                // Allow reconnection by updating existing entry
-                let old_direction = e.get().direction;
-                e.insert(ConnectionState {
-                    direction: ConnectionDirection::Outbound,
-                    connected_at: Instant::now(),
-                });
-                // Adjust counters if direction changed
-                if old_direction == ConnectionDirection::Inbound {
-                    self.inbound_count.fetch_sub(1, Ordering::Relaxed);
-                    self.outbound_count.fetch_add(1, Ordering::Relaxed);
-                }
-                true
+            Entry::Occupied(_) => {
+                // Reject if any connection (inbound or outbound) already exists.
+                // Prevents outbound from racing with an active inbound connection
+                // and corrupting the writer channel.
+                tracing::debug!(
+                    "🔄 Rejecting outbound to {} - connection already exists",
+                    ip
+                );
+                false
             }
         }
     }
@@ -790,6 +786,17 @@ impl PeerConnectionRegistry {
         self.mark_inbound(&peer_ip);
 
         let mut writers = self.peer_writers.write().await;
+        // Only overwrite if no existing live writer (defensive, mirrors register_peer_shared)
+        if let Some(existing) = writers.get(&peer_ip) {
+            if !existing.is_closed() {
+                debug!(
+                    "🔄 Inbound peer {} already has a live writer, skipping overwrite",
+                    peer_ip
+                );
+                return;
+            }
+            debug!("♻️ Replacing dead writer for inbound peer {}", peer_ip);
+        }
         writers.insert(peer_ip.clone(), writer);
         debug!("✅ Registered peer connection: {}", peer_ip);
     }
@@ -855,9 +862,22 @@ impl PeerConnectionRegistry {
     }
 
     /// Update a peer's chain tip (height + hash)
+    /// Only updates if the new height is >= the cached height (monotonic),
+    /// preventing stale ChainTipResponse from overwriting a newer forced update.
     pub async fn update_peer_chain_tip(&self, peer_ip: &str, height: u64, hash: [u8; 32]) {
         let ip_only = extract_ip(peer_ip);
         let mut tips = self.peer_chain_tips.write().await;
+        if let Some(&(existing_height, _)) = tips.get(ip_only) {
+            if height < existing_height {
+                tracing::debug!(
+                    "🔄 Ignoring stale chain tip for {} (cached: {}, received: {})",
+                    ip_only,
+                    existing_height,
+                    height
+                );
+                return;
+            }
+        }
         tips.insert(ip_only.to_string(), (height, hash));
         drop(tips);
         self.chain_tip_updated.notify_waiters();
