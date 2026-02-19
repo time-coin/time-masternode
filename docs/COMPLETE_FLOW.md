@@ -413,15 +413,15 @@ The AttackDetector's recommendations are now automatically enforced:
 
 ### 6.3 Block Rewards
 
-- **50/50 Split**: Total reward = 100 TIME + transaction fees per block
-  - **Block Producer**: 50 TIME + all transaction fees (VRF-selected proposer)
-  - **Free-Tier Participation Pool**: 50 TIME distributed to active, mature Free-tier masternodes
-    - Weighted by fairness_bonus (blocks_without_reward / 10, capped at 20)
-    - Minimum payout: 1 TIME per node (max 50 recipients per block)
-    - If no eligible Free nodes: full 50 TIME goes to producer
+- **35/65 Split (§10.4)**: Total reward = 100 TIME + transaction fees per block
+  - **Block Producer**: 35 TIME + all transaction fees (VRF-selected leader bonus)
+  - **Weighted Pool**: 65 TIME distributed to ALL active AVS masternodes by tier weight
+    - Pool weights: Free=1, Bronze=5, Silver=20, Gold=60
+    - Block producer also receives a pool share (merged into their output)
+    - If no eligible pool nodes: full 65 TIME goes to producer
 - CoinbaseReward transaction for block producer
-- MasternodeReward transactions for Free-tier pool recipients
-- Reward eligibility based on active status and uptime
+- MasternodeReward transactions for pool recipients
+- Reward eligibility based on active status (Free tier requires maturity gate)
 
 ---
 

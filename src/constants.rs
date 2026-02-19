@@ -12,10 +12,10 @@ pub mod blockchain {
     pub const SATOSHIS_PER_TIME: u64 = 100_000_000;
     pub const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME;
 
-    /// Reward split: producer share and Free-tier participation pool
-    pub const PRODUCER_REWARD_SATOSHIS: u64 = 50 * SATOSHIS_PER_TIME; // 50 TIME to block producer
-    pub const POOL_REWARD_SATOSHIS: u64 = 50 * SATOSHIS_PER_TIME; // 50 TIME to Free-tier pool
-    pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = SATOSHIS_PER_TIME; // Minimum 1 TIME per node
+    /// Reward split: 35% leader bonus + 65% weighted pool for ALL tiers (§10.4)
+    pub const PRODUCER_REWARD_SATOSHIS: u64 = 35 * SATOSHIS_PER_TIME; // 35 TIME leader bonus
+    pub const POOL_REWARD_SATOSHIS: u64 = 65 * SATOSHIS_PER_TIME; // 65 TIME weighted pool (all tiers)
+    pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = 10_000; // Dust threshold (0.0001 TIME)
 
     /// Anti-sybil maturity gate: Free nodes must be online this many blocks before
     /// becoming eligible for VRF sortition and the participation pool.

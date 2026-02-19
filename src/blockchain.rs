@@ -2600,73 +2600,50 @@ impl Blockchain {
         }
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
-        // Split: 50 TIME to block producer, 50 TIME to Free-tier participation pool
+        // §10.4 Unified model: 35% leader bonus + 65% weighted pool for ALL tiers
         let base_reward = BLOCK_REWARD_SATOSHIS;
         let total_reward = base_reward + finalized_txs_fees;
-        let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Producer gets 50 TIME + all fees
+        let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Leader gets 35 TIME + all fees
 
-        // Build reward list: producer first, then Free-tier pool participants
+        // Build reward list: producer first, then weighted pool for all eligible masternodes
         let mut rewards: Vec<(String, u64)> = Vec::new();
 
-        // 1. Block producer reward (50 TIME + fees)
+        // 1. Block producer leader bonus (35 TIME + fees)
         if let Some(ref wallet) = producer_wallet {
             rewards.push((wallet.clone(), producer_share));
         }
 
-        // 2. Free-tier participation pool (50 TIME, min 1 TIME each)
-        let eligible_free = self
+        // 2. Weighted pool (65 TIME) distributed to ALL active masternodes by tier weight
+        let eligible_pool = self
             .masternode_registry
-            .get_eligible_free_nodes(next_height)
-            .await;
-
-        let blocks_without_reward_map = self
-            .masternode_registry
-            .get_verifiable_reward_tracking(self)
+            .get_eligible_pool_nodes(next_height)
             .await;
 
         let mut pool_remaining = POOL_REWARD_SATOSHIS;
-        if !eligible_free.is_empty() {
-            // Sort by fairness bonus descending (most starved first)
-            let mut sorted_free: Vec<_> = eligible_free
-                .iter()
-                .map(|mn| {
-                    let blocks_without = blocks_without_reward_map
-                        .get(&mn.masternode.address)
-                        .copied()
-                        .unwrap_or(0);
-                    let fairness_bonus = (blocks_without / 10).min(20);
-                    (mn, mn.masternode.tier.reward_weight() + fairness_bonus)
-                })
-                .collect();
-            sorted_free.sort_by(|a, b| b.1.cmp(&a.1));
+        if !eligible_pool.is_empty() {
+            // Sort by address for deterministic ordering
+            let mut sorted_pool: Vec<_> = eligible_pool.iter().collect();
+            sorted_pool.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
-            // Calculate total weight for proportional distribution
-            let total_weight: u64 = sorted_free.iter().map(|(_, w)| *w).sum();
+            let total_weight: u64 = sorted_pool
+                .iter()
+                .map(|mn| mn.masternode.tier.reward_weight())
+                .sum();
 
             if total_weight > 0 {
-                // Max recipients: pool / min_payout (at most 50 with 50 TIME / 1 TIME)
-                let max_recipients = (POOL_REWARD_SATOSHIS / MIN_POOL_PAYOUT_SATOSHIS) as usize;
-                let recipients = sorted_free.len().min(max_recipients);
-
-                // Distribute proportionally by weight, minimum 1 TIME each
                 let mut distributed = 0u64;
-                for (i, (mn, weight)) in sorted_free.iter().take(recipients).enumerate() {
-                    let share = if i == recipients - 1 {
-                        // Last recipient gets remainder
+                for (i, mn) in sorted_pool.iter().enumerate() {
+                    let weight = mn.masternode.tier.reward_weight();
+                    let share = if i == sorted_pool.len() - 1 {
+                        // Last recipient gets remainder to avoid rounding errors
                         pool_remaining - distributed
                     } else {
-                        let proportional = (POOL_REWARD_SATOSHIS as u128 * *weight as u128
-                            / total_weight as u128)
-                            as u64;
-                        // Ensure minimum 1 TIME, but don't exceed remaining pool
-                        proportional
-                            .max(MIN_POOL_PAYOUT_SATOSHIS)
-                            .min(pool_remaining - distributed)
+                        (POOL_REWARD_SATOSHIS as u128 * weight as u128
+                            / total_weight as u128) as u64
                     };
                     if share >= MIN_POOL_PAYOUT_SATOSHIS {
-                        // Skip if producer wallet is same address (don't double-pay)
+                        // Merge into producer entry if same wallet address
                         if producer_wallet.as_ref() == Some(&mn.masternode.wallet_address) {
-                            // Producer already got their share; add pool share to their entry
                             if let Some(entry) = rewards
                                 .iter_mut()
                                 .find(|(a, _)| a == &mn.masternode.wallet_address)
@@ -2683,7 +2660,7 @@ impl Blockchain {
             }
         }
 
-        // If no eligible Free nodes or leftover, producer gets the remainder
+        // If no eligible pool nodes or leftover from rounding, producer gets the remainder
         if pool_remaining > 0 {
             if let Some(entry) = rewards.first_mut() {
                 entry.1 += pool_remaining;
@@ -2691,13 +2668,13 @@ impl Blockchain {
         }
 
         tracing::info!(
-            "💰 Block {}: {} satoshis ({} TIME) — producer gets {} TIME, pool {} TIME to {} Free node(s)",
+            "💰 Block {}: {} satoshis ({} TIME) — producer gets {} TIME leader bonus, pool {} TIME to {} node(s)",
             next_height,
             total_reward,
             total_reward / 100_000_000,
             producer_share / 100_000_000,
             (POOL_REWARD_SATOSHIS - pool_remaining) / 100_000_000,
-            rewards.len().saturating_sub(1)
+            eligible_pool.len()
         );
 
         if rewards.is_empty() {
@@ -4676,7 +4653,7 @@ impl Blockchain {
     }
 
     /// Validate block rewards are correct and not double-counted.
-    /// Also verifies the 50/50 split and Free-tier pool distribution through
+    /// Also verifies the 35/65 split and weighted pool distribution through
     /// consensus: each node independently re-derives expected rewards from chain data.
     async fn validate_block_rewards(&self, block: &Block) -> Result<(), String> {
         // Skip validation for blocks with no transactions (shouldn't happen, but be safe)
@@ -4892,7 +4869,7 @@ impl Blockchain {
         }
 
         // ═══ CONSENSUS-VERIFIED POOL DISTRIBUTION ═══
-        // Re-derive the expected 50/50 split and Free-tier pool allocation from chain data.
+        // Re-derive the expected 35/65 split and weighted pool allocation from chain data.
         // Every validating node independently computes the same result, closing the gap
         // where a dishonest producer could manipulate pool weights.
         //
@@ -4906,9 +4883,9 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Verify the reward distribution matches the expected 50/50 split algorithm.
+    /// Verify the reward distribution matches the expected 35/65 split algorithm.
     /// Mirrors the logic in produce_block_at_height() exactly, using chain-derived
-    /// fairness bonus data so any node can independently verify.
+    /// data so any node can independently verify.
     async fn validate_pool_distribution(
         &self,
         block: &Block,
@@ -4934,79 +4911,50 @@ impl Blockchain {
             None => return Ok(()), // Unknown producer — can't validate pool split
         };
 
-        // Compute expected producer share: 50 TIME + fees
+        // Compute expected producer share: 35 TIME + fees
         let expected_producer_base = PRODUCER_REWARD_SATOSHIS + calculated_fees;
 
-        // Find eligible Free-tier nodes and compute fairness-weighted distribution
-        let eligible_free: Vec<_> = all_infos
+        // Find ALL eligible pool nodes (all tiers, with maturity gate for Free)
+        let eligible_pool: Vec<_> = all_infos
             .iter()
             .filter(|info| {
                 info.is_active
-                    && matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
-                    && MasternodeRegistry::is_mature_for_sortition(
-                        info,
-                        block.header.height,
-                        self.network_type,
+                    && (
+                        // Paid tiers always eligible
+                        !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                        // Free tier requires maturity
+                        || MasternodeRegistry::is_mature_for_sortition(
+                            info,
+                            block.header.height,
+                            self.network_type,
+                        )
                     )
             })
             .collect();
-
-        // Compute fairness bonus from on-chain data (scan blockchain, not local state)
-        let mut blocks_without_map = std::collections::HashMap::new();
-        let scan_limit = 1000u64;
-        let start_h = block.header.height.saturating_sub(scan_limit);
-        // We scan from the PREVIOUS height (block being validated hasn't been added yet)
-        let scan_height = block.header.height.saturating_sub(1);
-
-        for mn in &eligible_free {
-            let mut blocks_without = scan_limit; // Default: never received reward
-            for h in (start_h..=scan_height).rev() {
-                if let Ok(b) = self.get_block(h) {
-                    if b.header.leader == mn.masternode.address {
-                        blocks_without = scan_height.saturating_sub(h);
-                        break;
-                    }
-                }
-            }
-            blocks_without_map.insert(mn.masternode.address.clone(), blocks_without);
-        }
 
         // Re-derive the expected reward list using the same algorithm as produce_block_at_height
         let mut expected_rewards: Vec<(String, u64)> = Vec::new();
         expected_rewards.push((producer_wallet.clone(), expected_producer_base));
 
         let mut pool_remaining = POOL_REWARD_SATOSHIS;
-        if !eligible_free.is_empty() {
-            let mut sorted_free: Vec<_> = eligible_free
-                .iter()
-                .map(|mn| {
-                    let bw = blocks_without_map
-                        .get(&mn.masternode.address)
-                        .copied()
-                        .unwrap_or(0);
-                    let fairness_bonus = (bw / 10).min(20);
-                    (*mn, mn.masternode.tier.reward_weight() + fairness_bonus)
-                })
-                .collect();
-            sorted_free.sort_by(|a, b| b.1.cmp(&a.1));
+        if !eligible_pool.is_empty() {
+            let mut sorted_pool: Vec<_> = eligible_pool.iter().collect();
+            sorted_pool.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
 
-            let total_weight: u64 = sorted_free.iter().map(|(_, w)| *w).sum();
+            let total_weight: u64 = sorted_pool
+                .iter()
+                .map(|mn| mn.masternode.tier.reward_weight())
+                .sum();
 
             if total_weight > 0 {
-                let max_recipients = (POOL_REWARD_SATOSHIS / MIN_POOL_PAYOUT_SATOSHIS) as usize;
-                let recipients = sorted_free.len().min(max_recipients);
-
                 let mut distributed = 0u64;
-                for (i, (mn, weight)) in sorted_free.iter().take(recipients).enumerate() {
-                    let share = if i == recipients - 1 {
+                for (i, mn) in sorted_pool.iter().enumerate() {
+                    let weight = mn.masternode.tier.reward_weight();
+                    let share = if i == sorted_pool.len() - 1 {
                         pool_remaining - distributed
                     } else {
-                        let proportional = (POOL_REWARD_SATOSHIS as u128 * *weight as u128
-                            / total_weight as u128)
-                            as u64;
-                        proportional
-                            .max(MIN_POOL_PAYOUT_SATOSHIS)
-                            .min(pool_remaining - distributed)
+                        (POOL_REWARD_SATOSHIS as u128 * weight as u128
+                            / total_weight as u128) as u64
                     };
                     if share >= MIN_POOL_PAYOUT_SATOSHIS {
                         if mn.masternode.wallet_address == producer_wallet {
@@ -5048,8 +4996,7 @@ impl Blockchain {
             return Ok(());
         }
 
-        // Verify producer gets at least their minimum share (50 TIME + fees)
-        // This is the critical anti-cheat: producer can't steal from the pool.
+        // Verify producer gets at least their minimum share (35 TIME + fees)
         let actual_producer_amount = block
             .masternode_rewards
             .iter()
@@ -5057,9 +5004,7 @@ impl Blockchain {
             .map(|(_, amt)| *amt)
             .unwrap_or(0);
 
-        // Producer should get at least their base share (could be more if pool merges)
         if actual_producer_amount > 0 && calculated_fees == 0 {
-            // With no fees, producer's share should be between PRODUCER_REWARD and full BLOCK_REWARD
             if actual_producer_amount < PRODUCER_REWARD_SATOSHIS {
                 return Err(format!(
                     "Block {} producer {} received {} satoshis, less than minimum {} (pool theft)",
@@ -5089,7 +5034,7 @@ impl Blockchain {
                 .find(|(a, _)| a == expected_addr)
             {
                 // Allow up to 1 TIME tolerance per output for rounding differences
-                let tolerance = MIN_POOL_PAYOUT_SATOSHIS;
+                let tolerance = crate::constants::blockchain::SATOSHIS_PER_TIME;
                 let diff = if *actual_amt > *expected_amt {
                     actual_amt - expected_amt
                 } else {

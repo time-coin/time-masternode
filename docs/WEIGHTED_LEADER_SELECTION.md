@@ -25,7 +25,7 @@ Instead of storing participant lists, we:
 1. **Only reward the block producer** (already stored in `header.leader`)
 2. **Weight leader selection by tier** using `reward_weight()`
 3. **Higher tiers produce more blocks** → earn more rewards over time
-4. **Fixed reward per block** (50 TIME base + transaction fees)
+4. **Fixed reward per block** (100 TIME base + transaction fees, split 35/65 per §10.4)
 
 This achieves the same economic outcome (higher tiers earn more) without blockchain bloat.
 
@@ -57,8 +57,8 @@ Each masternode tier has a selection weight:
 
 ### Block Rewards
 
-- **Fixed reward:** 50 TIME per block (+ transaction fees)
-- **Single recipient:** Block producer only
+- **Fixed reward:** 100 TIME per block (+ transaction fees), split 35% leader + 65% weighted pool
+- **Pool recipients:** All active AVS masternodes weighted by tier
 - **No participant lists:** Minimal blockchain data
 
 ---
