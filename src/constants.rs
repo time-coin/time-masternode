@@ -12,10 +12,20 @@ pub mod blockchain {
     pub const SATOSHIS_PER_TIME: u64 = 100_000_000;
     pub const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME;
 
-    /// Reward split: 35% leader bonus + 65% weighted pool for ALL tiers (§10.4)
+    /// Reward split: 35% leader bonus + 65% per-tier pools (§10.4)
     pub const PRODUCER_REWARD_SATOSHIS: u64 = 35 * SATOSHIS_PER_TIME; // 35 TIME leader bonus
-    pub const POOL_REWARD_SATOSHIS: u64 = 65 * SATOSHIS_PER_TIME; // 65 TIME weighted pool (all tiers)
-    pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = 10_000; // Dust threshold (0.0001 TIME)
+
+    /// Per-tier reward pools — each tier's allocation rotates among its active nodes
+    pub const GOLD_POOL_SATOSHIS: u64 = 25 * SATOSHIS_PER_TIME; // 25 TIME
+    pub const SILVER_POOL_SATOSHIS: u64 = 18 * SATOSHIS_PER_TIME; // 18 TIME
+    pub const BRONZE_POOL_SATOSHIS: u64 = 14 * SATOSHIS_PER_TIME; // 14 TIME
+    pub const FREE_POOL_SATOSHIS: u64 = 8 * SATOSHIS_PER_TIME; //  8 TIME
+    /// Total pool = 65 TIME (must equal BLOCK_REWARD - PRODUCER_REWARD)
+    pub const TOTAL_POOL_SATOSHIS: u64 =
+        GOLD_POOL_SATOSHIS + SILVER_POOL_SATOSHIS + BRONZE_POOL_SATOSHIS + FREE_POOL_SATOSHIS;
+
+    pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = SATOSHIS_PER_TIME; // 1 TIME minimum per recipient
+    pub const MAX_TIER_RECIPIENTS: usize = 25; // Max recipients per tier per block
 
     /// Anti-sybil maturity gate: Free nodes must be online this many blocks before
     /// becoming eligible for VRF sortition and the participation pool.

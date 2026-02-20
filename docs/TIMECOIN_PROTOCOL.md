@@ -782,44 +782,57 @@ Fees are the sum of included archived transactions’ fees for the slot.
 
 ### 10.4 Payout split
 
-**Unified Reward Model (35% Leader Bonus + 65% Weighted Pool):**
+**Per-Tier Pool Model (35 TIME Leader + 65 TIME across 4 Tier Pools):**
 
 ```
 Total Reward = 100 TIME + transaction_fees
 
 Distribution:
   35 TIME + transaction_fees → Block Producer (VRF-selected proposer)
-  65 TIME → Weighted Pool (ALL active AVS masternodes, by tier reward weight)
+  65 TIME → Four independent tier pools:
+    Gold pool:   25 TIME — shared equally among active Gold masternodes
+    Silver pool: 18 TIME — shared equally among active Silver masternodes
+    Bronze pool: 14 TIME — shared equally among active Bronze masternodes
+    Free pool:    8 TIME — shared equally among active Free masternodes
 
-Pool Weight Ratios:
-  Free:   1   (baseline)
-  Bronze: 5   (5x)
-  Silver: 20  (20x)
-  Gold:   60  (60x)
-
-The block producer also receives a pool share at their tier weight.
-Their total = leader_bonus + pool_share.
+The block producer also receives a tier pool share (merged into their output).
+Their total = leader_bonus + tier_pool_share.
 ```
 
-Masternodes are sorted canonically by address for deterministic pool distribution. Each pool participant receives `(65 TIME * tier_reward_weight) / total_weight`. The last masternode in the sorted list receives the remainder to avoid rounding errors.
+**Rotation via Fairness Bonus:**
+
+When a tier has more active nodes than `MAX_TIER_RECIPIENTS` (25), nodes are selected by fairness bonus (longest without reward first). Within the selected set, each node receives an equal share of their tier's pool. Excluded nodes rotate in on subsequent blocks.
+
+```
+fairness_bonus = min(blocks_without_pool_reward / 10, 20)
+Selection: sort by fairness_bonus DESC, then address ASC (deterministic tiebreak)
+Take top 25 per tier → distribute tier_pool / recipient_count equally
+Minimum payout: 1 TIME per node (if share < 1 TIME, remainder goes to producer)
+```
 
 Payout MUST be represented as one or more on-chain reward transactions included in the checkpoint block (coinbase-style).
 
-**Example Distribution (6 masternodes: 1 Gold, 1 Silver, 1 Bronze, 3 Free):**
+**Example Distribution (8 masternodes: 2 Gold, 1 Silver, 2 Bronze, 3 Free):**
 ```
-Total weight = 60 + 20 + 5 + 1 + 1 + 1 = 88
+Block producer: Bronze node A (won VRF sortition)
 
-Block producer: Bronze node (won VRF sortition)
-- Leader bonus: 35 TIME + fees
-- Pool share:   65 × 5/88 ≈ 3.69 TIME
-- Total:        ~38.69 TIME + fees
+Leader bonus: 35 TIME + fees
 
-Non-producer rewards (from 65 TIME pool):
-- Gold node:    65 × 60/88 ≈ 44.32 TIME
-- Silver node:  65 × 20/88 ≈ 14.77 TIME
-- Free node A:  65 × 1/88  ≈ 0.74 TIME
-- Free node B:  65 × 1/88  ≈ 0.74 TIME
-- Free node C:  remainder  ≈ 0.74 TIME
+Gold pool (25 TIME ÷ 2 nodes):
+- Gold node A:   12.5 TIME
+- Gold node B:   12.5 TIME
+
+Silver pool (18 TIME ÷ 1 node):
+- Silver node A: 18 TIME
+
+Bronze pool (14 TIME ÷ 2 nodes):
+- Bronze node A: 7 TIME (producer — merged with leader bonus = 42 TIME + fees)
+- Bronze node B: 7 TIME
+
+Free pool (8 TIME ÷ 3 nodes):
+- Free node A:   2.67 TIME
+- Free node B:   2.67 TIME
+- Free node C:   2.66 TIME (remainder)
 ```
 
 ---
@@ -1608,25 +1621,27 @@ This economic model is subject to community consensus. Future governance proposa
 
 ### 25.4 Reward Distribution
 
-**Per Block (35/65 Split — see §10.4 for normative specification):**
+**Per Block (35/65 Per-Tier Split — see §10.4 for normative specification):**
 ```
 Total Reward = 100 TIME + transaction_fees
 
 Distribution:
   35 TIME + transaction_fees → Block Producer (VRF-selected proposer)
-  65 TIME → Weighted Pool (ALL active AVS masternodes)
+  65 TIME → Four independent tier pools:
+    Gold:   25 TIME    Silver: 18 TIME
+    Bronze: 14 TIME    Free:    8 TIME
 
-Weighted Pool:
-- Distributed to ALL active masternodes (every tier), weighted by tier reward weight
-- Pool weights: Free=1, Bronze=5, Silver=20, Gold=60
-- Block producer also receives a pool share (merged into their output)
-- If no eligible pool nodes exist, the full 65 TIME goes to the producer
+Within each tier:
+- Equal share per selected recipient
+- Max 25 recipients per tier per block
+- Fairness rotation: longest-waiting nodes selected first
+- If tier is empty, its pool goes to the block producer
 ```
 
 **Anti-Sybil Maturity Gate:**
 ```
 Free-tier masternodes must be continuously registered for a minimum number of
-blocks before becoming eligible for VRF sortition or the weighted pool:
+blocks before becoming eligible for VRF sortition or the tier pool:
 
 - Mainnet: 72 blocks (~12 hours at 10 min/block)
 - Testnet: 0 blocks (no gate, for rapid development iteration)
@@ -1635,27 +1650,28 @@ Paid tiers (Bronze/Silver/Gold) have no maturity requirement — their collatera
 provides sufficient sybil resistance.
 ```
 
-**Example Distribution (6 masternodes: 1 Gold, 1 Silver, 1 Bronze, 3 Free):**
+**Example: Large Network (500 nodes: 5 Gold, 20 Silver, 75 Bronze, 400 Free):**
 ```
-Total weight = 60 + 20 + 5 + 1 + 1 + 1 = 88
-
-Block producer: Bronze node (won VRF sortition)
+Block producer: Silver node (won VRF sortition)
 - Leader bonus: 35 TIME + fees
-- Pool share:   65 × 5/88 ≈ 3.69 TIME
-- Total:        ~38.69 TIME + fees
+- Silver pool share: 18 / 20 = 0.9 TIME
+- Total: 35.9 TIME + fees
 
-Gold node:    65 × 60/88 ≈ 44.32 TIME
-Silver node:  65 × 20/88 ≈ 14.77 TIME
-Free node A:  65 × 1/88  ≈ 0.74 TIME
-Free node B:  65 × 1/88  ≈ 0.74 TIME
-Free node C:  remainder  ≈ 0.74 TIME
+Gold pool: 25 TIME ÷ 5 = 5 TIME each
+Silver pool: 18 TIME ÷ 20 = 0.9 TIME each (19 non-producers)
+Bronze pool: 14 TIME ÷ 25 = 0.56 TIME each (top 25 of 75, rotated by fairness)
+Free pool: 8 TIME ÷ 8 = 1 TIME each (top 8 of 400, rotated by fairness)
+
+Next block: different 25 Bronze and 8 Free nodes selected via fairness rotation.
+All Bronze nodes paid within ~3 blocks. All Free nodes paid within ~50 blocks.
 ```
 
 **Fair APY Design:**
 - Leader bonus incentivizes block production via VRF competition
-- Weighted pool ensures ALL tiers earn per-block income proportional to stake
-- Softened weight ratios (1:5:20:60) reduce sybil attack incentive for Free tier
-- Anti-sybil maturity gate prevents rapid node spinning for reward farming
+- Per-tier pools guarantee each tier has a dedicated reward allocation
+- Equal share within tier prevents micro-transactions from weight disparity
+- Fairness rotation ensures every node gets paid in turn (no starvation)
+- Anti-sybil maturity gate prevents rapid Free-tier node spinning
 
 See §10.4 for the normative reward calculation specification.
 
