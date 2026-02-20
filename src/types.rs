@@ -10,6 +10,30 @@ use std::sync::Arc;
 pub type Hash256 = [u8; 32];
 pub type Signature = [u8; 64];
 
+/// Type-safe wrapper for stake-weighted sampling weight (used in VRF sortition and TimeVote).
+/// Prevents accidental interchange with GovernanceWeight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct SamplingWeight(pub u64);
+
+impl std::ops::Deref for SamplingWeight {
+    type Target = u64;
+    fn deref(&self) -> &u64 {
+        &self.0
+    }
+}
+
+/// Type-safe wrapper for governance voting power (used in on-chain governance proposals).
+/// Prevents accidental interchange with SamplingWeight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GovernanceWeight(pub u64);
+
+impl std::ops::Deref for GovernanceWeight {
+    type Target = u64;
+    fn deref(&self) -> &u64 {
+        &self.0
+    }
+}
+
 // Import ValidatorInfo from consensus for AVSSnapshot
 pub use crate::consensus::ValidatorInfo;
 
@@ -346,12 +370,12 @@ impl MasternodeTier {
     }
 
     #[allow(dead_code)]
-    pub fn voting_power(&self) -> u64 {
+    pub fn voting_power(&self) -> GovernanceWeight {
         match self {
-            MasternodeTier::Free => 0,    // Cannot vote
-            MasternodeTier::Bronze => 1,  // 1x voting power
-            MasternodeTier::Silver => 10, // 10x voting power
-            MasternodeTier::Gold => 100,  // 100x voting power
+            MasternodeTier::Free => GovernanceWeight(0), // Cannot vote
+            MasternodeTier::Bronze => GovernanceWeight(1), // 1x voting power
+            MasternodeTier::Silver => GovernanceWeight(10), // 10x voting power
+            MasternodeTier::Gold => GovernanceWeight(100), // 100x voting power
         }
     }
 
@@ -366,13 +390,19 @@ impl MasternodeTier {
     }
 
     /// Sampling weight for VRF sortition and timevote consensus (§5.2)
-    /// Used for stake-weighted leader selection and sampling
+    /// Used for stake-weighted leader selection and sampling.
+    /// Returns raw u64 for arithmetic compatibility; use `sampling_weight_typed()` for type safety.
     pub fn sampling_weight(&self) -> u64 {
+        self.sampling_weight_typed().0
+    }
+
+    /// Type-safe sampling weight (§5.2). Use when type distinction from governance weight matters.
+    pub fn sampling_weight_typed(&self) -> SamplingWeight {
         match self {
-            MasternodeTier::Free => 1,     // 1x weight
-            MasternodeTier::Bronze => 10,  // 10x weight
-            MasternodeTier::Silver => 100, // 100x weight
-            MasternodeTier::Gold => 1000,  // 1000x weight
+            MasternodeTier::Free => SamplingWeight(1),     // 1x weight
+            MasternodeTier::Bronze => SamplingWeight(10),  // 10x weight
+            MasternodeTier::Silver => SamplingWeight(100), // 100x weight
+            MasternodeTier::Gold => SamplingWeight(1000),  // 1000x weight
         }
     }
 }
@@ -657,11 +687,11 @@ impl TimeProof {
             accumulated_weight += vote.voter_weight;
         }
 
-        // 6. Check finality threshold (Protocol §8.3: Q_finality = 51% simple majority)
-        let finality_threshold = (total_avs_weight * 51).div_ceil(100);
+        // 6. Check finality threshold (Protocol §8.3: Q_finality = 67% BFT-safe majority)
+        let finality_threshold = (total_avs_weight * 67).div_ceil(100);
         if accumulated_weight < finality_threshold {
             return Err(format!(
-                "Insufficient weight: {} < {} (51% of {})",
+                "Insufficient weight: {} < {} (67% of {})",
                 accumulated_weight, finality_threshold, total_avs_weight
             ));
         }

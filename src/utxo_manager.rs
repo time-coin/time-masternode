@@ -270,12 +270,9 @@ impl UTXOStateManager {
                 | UTXOState::SpentFinalized { .. }
                 | UTXOState::Archived { .. } => Err(UtxoError::AlreadySpent),
             },
-            Entry::Vacant(entry) => {
-                entry.insert(UTXOState::Locked {
-                    txid,
-                    locked_at: Self::current_timestamp(),
-                });
-                Ok(())
+            Entry::Vacant(_) => {
+                // UTXO not in state map means it doesn't exist — reject
+                Err(UtxoError::NotFound)
             }
         }
     }
@@ -411,7 +408,15 @@ impl UTXOStateManager {
     }
 
     /// Force reset a UTXO to Unspent state (for recovery from stuck locks)
+    /// Refuses to unlock UTXOs locked as masternode collateral.
     pub fn force_unlock(&self, outpoint: &OutPoint) -> bool {
+        if self.is_collateral_locked(outpoint) {
+            tracing::warn!(
+                "🚫 force_unlock refused: UTXO {:?} is locked as masternode collateral",
+                outpoint
+            );
+            return false;
+        }
         if self.utxo_states.contains_key(outpoint) {
             self.utxo_states
                 .insert(outpoint.clone(), UTXOState::Unspent);
@@ -628,6 +633,47 @@ impl UTXOStateManager {
             .filter(|entry| entry.value().masternode_address == masternode_address)
             .map(|entry| entry.value().clone())
             .collect()
+    }
+
+    /// Rebuild collateral locks from masternode registry data.
+    /// Called on startup to restore in-memory collateral locks that would
+    /// otherwise be lost across restarts.
+    pub fn rebuild_collateral_locks(
+        &self,
+        entries: Vec<(OutPoint, String, u64, u64)>, // (outpoint, mn_address, lock_height, amount)
+    ) -> usize {
+        let mut restored = 0;
+        for (outpoint, masternode_address, lock_height, amount) in entries {
+            if self.locked_collaterals.contains_key(&outpoint) {
+                continue; // Already locked
+            }
+            // Only lock if UTXO still exists and is unspent
+            match self.utxo_states.get(&outpoint) {
+                Some(state) if matches!(state.value(), UTXOState::Unspent) => {
+                    let locked = LockedCollateral::new(
+                        outpoint.clone(),
+                        masternode_address,
+                        lock_height,
+                        amount,
+                    );
+                    self.locked_collaterals.insert(outpoint, locked);
+                    restored += 1;
+                }
+                _ => {
+                    tracing::warn!(
+                        "⚠️ Cannot restore collateral lock for {:?} — UTXO not in Unspent state",
+                        outpoint
+                    );
+                }
+            }
+        }
+        if restored > 0 {
+            tracing::info!(
+                "🔒 Rebuilt {} collateral lock(s) from masternode registry",
+                restored
+            );
+        }
+        restored
     }
 }
 
