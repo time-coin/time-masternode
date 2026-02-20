@@ -31,6 +31,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — Masternode Collateral & UTXO Hardening
+- **CRITICAL: Prevent duplicate collateral registration across masternodes**
+  - Same UTXO could register multiple masternodes (outpoint uniqueness not enforced)
+  - Added `DuplicateCollateral` error with outpoint scan in `register_internal()`
+- **CRITICAL: Collateral locks now persist across daemon restarts**
+  - `locked_collaterals` DashMap was in-memory only; restart cleared all locks
+  - Added `rebuild_collateral_locks()` called on startup for all known masternodes
+- **CRITICAL: Reject unsigned transaction inputs (empty script_sig)**
+  - Transactions with empty signatures were accepted into the mempool
+- **TX validation now checks collateral locks** (prevents mempool pollution with locked UTXOs)
+- **Reject locking non-existent UTXOs** (Vacant entry path created phantom locks)
+- **Guard `force_unlock()` against collateral-locked UTXOs**
+
+### Security — Protocol Consensus Hardening
+- **Block 2PC now uses stake weight instead of raw vote count**
+  - Previously used `vote_count > effective_size / 2` (node count)
+  - Free-tier Sybil attack: many zero-stake nodes could dominate block consensus
+  - Now accumulates stake weight and requires >50% of total participating weight
+- **Raised Q_FINALITY from 51% to 67% (BFT-safe majority)**
+  - 51% threshold only tolerated 49% Byzantine; 67% tolerates up to 33%
+  - Liveness fallback: threshold drops to 51% after 30s stall to prevent deadlock
+  - Updated across all finality checks: consensus, finality_proof, types, timelock,
+    message_handler, server
+- **Fallback leader election now includes `prev_block_hash`**
+  - Previously used only public values (txid, slot_index, mn_pubkey) — fully predictable
+  - Adding latest block hash prevents prediction before block production, mitigating
+    targeted DDoS against known fallback leaders
+- **Free tier VRF weight capped below Bronze base weight**
+  - Free tier with max fairness bonus (+20) reached effective weight 21, exceeding Bronze (10)
+  - Capped at `Bronze.sampling_weight() - 1 = 9` for both local and total VRF calculations
+- **Emergency VRF fallback requires Bronze+ tier**
+  - Emergency threshold relaxation (`2^attempt` multiplier) no longer applies to Free tier
+  - Maintains Sybil resistance even when legitimate VRF winners are unavailable
+- **Added `SamplingWeight` and `GovernanceWeight` newtypes**
+  - Type-safe wrappers prevent accidental interchange between consensus weights and
+    governance voting power (10x discrepancy at Gold tier)
+- **AVS witness subnet diversity requirement**
+  - Liveness heartbeat witnesses must come from ≥2 distinct /16 subnets (networks ≥5 nodes)
+  - Prevents targeted DDoS against a node's 3 witnesses on the same subnet
+- **Added FIXME(security) for catastrophic conflict recovery mechanism**
+
 ### Fixed - Same-Height Fork Resolution Blocked by Reorg Guard
 - **CRITICAL: Deterministic same-height fork resolution never completed**
   - `perform_reorg()` rejected reorgs where `new_height <= our_height`

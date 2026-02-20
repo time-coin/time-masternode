@@ -132,7 +132,7 @@ TimeCoin implements several security measures:
 1. **P2P Encryption**: Not yet implemented (planned for v0.3.0)
 2. **Eclipse Attacks**: Partial mitigation through peer diversity
 3. **Sybil Attacks**: Mitigated by masternode system and whitelisting
-4. **51% Attacks**: Risk exists as with all blockchain systems
+4. **67% Attacks**: BFT-safe finality threshold requires 67% stake to attack (tolerates up to 33% Byzantine)
 
 ### Attack Vectors Being Monitored
 

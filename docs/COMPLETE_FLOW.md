@@ -85,17 +85,17 @@ The event-driven wake (branch 3) reduces latency from ~1 second to near-instant 
 **Phase 2a: Prepare Votes**
 1. Validators send `TimeVotePrepare { block_hash, voter_id, signature }`
 2. Ed25519 signature over `block_hash + voter_id + "PREPARE"`
-3. Votes accumulate by validator count (simple majority)
-4. Threshold: >50% of participating validator count
+3. Votes accumulate by validator **stake weight** (not raw count)
+4. Threshold: >50% of participating validator **weight**
 
 **Phase 2b: Precommit Votes**
 1. After prepare threshold met, send `TimeVotePrecommit { block_hash, voter_id, signature }`
 2. Ed25519 signature over `block_hash + voter_id + "PRECOMMIT"`
-3. Threshold: >50% of participating validator count
+3. Threshold: >50% of participating validator **weight**
 4. Block is finalized after precommit threshold
 
 **TimeProof Finality (separate from 2PC):**
-- Transactions achieve instant finality via TimeProof with **51% weighted stake** threshold
+- Transactions achieve instant finality via TimeProof with **67% weighted stake** threshold (liveness fallback to 51% after 30s)
 - Weight is tier-based **sampling weight**: Free=1, Bronze=10, Silver=100, Gold=1000
 - Note: Sampling weight is distinct from tier pool allocation (Gold=25 TIME, Silver=18 TIME, Bronze=14 TIME, Free=8 TIME per block) and governance voting power (Free=0, Bronze=1, Silver=10, Gold=100)
 - This is distinct from block 2PC which uses validator count
@@ -193,7 +193,7 @@ Seen → Voting → Finalized → Archived
 - **Seen**: Transaction received, pending validation
 - **Voting**: Actively collecting signed FinalityVotes, tracking `accumulated_weight` and `confidence`
 - **FallbackResolution**: Stall detected, deterministic fallback round in progress (tracks round number and alert count)
-- **Finalized**: `accumulated_weight ≥ 51%` of AVS weight, TimeProof assembled
+- **Finalized**: `accumulated_weight ≥ 67%` of AVS weight, TimeProof assembled
 - **Rejected**: Lost conflict resolution or deemed invalid
 - **Archived**: Included in TimeLock checkpoint block
 
@@ -438,7 +438,7 @@ TimeCoin uses a hybrid consensus combining two mechanisms:
 
 2. **TimeVote** - Transaction and block finality (is this block accepted?)
    - Two-phase commit: Prepare → Precommit (validator count majority)
-   - TimeProof finality: 51% weighted stake threshold for transaction finality
+   - TimeProof finality: 67% weighted stake threshold for transaction finality (51% liveness fallback)
    - Sampling weight tiers: Free=1, Bronze=10, Silver=100, Gold=1000
    - Instant finality: once threshold met, transaction/block is final
    - No rollback of finalized blocks (critical security property)
@@ -446,8 +446,8 @@ TimeCoin uses a hybrid consensus combining two mechanisms:
 ### 7.2 Finality
 
 - **Dual threshold system:**
-  - **Block 2PC (Prepare/Precommit):** >50% of participating **validator count** (simple majority)
-  - **TimeProof (transaction finality):** 51% of total **weighted stake**
+  - **Block 2PC (Prepare/Precommit):** >50% of participating **validator weight** (stake-weighted)
+  - **TimeProof (transaction finality):** 67% of total **weighted stake** (51% liveness fallback after 30s)
 - Instant finality (<10 seconds typically)
 - Finalized transactions are protected during fork resolution
 - No probabilistic finality (unlike Bitcoin's 6-confirmation rule)
@@ -578,7 +578,7 @@ Without the sled flush, dirty pages are lost, causing block corruption ("unexpec
 | Block cache size | ~500 blocks | Two-tier cache capacity |
 | Tx pool max | 100MB | Transaction pool memory limit |
 | Prepare/Precommit threshold | >50% count | Validator count majority for block 2PC |
-| TimeProof finality threshold | 51% weight | Weighted stake for transaction finality |
+| TimeProof finality threshold | 67% weight | Weighted stake for transaction finality (51% liveness fallback) |
 | Stall timeout | 30s | Time before liveness fallback triggers |
 | Fallback rounds | 5 max | Maximum fallback resolution rounds |
 | Max reorg depth | 500 blocks | Maximum fork rollback depth |

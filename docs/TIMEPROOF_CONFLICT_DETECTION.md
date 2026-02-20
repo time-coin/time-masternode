@@ -13,10 +13,10 @@ TimeProof conflict detection is a **security monitoring feature** that detects a
 
 ## Key Insight from Protocol Analysis
 
-**By pigeonhole principle:** Two transactions spending the same UTXO cannot BOTH reach 51% finality approval:
-- TX-A needs 51% weight = 5100 units (of 10,000 total)
-- TX-B needs 51% weight = 5100 units
-- Total: 10,200 > 10,000 (impossible)
+**By pigeonhole principle:** Two transactions spending the same UTXO cannot BOTH reach 67% finality approval:
+- TX-A needs 67% weight = 6700 units (of 10,000 total)
+- TX-B needs 67% weight = 6700 units
+- Total: 13,400 > 10,000 (impossible — even stronger guarantee than previous 51% threshold)
 
 Therefore, multiple finalized TimeProofs for the same transaction indicates:
 1. **UTXO state machine bug** → should reject one transaction at validation layer

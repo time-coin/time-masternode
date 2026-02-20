@@ -462,7 +462,7 @@ Masternode management is **local only**:
 **A:** Set `enabled = false` in `config.toml` and restart the daemon.
 
 ### Q: What happens if I spend locked collateral?
-**A:** Your masternode is automatically deregistered and removed from rewards.
+**A:** The transaction will be rejected — locked collateral UTXOs cannot be spent while the masternode is registered. Deregister first by setting `enabled = false` and restarting.
 
 ### Q: How long to wait for rewards?
 **A:** Depends on total masternodes. With 50 MNs, expect rewards every ~50 minutes.

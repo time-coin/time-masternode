@@ -70,7 +70,7 @@ Bootstrap:     Configured in config.toml
 TimeVote:
   k:               20          # sample size
   α:               14          # success threshold
-  Q_finality:      51%         # finality threshold (% of AVS weight)
+  Q_finality:      67%         # finality threshold (% of AVS weight), liveness fallback to 51% after 30s
   POLL_TIMEOUT:    200 ms
   
 TimeLock:
@@ -242,7 +242,7 @@ TimeProof validation:
   2. All votes agree on (chain_id, txid, tx_hash_commitment, slot_index)
   3. All votes have decision=Accept (only Accept votes count toward finality)
   4. Voters distinct
-  5. Sum of weights ≥ 51% of AVS weight at slot_index
+  5. Sum of weights ≥ 67% of AVS weight at slot_index (51% under liveness fallback)
 ```
 
 ---
