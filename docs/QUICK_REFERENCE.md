@@ -104,16 +104,20 @@ Gold:   100,000 TIME    → sampling weight 1,000 (exact collateral)
 ## Rewards (per checkpoint block)
 
 ```
-R = 100 * (1 + ln(|AVS|))
+Base Reward = 100 TIME (fixed per block)
+Total Reward = 100 TIME + transaction_fees
 
-Examples:
-  |AVS| = 10    → R ≈ 330 TIME
-  |AVS| = 100   → R ≈ 561 TIME
-  |AVS| = 1,000 → R ≈ 791 TIME
+Distribution (§10.4):
+  Block Producer:  35 TIME + fees  (VRF-selected leader bonus)
+  Per-Tier Pools:  65 TIME total
+    Gold pool:     25 TIME  (shared equally within tier)
+    Silver pool:   18 TIME
+    Bronze pool:   14 TIME
+    Free pool:      8 TIME
 
-Distribution:
-  Producer:    10% of (R + tx_fees)
-  Validators:  90% of (R + tx_fees) proportional to weight
+  Max 25 recipients per tier per block.
+  Fairness rotation: longest-waiting nodes selected first.
+  Empty tier's pool → block producer.
 ```
 
 ---

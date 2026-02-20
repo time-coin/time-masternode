@@ -119,20 +119,20 @@ time-cli listlockedcollaterals
 
 ## Masternode Tiers
 
-TIME Coin has four masternode tiers with different collateral requirements and reward weights:
+TIME Coin has four masternode tiers with different collateral requirements and dedicated reward pools:
 
-| Tier | Collateral | Reward Weight | Governance | Sampling Weight |
-|------|-----------|---------------|------------|-----------------|
-| **Free** | 0 TIME | 0.1x | None | 1x |
-| **Bronze** | 1,000 TIME (exact) | 1x | 1 vote | 10x |
-| **Silver** | 10,000 TIME (exact) | 10x | 10 votes | 100x |
-| **Gold** | 100,000 TIME (exact) | 100x | 100 votes | 1000x |
+| Tier | Collateral | Pool Allocation | Governance | Sampling Weight |
+|------|-----------|-----------------|------------|-----------------|
+| **Free** | 0 TIME | 8 TIME/block | None | 1x |
+| **Bronze** | 1,000 TIME (exact) | 14 TIME/block | 1 vote | 10x |
+| **Silver** | 10,000 TIME (exact) | 18 TIME/block | 10 votes | 100x |
+| **Gold** | 100,000 TIME (exact) | 25 TIME/block | 100 votes | 1000x |
 
 ### Tier Benefits
 
-- **Reward Weight**: Determines share of block rewards in rotation
+- **Pool Allocation**: Each tier has a dedicated reward pool shared equally among active nodes in that tier (max 25 per block, fairness rotation for overflow)
 - **Voting Power**: Weight in governance decisions
-- **Sampling Weight**: Probability of being selected for consensus voting
+- **Sampling Weight**: Probability of being selected for consensus voting and VRF block production
 
 ---
 
@@ -344,18 +344,20 @@ To upgrade or downgrade your tier:
 
 ### How Rewards Work
 
-- **10 masternodes** are selected per block
-- Selection uses deterministic rotation based on block height
-- All nodes agree on which masternodes receive rewards
-- Rewards distributed proportional to tier weight
+Each block distributes 100 TIME + transaction fees:
 
-### Rotation System
+- **35 TIME + fees** → Block producer (VRF-selected leader bonus)
+- **65 TIME** → Four per-tier pools (Gold=25, Silver=18, Bronze=14, Free=8)
 
-If there are more than 10 masternodes:
-- Block 1: Nodes 1-10 receive rewards
-- Block 2: Nodes 11-20 receive rewards
-- Block N: Rotation continues through all masternodes
-- Each node receives rewards every `N/10` blocks (where N = total masternodes)
+Within each tier's pool, rewards are divided equally among selected recipients. The block producer also receives their tier's pool share.
+
+### Per-Tier Rotation
+
+If a tier has more than 25 active nodes:
+- Fairness bonus selects the 25 longest-waiting nodes
+- Selected nodes split their tier's pool equally
+- Remaining nodes rotate in on subsequent blocks
+- All nodes in a tier get paid within `ceil(tier_count / 25)` blocks
 
 ---
 

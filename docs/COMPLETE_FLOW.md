@@ -97,7 +97,7 @@ The event-driven wake (branch 3) reduces latency from ~1 second to near-instant 
 **TimeProof Finality (separate from 2PC):**
 - Transactions achieve instant finality via TimeProof with **51% weighted stake** threshold
 - Weight is tier-based **sampling weight**: Free=1, Bronze=10, Silver=100, Gold=1000
-- Note: Sampling weight is distinct from reward weight (Free=100, Bronze=1000, Silver=10000, Gold=100000) and governance voting power (Free=0, Bronze=1, Silver=10, Gold=100)
+- Note: Sampling weight is distinct from tier pool allocation (Gold=25 TIME, Silver=18 TIME, Bronze=14 TIME, Free=8 TIME per block) and governance voting power (Free=0, Bronze=1, Silver=10, Gold=100)
 - This is distinct from block 2PC which uses validator count
 
 **Liveness Fallback:**

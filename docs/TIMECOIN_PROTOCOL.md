@@ -111,15 +111,15 @@ A masternode has:
 
 Each tier has multiple weight types for different protocol functions:
 
-| Tier | Collateral (TIME) | Sampling Weight | Reward Weight | Voting Power |
-|------|-------------------|-----------------|---------------|--------------|
-| Free | 0 | 1 | 1 | 0 |
-| Bronze | 1,000 | 10 | 5 | 1 |
-| Silver | 10,000 | 100 | 20 | 10 |
-| Gold | 100,000 | 1,000 | 60 | 100 |
+| Tier | Collateral (TIME) | Sampling Weight | Pool Allocation | Voting Power |
+|------|-------------------|-----------------|-----------------|--------------|
+| Free | 0 | 1 | 8 TIME/block | 0 |
+| Bronze | 1,000 | 10 | 14 TIME/block | 1 |
+| Silver | 10,000 | 100 | 18 TIME/block | 10 |
+| Gold | 100,000 | 1,000 | 25 TIME/block | 100 |
 
 - **Sampling Weight (`w`):** Used for stake-weighted validator selection during TimeVote polling (§7.4) and VRF sortition threshold (§9.2)
-- **Reward Weight:** Used for proportional weighted pool distribution (§10.4). Softened ratios (1:5:20:60) reduce sybil incentive relative to collateral ratios
+- **Pool Allocation:** Each tier has a dedicated reward pool (§10.4). Shared equally among selected nodes within the tier, with fairness rotation for overflow (max 25 per tier per block)
 - **Voting Power:** Used for governance. Free tier nodes cannot vote on governance (voting power = 0)
 
 ### 5.2.1 Fairness Bonus (Sortition Weight Adjustment)
