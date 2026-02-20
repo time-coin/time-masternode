@@ -2036,11 +2036,20 @@ impl MessageHandler {
                     lock_height,
                     tier.collateral(),
                 ) {
-                    warn!(
-                        "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
-                        self.direction, tier, peer_ip, e
-                    );
-                    return Ok(None);
+                    if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
+                        // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
+                        tracing::debug!(
+                            "🔒 [{}] Collateral for {} already locked — proceeding",
+                            self.direction,
+                            peer_ip
+                        );
+                    } else {
+                        warn!(
+                            "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
+                            self.direction, tier, peer_ip, e
+                        );
+                        return Ok(None);
+                    }
                 }
             } else {
                 warn!(

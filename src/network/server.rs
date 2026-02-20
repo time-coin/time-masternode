@@ -1115,8 +1115,13 @@ async fn handle_peer(
 
                                         let lock_height = blockchain.get_height();
                                         if let Err(e) = consensus.utxo_manager.lock_collateral(outpoint, peer_ip.clone(), lock_height, tier.collateral()) {
-                                            tracing::warn!("❌ Rejecting {:?} masternode from {} — failed to lock collateral: {:?}", tier, peer_ip, e);
-                                            continue;
+                                            if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
+                                                // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
+                                                tracing::debug!("🔒 Collateral for {} already locked — proceeding", peer_ip);
+                                            } else {
+                                                tracing::warn!("❌ Rejecting {:?} masternode from {} — failed to lock collateral: {:?}", tier, peer_ip, e);
+                                                continue;
+                                            }
                                         }
 
                                         match masternode_registry.register(mn, reward_address.clone()).await {

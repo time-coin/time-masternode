@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::types::{Masternode, MasternodeTier};
+use crate::types::{Masternode, MasternodeTier, OutPoint};
 use crate::NetworkType;
 use dashmap::DashMap;
 use sled::Db;
@@ -103,6 +103,8 @@ pub struct MasternodeRegistry {
     /// Current blockchain height, updated externally. Used to set registration_height
     /// on newly registered masternodes for the anti-sybil maturity gate.
     current_height: Arc<std::sync::atomic::AtomicU64>,
+    /// Collateral outpoints pending unlock (drained by periodic task with utxo_manager access)
+    pending_collateral_unlocks: Arc<parking_lot::Mutex<Vec<OutPoint>>>,
 }
 
 impl MasternodeRegistry {
@@ -175,6 +177,7 @@ impl MasternodeRegistry {
             broadcast_tx: Arc::new(RwLock::new(None)),
             started_at: now,
             current_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            pending_collateral_unlocks: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
@@ -190,6 +193,26 @@ impl MasternodeRegistry {
     pub fn update_height(&self, height: u64) {
         self.current_height
             .store(height, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Drain pending collateral unlock requests. Call this periodically with
+    /// access to the UTXOStateManager to actually unlock the collateral UTXOs.
+    pub fn drain_pending_unlocks(
+        &self,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
+    ) -> usize {
+        let outpoints: Vec<OutPoint> = self.pending_collateral_unlocks.lock().drain(..).collect();
+        let count = outpoints.len();
+        for outpoint in outpoints {
+            if let Err(e) = utxo_manager.unlock_collateral(&outpoint) {
+                tracing::debug!(
+                    "Could not unlock collateral {:?}: {:?} (may already be unlocked)",
+                    outpoint,
+                    e
+                );
+            }
+        }
+        count
     }
 
     /// Get the network type this registry is configured for.
@@ -444,7 +467,7 @@ impl MasternodeRegistry {
     }
 
     #[allow(dead_code)]
-    pub async fn unregister(&self, address: &str) -> Result<(), RegistryError> {
+    pub async fn unregister(&self, address: &str) -> Result<Option<MasternodeInfo>, RegistryError> {
         let mut nodes = self.masternodes.write().await;
 
         if !nodes.contains_key(address) {
@@ -457,8 +480,8 @@ impl MasternodeRegistry {
             .remove(key.as_bytes())
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
-        nodes.remove(address);
-        Ok(())
+        let removed = nodes.remove(address);
+        Ok(removed)
     }
 
     #[allow(dead_code)]
@@ -1085,15 +1108,23 @@ impl MasternodeRegistry {
             }
         }
 
-        // Deregister invalid masternodes
+        // Deregister invalid masternodes and unlock their collateral
         let count = to_deregister.len();
         for address in to_deregister {
             tracing::warn!(
                 "🗑️ Auto-deregistering masternode {} due to invalid collateral",
                 address
             );
-            if let Err(e) = self.unregister(&address).await {
-                tracing::error!("Failed to deregister masternode {}: {:?}", address, e);
+            match self.unregister(&address).await {
+                Ok(Some(info)) => {
+                    if let Some(outpoint) = &info.masternode.collateral_outpoint {
+                        let _ = utxo_manager.unlock_collateral(outpoint);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!("Failed to deregister masternode {}: {:?}", address, e);
+                }
             }
         }
 
@@ -1342,10 +1373,17 @@ impl MasternodeRegistry {
 
         // Remove dead masternodes
         for address in &to_remove {
-            if let Some(_info) = masternodes.remove(address) {
+            if let Some(info) = masternodes.remove(address) {
                 // Remove from disk
                 let key = format!("masternode:{}", address);
                 let _ = self.db.remove(key.as_bytes());
+
+                // Queue collateral unlock
+                if let Some(outpoint) = &info.masternode.collateral_outpoint {
+                    self.pending_collateral_unlocks
+                        .lock()
+                        .push(outpoint.clone());
+                }
 
                 info!("🗑️  Removed masternode {} from registry", address);
             }
@@ -1644,6 +1682,7 @@ impl Clone for MasternodeRegistry {
             broadcast_tx: self.broadcast_tx.clone(),
             started_at: self.started_at,
             current_height: self.current_height.clone(),
+            pending_collateral_unlocks: self.pending_collateral_unlocks.clone(),
         }
     }
 }
