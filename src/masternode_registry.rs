@@ -1362,6 +1362,61 @@ impl MasternodeRegistry {
         scan_limit
     }
 
+    /// Get blocks-without-pool-reward for all masternodes by scanning masternode_rewards.
+    /// Unlike `get_verifiable_reward_tracking` (which only checks block leader), this
+    /// checks all reward outputs — covering both leader bonus and pool shares.
+    /// Single pass over blocks: O(scan_limit × avg_rewards_per_block).
+    pub async fn get_pool_reward_tracking(
+        &self,
+        blockchain: &crate::blockchain::Blockchain,
+    ) -> std::collections::HashMap<String, u64> {
+        let current_height = blockchain.get_height();
+        let masternodes = self.masternodes.read().await;
+        let scan_limit = 1000u64;
+
+        if current_height < 10 {
+            return masternodes.keys().map(|a| (a.clone(), 0)).collect();
+        }
+
+        // Build wallet_address -> masternode_address mapping
+        let wallet_to_mn: std::collections::HashMap<&str, &str> = masternodes
+            .values()
+            .map(|info| {
+                (
+                    info.masternode.wallet_address.as_str(),
+                    info.masternode.address.as_str(),
+                )
+            })
+            .collect();
+
+        // Scan blocks once, record last reward height for each address
+        let mut last_rewarded: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
+        let start_h = current_height.saturating_sub(scan_limit);
+
+        for h in (start_h..=current_height).rev() {
+            if let Ok(block) = blockchain.get_block(h) {
+                for (wallet, _) in &block.masternode_rewards {
+                    if let Some(&mn_addr) = wallet_to_mn.get(wallet.as_str()) {
+                        last_rewarded.entry(mn_addr.to_string()).or_insert(h);
+                    }
+                }
+            }
+        }
+
+        // Convert to blocks_without_reward
+        masternodes
+            .keys()
+            .map(|addr| {
+                let blocks_without = match last_rewarded.get(addr) {
+                    Some(&h) => current_height.saturating_sub(h),
+                    None => scan_limit,
+                };
+                (addr.clone(), blocks_without)
+            })
+            .collect()
+    }
+
     /// Get blocks without reward for all masternodes (on-chain verifiable)
     /// Scans blockchain history - deterministic across all nodes
     /// Optimized for bootstrap: returns all zeros at height 0-10

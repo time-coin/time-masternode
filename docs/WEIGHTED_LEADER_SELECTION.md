@@ -57,8 +57,8 @@ Each masternode tier has a selection weight:
 
 ### Block Rewards
 
-- **Fixed reward:** 100 TIME per block (+ transaction fees), split 35% leader + 65% weighted pool
-- **Pool recipients:** All active AVS masternodes weighted by tier
+- **Fixed reward:** 100 TIME per block (+ transaction fees), split 35% leader + 65% per-tier pools
+- **Pool recipients:** All active AVS masternodes via per-tier rotation
 - **No participant lists:** Minimal blockchain data
 
 ---

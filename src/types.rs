@@ -334,6 +334,17 @@ impl MasternodeTier {
         }
     }
 
+    /// Per-tier pool allocation in satoshis (§10.4)
+    pub fn pool_allocation(&self) -> u64 {
+        use crate::constants::blockchain;
+        match self {
+            MasternodeTier::Gold => blockchain::GOLD_POOL_SATOSHIS,
+            MasternodeTier::Silver => blockchain::SILVER_POOL_SATOSHIS,
+            MasternodeTier::Bronze => blockchain::BRONZE_POOL_SATOSHIS,
+            MasternodeTier::Free => blockchain::FREE_POOL_SATOSHIS,
+        }
+    }
+
     #[allow(dead_code)]
     pub fn voting_power(&self) -> u64 {
         match self {
