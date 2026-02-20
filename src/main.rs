@@ -378,12 +378,29 @@ async fn main() {
         }
     };
 
-    let utxo_mgr = Arc::new(UTXOStateManager::new_with_storage(storage));
+    let mut utxo_mgr = UTXOStateManager::new_with_storage(storage);
+
+    // Enable persistent collateral lock storage
+    if let Err(e) = utxo_mgr.enable_collateral_persistence(&block_storage) {
+        tracing::warn!("⚠️ Failed to enable collateral persistence: {:?}", e);
+    }
+
+    let utxo_mgr = Arc::new(utxo_mgr);
 
     // Initialize UTXO states from storage
     tracing::info!("🔧 Initializing UTXO state manager from storage...");
     if let Err(e) = utxo_mgr.initialize_states().await {
         eprintln!("⚠️ Warning: Failed to initialize UTXO states: {}", e);
+    }
+
+    // Load persisted collateral locks from disk (must be after initialize_states
+    // so UTXO states are available for validation)
+    let loaded_locks = utxo_mgr.load_persisted_collateral_locks();
+    if loaded_locks > 0 {
+        tracing::info!(
+            "✅ Restored {} collateral lock(s) from persistent storage",
+            loaded_locks
+        );
     }
 
     // Auto-detect masternode tier from collateral UTXO value
@@ -1401,6 +1418,7 @@ async fn main() {
 
     // Start block production timer (every 10 minutes)
     let block_registry = registry.clone();
+    let block_utxo_mgr = utxo_mgr.clone(); // For draining pending collateral unlocks
     let block_blockchain = blockchain.clone();
     let block_peer_registry = peer_connection_registry.clone(); // Used for peer sync before fallback
     let block_masternode_address = masternode_address.clone(); // For leader comparison
@@ -1653,6 +1671,13 @@ async fn main() {
             // Mark start of new block period (only once per period)
             let current_height = block_blockchain.get_height();
             block_registry.update_height(current_height);
+
+            // Drain any pending collateral unlocks queued by cleanup tasks
+            let unlocked = block_registry.drain_pending_unlocks(&block_utxo_mgr);
+            if unlocked > 0 {
+                tracing::info!("🔓 Unlocked {} stale collateral(s)", unlocked);
+            }
+
             let expected_period = current_height + 1;
             if expected_period > last_block_period_started {
                 block_registry.start_new_block_period().await;

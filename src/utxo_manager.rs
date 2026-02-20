@@ -45,6 +45,8 @@ pub struct UTXOStateManager {
     pub utxo_states: DashMap<OutPoint, UTXOState>,
     /// Track UTXOs locked as masternode collateral
     pub locked_collaterals: DashMap<OutPoint, LockedCollateral>,
+    /// Persistent storage for collateral locks (survives restarts independently of registry)
+    collateral_db: Option<sled::Tree>,
 }
 
 impl Default for UTXOStateManager {
@@ -60,6 +62,7 @@ impl UTXOStateManager {
             storage: Arc::new(InMemoryUtxoStorage::new()),
             utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
             locked_collaterals: DashMap::new(),
+            collateral_db: None,
         }
     }
 
@@ -69,7 +72,54 @@ impl UTXOStateManager {
             storage,
             utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
             locked_collaterals: DashMap::new(),
+            collateral_db: None,
         }
+    }
+
+    /// Enable persistent collateral lock storage using a sled database.
+    /// Must be called before any lock/unlock operations for persistence to work.
+    pub fn enable_collateral_persistence(&mut self, db: &sled::Db) -> Result<(), UtxoError> {
+        let tree = db
+            .open_tree("collateral_locks")
+            .map_err(|e| UtxoError::Storage(e.into()))?;
+        self.collateral_db = Some(tree);
+        Ok(())
+    }
+
+    /// Load persisted collateral locks from sled into memory.
+    /// Called on startup after `enable_collateral_persistence` and `initialize_states`.
+    pub fn load_persisted_collateral_locks(&self) -> usize {
+        let tree = match &self.collateral_db {
+            Some(t) => t,
+            None => return 0,
+        };
+        let mut loaded = 0;
+        for (key, value) in tree.iter().flatten() {
+            if let Ok(locked) = bincode::deserialize::<LockedCollateral>(&value) {
+                let outpoint = locked.outpoint.clone();
+                // Only restore if UTXO is still unspent
+                match self.utxo_states.get(&outpoint) {
+                    Some(state) if matches!(state.value(), UTXOState::Unspent) => {
+                        self.locked_collaterals.insert(outpoint, locked);
+                        loaded += 1;
+                    }
+                    _ => {
+                        // UTXO no longer unspent — remove stale lock from disk
+                        let _ = tree.remove(key);
+                        tracing::warn!(
+                            "🗑️ Removed stale persisted collateral lock (UTXO no longer unspent)"
+                        );
+                    }
+                }
+            }
+        }
+        if loaded > 0 {
+            tracing::info!(
+                "🔒 Loaded {} persisted collateral lock(s) from disk",
+                loaded
+            );
+        }
+        loaded
     }
 
     /// Initialize UTXO states from storage (call after creating with new_with_storage)
@@ -108,6 +158,11 @@ impl UTXOStateManager {
         // Clear in-memory state maps
         self.utxo_states.clear();
         self.locked_collaterals.clear();
+
+        // Clear persisted collateral locks
+        if let Some(tree) = &self.collateral_db {
+            let _ = tree.clear();
+        }
 
         tracing::info!("✅ All UTXOs cleared");
         Ok(())
@@ -578,7 +633,16 @@ impl UTXOStateManager {
 
         // Store in locked collaterals map
         self.locked_collaterals
-            .insert(outpoint.clone(), locked_collateral);
+            .insert(outpoint.clone(), locked_collateral.clone());
+
+        // Persist to disk if available
+        if let Some(tree) = &self.collateral_db {
+            let key = bincode::serialize(&outpoint).unwrap_or_default();
+            let value = bincode::serialize(&locked_collateral).unwrap_or_default();
+            if let Err(e) = tree.insert(key, value) {
+                tracing::warn!("⚠️ Failed to persist collateral lock to disk: {}", e);
+            }
+        }
 
         tracing::debug!(
             "🔒 Locked collateral UTXO {:?} (amount: {})",
@@ -591,6 +655,13 @@ impl UTXOStateManager {
     /// Unlock a UTXO from masternode collateral
     pub fn unlock_collateral(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
         if let Some((_, locked)) = self.locked_collaterals.remove(outpoint) {
+            // Remove from persistent storage
+            if let Some(tree) = &self.collateral_db {
+                let key = bincode::serialize(outpoint).unwrap_or_default();
+                if let Err(e) = tree.remove(key) {
+                    tracing::warn!("⚠️ Failed to remove collateral lock from disk: {}", e);
+                }
+            }
             tracing::info!(
                 "🔓 Unlocked collateral UTXO {:?} (was {} TIME for {})",
                 outpoint,
@@ -656,6 +727,12 @@ impl UTXOStateManager {
                         lock_height,
                         amount,
                     );
+                    // Persist to disk if available
+                    if let Some(tree) = &self.collateral_db {
+                        let key = bincode::serialize(&outpoint).unwrap_or_default();
+                        let value = bincode::serialize(&locked).unwrap_or_default();
+                        let _ = tree.insert(key, value);
+                    }
                     self.locked_collaterals.insert(outpoint, locked);
                     restored += 1;
                 }
