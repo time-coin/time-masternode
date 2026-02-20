@@ -754,16 +754,45 @@ async fn main() {
                 if mn.tier != types::MasternodeTier::Free {
                     if let Some(ref outpoint) = mn.collateral_outpoint {
                         let lock_height = blockchain.get_height();
-                        let _ = consensus_engine.utxo_manager.lock_collateral(
+                        if let Err(e) = consensus_engine.utxo_manager.lock_collateral(
                             outpoint.clone(),
                             mn.address.clone(),
                             lock_height,
                             mn.tier.collateral(),
-                        );
-                        tracing::info!(
-                            "🔒 Locked collateral UTXO for {} tier",
-                            format!("{:?}", mn.tier)
-                        );
+                        ) {
+                            tracing::warn!("⚠️ Failed to lock local collateral UTXO: {:?}", e);
+                        } else {
+                            tracing::info!(
+                                "🔒 Locked collateral UTXO for {} tier",
+                                format!("{:?}", mn.tier)
+                            );
+                        }
+                    }
+                }
+
+                // Rebuild collateral locks for ALL known masternodes (not just local)
+                // This restores in-memory locks lost across restarts
+                {
+                    let all_masternodes = registry.list_all().await;
+                    let lock_height = blockchain.get_height();
+                    let entries: Vec<_> = all_masternodes
+                        .iter()
+                        .filter(|info| info.masternode.address != mn.address) // Skip local (already locked above)
+                        .filter_map(|info| {
+                            info.masternode.collateral_outpoint.as_ref().map(|op| {
+                                (
+                                    op.clone(),
+                                    info.masternode.address.clone(),
+                                    lock_height,
+                                    info.masternode.tier.collateral(),
+                                )
+                            })
+                        })
+                        .collect();
+                    if !entries.is_empty() {
+                        consensus_engine
+                            .utxo_manager
+                            .rebuild_collateral_locks(entries);
                     }
                 }
 
@@ -914,6 +943,28 @@ async fn main() {
             }
         });
         shutdown_manager.register_task(announcement_handle);
+    } else {
+        // Non-masternode node: still rebuild collateral locks for known peers
+        let all_masternodes = registry.list_all().await;
+        let lock_height = blockchain.get_height();
+        let entries: Vec<_> = all_masternodes
+            .iter()
+            .filter_map(|info| {
+                info.masternode.collateral_outpoint.as_ref().map(|op| {
+                    (
+                        op.clone(),
+                        info.masternode.address.clone(),
+                        lock_height,
+                        info.masternode.tier.collateral(),
+                    )
+                })
+            })
+            .collect();
+        if !entries.is_empty() {
+            consensus_engine
+                .utxo_manager
+                .rebuild_collateral_locks(entries);
+        }
     }
 
     // Initialize blockchain and sync from peers in background
@@ -2113,7 +2164,16 @@ async fn main() {
                 .copied()
                 .unwrap_or(0);
             let our_fairness_bonus = (our_blocks_without / 10).min(20);
-            let our_sampling_weight = our_mn.tier.sampling_weight() + our_fairness_bonus;
+            let our_sampling_weight = {
+                let raw = our_mn.tier.sampling_weight() + our_fairness_bonus;
+                // Cap Free tier effective weight below Bronze base to prevent
+                // zero-collateral nodes from outcompeting paid tiers via fairness bonus
+                if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {
+                    raw.min(crate::types::MasternodeTier::Bronze.sampling_weight() - 1)
+                } else {
+                    raw
+                }
+            };
 
             let total_sampling_weight: u64 = masternodes
                 .iter()
@@ -2123,18 +2183,29 @@ async fn main() {
                         .copied()
                         .map(|b| (b / 10).min(20))
                         .unwrap_or(0);
-                    mn.tier.sampling_weight() + bonus
+                    let raw = mn.tier.sampling_weight() + bonus;
+                    // Apply same Free-tier cap for total weight calculation
+                    if matches!(mn.tier, crate::types::MasternodeTier::Free) {
+                        raw.min(crate::types::MasternodeTier::Bronze.sampling_weight() - 1)
+                    } else {
+                        raw
+                    }
                 })
                 .sum();
 
             // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
             // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
-            // After ~6 attempts (60s), all nodes become eligible (emergency fallback)
+            // SECURITY: Only Bronze+ tier nodes are eligible for emergency fallback.
+            // Free tier (zero collateral) is excluded to maintain sybil resistance.
             let effective_sampling_weight = if leader_attempt > 0 {
-                let multiplier = 1u64 << leader_attempt.min(20); // Cap to prevent overflow
-                our_sampling_weight
-                    .saturating_mul(multiplier)
-                    .min(total_sampling_weight)
+                if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {
+                    our_sampling_weight // No emergency boost for Free tier
+                } else {
+                    let multiplier = 1u64 << leader_attempt.min(20); // Cap to prevent overflow
+                    our_sampling_weight
+                        .saturating_mul(multiplier)
+                        .min(total_sampling_weight)
+                }
             } else {
                 our_sampling_weight
             };

@@ -482,7 +482,7 @@ impl TSCDConsensus {
             None => vec![],
         };
         let total_stake: u64 = masternodes.iter().map(|m| m.masternode.collateral).sum();
-        let threshold = (total_stake * 51).div_ceil(100); // 51% of total stake (ceiling)
+        let threshold = (total_stake * 67).div_ceil(100); // 67% of total stake (ceiling)
 
         let mut signed_stake = 0u64;
         for validator_id in state.precommits_received.keys() {
@@ -773,7 +773,7 @@ impl TSCDConsensus {
             None => vec![],
         };
         let total_stake: u64 = masternodes.iter().map(|m| m.masternode.collateral).sum();
-        let threshold = (total_stake * 51).div_ceil(100); // 51% of total stake (ceiling)
+        let threshold = (total_stake * 67).div_ceil(100); // 67% of total stake (ceiling)
 
         if !masternodes.is_empty()
             && proof.signatures.len() as u64 * total_stake / masternodes.len() as u64 <= threshold

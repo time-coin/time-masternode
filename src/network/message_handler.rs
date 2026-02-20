@@ -2030,12 +2030,18 @@ impl MessageHandler {
 
                 // Lock the collateral
                 let lock_height = context.blockchain.get_height();
-                let _ = utxo_manager.lock_collateral(
+                if let Err(e) = utxo_manager.lock_collateral(
                     outpoint.clone(),
                     peer_ip.clone(),
                     lock_height,
                     tier.collateral(),
-                );
+                ) {
+                    warn!(
+                        "❌ [{}] Rejecting {:?} masternode from {} — failed to lock collateral: {:?}",
+                        self.direction, tier, peer_ip, e
+                    );
+                    return Ok(None);
+                }
             } else {
                 warn!(
                     "⚠️ [{}] Cannot verify collateral for {} — no UTXO manager available",
@@ -3131,10 +3137,12 @@ impl MessageHandler {
                 .map(|mn| mn.masternode.clone())
                 .collect::<Vec<_>>();
 
+            let prev_block_hash = consensus.get_prev_block_hash();
             let expected_leader = crate::consensus::compute_fallback_leader(
                 &proposal.txid,
                 proposal.slot_index,
                 &avs,
+                &prev_block_hash,
             );
 
             // Step 2: Verify the proposal came from the expected leader
@@ -3832,13 +3840,13 @@ impl MessageHandler {
             accumulated_weight
         );
 
-        // Step 2: Check if finality threshold reached (51% simple majority)
+        // Step 2: Check if finality threshold reached (67% BFT-safe majority)
         let validators = consensus.timevote.get_validators();
         let total_avs_weight: u64 = validators.iter().map(|v| v.weight).sum();
-        let finality_threshold = ((total_avs_weight as f64) * 0.51).ceil() as u64;
+        let finality_threshold = ((total_avs_weight as f64) * 0.67).ceil() as u64;
 
         tracing::info!(
-            "Finality check for TX {:?}: accumulated={}, threshold={} (51% of {})",
+            "Finality check for TX {:?}: accumulated={}, threshold={} (67% of {})",
             hex::encode(txid),
             accumulated_weight,
             finality_threshold,

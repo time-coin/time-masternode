@@ -51,6 +51,8 @@ pub enum RegistryError {
     CollateralNotFound,
     #[error("Collateral UTXO already locked")]
     CollateralAlreadyLocked,
+    #[error("Collateral outpoint already used by another masternode")]
+    DuplicateCollateral,
     #[error("Insufficient collateral confirmations (need {0}, have {1})")]
     InsufficientConfirmations(u64, u64),
     #[error("Collateral has been spent")]
@@ -248,6 +250,25 @@ impl MasternodeRegistry {
 
         let mut nodes = self.masternodes.write().await;
         let now = Self::now();
+
+        // Prevent duplicate collateral: reject if another masternode already uses this outpoint
+        if let Some(ref outpoint) = masternode.collateral_outpoint {
+            for (addr, info) in nodes.iter() {
+                if addr != &masternode.address {
+                    if let Some(ref existing_outpoint) = info.masternode.collateral_outpoint {
+                        if existing_outpoint == outpoint {
+                            tracing::warn!(
+                                "🚫 Rejected masternode {} — collateral {:?} already used by {}",
+                                masternode.address,
+                                outpoint,
+                                addr
+                            );
+                            return Err(RegistryError::DuplicateCollateral);
+                        }
+                    }
+                }
+            }
+        }
 
         // Get the count before we do any mutable operations
         let total_masternodes = nodes.len();
@@ -1256,7 +1277,28 @@ impl MasternodeRegistry {
             let report_count = info.peer_reports.len();
 
             let was_active = info.is_active;
-            info.is_active = report_count >= min_reports;
+
+            // Require sufficient report count AND subnet diversity (if network is large enough)
+            let meets_count = report_count >= min_reports;
+            let meets_diversity = if total_masternodes >= 5 && report_count >= 2 {
+                // Require witnesses from at least 2 distinct /16 subnets to prevent
+                // targeted DDoS against a node's witnesses on the same subnet
+                let mut subnets = std::collections::HashSet::new();
+                for entry in info.peer_reports.iter() {
+                    let peer_addr: &String = entry.key();
+                    // Extract /16 prefix from IP address (e.g., "192.168" from "192.168.1.1:24000")
+                    if let Some(ip_part) = peer_addr.split(':').next() {
+                        let octets: Vec<&str> = ip_part.split('.').collect();
+                        if octets.len() >= 2 {
+                            subnets.insert(format!("{}.{}", octets[0], octets[1]));
+                        }
+                    }
+                }
+                subnets.len() >= 2
+            } else {
+                true // Small networks exempt from diversity requirement
+            };
+            info.is_active = meets_count && meets_diversity;
 
             if was_active != info.is_active {
                 status_changes += 1;

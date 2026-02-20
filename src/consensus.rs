@@ -243,7 +243,7 @@ impl Default for TimeVoteConfig {
             sample_size: 20,         // Query 20 validators per round (k)
             quorum_size: 14,         // Need 14+ responses for consensus (alpha)
             finality_confidence: 20, // 20 consecutive confirms for finality (beta)
-            q_finality_percent: 51,  // 51% weight threshold for finality (simple majority)
+            q_finality_percent: 67,  // 67% weight threshold for finality (BFT-safe majority)
             query_timeout_ms: 2000,  // 2 second timeout
             max_rounds: 100,
         }
@@ -351,8 +351,9 @@ impl PrepareVoteAccumulator {
         votes.push((voter_id, weight));
     }
 
-    /// Check if timevote consensus reached: majority of participating validators agree
-    pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
+    /// Check if timevote consensus reached: majority of participating validator WEIGHT agrees.
+    /// Uses accumulated stake weight (not raw vote count) to prevent Free-tier Sybil attacks.
+    pub fn check_consensus(&self, block_hash: Hash256, _sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
 
@@ -362,18 +363,22 @@ impl PrepareVoteAccumulator {
                 return false;
             }
 
-            // Count unique voters across ALL block hashes (participating validators)
-            let mut all_voters = std::collections::HashSet::new();
+            // Accumulate weight for this block hash
+            let block_weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+
+            // Accumulate total participating weight across ALL block hashes
+            let mut total_weight: u64 = 0;
+            let mut seen_voters = std::collections::HashSet::new();
             for entry in self.votes.iter() {
-                for (voter_id, _) in entry.value() {
-                    all_voters.insert(voter_id.clone());
+                for (voter_id, w) in entry.value() {
+                    if seen_voters.insert(voter_id.clone()) {
+                        total_weight += w;
+                    }
                 }
             }
-            let participating = all_voters.len();
-            // Use the smaller of active validators and actual participants as denominator
-            let effective_size = sample_size.min(participating.max(1));
-            // Majority: need more than half of participating validators
-            vote_count > effective_size / 2
+
+            // Majority: block weight must exceed 50% of total participating weight
+            total_weight > 0 && block_weight > total_weight / 2
         } else {
             false
         }
@@ -469,14 +474,11 @@ impl PrecommitVoteAccumulator {
         votes.push((voter_id, weight));
     }
 
-    /// Check if timevote consensus reached: majority of participating validators agree
-    ///
-    /// ADAPTIVE QUORUM: Same logic as PrepareVoteAccumulator::check_consensus.
-    /// Uses min(active_validators, total_unique_voters) as denominator so that
-    /// non-participating nodes don't block finalization.
+    /// Check if timevote consensus reached: majority of participating validator WEIGHT agrees.
+    /// Uses accumulated stake weight (not raw vote count) to prevent Free-tier Sybil attacks.
     ///
     /// SECURITY: A minimum of 2 unique voters is required to prevent solo finalization.
-    pub fn check_consensus(&self, block_hash: Hash256, sample_size: usize) -> bool {
+    pub fn check_consensus(&self, block_hash: Hash256, _sample_size: usize) -> bool {
         if let Some(entry) = self.votes.get(&block_hash) {
             let vote_count = entry.len();
 
@@ -486,18 +488,22 @@ impl PrecommitVoteAccumulator {
                 return false;
             }
 
-            // Count unique voters across ALL block hashes (participating validators)
-            let mut all_voters = std::collections::HashSet::new();
+            // Accumulate weight for this block hash
+            let block_weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+
+            // Accumulate total participating weight across ALL block hashes
+            let mut total_weight: u64 = 0;
+            let mut seen_voters = std::collections::HashSet::new();
             for entry in self.votes.iter() {
-                for (voter_id, _) in entry.value() {
-                    all_voters.insert(voter_id.clone());
+                for (voter_id, w) in entry.value() {
+                    if seen_voters.insert(voter_id.clone()) {
+                        total_weight += w;
+                    }
                 }
             }
-            let participating = all_voters.len();
-            // Use the smaller of active validators and actual participants as denominator
-            let effective_size = sample_size.min(participating.max(1));
-            // Majority: need more than half of participating validators
-            vote_count > effective_size / 2
+
+            // Majority: block weight must exceed 50% of total participating weight
+            total_weight > 0 && block_weight > total_weight / 2
         } else {
             false
         }
@@ -980,6 +986,13 @@ impl TimeVoteConsensus {
     /// - Logs conflicts to anomaly detector for security monitoring
     /// - Resolves via weight comparison (higher weight wins)
     /// - Returns index of winning TimeProof
+    ///
+    /// FIXME(security): If two conflicting transactions both obtain valid TimeProofs,
+    /// the safety assumptions are violated and the protocol has no on-chain recovery
+    /// mechanism. A future release should implement an emergency checkpoint process
+    /// where a supermajority (≥90% of AVS weight) can sign a recovery block that
+    /// definitively resolves the conflict. Without this, a successful Byzantine attack
+    /// could leave the network in an unrecoverable state requiring off-chain coordination.
     pub fn detect_competing_timeproof(
         &self,
         new_proof: TimeProof,
@@ -1535,6 +1548,8 @@ pub struct ConsensusEngine {
     finality_times: FinalityTimeTracker,
     /// Rolling average of last 20 finality times (in milliseconds)
     avg_finality_ms: Arc<parking_lot::RwLock<Vec<f64>>>,
+    /// Latest known block hash — used to add unpredictability to fallback leader election
+    prev_block_hash: Arc<parking_lot::RwLock<Hash256>>,
 }
 
 impl ConsensusEngine {
@@ -1558,6 +1573,7 @@ impl ConsensusEngine {
             ai_validator: None,
             finality_times: Arc::new(DashMap::new()),
             avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
         }
     }
 
@@ -1585,12 +1601,23 @@ impl ConsensusEngine {
             ai_validator: None,
             finality_times: Arc::new(DashMap::new()),
             avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
         }
     }
 
     pub fn enable_ai_validation(&mut self, db: Arc<sled::Db>) {
         self.ai_validator = Some(Arc::new(crate::ai::AITransactionValidator::new(db)));
         tracing::info!("🤖 AI transaction validation enabled");
+    }
+
+    /// Update the latest known block hash (called when a new block is finalized)
+    pub fn update_prev_block_hash(&self, hash: Hash256) {
+        *self.prev_block_hash.write() = hash;
+    }
+
+    /// Get the latest known block hash for fallback leader election
+    pub fn get_prev_block_hash(&self) -> Hash256 {
+        *self.prev_block_hash.read()
     }
 
     /// Record when a block is received (start of finality tracking)
@@ -1649,7 +1676,9 @@ impl ConsensusEngine {
             loop {
                 interval.tick().await;
 
-                let retry_count = self.check_fallback_timeouts(&masternode_registry).await;
+                let retry_count = self
+                    .check_fallback_timeouts(&masternode_registry, &self.get_prev_block_hash())
+                    .await;
                 if retry_count > 0 {
                     tracing::info!("⏱️ Processed {} fallback timeouts", retry_count);
                 }
@@ -1726,7 +1755,13 @@ impl ConsensusEngine {
                     };
 
                     // Check if we are the leader for this transaction
-                    if self.is_fallback_leader(txid, slot_index, round, &avs_snapshot) {
+                    if self.is_fallback_leader(
+                        txid,
+                        slot_index,
+                        round,
+                        &avs_snapshot,
+                        &self.get_prev_block_hash(),
+                    ) {
                         tracing::info!(
                             "🎯 I am the fallback leader for tx {} (slot: {}, round: {})",
                             hex::encode(&txid[..8]),
@@ -2108,6 +2143,17 @@ impl ConsensusEngine {
 
         // 2. Check inputs exist and are unspent (or locked/finalized by this tx)
         for input in &tx.inputs {
+            // Check if UTXO is locked as masternode collateral (separate from UTXO state)
+            if self
+                .utxo_manager
+                .is_collateral_locked(&input.previous_output)
+            {
+                return Err(format!(
+                    "UTXO {} is locked as masternode collateral",
+                    input.previous_output
+                ));
+            }
+
             match self.utxo_manager.get_state(&input.previous_output) {
                 Some(UTXOState::Unspent) => {}
                 Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {
@@ -2182,14 +2228,15 @@ impl ConsensusEngine {
         }
 
         // ===== CRITICAL FIX #1: VERIFY SIGNATURES ON ALL INPUTS =====
-        // Skip signature verification if script_sig is empty (unsigned transaction)
-        // TODO: Remove this once wallet signing is fully implemented
+        // Reject transactions with unsigned inputs — all inputs must have signatures
         for (idx, input) in tx.inputs.iter().enumerate() {
-            if !input.script_sig.is_empty() {
-                self.verify_input_signature(tx, idx).await?;
-            } else {
-                tracing::debug!("Skipping signature verification for unsigned input {}", idx);
+            if input.script_sig.is_empty() {
+                return Err(format!(
+                    "Input {} has empty script_sig — unsigned transactions are not allowed",
+                    idx
+                ));
             }
+            self.verify_input_signature(tx, idx).await?;
         }
 
         tracing::debug!(
@@ -2637,6 +2684,7 @@ impl ConsensusEngine {
             ai_validator: self.ai_validator.clone(),
             finality_times: self.finality_times.clone(),
             avg_finality_ms: self.avg_finality_ms.clone(),
+            prev_block_hash: self.prev_block_hash.clone(),
         });
         let tx_status_map = self.timevote.tx_status.clone();
 
@@ -2687,8 +2735,18 @@ impl ConsensusEngine {
                         .iter()
                         .map(|mn| mn.tier.sampling_weight())
                         .sum();
-                    let threshold = (total_avs_weight * 51).div_ceil(100);
+                    // Liveness fallback: if stalled >30s at 67%, fall back to 51%
+                    let elapsed_secs = start.elapsed().as_secs();
+                    let q_percent = if elapsed_secs >= 30 { 51u64 } else { 67u64 };
+                    let threshold = (total_avs_weight * q_percent).div_ceil(100);
                     let min_weight_floor = threshold.div_ceil(4); // 25% of threshold
+
+                    if q_percent == 51 {
+                        tracing::warn!(
+                            "⚠️ TX {:?} stalled >30s — liveness fallback to 51% threshold",
+                            hex::encode(txid)
+                        );
+                    }
 
                     if weight < min_weight_floor && vote_deadline < max_deadline {
                         vote_deadline += Duration::from_secs(5);
@@ -3591,7 +3649,7 @@ impl ConsensusEngine {
     /// # Example
     /// ```ignore
     /// let avs = consensus.get_avs_snapshot(slot_index)?;
-    /// let leader = consensus.elect_fallback_leader(txid, slot_index, 0, &avs)?;
+    /// let leader = consensus.elect_fallback_leader(txid, slot_index, 0, &avs, &prev_block_hash)?;
     ///
     /// if leader == my_masternode_id {
     ///     // I am the leader, broadcast proposal
@@ -3604,6 +3662,7 @@ impl ConsensusEngine {
         slot_index: u64,
         round: u32,
         avs: &AVSSnapshot,
+        prev_block_hash: &Hash256,
     ) -> Option<String> {
         if avs.validators.is_empty() && avs.validators_ref.is_none() {
             tracing::warn!("Cannot elect fallback leader: AVS is empty");
@@ -3617,11 +3676,13 @@ impl ConsensusEngine {
         if let Some(ref validators_arc) = avs.validators_ref {
             // Use the shared reference
             for validator in validators_arc.iter() {
-                // Compute deterministic hash: H(txid || slot_index || round || mn_pubkey)
+                // Compute deterministic hash: H(txid || slot_index || round || prev_block_hash || mn_pubkey)
+                // Including prev_block_hash prevents prediction of leader before latest block is produced
                 let mut hasher = Sha256::new();
                 hasher.update(txid);
                 hasher.update(slot_index.to_le_bytes());
                 hasher.update(round.to_le_bytes());
+                hasher.update(prev_block_hash);
                 hasher.update(validator.address.as_bytes());
 
                 let hash: [u8; 32] = hasher.finalize().into();
@@ -3635,11 +3696,12 @@ impl ConsensusEngine {
         } else {
             // Use the serialized validators
             for (validator_id, _weight) in &avs.validators {
-                // Compute deterministic hash: H(txid || slot_index || round || mn_pubkey)
+                // Compute deterministic hash: H(txid || slot_index || round || prev_block_hash || mn_pubkey)
                 let mut hasher = Sha256::new();
                 hasher.update(txid);
                 hasher.update(slot_index.to_le_bytes());
                 hasher.update(round.to_le_bytes());
+                hasher.update(prev_block_hash);
                 hasher.update(validator_id.as_bytes());
 
                 let hash: [u8; 32] = hasher.finalize().into();
@@ -3683,13 +3745,15 @@ impl ConsensusEngine {
         slot_index: u64,
         round: u32,
         avs: &AVSSnapshot,
+        prev_block_hash: &Hash256,
     ) -> bool {
         let identity = match self.identity.get() {
             Some(id) => id,
             None => return false,
         };
 
-        let leader = match self.elect_fallback_leader(txid, slot_index, round, avs) {
+        let leader = match self.elect_fallback_leader(txid, slot_index, round, avs, prev_block_hash)
+        {
             Some(l) => l,
             None => return false,
         };
@@ -3726,12 +3790,16 @@ impl ConsensusEngine {
     /// # Example
     /// ```ignore
     /// // Called every 5 seconds by background task
-    /// let retry_count = consensus.check_fallback_timeouts(&registry).await;
+    /// let retry_count = consensus.check_fallback_timeouts(&registry, &prev_block_hash).await;
     /// if retry_count > 0 {
     ///     info!("Retried {} timed-out fallback rounds", retry_count);
     /// }
     /// ```
-    pub async fn check_fallback_timeouts(&self, masternode_registry: &MasternodeRegistry) -> usize {
+    pub async fn check_fallback_timeouts(
+        &self,
+        masternode_registry: &MasternodeRegistry,
+        prev_block_hash: &Hash256,
+    ) -> usize {
         let now = Instant::now();
         let mut retried_count = 0;
 
@@ -3801,7 +3869,9 @@ impl ConsensusEngine {
                     .map(|mn| mn.masternode.clone())
                     .collect();
 
-                if let Some(new_leader_id) = compute_fallback_leader(&txid, new_slot_index, &avs) {
+                if let Some(new_leader_id) =
+                    compute_fallback_leader(&txid, new_slot_index, &avs, prev_block_hash)
+                {
                     tracing::info!(
                         "🔄 New leader for tx {}: {} (slot {})",
                         hex::encode(txid),
@@ -3888,7 +3958,7 @@ impl ConsensusEngine {
 
                 // Check for timed-out fallback rounds
                 let retry_count = consensus
-                    .check_fallback_timeouts(&masternode_registry)
+                    .check_fallback_timeouts(&masternode_registry, &consensus.get_prev_block_hash())
                     .await;
 
                 if retry_count > 0 {
@@ -4071,7 +4141,7 @@ impl ConsensusEngine {
     /// # Example
     /// ```ignore
     /// let avs = consensus.get_avs_snapshot(slot)?;
-    /// if consensus.is_fallback_leader(txid, slot, 0, &avs) {
+    /// if consensus.is_fallback_leader(txid, slot, 0, &avs, &prev_block_hash) {
     ///     consensus.execute_fallback_as_leader(txid, slot, 0).await?;
     /// }
     /// ```
@@ -4115,7 +4185,7 @@ impl ConsensusEngine {
     /// and must propose an Accept/Reject decision for a stalled transaction.
     ///
     /// # Protocol Flow (§7.6.4)
-    /// 1. Node computes itself as leader via `elect_fallback_leader(txid, slot, AVS)`
+    /// 1. Node computes itself as leader via `elect_fallback_leader(txid, slot, AVS, prev_block_hash)`
     /// 2. Signs proposal with decision (Accept or Reject)
     /// 3. Broadcasts to all AVS members
     /// 4. AVS members vote on the proposal
@@ -4136,7 +4206,7 @@ impl ConsensusEngine {
     ///
     /// # Example
     /// ```ignore
-    /// let leader = consensus.compute_fallback_leader(&txid, slot, &avs_members)?;
+    /// let leader = consensus.compute_fallback_leader(&txid, slot, &avs_members, &prev_block_hash)?;
     /// if leader.address == my_address {
     ///     consensus.broadcast_finality_proposal(txid, slot, FallbackDecision::Accept).await?;
     /// }
@@ -4613,7 +4683,7 @@ mod tests {
 /// let slot = current_slot_index();
 /// let avs = consensus.get_avs_snapshot(slot)?;
 ///
-/// let leader_id = compute_fallback_leader(&txid, slot, &avs).unwrap();
+/// let leader_id = compute_fallback_leader(&txid, slot, &avs, &prev_block_hash).unwrap();
 ///
 /// if leader_id == my_node_id {
 ///     // I am the leader, propose decision
@@ -4624,18 +4694,21 @@ pub fn compute_fallback_leader(
     txid: &Hash256,
     slot_index: u64,
     avs: &[Masternode],
+    prev_block_hash: &Hash256,
 ) -> Option<String> {
     if avs.is_empty() {
         return None;
     }
 
     // Compute hash score for each masternode
+    // Including prev_block_hash prevents prediction of leader before latest block is produced
     let mut scores: Vec<(Hash256, String)> = avs
         .iter()
         .map(|mn| {
             let mut hasher = Sha256::new();
             hasher.update(txid);
             hasher.update(slot_index.to_le_bytes());
+            hasher.update(prev_block_hash);
             hasher.update(mn.public_key.as_bytes());
             let score: Hash256 = hasher.finalize().into();
             (score, mn.address.clone())
@@ -4673,19 +4746,20 @@ mod fallback_tests {
         let slot_index = 100;
 
         // Compute leader twice - should be same
-        let leader1 = compute_fallback_leader(&txid, slot_index, &avs);
-        let leader2 = compute_fallback_leader(&txid, slot_index, &avs);
+        let prev_hash = [0u8; 32];
+        let leader1 = compute_fallback_leader(&txid, slot_index, &avs, &prev_hash);
+        let leader2 = compute_fallback_leader(&txid, slot_index, &avs, &prev_hash);
         assert_eq!(leader1, leader2);
         assert!(leader1.is_some());
 
         // Different slot should give potentially different leader
-        let leader3 = compute_fallback_leader(&txid, slot_index + 1, &avs);
+        let leader3 = compute_fallback_leader(&txid, slot_index + 1, &avs, &prev_hash);
         assert!(leader3.is_some());
         // May or may not be different, but function should work
 
         // Different txid should give potentially different leader
         let txid2 = [2u8; 32];
-        let leader4 = compute_fallback_leader(&txid2, slot_index, &avs);
+        let leader4 = compute_fallback_leader(&txid2, slot_index, &avs, &prev_hash);
         assert!(leader4.is_some());
     }
 
@@ -4695,7 +4769,7 @@ mod fallback_tests {
         let slot_index = 100;
         let avs: Vec<Masternode> = Vec::new();
 
-        let leader = compute_fallback_leader(&txid, slot_index, &avs);
+        let leader = compute_fallback_leader(&txid, slot_index, &avs, &[0u8; 32]);
         assert!(leader.is_none());
     }
 
@@ -4916,9 +4990,10 @@ mod fallback_tests {
             .collect();
 
         // Compute leader multiple times
-        let leader1 = compute_fallback_leader(&txid, slot_index, &avs);
-        let leader2 = compute_fallback_leader(&txid, slot_index, &avs);
-        let leader3 = compute_fallback_leader(&txid, slot_index, &avs);
+        let prev_hash = [0u8; 32];
+        let leader1 = compute_fallback_leader(&txid, slot_index, &avs, &prev_hash);
+        let leader2 = compute_fallback_leader(&txid, slot_index, &avs, &prev_hash);
+        let leader3 = compute_fallback_leader(&txid, slot_index, &avs, &prev_hash);
 
         // All must be identical
         assert_eq!(leader1, leader2);

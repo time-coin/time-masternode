@@ -62,8 +62,8 @@ impl FinalityProofManager {
         if let Some(votes_entry) = self.votes.get(&txid) {
             let total_weight: u64 = votes_entry.iter().map(|v| v.voter_weight).sum();
 
-            // Protocol §8.3: Q_finality = 0.51 * total_AVS_weight (simple majority) (rounded up)
-            let threshold = (total_avs_weight * 51).div_ceil(100); // 51% of AVS weight (ceiling)
+            // Protocol §8.3: Q_finality = 0.67 * total_AVS_weight (BFT-safe majority) (rounded up)
+            let threshold = (total_avs_weight * 67).div_ceil(100); // 67% of AVS weight (ceiling)
             if total_weight >= threshold {
                 return Some(total_weight);
             }
