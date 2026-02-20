@@ -51,7 +51,7 @@
                 ↓
 6. Vote Accumulation → Stake-weighted sum calculated
                 ↓
-7. Finalization → 51% threshold → Move to finalized pool (ALL NODES)
+7. Finalization → 67% threshold → Move to finalized pool (ALL NODES)
                 ↓
 8. TimeProof Assembly → Collect Accept votes, create proof
                 ↓
@@ -111,7 +111,7 @@
 **Key Features:**
 - **TimeVote Protocol:** Continuous voting consensus with stake-weighted validator voting
 - **Progressive TimeProof Assembly:** Signed votes accumulate to form verifiable proof
-- **Unified Finality:** Single finality state (51% weight threshold)
+- **Unified Finality:** Single finality state (67% weight threshold, liveness fallback to 51% after 30s)
 - **Instant Finality:** Transactions finalized in ~750ms average
 - **UTXO Locking:** Prevents double-spending during consensus
 - **Deterministic Finality:** No forks after finality achieved
@@ -409,7 +409,7 @@ Execute TimeVote Rounds (progressive TimeProof assembly)
     │   ├─→ Add signed votes to TimeProof
     │   ├─→ Update accumulated weight
     │
-    └─→ If accumulated_weight ≥ Q_finality (51% of AVS weight):
+    └─→ If accumulated_weight ≥ Q_finality (67% of AVS weight, 51% liveness fallback):
         ├─→ Transaction FINALIZED (single unified state)
         ├─→ TimeProof complete (verifiable by anyone)
         ├─→ Move to finalized pool
@@ -429,7 +429,7 @@ Transaction in blockchain (permanent checkpoint)
 **TimeVote Parameters:**
 - **Sample size (k):** 20 validators per round
 - **Quorum (α):** 14 responses needed for decision
-- **Finality threshold (Q_finality):** 51% of AVS weight
+- **Finality threshold (Q_finality):** 67% of AVS weight (falls back to 51% after 30s stall for liveness)
 - **Query timeout:** 2 seconds per round
 - **Typical finality:** 750ms (varies with network)
 
@@ -609,7 +609,7 @@ pub enum AppError {
     └───────┘   └───────┘   └───────┘
 ```
 
-**Minimum:** 3 masternodes for quorum (simple majority (>50%))  
+**Minimum:** 3 masternodes for quorum (67% stake-weighted majority)  
 **Recommended:** 5+ masternodes for redundancy  
 **Full nodes:** Can be unlimited
 
@@ -621,7 +621,7 @@ pub enum AppError {
 |--------|----------------|
 | **Message Authentication** | Ed25519 signatures |
 | **Double-Spend Prevention** | UTXO locking mechanism |
-| **Byzantine Tolerance** | PBFT consensus (simple majority (>50%) quorum) |
+| **Byzantine Tolerance** | Stake-weighted consensus (67% quorum, BFT-safe) |
 | **Sybil Protection** | Masternode registry |
 | **Network Privacy** | Optional encryption layer |
 | **DOS Protection** | Rate limiting per peer |

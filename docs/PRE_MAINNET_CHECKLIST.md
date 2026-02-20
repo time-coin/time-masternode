@@ -42,9 +42,14 @@
 ### ⚠️ Partial (4 items)
 
 #### 3. Staking script semantics
-- **Issue:** Masternode collateral locking mechanism needs formal verification
-- **Status:** Collateral UTXOs are locked on-chain, but edge cases around unlock timing not fully tested
-- **Action:** Add comprehensive integration tests for collateral lifecycle
+- **Issue:** ~~Masternode collateral locking mechanism needs formal verification~~
+- **Status:** ✅ **HARDENED** — Collateral security audit completed:
+  - Duplicate collateral registration prevented (outpoint uniqueness check)
+  - Collateral locks persist across restarts (`rebuild_collateral_locks()`)
+  - TX validation rejects spending locked collateral UTXOs
+  - Unsigned inputs rejected, phantom UTXO locks prevented
+  - `force_unlock()` guarded against collateral-locked UTXOs
+- **Remaining:** Integration tests for full collateral lifecycle (register → operate → deregister → unlock)
 
 #### 7. Clock sync (NTP)
 - **Issue:** ~~Protocol spec requires ±10s clock tolerance, implementation uses ±120s~~ **FIXED**
