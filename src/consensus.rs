@@ -20,7 +20,7 @@ use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::DashMap;
-use ed25519_dalek::{Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, Verifier, VerifyingKey};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -1986,6 +1986,26 @@ impl ConsensusEngine {
         self.identity.get().map(|id| id.signing_key.clone())
     }
 
+    /// Sign all inputs of a transaction using this node's wallet key.
+    /// Each input's script_sig is set to [32-byte pubkey || 64-byte Ed25519 signature].
+    pub fn sign_transaction(&self, tx: &mut Transaction) -> Result<(), String> {
+        let signing_key = self
+            .get_signing_key()
+            .ok_or("No signing key available — node identity not set")?;
+        let pubkey_bytes = signing_key.verifying_key().to_bytes();
+
+        for idx in 0..tx.inputs.len() {
+            let message = self.create_signature_message(tx, idx)?;
+            let signature = signing_key.sign(&message);
+            let mut script_sig = Vec::with_capacity(96);
+            script_sig.extend_from_slice(&pubkey_bytes);
+            script_sig.extend_from_slice(&signature.to_bytes());
+            tx.inputs[idx].script_sig = script_sig;
+        }
+
+        Ok(())
+    }
+
     // ========================================================================
     // FINALITY VOTE GENERATION (Per Protocol §8.5)
     // ========================================================================
@@ -2256,8 +2276,13 @@ impl ConsensusEngine {
         tx: &Transaction,
         input_idx: usize,
     ) -> Result<Vec<u8>, String> {
-        // Compute transaction hash
-        let tx_hash = tx.txid();
+        // Compute transaction hash with script_sigs cleared to avoid
+        // chicken-and-egg: signer has empty sigs, verifier has filled sigs
+        let mut signing_tx = tx.clone();
+        for input in &mut signing_tx.inputs {
+            input.script_sig = vec![];
+        }
+        let tx_hash = signing_tx.txid();
 
         // Create message: txid || input_index || outputs_hash
         let mut message = Vec::new();
@@ -2278,8 +2303,8 @@ impl ConsensusEngine {
     }
 
     /// Verify a single input's cryptographic signature
-    /// Uses ed25519 signature scheme for verification
-    /// CPU-intensive crypto is moved to spawn_blocking to prevent async runtime blocking
+    /// script_sig format: [32-byte Ed25519 pubkey || 64-byte signature]
+    /// The pubkey is verified against the UTXO's address (script_pubkey stores address bytes)
     async fn verify_input_signature(
         &self,
         tx: &Transaction,
@@ -2299,44 +2324,54 @@ impl ConsensusEngine {
         let message = self.create_signature_message(tx, input_idx)?;
 
         // Clone data needed for blocking task
-        let pubkey_bytes = utxo.script_pubkey.clone();
-        let sig_bytes = input.script_sig.clone();
+        let addr_bytes = utxo.script_pubkey.clone();
+        let script_sig = input.script_sig.clone();
 
         // Move CPU-intensive signature verification to blocking pool
         tokio::task::spawn_blocking(move || {
             use ed25519_dalek::Signature;
 
-            // Extract public key from UTXO's script_pubkey
-            // In ed25519 setup, script_pubkey IS the 32-byte public key
-            if pubkey_bytes.len() != 32 {
+            // script_sig = [32-byte pubkey || 64-byte signature]
+            if script_sig.len() != 96 {
                 return Err(format!(
-                    "Invalid public key length: {} (expected 32)",
-                    pubkey_bytes.len()
+                    "Invalid script_sig length: {} (expected 96: 32-byte pubkey + 64-byte signature)",
+                    script_sig.len()
                 ));
             }
 
-            let public_key = ed25519_dalek::VerifyingKey::from_bytes(
-                &pubkey_bytes[0..32]
-                    .try_into()
-                    .map_err(|_| "Failed to convert public key bytes")?,
-            )
-            .map_err(|e| format!("Invalid public key: {}", e))?;
+            let pubkey_bytes: [u8; 32] = script_sig[..32]
+                .try_into()
+                .map_err(|_| "Failed to extract public key bytes")?;
+            let sig_bytes: [u8; 64] = script_sig[32..96]
+                .try_into()
+                .map_err(|_| "Failed to extract signature bytes")?;
 
-            // Parse signature from script_sig (must be exactly 64 bytes)
-            if sig_bytes.len() != 64 {
+            // Parse public key
+            let public_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
+                .map_err(|e| format!("Invalid public key: {}", e))?;
+
+            // Verify public key matches UTXO's address
+            // script_pubkey stores the address string as UTF-8 bytes
+            let addr_str = String::from_utf8(addr_bytes.clone())
+                .map_err(|_| "Invalid UTF-8 in UTXO script_pubkey")?;
+            let network = if addr_str.starts_with("TIME0") {
+                crate::NetworkType::Testnet
+            } else if addr_str.starts_with("TIME1") {
+                crate::NetworkType::Mainnet
+            } else {
+                return Err("Invalid address prefix in UTXO script_pubkey".to_string());
+            };
+            let derived_addr =
+                crate::address::Address::from_public_key(&public_key, network).to_string();
+            if derived_addr.as_bytes() != addr_bytes.as_slice() {
                 return Err(format!(
-                    "Invalid signature length: {} (expected 64 bytes)",
-                    sig_bytes.len()
+                    "Public key doesn't match UTXO address: derived {} vs stored {}",
+                    derived_addr, addr_str
                 ));
             }
 
-            let signature = Signature::from_bytes(
-                &sig_bytes[0..64]
-                    .try_into()
-                    .map_err(|_| "Failed to convert signature bytes")?,
-            );
-
-            // Verify signature (CPU intensive)
+            // Verify signature
+            let signature = Signature::from_bytes(&sig_bytes);
             public_key.verify(&message, &signature).map_err(|_| {
                 format!(
                     "Signature verification FAILED for input {}: signature doesn't match message",
