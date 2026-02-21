@@ -92,6 +92,8 @@ pub struct MasternodeInfo {
 pub struct MasternodeRegistry {
     masternodes: Arc<RwLock<HashMap<String, MasternodeInfo>>>,
     local_masternode_address: Arc<RwLock<Option<String>>>, // Track which one is ours
+    /// Wallet (reward) address of the local masternode — persists across deregistration
+    local_wallet_address: Arc<RwLock<Option<String>>>,
     db: Arc<Db>,
     network: NetworkType,
     block_period_start: Arc<RwLock<u64>>,
@@ -170,6 +172,7 @@ impl MasternodeRegistry {
         Self {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
+            local_wallet_address: Arc::new(RwLock::new(None)),
             db,
             network,
             block_period_start: Arc::new(RwLock::new(now)),
@@ -880,8 +883,17 @@ impl MasternodeRegistry {
         self.local_masternode_address.read().await.clone()
     }
 
+    /// Get the local wallet (reward) address — persists even if masternode is deregistered
+    pub async fn get_local_wallet_address(&self) -> Option<String> {
+        self.local_wallet_address.read().await.clone()
+    }
+
     pub async fn set_local_masternode(&self, address: String) {
-        *self.local_masternode_address.write().await = Some(address);
+        *self.local_masternode_address.write().await = Some(address.clone());
+        // Also persist wallet address from the masternode info
+        if let Some(info) = self.masternodes.read().await.get(&address) {
+            *self.local_wallet_address.write().await = Some(info.reward_address.clone());
+        }
     }
 
     #[allow(dead_code)]
@@ -1072,18 +1084,7 @@ impl MasternodeRegistry {
         if let Some(info) = masternodes.get(masternode_address) {
             // Check if has locked collateral
             if let Some(collateral_outpoint) = &info.masternode.collateral_outpoint {
-                // Verify UTXO still exists and is locked
-                if !utxo_manager.is_collateral_locked(collateral_outpoint) {
-                    tracing::warn!(
-                        "⚠️ Masternode {} collateral {}:{} is no longer locked",
-                        masternode_address,
-                        hex::encode(collateral_outpoint.txid),
-                        collateral_outpoint.vout
-                    );
-                    return false;
-                }
-
-                // Verify UTXO exists
+                // Verify UTXO exists first
                 if utxo_manager.get_utxo(collateral_outpoint).await.is_err() {
                     tracing::warn!(
                         "⚠️ Masternode {} collateral {}:{} UTXO no longer exists",
@@ -1092,6 +1093,42 @@ impl MasternodeRegistry {
                         collateral_outpoint.vout
                     );
                     return false;
+                }
+
+                // Verify UTXO is locked as collateral
+                if !utxo_manager.is_collateral_locked(collateral_outpoint) {
+                    // UTXO exists but isn't locked — this can happen during block
+                    // processing when a recollateralization TX creates the new UTXO
+                    // but it hasn't been formally locked yet. Auto-lock it.
+                    let lock_height = self
+                        .current_height
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    match utxo_manager.lock_collateral(
+                        collateral_outpoint.clone(),
+                        masternode_address.to_string(),
+                        lock_height,
+                        info.masternode.tier.collateral(),
+                    ) {
+                        Ok(()) => {
+                            tracing::info!(
+                                "🔒 Auto-locked collateral {}:{} for masternode {}",
+                                hex::encode(collateral_outpoint.txid),
+                                collateral_outpoint.vout,
+                                masternode_address
+                            );
+                            return true;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Masternode {} collateral {}:{} exists but could not be locked: {:?}",
+                                masternode_address,
+                                hex::encode(collateral_outpoint.txid),
+                                collateral_outpoint.vout,
+                                e
+                            );
+                            return false;
+                        }
+                    }
                 }
 
                 return true;
@@ -1112,10 +1149,19 @@ impl MasternodeRegistry {
     ) -> usize {
         let mut to_deregister = Vec::new();
 
+        // Never auto-deregister the local masternode — operator must disable explicitly
+        let local_addr = self.local_masternode_address.read().await.clone();
+
         // Check all masternodes
         {
             let masternodes = self.masternodes.read().await;
             for (address, info) in masternodes.iter() {
+                // Skip the local masternode
+                if let Some(ref local) = local_addr {
+                    if address == local {
+                        continue;
+                    }
+                }
                 // Only check masternodes with locked collateral
                 if info.masternode.collateral_outpoint.is_some()
                     && !self.check_collateral_validity(address, utxo_manager).await
@@ -1692,6 +1738,7 @@ impl Clone for MasternodeRegistry {
         Self {
             masternodes: self.masternodes.clone(),
             local_masternode_address: self.local_masternode_address.clone(),
+            local_wallet_address: self.local_wallet_address.clone(),
             db: self.db.clone(),
             network: self.network,
             block_period_start: self.block_period_start.clone(),

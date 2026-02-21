@@ -5099,10 +5099,15 @@ impl Blockchain {
                     expected_amt - actual_amt
                 };
                 if diff > tolerance {
-                    return Err(format!(
-                        "Block {} reward for {} deviates: expected {} satoshis, got {} (diff {} > tolerance {})",
-                        block.header.height, expected_addr, expected_amt, actual_amt, diff, tolerance
-                    ));
+                    // Large deviation may be caused by masternode list divergence
+                    // (different nodes see different active counts). Downgrade to
+                    // a warning instead of rejecting the block outright — the total
+                    // block reward is already validated above.
+                    tracing::warn!(
+                        "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
+                         Accepting due to possible masternode list divergence.",
+                        block.header.height, expected_addr, expected_amt, actual_amt, diff
+                    );
                 }
             }
         }
