@@ -371,10 +371,11 @@ After each block, the system validates all locked collaterals:
 - UTXO still exists
 - UTXO not spent
 - Collateral still locked
+- UTXO is Unspent but not yet locked → **auto-locked** (handles recollateralization race)
 
 ❌ **Invalid if:**
 - UTXO spent
-- Collateral unlocked
+- Collateral unlocked and UTXO does not exist
 
 ### Automatic Deregistration
 
@@ -382,6 +383,10 @@ If collateral becomes invalid:
 1. Masternode automatically deregistered
 2. Removed from reward rotation
 3. Logged in system
+
+> **Note:** The **local masternode** (this node) is never auto-deregistered by `cleanup_invalid_collaterals()`. The operator must explicitly set `enabled = false` in config to deregister. This prevents false deregistration during recollateralization when the new UTXO exists but hasn't been formally locked yet.
+>
+> If the local masternode is unexpectedly deregistered, wallet RPCs (`getbalance`, `listunspent`) fall back to a stored `local_wallet_address` so UTXOs remain visible.
 
 ---
 

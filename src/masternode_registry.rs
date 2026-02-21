@@ -502,6 +502,18 @@ impl MasternodeRegistry {
         Ok(removed)
     }
 
+    /// Find a masternode by its reward address. Returns (network_address, info).
+    pub async fn find_by_reward_address(
+        &self,
+        reward_addr: &str,
+    ) -> Option<(String, MasternodeInfo)> {
+        let nodes = self.masternodes.read().await;
+        nodes
+            .iter()
+            .find(|(_, info)| info.reward_address == reward_addr)
+            .map(|(addr, info)| (addr.clone(), info.clone()))
+    }
+
     #[allow(dead_code)]
     pub async fn get(&self, address: &str) -> Option<MasternodeInfo> {
         self.masternodes.read().await.get(address).cloned()

@@ -46,6 +46,8 @@ Commands:
     getrawmempool          Get raw memory pool
   Consensus
     getconsensusinfo       Get consensus information
+  Treasury
+    gettreasurybalance     Get on-chain treasury balance
   Utility
     validateaddress        Validate an address
     stop                   Stop the daemon
@@ -288,6 +290,13 @@ enum Commands {
     GetConsensusInfo,
 
     // ============================================================
+    // TREASURY COMMANDS
+    // ============================================================
+    /// Get the on-chain treasury balance
+    #[command(next_help_heading = "Treasury")]
+    GetTreasuryBalance,
+
+    // ============================================================
     // UTILITY COMMANDS
     // ============================================================
     /// Validate an address
@@ -425,6 +434,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
+        Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
         Commands::ValidateAddress { address } => ("validateaddress", json!([address])),
         Commands::Stop => ("stop", json!([])),
         Commands::Uptime => ("uptime", json!([])),

@@ -15,12 +15,12 @@ use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use chrono::Utc;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -233,6 +233,9 @@ pub struct Blockchain {
     /// Tracks reward-distribution violations per block producer address.
     /// After REWARD_VIOLATION_THRESHOLD strikes the producer's proposals are rejected.
     reward_violations: Arc<DashMap<String, u64>>,
+    /// On-chain treasury balance in satoshis. Funded by slashed collateral,
+    /// disbursed via governance-approved coinbase outputs. Not a UTXO — pure state.
+    treasury_balance: Arc<AtomicU64>,
 }
 
 impl Blockchain {
@@ -283,6 +286,22 @@ impl Blockchain {
             .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
             .unwrap_or(0);
 
+        // Load treasury balance from database
+        let loaded_treasury = storage
+            .get("treasury_balance".as_bytes())
+            .ok()
+            .and_then(|opt| opt)
+            .and_then(|bytes| bincode::deserialize::<u64>(&bytes).ok())
+            .unwrap_or(0);
+
+        if loaded_treasury > 0 {
+            tracing::info!(
+                "🏦 Loaded treasury balance: {} TIME ({} satoshis)",
+                loaded_treasury / constants::blockchain::SATOSHIS_PER_TIME,
+                loaded_treasury
+            );
+        }
+
         if loaded_height > 0 {
             tracing::info!(
                 "📊 Loaded blockchain height {} from database",
@@ -320,6 +339,7 @@ impl Blockchain {
             block_added_signal: Arc::new(tokio::sync::Notify::new()),
             last_consensus_log: Arc::new(RwLock::new(None)),
             reward_violations: Arc::new(DashMap::new()),
+            treasury_balance: Arc::new(AtomicU64::new(loaded_treasury)),
         }
     }
 
@@ -5140,20 +5160,111 @@ impl Blockchain {
     }
 
     /// Record a reward-distribution violation for a block producer.
-    pub fn record_reward_violation(&self, producer_addr: &str) {
-        let mut count = self.reward_violations.entry(producer_addr.to_string()).or_insert(0);
+    /// On reaching REWARD_VIOLATION_THRESHOLD, the producer's collateral is slashed
+    /// (transferred to treasury) and the masternode is deregistered.
+    pub async fn record_reward_violation(&self, producer_addr: &str) {
+        let mut count = self
+            .reward_violations
+            .entry(producer_addr.to_string())
+            .or_insert(0);
         *count += 1;
         let strikes = *count;
         if strikes >= REWARD_VIOLATION_THRESHOLD {
             tracing::warn!(
-                "🚨 Producer {} has {} reward violation(s) — now MISBEHAVING, future proposals will be rejected",
-                producer_addr, strikes
+                "🚨 Producer {} has {} reward violation(s) — SLASHING collateral and deregistering",
+                producer_addr,
+                strikes
             );
+            // Drop DashMap ref before async call
+            drop(count);
+            self.slash_producer_collateral(producer_addr).await;
         } else {
             tracing::warn!(
                 "⚠️ Producer {} reward violation ({}/{} strikes)",
-                producer_addr, strikes, REWARD_VIOLATION_THRESHOLD
+                producer_addr,
+                strikes,
+                REWARD_VIOLATION_THRESHOLD
             );
+        }
+    }
+
+    /// Slash a misbehaving producer: unlock their collateral, transfer the amount
+    /// to the on-chain treasury balance, and deregister the masternode.
+    async fn slash_producer_collateral(&self, producer_reward_addr: &str) {
+        // Find the masternode whose reward_address matches the producer
+        let registry = &self.masternode_registry;
+        let mn_entry = registry.find_by_reward_address(producer_reward_addr).await;
+
+        let (mn_address, collateral_outpoint, collateral_amount) = match mn_entry {
+            Some((addr, info)) => {
+                let outpoint = info.masternode.collateral_outpoint.clone();
+                let amount =
+                    info.masternode.tier.collateral() * constants::blockchain::SATOSHIS_PER_TIME;
+                (addr, outpoint, amount)
+            }
+            None => {
+                tracing::warn!(
+                    "⚠️ Cannot slash producer {} — no masternode found with that reward address",
+                    producer_reward_addr
+                );
+                return;
+            }
+        };
+
+        // Unlock and consume the collateral UTXO
+        if let Some(outpoint) = &collateral_outpoint {
+            if let Err(e) = self.utxo_manager.unlock_collateral(outpoint) {
+                tracing::warn!("⚠️ Failed to unlock collateral during slash: {}", e);
+            }
+            // Mark the UTXO as spent so it cannot be reused
+            if let Err(e) = self.utxo_manager.spend_utxo(outpoint).await {
+                tracing::warn!("⚠️ Failed to spend slashed collateral UTXO: {}", e);
+            }
+        }
+
+        // Transfer collateral value to treasury
+        self.treasury_deposit(collateral_amount);
+        tracing::warn!(
+            "🏦 Slashed {} TIME from producer {} → treasury (new balance: {} TIME)",
+            collateral_amount / constants::blockchain::SATOSHIS_PER_TIME,
+            producer_reward_addr,
+            self.get_treasury_balance() / constants::blockchain::SATOSHIS_PER_TIME
+        );
+
+        // Deregister the masternode
+        match registry.unregister(&mn_address).await {
+            Ok(Some(_)) => {
+                tracing::warn!(
+                    "🗑️ Deregistered masternode {} (reward addr {}) after collateral slash",
+                    mn_address,
+                    producer_reward_addr
+                );
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ Failed to deregister slashed masternode {}: {:?}",
+                    mn_address,
+                    e
+                );
+            }
+        }
+    }
+
+    // ===== Treasury =====
+
+    /// Get the current treasury balance in satoshis.
+    pub fn get_treasury_balance(&self) -> u64 {
+        self.treasury_balance.load(Ordering::Relaxed)
+    }
+
+    /// Deposit satoshis into the treasury (used by slashing).
+    pub fn treasury_deposit(&self, amount: u64) {
+        self.treasury_balance.fetch_add(amount, Ordering::Relaxed);
+        // Persist to disk
+        let new_balance = self.get_treasury_balance();
+        if let Ok(bytes) = bincode::serialize(&new_balance) {
+            let _ = self.storage.insert("treasury_balance", bytes);
         }
     }
 
@@ -5167,7 +5278,10 @@ impl Blockchain {
             return Err(format!(
                 "Producer {} is misbehaving ({} reward violations) — rejecting proposal",
                 producer_addr,
-                self.reward_violations.get(producer_addr).map(|v| *v).unwrap_or(0)
+                self.reward_violations
+                    .get(producer_addr)
+                    .map(|v| *v)
+                    .unwrap_or(0)
             ));
         }
 
@@ -5175,7 +5289,7 @@ impl Blockchain {
         // If the check fails, record a violation and reject.
         if let Err(e) = self.validate_pool_distribution(block, 0).await {
             if !producer_addr.is_empty() {
-                self.record_reward_violation(producer_addr);
+                self.record_reward_violation(producer_addr).await;
             }
             return Err(e);
         }
@@ -8792,6 +8906,7 @@ impl Clone for Blockchain {
             block_added_signal: self.block_added_signal.clone(),
             last_consensus_log: self.last_consensus_log.clone(),
             reward_violations: self.reward_violations.clone(),
+            treasury_balance: self.treasury_balance.clone(),
         }
     }
 }

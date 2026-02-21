@@ -3381,10 +3381,7 @@ impl MessageHandler {
         // This runs the full pool-distribution check BEFORE voting so we
         // never endorse a block with tampered rewards.
         if block.header.height > 0 {
-            context
-                .blockchain
-                .validate_proposal_rewards(block)
-                .await?;
+            context.blockchain.validate_proposal_rewards(block).await?;
         }
 
         // 5. SECURITY: Verify VRF proof — confirms proposer is legitimately selected
