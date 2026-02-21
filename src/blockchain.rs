@@ -5099,10 +5099,16 @@ impl Blockchain {
                     expected_amt - actual_amt
                 };
                 if diff > tolerance {
-                    // Large deviation may be caused by masternode list divergence
-                    // (different nodes see different active counts). Downgrade to
-                    // a warning instead of rejecting the block outright — the total
-                    // block reward is already validated above.
+                    // Cap: deviation must not exceed the largest tier pool.
+                    // Differences beyond that can't be explained by masternode
+                    // list divergence and indicate tampering.
+                    let max_divergence = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
+                    if diff > max_divergence {
+                        return Err(format!(
+                            "Block {} reward for {} deviates beyond max tier pool: expected {} satoshis, got {} (diff {} > cap {})",
+                            block.header.height, expected_addr, expected_amt, actual_amt, diff, max_divergence
+                        ));
+                    }
                     tracing::warn!(
                         "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
                          Accepting due to possible masternode list divergence.",
