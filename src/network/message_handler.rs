@@ -3377,6 +3377,16 @@ impl MessageHandler {
             self.validate_block_rewards_structure(block)?;
         }
 
+        // 4b. Validate reward distribution and check producer misbehavior
+        // This runs the full pool-distribution check BEFORE voting so we
+        // never endorse a block with tampered rewards.
+        if block.header.height > 0 {
+            context
+                .blockchain
+                .validate_proposal_rewards(block)
+                .await?;
+        }
+
         // 5. SECURITY: Verify VRF proof — confirms proposer is legitimately selected
         // Skip for old blocks without VRF proof (backward compatibility)
         if !block.header.vrf_proof.is_empty() && block.header.height > 0 {
