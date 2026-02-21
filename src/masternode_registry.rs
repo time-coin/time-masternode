@@ -94,6 +94,8 @@ pub struct MasternodeRegistry {
     local_masternode_address: Arc<RwLock<Option<String>>>, // Track which one is ours
     /// Wallet (reward) address of the local masternode — persists across deregistration
     local_wallet_address: Arc<RwLock<Option<String>>>,
+    /// Certificate for the local masternode (website-issued Ed25519 signature)
+    local_certificate: Arc<RwLock<[u8; 64]>>,
     db: Arc<Db>,
     network: NetworkType,
     block_period_start: Arc<RwLock<u64>>,
@@ -173,6 +175,7 @@ impl MasternodeRegistry {
             masternodes: Arc::new(RwLock::new(nodes)),
             local_masternode_address: Arc::new(RwLock::new(None)),
             local_wallet_address: Arc::new(RwLock::new(None)),
+            local_certificate: Arc::new(RwLock::new([0u8; 64])),
             db,
             network,
             block_period_start: Arc::new(RwLock::new(now)),
@@ -906,6 +909,16 @@ impl MasternodeRegistry {
         if let Some(info) = self.masternodes.read().await.get(&address) {
             *self.local_wallet_address.write().await = Some(info.reward_address.clone());
         }
+    }
+
+    /// Get the local masternode's certificate (for announcements)
+    pub async fn get_local_certificate(&self) -> [u8; 64] {
+        *self.local_certificate.read().await
+    }
+
+    /// Set the local masternode's certificate (loaded from masternode.conf)
+    pub async fn set_local_certificate(&self, certificate: [u8; 64]) {
+        *self.local_certificate.write().await = certificate;
     }
 
     #[allow(dead_code)]
@@ -1751,6 +1764,7 @@ impl Clone for MasternodeRegistry {
             masternodes: self.masternodes.clone(),
             local_masternode_address: self.local_masternode_address.clone(),
             local_wallet_address: self.local_wallet_address.clone(),
+            local_certificate: self.local_certificate.clone(),
             db: self.db.clone(),
             network: self.network,
             block_period_start: self.block_period_start.clone(),

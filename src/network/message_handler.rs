@@ -381,12 +381,33 @@ impl MessageHandler {
                 public_key,
                 collateral_outpoint,
             } => {
+                // V2 without certificate — treat as empty certificate
                 self.handle_masternode_announcement(
                     address.clone(),
                     reward_address.clone(),
                     *tier,
                     *public_key,
                     collateral_outpoint.clone(),
+                    vec![0u8; 64],
+                    context,
+                )
+                .await
+            }
+            NetworkMessage::MasternodeAnnouncementV3 {
+                address,
+                reward_address,
+                tier,
+                public_key,
+                collateral_outpoint,
+                certificate,
+            } => {
+                self.handle_masternode_announcement(
+                    address.clone(),
+                    reward_address.clone(),
+                    *tier,
+                    *public_key,
+                    collateral_outpoint.clone(),
+                    certificate.clone(),
                     context,
                 )
                 .await
@@ -1951,7 +1972,8 @@ impl MessageHandler {
         Ok(None)
     }
 
-    /// Handle MasternodeAnnouncement
+    /// Handle MasternodeAnnouncement (V2 and V3)
+    #[allow(clippy::too_many_arguments)]
     async fn handle_masternode_announcement(
         &self,
         _address: String,
@@ -1959,6 +1981,7 @@ impl MessageHandler {
         tier: crate::types::MasternodeTier,
         public_key: ed25519_dalek::VerifyingKey,
         collateral_outpoint: Option<crate::types::OutPoint>,
+        certificate: Vec<u8>,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let peer_ip = self.peer_ip.clone();
@@ -1967,6 +1990,16 @@ impl MessageHandler {
             "📨 [{}] Received masternode announcement from {} (tier: {:?})",
             self.direction, peer_ip, tier
         );
+
+        // Verify masternode certificate (website-issued key)
+        if !crate::masternode_certificate::verify_masternode_certificate(&public_key, &certificate)
+        {
+            warn!(
+                "❌ [{}] Rejecting masternode {} — invalid certificate (not registered at time-coin.io)",
+                self.direction, peer_ip
+            );
+            return Ok(None);
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

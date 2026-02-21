@@ -704,15 +704,17 @@ async fn handle_peer(
                                             // Only send OUR masternode announcement, not all masternodes
                                             let local_masternodes = masternode_registry.get_all().await;
                                             if let Some(our_mn) = local_masternodes.iter().find(|mn| mn.masternode.address == our_address) {
-                                                let announcement_v2 = NetworkMessage::MasternodeAnnouncementV2 {
+                                                let cert = masternode_registry.get_local_certificate().await;
+                                                let announcement = NetworkMessage::MasternodeAnnouncementV3 {
                                                     address: our_mn.masternode.address.clone(),
                                                     reward_address: our_mn.reward_address.clone(),
                                                     tier: our_mn.masternode.tier,
                                                     public_key: our_mn.masternode.public_key,
                                                     collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
+                                                    certificate: cert.to_vec(),
                                                 };
-                                                let _ = peer_registry.send_to_peer(&ip_str, announcement_v2).await;
-                                                tracing::info!("📢 Sent masternode announcement to peer {}", ip_str);
+                                                let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
+                                                tracing::info!("📢 Sent masternode announcement (V3) to peer {}", ip_str);
                                             }
                                         }
 
@@ -1052,12 +1054,37 @@ async fn handle_peer(
                                     tracing::debug!("⏭️  Ignoring deprecated V1 masternode announcement from {}", peer.addr);
                                 }
                                 NetworkMessage::MasternodeAnnouncementV2 { address: _, reward_address, tier, public_key, collateral_outpoint } => {
+                                    // V2 without certificate — delegate to V3 handler with empty cert
+                                    let v3_msg = NetworkMessage::MasternodeAnnouncementV3 {
+                                        address: peer.addr.split(':').next().unwrap_or("").to_string(),
+                                        reward_address: reward_address.clone(),
+                                        tier: *tier,
+                                        public_key: *public_key,
+                                        collateral_outpoint: collateral_outpoint.clone(),
+                                        certificate: vec![0u8; 64],
+                                    };
+                                    // Fall through to V3 handler below
+                                    // (re-dispatch via the message handler for consistency)
+                                    check_rate_limit!("masternode_announce");
+                                    if !is_stable_connection {
+                                        is_stable_connection = true;
+                                    }
+                                    let peer_ip_str = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+                                    context.utxo_manager = Some(Arc::clone(&consensus.utxo_manager));
+                                    context.peer_manager = Some(Arc::clone(&peer_manager));
+                                    if let Ok(Some(response)) = handler.handle_message(&v3_msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&peer.addr, response).await;
+                                    }
+                                }
+                                NetworkMessage::MasternodeAnnouncementV3 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate } => {
                                     check_rate_limit!("masternode_announce");
 
-                                    // V2 announcement with collateral verification
-                                    // Note: masternode announcements are exempt from the
-                                    // stable-connection gate. Dropping a reconnecting peer's
-                                    // announcement leaves the masternode stuck as inactive.
                                     if !is_stable_connection {
                                         is_stable_connection = true;
                                     }
@@ -1065,7 +1092,13 @@ async fn handle_peer(
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
                                     if peer_ip.is_empty() { continue; }
 
-                                    tracing::debug!("📨 Received V2 masternode announcement from {} (tier: {:?})", peer.addr, tier);
+                                    tracing::debug!("📨 Received V3 masternode announcement from {} (tier: {:?})", peer.addr, tier);
+
+                                    // Verify certificate
+                                    if !crate::masternode_certificate::verify_masternode_certificate(public_key, certificate) {
+                                        tracing::warn!("❌ Rejecting masternode {} — invalid certificate", peer_ip);
+                                        continue;
+                                    }
 
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
@@ -1116,7 +1149,6 @@ async fn handle_peer(
                                         let lock_height = blockchain.get_height();
                                         if let Err(e) = consensus.utxo_manager.lock_collateral(outpoint, peer_ip.clone(), lock_height, tier.collateral()) {
                                             if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
-                                                // Already locked (e.g., rebuilt on startup or peer reconnected) — this is fine
                                                 tracing::debug!("🔒 Collateral for {} already locked — proceeding", peer_ip);
                                             } else {
                                                 tracing::warn!("❌ Rejecting {:?} masternode from {} — failed to lock collateral: {:?}", tier, peer_ip, e);
