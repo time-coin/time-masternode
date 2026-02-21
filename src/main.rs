@@ -59,7 +59,7 @@ use wallet::WalletManager;
 #[command(about = "TIME Coin Protocol Daemon", long_about = None)]
 struct Args {
     /// Config file path (time.conf or legacy config.toml)
-    #[arg(short, long)]
+    #[arg(short, long, alias = "config")]
     conf: Option<String>,
 
     /// Data directory override

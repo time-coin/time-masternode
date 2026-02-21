@@ -13,7 +13,7 @@ Group=timecoin
 WorkingDirectory=/opt/timecoin
 
 # Binary location
-ExecStart=/usr/local/bin/timed --config /etc/timecoin/config.toml
+ExecStart=/usr/local/bin/timed --conf /etc/timecoin/time.conf
 
 # Restart policy
 Restart=on-failure
