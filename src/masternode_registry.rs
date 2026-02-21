@@ -750,10 +750,18 @@ impl MasternodeRegistry {
 
             // CRITICAL: If still insufficient active masternodes, return empty to prevent block production
             if active.len() < 3 {
-                tracing::error!(
-                    "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
-                    active.len()
-                );
+                // Rate-limit this error (once per 60s) to avoid log spam
+                use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
+                static LAST_FORK_WARN: AtomicI64 = AtomicI64::new(0);
+                let now_secs = chrono::Utc::now().timestamp();
+                let last = LAST_FORK_WARN.load(AtomOrd::Relaxed);
+                if now_secs - last >= 60 {
+                    LAST_FORK_WARN.store(now_secs, AtomOrd::Relaxed);
+                    tracing::error!(
+                        "🛡️ FORK PREVENTION: Only {} active masternodes (minimum 3 required) - refusing block production",
+                        active.len()
+                    );
+                }
                 return Vec::new();
             }
 
