@@ -450,6 +450,13 @@ impl Blockchain {
             .await
             .map_err(|e| format!("Failed to clear UTXOs: {:?}", e))?;
 
+        // Reset treasury balance (will be rebuilt from block replay)
+        self.treasury_balance
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(bytes) = bincode::serialize(&0u64) {
+            let _ = self.storage.insert("treasury_balance", bytes);
+        }
+
         // Step 2: Replay all blocks from genesis to current height
         let mut blocks_processed = 0u64;
         let start = std::time::Instant::now();
@@ -466,6 +473,12 @@ impl Blockchain {
                                     "⚠️  Failed to save undo log for block {}: {}",
                                     height,
                                     e
+                                );
+                            }
+                            // Rebuild treasury balance (5 TIME per non-genesis block)
+                            if height > 0 {
+                                self.treasury_deposit(
+                                    constants::blockchain::TREASURY_POOL_SATOSHIS,
                                 );
                             }
                         }
@@ -2627,15 +2640,19 @@ impl Blockchain {
         }
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
-        // §10.4 Unified model: 35 TIME leader bonus + 65 TIME per-tier pools
+        // §10.4 Unified model: 30 TIME leader bonus + 5 TIME treasury + 65 TIME per-tier pools
         let base_reward = BLOCK_REWARD_SATOSHIS;
-        let total_reward = base_reward + finalized_txs_fees;
-        let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Leader gets 35 TIME + all fees
+        let treasury_share = constants::blockchain::TREASURY_POOL_SATOSHIS;
+        let total_reward = base_reward + finalized_txs_fees - treasury_share; // coinbase outputs (no treasury UTXO)
+        let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Leader gets 30 TIME + all fees
+
+        // NOTE: Treasury deposit happens in add_block(), not here, to avoid
+        // double-deposit when the producer's own node processes the block.
 
         // Build reward list: producer first, then per-tier pool recipients
         let mut rewards: Vec<(String, u64)> = Vec::new();
 
-        // 1. Block producer leader bonus (35 TIME + fees)
+        // 1. Block producer leader bonus (30 TIME + fees)
         if let Some(ref wallet) = producer_wallet {
             rewards.push((wallet.clone(), producer_share));
         }
@@ -3493,6 +3510,11 @@ impl Blockchain {
 
         // Process UTXOs and create undo log
         let undo_log = self.process_block_utxos(&block).await?;
+
+        // Deposit treasury allocation for this block (5 TIME per block)
+        if !is_genesis {
+            self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
+        }
 
         // Save undo log for rollback support
         self.save_undo_log(&undo_log)?;
@@ -4841,16 +4863,18 @@ impl Blockchain {
             }
         }
 
-        // Verify block_reward matches base reward + calculated fees
-        let expected_reward = BLOCK_REWARD_SATOSHIS + calculated_fees;
+        // Verify block_reward matches base reward + calculated fees - treasury allocation
+        let treasury_share = constants::blockchain::TREASURY_POOL_SATOSHIS;
+        let expected_reward = BLOCK_REWARD_SATOSHIS + calculated_fees - treasury_share;
 
         if block.header.block_reward != expected_reward {
             return Err(format!(
-                "Block {} has incorrect block_reward: expected {} (base {} + fees {}), got {}",
+                "Block {} has incorrect block_reward: expected {} (base {} + fees {} - treasury {}), got {}",
                 block.header.height,
                 expected_reward,
                 BLOCK_REWARD_SATOSHIS,
                 calculated_fees,
+                treasury_share,
                 block.header.block_reward
             ));
         }
@@ -4976,7 +5000,7 @@ impl Blockchain {
             None => return Ok(()), // Unknown producer — can't validate pool split
         };
 
-        // Compute expected producer share: 35 TIME + fees
+        // Compute expected producer share: 30 TIME + fees
         let expected_producer_base = PRODUCER_REWARD_SATOSHIS + calculated_fees;
 
         // Find ALL eligible pool nodes (all tiers, with maturity gate for Free)
