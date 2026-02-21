@@ -58,8 +58,17 @@ use wallet::WalletManager;
 #[command(name = "timed")]
 #[command(about = "TIME Coin Protocol Daemon", long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "config.toml")]
-    config: String,
+    /// Config file path (time.conf or legacy config.toml)
+    #[arg(short, long)]
+    conf: Option<String>,
+
+    /// Data directory override
+    #[arg(long)]
+    datadir: Option<String>,
+
+    /// Run on testnet (overrides config file)
+    #[arg(long)]
+    testnet: bool,
 
     #[arg(long)]
     listen_addr: Option<String>,
@@ -74,6 +83,7 @@ struct Args {
     #[arg(long)]
     demo: bool,
 
+    /// Generate default time.conf and masternode.conf, then exit
     #[arg(long)]
     generate_config: bool,
 }
@@ -97,49 +107,92 @@ async fn main() {
         }
     }
 
-    // Determine network type from config file or default to testnet
-    let network_type = if let Ok(cfg) = Config::load_from_file(&args.config) {
-        cfg.node.network_type()
+    // ─── Determine config path and network type ──────────────────────
+    // Priority: --conf flag > time.conf in data dir > legacy config.toml in cwd
+    let conf_path = if let Some(ref p) = args.conf {
+        std::path::PathBuf::from(p)
     } else {
+        let data_dir = config::get_data_dir();
+        let time_conf = data_dir.join("time.conf");
+        if time_conf.exists() {
+            time_conf
+        } else if std::path::Path::new("config.toml").exists() {
+            // Legacy fallback
+            std::path::PathBuf::from("config.toml")
+        } else {
+            // Will be created on first run
+            time_conf
+        }
+    };
+
+    let is_legacy_toml = conf_path.extension().is_some_and(|ext| ext == "toml");
+
+    // Determine network type
+    let network_type = if args.testnet {
         NetworkType::Testnet
+    } else if is_legacy_toml {
+        if let Ok(cfg) = Config::load_from_file(&conf_path.to_string_lossy()) {
+            cfg.node.network_type()
+        } else {
+            NetworkType::Testnet
+        }
+    } else {
+        config::detect_network_from_conf(&conf_path)
     };
 
     if args.generate_config {
-        let config = Config::default();
-        match config.save_to_file(&args.config) {
-            Ok(_) => {
-                println!("✅ Generated default config at: {}", args.config);
-                return;
-            }
+        let data_dir = config::get_network_data_dir(&network_type);
+        std::fs::create_dir_all(&data_dir).ok();
+        let gen_conf = data_dir.join("time.conf");
+        let gen_mn = data_dir.join("masternode.conf");
+        match config::generate_default_conf(&gen_conf) {
+            Ok(_) => println!("✅ Generated {}", gen_conf.display()),
             Err(e) => {
-                eprintln!("❌ Failed to generate config: {}", e);
+                eprintln!("❌ Failed to generate time.conf: {}", e);
                 std::process::exit(1);
             }
         }
+        match config::generate_default_masternode_conf(&gen_mn) {
+            Ok(_) => println!("✅ Generated {}", gen_mn.display()),
+            Err(e) => {
+                eprintln!("❌ Failed to generate masternode.conf: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
     }
 
-    // Load or create config with network-specific data directory
-    let mut config = match Config::load_or_create(&args.config, &network_type) {
-        Ok(cfg) => {
-            println!("✓ Loaded configuration from {}", args.config);
-            cfg
+    // Load config — time.conf or legacy TOML
+    let mut config = if is_legacy_toml {
+        match Config::load_or_create(&conf_path.to_string_lossy(), &network_type) {
+            Ok(cfg) => {
+                println!(
+                    "  ✓ Loaded legacy configuration from {}",
+                    conf_path.display()
+                );
+                cfg
+            }
+            Err(e) => {
+                eprintln!("❌ Failed to load config: {}", e);
+                std::process::exit(1);
+            }
         }
-        Err(e) => {
-            eprintln!("❌ Failed to load config: {}", e);
-            std::process::exit(1);
+    } else {
+        match Config::load_from_conf(&conf_path, &network_type) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                eprintln!("❌ Failed to load config: {}", e);
+                std::process::exit(1);
+            }
         }
     };
 
-    // CRITICAL FIX: Force disable compression if enabled (causes block corruption)
-    if config.storage.compress_blocks {
-        tracing::warn!("⚠️  Compression is enabled in config but causes corruption - forcing OFF");
-        config.storage.compress_blocks = false;
-        // Update the config file to prevent re-enabling on next restart
-        if let Err(e) = config.save_to_file(&args.config) {
-            tracing::error!("❌ Failed to save updated config: {}", e);
-        } else {
-            tracing::info!("✅ Updated config file: compression disabled");
-        }
+    // CLI overrides
+    if args.testnet {
+        config.node.network = "testnet".to_string();
+    }
+    if let Some(ref datadir) = args.datadir {
+        config.storage.data_dir = datadir.clone();
     }
 
     setup_logging(&config.logging, args.verbose);
