@@ -12,15 +12,18 @@ pub mod blockchain {
     pub const SATOSHIS_PER_TIME: u64 = 100_000_000;
     pub const BLOCK_REWARD_SATOSHIS: u64 = 100 * SATOSHIS_PER_TIME;
 
-    /// Reward split: 35% leader bonus + 65% per-tier pools (§10.4)
-    pub const PRODUCER_REWARD_SATOSHIS: u64 = 35 * SATOSHIS_PER_TIME; // 35 TIME leader bonus
+    /// Reward split: 30% leader bonus + 5% treasury + 65% per-tier pools (§10.4)
+    pub const PRODUCER_REWARD_SATOSHIS: u64 = 30 * SATOSHIS_PER_TIME; // 30 TIME leader bonus
+
+    /// Treasury allocation per block — deposited as on-chain state, not a UTXO
+    pub const TREASURY_POOL_SATOSHIS: u64 = 5 * SATOSHIS_PER_TIME; // 5 TIME
 
     /// Per-tier reward pools — each tier's allocation rotates among its active nodes
     pub const GOLD_POOL_SATOSHIS: u64 = 25 * SATOSHIS_PER_TIME; // 25 TIME
     pub const SILVER_POOL_SATOSHIS: u64 = 18 * SATOSHIS_PER_TIME; // 18 TIME
     pub const BRONZE_POOL_SATOSHIS: u64 = 14 * SATOSHIS_PER_TIME; // 14 TIME
     pub const FREE_POOL_SATOSHIS: u64 = 8 * SATOSHIS_PER_TIME; //  8 TIME
-    /// Total pool = 65 TIME (must equal BLOCK_REWARD - PRODUCER_REWARD)
+    /// Total pool = 65 TIME (must equal BLOCK_REWARD - PRODUCER_REWARD - TREASURY_POOL)
     pub const TOTAL_POOL_SATOSHIS: u64 =
         GOLD_POOL_SATOSHIS + SILVER_POOL_SATOSHIS + BRONZE_POOL_SATOSHIS + FREE_POOL_SATOSHIS;
 

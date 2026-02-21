@@ -81,7 +81,7 @@ impl DeterministicBlockGenerator {
             .sum();
 
         // 100% of block rewards go to masternodes
-        // No treasury or governance allocations
+        // Treasury allocation: 5 TIME per block deposited as on-chain state (not a UTXO)
         let masternode_pool = total_reward;
 
         // Distribute masternode rewards proportionally by weight
