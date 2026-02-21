@@ -20,6 +20,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use dashmap::DashMap;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
@@ -27,6 +28,9 @@ const BLOCK_TIME_SECONDS: i64 = constants::blockchain::BLOCK_TIME_SECONDS;
 const BLOCK_REWARD_SATOSHIS: u64 = constants::blockchain::BLOCK_REWARD_SATOSHIS;
 const PRODUCER_REWARD_SATOSHIS: u64 = constants::blockchain::PRODUCER_REWARD_SATOSHIS;
 const MIN_POOL_PAYOUT_SATOSHIS: u64 = constants::blockchain::MIN_POOL_PAYOUT_SATOSHIS;
+
+/// Number of reward-distribution violations before a producer is considered misbehaving
+const REWARD_VIOLATION_THRESHOLD: u64 = 3;
 
 // Security limits (Phase 1)
 const MAX_BLOCK_SIZE: usize = constants::blockchain::MAX_BLOCK_SIZE;
@@ -226,6 +230,9 @@ pub struct Blockchain {
     /// Last logged consensus result (height, hash) to suppress duplicate log lines
     #[allow(clippy::type_complexity)]
     last_consensus_log: Arc<RwLock<Option<(u64, [u8; 32])>>>,
+    /// Tracks reward-distribution violations per block producer address.
+    /// After REWARD_VIOLATION_THRESHOLD strikes the producer's proposals are rejected.
+    reward_violations: Arc<DashMap<String, u64>>,
 }
 
 impl Blockchain {
@@ -312,6 +319,7 @@ impl Blockchain {
             has_ever_had_peers: Arc::new(AtomicBool::new(false)),
             block_added_signal: Arc::new(tokio::sync::Notify::new()),
             last_consensus_log: Arc::new(RwLock::new(None)),
+            reward_violations: Arc::new(DashMap::new()),
         }
     }
 
@@ -5121,6 +5129,60 @@ impl Blockchain {
         Ok(())
     }
 
+    // ===== Reward Misbehavior Tracking =====
+
+    /// Check whether a producer has exceeded the reward-violation threshold.
+    pub fn is_producer_misbehaving(&self, producer_addr: &str) -> bool {
+        self.reward_violations
+            .get(producer_addr)
+            .map(|v| *v >= REWARD_VIOLATION_THRESHOLD)
+            .unwrap_or(false)
+    }
+
+    /// Record a reward-distribution violation for a block producer.
+    pub fn record_reward_violation(&self, producer_addr: &str) {
+        let mut count = self.reward_violations.entry(producer_addr.to_string()).or_insert(0);
+        *count += 1;
+        let strikes = *count;
+        if strikes >= REWARD_VIOLATION_THRESHOLD {
+            tracing::warn!(
+                "🚨 Producer {} has {} reward violation(s) — now MISBEHAVING, future proposals will be rejected",
+                producer_addr, strikes
+            );
+        } else {
+            tracing::warn!(
+                "⚠️ Producer {} reward violation ({}/{} strikes)",
+                producer_addr, strikes, REWARD_VIOLATION_THRESHOLD
+            );
+        }
+    }
+
+    /// Validate a block proposal's reward distribution BEFORE voting.
+    /// Strict: returns Err if rewards deviate or producer is misbehaving.
+    pub async fn validate_proposal_rewards(&self, block: &Block) -> Result<(), String> {
+        let producer_addr = &block.header.leader;
+
+        // Reject proposals from producers that have exceeded the misbehavior threshold
+        if !producer_addr.is_empty() && self.is_producer_misbehaving(producer_addr) {
+            return Err(format!(
+                "Producer {} is misbehaving ({} reward violations) — rejecting proposal",
+                producer_addr,
+                self.reward_violations.get(producer_addr).map(|v| *v).unwrap_or(0)
+            ));
+        }
+
+        // Run the pool distribution check with 0 fees as a baseline.
+        // If the check fails, record a violation and reject.
+        if let Err(e) = self.validate_pool_distribution(block, 0).await {
+            if !producer_addr.is_empty() {
+                self.record_reward_violation(producer_addr);
+            }
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
     // ===== Fork Detection and Reorganization =====
 
     /// Detect if we're on a different chain than a peer by comparing block hashes
@@ -8729,6 +8791,7 @@ impl Clone for Blockchain {
             has_ever_had_peers: self.has_ever_had_peers.clone(),
             block_added_signal: self.block_added_signal.clone(),
             last_consensus_log: self.last_consensus_log.clone(),
+            reward_violations: self.reward_violations.clone(),
         }
     }
 }
