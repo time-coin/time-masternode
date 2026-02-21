@@ -206,8 +206,9 @@ impl MasternodeRegistry {
         for outpoint in outpoints {
             if let Err(e) = utxo_manager.unlock_collateral(&outpoint) {
                 tracing::debug!(
-                    "Could not unlock collateral {:?}: {:?} (may already be unlocked)",
-                    outpoint,
+                    "Could not unlock collateral {}:{}: {:?} (may already be unlocked)",
+                    hex::encode(outpoint.txid),
+                    outpoint.vout,
                     e
                 );
             }
@@ -281,9 +282,10 @@ impl MasternodeRegistry {
                     if let Some(ref existing_outpoint) = info.masternode.collateral_outpoint {
                         if existing_outpoint == outpoint {
                             tracing::warn!(
-                                "🚫 Rejected masternode {} — collateral {:?} already used by {}",
+                                "🚫 Rejected masternode {} — collateral {}:{} already used by {}",
                                 masternode.address,
-                                outpoint,
+                                hex::encode(outpoint.txid),
+                                outpoint.vout,
                                 addr
                             );
                             return Err(RegistryError::DuplicateCollateral);
@@ -1073,9 +1075,10 @@ impl MasternodeRegistry {
                 // Verify UTXO still exists and is locked
                 if !utxo_manager.is_collateral_locked(collateral_outpoint) {
                     tracing::warn!(
-                        "⚠️ Masternode {} collateral {:?} is no longer locked",
+                        "⚠️ Masternode {} collateral {}:{} is no longer locked",
                         masternode_address,
-                        collateral_outpoint
+                        hex::encode(collateral_outpoint.txid),
+                        collateral_outpoint.vout
                     );
                     return false;
                 }
@@ -1083,9 +1086,10 @@ impl MasternodeRegistry {
                 // Verify UTXO exists
                 if utxo_manager.get_utxo(collateral_outpoint).await.is_err() {
                     tracing::warn!(
-                        "⚠️ Masternode {} collateral {:?} UTXO no longer exists",
+                        "⚠️ Masternode {} collateral {}:{} UTXO no longer exists",
                         masternode_address,
-                        collateral_outpoint
+                        hex::encode(collateral_outpoint.txid),
+                        collateral_outpoint.vout
                     );
                     return false;
                 }
