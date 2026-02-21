@@ -323,10 +323,23 @@ impl MasternodeRegistry {
                     masternode.address
                 );
             } else {
+                // If collateral outpoint changed, queue the old one for unlock
+                let old_outpoint = existing.masternode.collateral_outpoint.clone();
+                let new_outpoint = masternode.collateral_outpoint.clone();
+                if old_outpoint != new_outpoint {
+                    if let Some(old_op) = old_outpoint {
+                        tracing::info!(
+                            "🔓 Collateral changed for {} — queuing old outpoint for unlock",
+                            masternode.address
+                        );
+                        self.pending_collateral_unlocks.lock().push(old_op);
+                    }
+                }
+
                 // Update tier and collateral info on re-registration
                 existing.masternode.tier = masternode.tier;
                 existing.masternode.collateral = masternode.collateral;
-                existing.masternode.collateral_outpoint = masternode.collateral_outpoint.clone();
+                existing.masternode.collateral_outpoint = new_outpoint;
                 existing.masternode.public_key = masternode.public_key;
                 existing.reward_address = reward_address.clone();
             }
