@@ -12,6 +12,7 @@ pub mod crypto;
 pub mod error;
 pub mod finality_proof;
 pub mod masternode_authority;
+pub mod masternode_certificate;
 pub mod masternode_registry;
 pub mod network;
 pub mod network_type;

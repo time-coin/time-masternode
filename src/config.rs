@@ -1,12 +1,17 @@
 //! Configuration management for TIME Coin daemon.
 //!
+//! Supports two config formats:
+//! 1. **time.conf** (Dash-style key=value) — the primary format going forward
+//! 2. **config.toml** (legacy TOML) — still supported for backward compatibility
+//!
+//! On first run, if no config exists, time.conf and masternode.conf are
+//! auto-generated with free-node defaults in the data directory.
+//!
 //! Note: Some items appear as "dead code" in library checks because they're
-//! only used by the binary (main.rs). These include:
-//! - `get_data_dir()`, `get_network_data_dir()` - used for config path resolution
-//! - `NodeConfig::network_type()` - used to determine network type from config
-//! - `Config::load_from_file()`, etc. - used for config persistence
+//! only used by the binary (main.rs).
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -222,6 +227,23 @@ pub struct MasternodeConfig {
     pub collateral_vout: u32,
     #[serde(default = "default_tier")]
     pub tier: String,
+    /// Base58check-encoded Ed25519 private key issued by the website
+    #[serde(default)]
+    pub masternode_key: String,
+    /// Hex-encoded certificate (authority signature over masternode pubkey)
+    #[serde(default)]
+    pub masternode_cert: String,
+}
+
+/// A parsed entry from masternode.conf
+#[derive(Debug, Clone)]
+pub struct MasternodeConfEntry {
+    pub alias: String,
+    pub address: String,
+    pub masternode_key: String,
+    pub masternode_cert: String,
+    pub collateral_txid: String,
+    pub collateral_vout: u32,
 }
 
 fn default_tier() -> String {
@@ -551,6 +573,8 @@ impl Config {
                 collateral_txid: String::new(),
                 collateral_vout: 0,
                 tier: "free".to_string(),
+                masternode_key: String::new(),
+                masternode_cert: String::new(),
             },
             security: SecurityConfig {
                 enable_rate_limiting: true,
@@ -606,5 +630,532 @@ impl Config {
         let contents = toml::to_string_pretty(self)?;
         fs::write(path, contents)?;
         Ok(())
+    }
+
+    /// Load config from a Dash-style time.conf key=value file.
+    /// Falls back to defaults for any missing keys.
+    #[allow(dead_code)]
+    pub fn load_from_conf(
+        conf_path: &PathBuf,
+        network_type: &NetworkType,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let data_dir = get_network_data_dir(network_type);
+        fs::create_dir_all(&data_dir)?;
+
+        let mut config = Config::default();
+
+        // Set network-specific defaults
+        config.node.network = match network_type {
+            NetworkType::Mainnet => "mainnet".to_string(),
+            NetworkType::Testnet => "testnet".to_string(),
+        };
+        config.storage.data_dir = data_dir.to_string_lossy().to_string();
+
+        if conf_path.exists() {
+            let entries = parse_conf_file(conf_path)?;
+
+            // Apply key=value entries to config
+            if let Some(v) = entries.get("testnet") {
+                if v.last().is_some_and(|s| s == "1") {
+                    config.node.network = "testnet".to_string();
+                } else {
+                    config.node.network = "mainnet".to_string();
+                }
+            }
+            if let Some(v) = entries.get("port") {
+                if let Some(port) = v.last() {
+                    config.network.listen_address = format!("0.0.0.0:{}", port);
+                }
+            }
+            if let Some(v) = entries.get("listen") {
+                config.network.enable_peer_discovery = v.last().map_or(true, |s| s == "1");
+            }
+            if let Some(v) = entries.get("externalip") {
+                config.network.external_address = v.last().cloned();
+            }
+            if let Some(v) = entries.get("maxconnections") {
+                if let Some(val) = v.last().and_then(|s| s.parse::<u32>().ok()) {
+                    config.network.max_peers = val;
+                }
+            }
+            if let Some(v) = entries.get("server") {
+                config.rpc.enabled = v.last().map_or(true, |s| s == "1");
+            }
+            if let Some(v) = entries.get("rpcport") {
+                if let Some(port) = v.last() {
+                    config.rpc.listen_address = format!("127.0.0.1:{}", port);
+                }
+            }
+            if let Some(v) = entries.get("rpcbind") {
+                if let Some(addr) = v.last() {
+                    // If rpcbind has no port, keep existing port
+                    if addr.contains(':') {
+                        config.rpc.listen_address = addr.clone();
+                    } else {
+                        let port = config
+                            .rpc
+                            .listen_address
+                            .split(':')
+                            .next_back()
+                            .unwrap_or("24001")
+                            .to_string();
+                        config.rpc.listen_address = format!("{}:{}", addr, port);
+                    }
+                }
+            }
+            if let Some(v) = entries.get("rpcallowip") {
+                config.rpc.allow_origins = v.iter().map(|ip| format!("http://{}", ip)).collect();
+            }
+            if let Some(v) = entries.get("masternode") {
+                config.masternode.enabled = v.last().is_some_and(|s| s == "1");
+            }
+            if let Some(v) = entries.get("addnode") {
+                config.network.bootstrap_peers = v.clone();
+            }
+            if let Some(v) = entries.get("debug") {
+                if let Some(level) = v.last() {
+                    config.logging.level = level.clone();
+                }
+            }
+            if let Some(v) = entries.get("datadir") {
+                if let Some(dir) = v.last() {
+                    if !dir.is_empty() {
+                        config.storage.data_dir = dir.clone();
+                    }
+                }
+            }
+            if let Some(v) = entries.get("txindex") {
+                // txindex=1 means archive mode
+                if v.last().is_some_and(|s| s == "1") {
+                    config.storage.mode = "archive".to_string();
+                }
+            }
+
+            println!("  ✓ Loaded configuration from {}", conf_path.display());
+        } else {
+            // Generate default time.conf on first run
+            generate_default_conf(conf_path)?;
+            println!("  ✓ Generated default {}", conf_path.display());
+        }
+
+        // Load masternode.conf if it exists
+        let mn_conf_path = conf_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("masternode.conf");
+
+        if mn_conf_path.exists() {
+            let entries = parse_masternode_conf(&mn_conf_path)?;
+            if let Some(entry) = entries.first() {
+                config.masternode.enabled = true;
+                config.masternode.collateral_txid = entry.collateral_txid.clone();
+                config.masternode.collateral_vout = entry.collateral_vout;
+                config.masternode.masternode_key = entry.masternode_key.clone();
+                config.masternode.masternode_cert = entry.masternode_cert.clone();
+                if !entry.address.is_empty() {
+                    // Extract IP from IP:port
+                    let ip = entry.address.split(':').next().unwrap_or(&entry.address);
+                    config.network.external_address = Some(entry.address.clone());
+                    let _ = ip; // used above via entry.address
+                }
+                println!("  ✓ Loaded masternode config: alias={}", entry.alias);
+            }
+        } else if config.masternode.enabled {
+            // Generate blank masternode.conf template
+            generate_default_masternode_conf(&mn_conf_path)?;
+            println!("  ✓ Generated default {}", mn_conf_path.display());
+        }
+
+        Ok(config)
+    }
+}
+
+// ─── time.conf parser ────────────────────────────────────────────────
+
+/// Parse a Dash-style key=value config file.
+/// Supports # comments, blank lines, and repeatable keys (e.g., addnode).
+/// Returns a map of key → list of values (to handle repeated keys).
+#[allow(dead_code)]
+pub fn parse_conf_file(
+    path: &PathBuf,
+) -> Result<HashMap<String, Vec<String>>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (line_num, line) in contents.lines().enumerate() {
+        let line = line.trim();
+
+        // Skip comments and blank lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        // Parse key=value
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim().to_lowercase();
+            let value = value.trim().to_string();
+            map.entry(key).or_default().push(value);
+        } else {
+            tracing::warn!(
+                "⚠️ {}:{}: ignoring malformed line: {}",
+                path.display(),
+                line_num + 1,
+                line
+            );
+        }
+    }
+
+    Ok(map)
+}
+
+/// Detect network type from a time.conf without fully parsing it.
+#[allow(dead_code)]
+pub fn detect_network_from_conf(conf_path: &PathBuf) -> NetworkType {
+    if let Ok(entries) = parse_conf_file(conf_path) {
+        if let Some(v) = entries.get("testnet") {
+            if v.last().is_some_and(|s| s == "1") {
+                return NetworkType::Testnet;
+            }
+        }
+        // If testnet=0 or not present, check for mainnet key
+        if let Some(v) = entries.get("mainnet") {
+            if v.last().is_some_and(|s| s == "1") {
+                return NetworkType::Mainnet;
+            }
+        }
+    }
+    NetworkType::Testnet // default
+}
+
+// ─── masternode.conf parser ──────────────────────────────────────────
+
+/// Parse a masternode.conf file (one entry per line, space-delimited).
+/// Format: alias IP:port masternodekey masternodecert collateral_txid collateral_vout
+#[allow(dead_code)]
+pub fn parse_masternode_conf(
+    path: &PathBuf,
+) -> Result<Vec<MasternodeConfEntry>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let mut entries = Vec::new();
+
+    for (line_num, line) in contents.lines().enumerate() {
+        let line = line.trim();
+
+        // Skip comments and blank lines
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+
+        if parts.len() == 6 {
+            // Full format with key + cert
+            let vout = parts[5].parse::<u32>().map_err(|e| {
+                format!(
+                    "masternode.conf:{}: invalid collateral_vout '{}': {}",
+                    line_num + 1,
+                    parts[5],
+                    e
+                )
+            })?;
+
+            entries.push(MasternodeConfEntry {
+                alias: parts[0].to_string(),
+                address: parts[1].to_string(),
+                masternode_key: parts[2].to_string(),
+                masternode_cert: parts[3].to_string(),
+                collateral_txid: parts[4].to_string(),
+                collateral_vout: vout,
+            });
+        } else if parts.len() == 4 {
+            // Legacy format without key/cert (free nodes): alias IP:port txid vout
+            let vout = parts[3].parse::<u32>().map_err(|e| {
+                format!(
+                    "masternode.conf:{}: invalid collateral_vout '{}': {}",
+                    line_num + 1,
+                    parts[3],
+                    e
+                )
+            })?;
+
+            entries.push(MasternodeConfEntry {
+                alias: parts[0].to_string(),
+                address: parts[1].to_string(),
+                masternode_key: String::new(),
+                masternode_cert: String::new(),
+                collateral_txid: parts[2].to_string(),
+                collateral_vout: vout,
+            });
+        } else {
+            tracing::warn!(
+                "⚠️ masternode.conf:{}: expected 4 or 6 fields, got {} — skipping",
+                line_num + 1,
+                parts.len()
+            );
+        }
+    }
+
+    Ok(entries)
+}
+
+// ─── Default file generation ─────────────────────────────────────────
+
+/// Generate a default time.conf with commented documentation.
+#[allow(dead_code)]
+pub fn generate_default_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = r#"# TIME Coin Configuration File
+# https://time-coin.io
+#
+# Lines beginning with # are comments.
+# All settings are optional — defaults are shown below.
+
+# ─── Network ─────────────────────────────────────────────────
+# Run on testnet (1) or mainnet (0)
+testnet=1
+
+# Accept incoming connections
+listen=1
+
+# Override the default port (mainnet=24000, testnet=24100)
+#port=24100
+
+# Your public IP address (required for masternodes)
+#externalip=1.2.3.4
+
+# Maximum peer connections
+#maxconnections=50
+
+# ─── RPC ─────────────────────────────────────────────────────
+# Enable JSON-RPC server
+server=1
+
+# RPC port (mainnet=24001, testnet=24101)
+#rpcport=24101
+
+# IP addresses allowed to connect to RPC
+#rpcallowip=127.0.0.1
+
+# ─── Masternode ──────────────────────────────────────────────
+# Enable masternode mode (0=off, 1=on)
+# Collateral and key settings go in masternode.conf
+masternode=0
+
+# ─── Peers ───────────────────────────────────────────────────
+# Add seed nodes (one per line, can repeat)
+#addnode=seed1.time-coin.io
+#addnode=seed2.time-coin.io
+
+# ─── Logging ─────────────────────────────────────────────────
+# Log level: trace, debug, info, warn, error
+debug=info
+
+# ─── Storage ─────────────────────────────────────────────────
+# Maintain a full transaction index
+txindex=1
+
+# Custom data directory (leave commented for default)
+#datadir=
+"#;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Generate a default masternode.conf with instructions.
+#[allow(dead_code)]
+pub fn generate_default_masternode_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = r#"# TIME Coin Masternode Configuration
+#
+# Format (one entry per line):
+#   alias  IP:port  masternodekey  masternodecert  collateral_txid  collateral_vout
+#
+# Fields:
+#   alias            - A name for this masternode (e.g., mn1)
+#   IP:port          - Your masternode's public IP and port
+#   masternodekey    - Private key from time-coin.io registration (base58)
+#   masternodecert   - Certificate from time-coin.io registration (hex)
+#   collateral_txid  - Transaction ID of your collateral deposit
+#   collateral_vout  - Output index of your collateral (usually 0)
+#
+# Free nodes (no collateral) can omit key, cert, txid, and vout.
+#
+# Steps to set up a masternode:
+#   1. Register at https://time-coin.io/masternode-register with your email
+#   2. You'll receive a masternodekey and masternodecert
+#   3. Send collateral to yourself:
+#      time-cli sendtoaddress <your_address> 1000    (Bronze = 1,000 TIME)
+#      time-cli sendtoaddress <your_address> 10000   (Silver = 10,000 TIME)
+#      time-cli sendtoaddress <your_address> 100000  (Gold   = 100,000 TIME)
+#   4. Find your collateral TXID:
+#      time-cli listtransactions
+#   5. Add a line below and restart timed
+#
+# Example:
+#   mn1  69.167.168.176:24100  5HueCGU8rMjxEXxiP...  a1b2c3d4e5f6...  fc5b049a39807958cf...  0
+"#;
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, contents)?;
+    Ok(())
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_parse_conf_file() {
+        let dir = std::env::temp_dir().join("timecoin_test_conf");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test_time.conf");
+
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, "# comment line").unwrap();
+        writeln!(f, "testnet=1").unwrap();
+        writeln!(f, "port=24100").unwrap();
+        writeln!(f, "server=1").unwrap();
+        writeln!(f, "addnode=node1.example.com").unwrap();
+        writeln!(f, "addnode=node2.example.com").unwrap();
+        writeln!(f, "").unwrap();
+        writeln!(f, "  masternode = 0  ").unwrap();
+        drop(f);
+
+        let entries = parse_conf_file(&path).unwrap();
+        assert_eq!(entries.get("testnet").unwrap(), &vec!["1".to_string()]);
+        assert_eq!(entries.get("port").unwrap(), &vec!["24100".to_string()]);
+        assert_eq!(entries.get("server").unwrap(), &vec!["1".to_string()]);
+        assert_eq!(
+            entries.get("addnode").unwrap(),
+            &vec![
+                "node1.example.com".to_string(),
+                "node2.example.com".to_string()
+            ]
+        );
+        assert_eq!(entries.get("masternode").unwrap(), &vec!["0".to_string()]);
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parse_masternode_conf_full() {
+        let dir = std::env::temp_dir().join("timecoin_test_mn_conf");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("masternode.conf");
+
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, "# comment").unwrap();
+        writeln!(
+            f,
+            "mn1 69.167.168.176:24100 5HueCGU8rMjxEXxiPuD cert123abc txid123 0"
+        )
+        .unwrap();
+        drop(f);
+
+        let entries = parse_masternode_conf(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].alias, "mn1");
+        assert_eq!(entries[0].address, "69.167.168.176:24100");
+        assert_eq!(entries[0].masternode_key, "5HueCGU8rMjxEXxiPuD");
+        assert_eq!(entries[0].masternode_cert, "cert123abc");
+        assert_eq!(entries[0].collateral_txid, "txid123");
+        assert_eq!(entries[0].collateral_vout, 0);
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parse_masternode_conf_legacy() {
+        let dir = std::env::temp_dir().join("timecoin_test_mn_legacy");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("masternode.conf");
+
+        let mut f = fs::File::create(&path).unwrap();
+        writeln!(f, "mn1 69.167.168.176:24100 txid123 0").unwrap();
+        drop(f);
+
+        let entries = parse_masternode_conf(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].masternode_key, "");
+        assert_eq!(entries[0].masternode_cert, "");
+        assert_eq!(entries[0].collateral_txid, "txid123");
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_generate_default_conf() {
+        let dir = std::env::temp_dir().join("timecoin_test_gen");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("time.conf");
+
+        generate_default_conf(&path).unwrap();
+        assert!(path.exists());
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("testnet=1"));
+        assert!(contents.contains("server=1"));
+        assert!(contents.contains("masternode=0"));
+
+        // Verify it parses cleanly
+        let entries = parse_conf_file(&path).unwrap();
+        assert_eq!(entries.get("testnet").unwrap(), &vec!["1".to_string()]);
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_generate_default_masternode_conf() {
+        let dir = std::env::temp_dir().join("timecoin_test_mn_gen");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("masternode.conf");
+
+        generate_default_masternode_conf(&path).unwrap();
+        assert!(path.exists());
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("masternodekey"));
+        assert!(contents.contains("time-coin.io"));
+
+        // Should parse as empty (all lines are comments)
+        let entries = parse_masternode_conf(&path).unwrap();
+        assert!(entries.is_empty());
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_detect_network_from_conf() {
+        let dir = std::env::temp_dir().join("timecoin_test_detect");
+        fs::create_dir_all(&dir).unwrap();
+
+        // testnet=1
+        let path = dir.join("testnet.conf");
+        fs::write(&path, "testnet=1\n").unwrap();
+        assert_eq!(detect_network_from_conf(&path), NetworkType::Testnet);
+
+        // testnet=0 → mainnet
+        let path2 = dir.join("mainnet.conf");
+        fs::write(&path2, "testnet=0\n").unwrap();
+        assert_eq!(detect_network_from_conf(&path2), NetworkType::Testnet);
+
+        // mainnet=1
+        let path3 = dir.join("mainnet2.conf");
+        fs::write(&path3, "mainnet=1\n").unwrap();
+        assert_eq!(detect_network_from_conf(&path3), NetworkType::Mainnet);
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
