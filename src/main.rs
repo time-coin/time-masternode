@@ -797,6 +797,25 @@ async fn main() {
     // Create sync completion notifier for masternode announcement
     let sync_complete = Arc::new(tokio::sync::Notify::new());
 
+    // Decode certificate from config early (needed for registry and announcements)
+    let mn_certificate: [u8; 64] = if !config.masternode.masternode_cert.is_empty() {
+        match masternode_certificate::decode_certificate(&config.masternode.masternode_cert) {
+            Ok(cert) => {
+                tracing::info!("🔑 Loaded masternode certificate from config");
+                cert
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "⚠️ Invalid masternode certificate in config: {} — using empty",
+                    e
+                );
+                [0u8; 64]
+            }
+        }
+    } else {
+        [0u8; 64]
+    };
+
     // Register this node if running as masternode
     let masternode_address = masternode_info.as_ref().map(|mn| mn.address.clone());
 
@@ -808,6 +827,9 @@ async fn main() {
             Ok(()) => {
                 // Mark this as our local masternode
                 registry.set_local_masternode(mn.address.clone()).await;
+
+                // Store certificate in registry for server.rs announcements
+                registry.set_local_certificate(mn_certificate).await;
 
                 // Set signing key for consensus engine - use wallet's signing key
                 // so it matches the public key we announced
@@ -986,29 +1008,31 @@ async fn main() {
         // Start masternode announcement task
         let mn_for_announcement = mn.clone();
         let peer_registry_for_announcement = peer_connection_registry.clone();
+
         let announcement_handle = tokio::spawn(async move {
             // Wait 10 seconds for initial peer connections
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-            // Broadcast announcement immediately (don't wait for sync)
-            let announcement_v2 = NetworkMessage::MasternodeAnnouncementV2 {
+            // Broadcast V3 announcement with certificate
+            let announcement = NetworkMessage::MasternodeAnnouncementV3 {
                 address: mn_for_announcement.address.clone(),
                 reward_address: mn_for_announcement.wallet_address.clone(),
                 tier: mn_for_announcement.tier,
                 public_key: mn_for_announcement.public_key,
                 collateral_outpoint: mn_for_announcement.collateral_outpoint.clone(),
+                certificate: mn_certificate.to_vec(),
             };
 
             peer_registry_for_announcement
-                .broadcast(announcement_v2.clone())
+                .broadcast(announcement.clone())
                 .await;
-            tracing::info!("📢 Broadcast masternode announcement to network");
+            tracing::info!("📢 Broadcast masternode announcement (V3) to network");
 
             // Continue broadcasting every 60 seconds to ensure visibility
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 peer_registry_for_announcement
-                    .broadcast(announcement_v2.clone())
+                    .broadcast(announcement.clone())
                     .await;
                 tracing::debug!("📢 Re-broadcast masternode announcement");
             }

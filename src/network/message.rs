@@ -238,6 +238,17 @@ pub enum NetworkMessage {
         public_key: VerifyingKey,
         collateral_outpoint: Option<OutPoint>,
     },
+    /// V3 masternode announcement with website-issued certificate
+    MasternodeAnnouncementV3 {
+        address: String,
+        reward_address: String,
+        tier: MasternodeTier,
+        public_key: VerifyingKey,
+        collateral_outpoint: Option<OutPoint>,
+        /// Ed25519 signature from the authority over the masternode's public key (64 bytes)
+        /// Empty/zeroed for free nodes without certificates (allowed when enforcement is off)
+        certificate: Vec<u8>,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -353,6 +364,7 @@ impl NetworkMessage {
             NetworkMessage::FallbackVote { .. } => "FallbackVote",
             NetworkMessage::MasternodeStatusGossip { .. } => "MasternodeStatusGossip",
             NetworkMessage::MasternodeAnnouncementV2 { .. } => "MasternodeAnnouncementV2",
+            NetworkMessage::MasternodeAnnouncementV3 { .. } => "MasternodeAnnouncementV3",
             NetworkMessage::UnknownMessage => "UnknownMessage",
         }
     }

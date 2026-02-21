@@ -24,16 +24,25 @@ const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmno
 /// * `true` if the certificate is valid (signed by authority)
 /// * `true` if certificate enforcement is disabled (testnet development)
 /// * `false` if the certificate is invalid or authority key is not configured
-pub fn verify_masternode_certificate(
-    masternode_pubkey: &VerifyingKey,
-    certificate: &[u8; 64],
-) -> bool {
+pub fn verify_masternode_certificate(masternode_pubkey: &VerifyingKey, certificate: &[u8]) -> bool {
     if !ENFORCE_CERTIFICATE {
         tracing::debug!(
             "🔓 Certificate enforcement disabled — accepting masternode without verification"
         );
         return true;
     }
+
+    // Certificate must be exactly 64 bytes (Ed25519 signature)
+    let cert_bytes: &[u8; 64] = match certificate.try_into() {
+        Ok(b) => b,
+        Err(_) => {
+            tracing::warn!(
+                "❌ Invalid certificate length: expected 64 bytes, got {}",
+                certificate.len()
+            );
+            return false;
+        }
+    };
 
     // Check if authority key is configured (not all zeros)
     if MASTERNODE_AUTHORITY_PUBKEY == [0u8; 32] {
@@ -53,7 +62,7 @@ pub fn verify_masternode_certificate(
     };
 
     // Parse the certificate as an Ed25519 signature
-    let signature = Signature::from_bytes(certificate);
+    let signature = Signature::from_bytes(cert_bytes);
 
     // Verify: authority_key signed the masternode's public key bytes
     match authority_key.verify(masternode_pubkey.as_bytes(), &signature) {
