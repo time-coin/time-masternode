@@ -1758,13 +1758,19 @@ impl RpcHandler {
                 });
             }
 
-            let tx = Transaction {
+            let mut tx = Transaction {
                 version: 1,
                 inputs,
                 outputs,
                 lock_time: 0,
                 timestamp: chrono::Utc::now().timestamp(),
             };
+
+            // Sign all inputs with wallet key
+            self.consensus.sign_transaction(&mut tx).map_err(|e| RpcError {
+                code: -4,
+                message: format!("Failed to sign transaction: {}", e),
+            })?;
 
             let txid = tx.txid();
 
@@ -1935,7 +1941,7 @@ impl RpcHandler {
             .iter()
             .map(|utxo| TxInput {
                 previous_output: utxo.outpoint.clone(),
-                script_sig: vec![], // TODO: Sign with wallet key
+                script_sig: vec![],
                 sequence: 0xFFFFFFFF,
             })
             .collect();
@@ -1955,13 +1961,19 @@ impl RpcHandler {
             script_pubkey: output_address.as_bytes().to_vec(),
         }];
 
-        let tx = Transaction {
+        let mut tx = Transaction {
             version: 1,
             inputs,
             outputs,
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
         };
+
+        // Sign all inputs with wallet key
+        self.consensus.sign_transaction(&mut tx).map_err(|e| RpcError {
+            code: -4,
+            message: format!("Failed to sign transaction: {}", e),
+        })?;
 
         let txid = tx.txid();
 
