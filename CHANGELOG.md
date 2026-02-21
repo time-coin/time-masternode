@@ -31,6 +31,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Collateral Recollateralization Race Condition
+- **CRITICAL: `check_collateral_validity()` no longer falsely deregisters masternodes during recollateralization**
+  - `cleanup_invalid_collaterals()` ran inside `add_block()` after `process_block_utxos()` created a new collateral UTXO but before it was locked — the masternode was incorrectly deregistered
+  - Now auto-locks valid Unspent collateral UTXOs instead of declaring them invalid
+- **CRITICAL: Local masternode is never auto-deregistered by `cleanup_invalid_collaterals()`**
+  - Operator must explicitly disable via `enabled = false` in config
+  - Prevents wallet blindness where all RPC balance/UTXO queries returned 0
+- **Wallet RPCs (`getbalance`, `listunspent`) now fall back to stored `local_wallet_address`**
+  - If `get_local_masternode()` returns `None` after unexpected deregistration, UTXOs are still visible
+
+### Security — Block Reward Enforcement & Misbehavior Tracking
+- **Block reward distribution is validated BEFORE voting** (was only checked during `add_block()`)
+  - `validate_block_before_vote()` now calls `validate_proposal_rewards()` which runs the full pool distribution check
+  - If rewards deviate beyond `GOLD_POOL_SATOSHIS` (25 TIME) the node refuses to vote
+  - Block fails to reach consensus → TimeGuard fallback → next VRF producer takes over
+- **Per-producer misbehavior tracking** with lifetime violation counter
+  - After 3 reward violations a producer is marked as misbehaving
+  - All future proposals from that producer are rejected
+  - Violations are logged: `⚠️ Producer X reward violation (N/3 strikes)`
+  - Threshold breach: `🚨 Producer X is MISBEHAVING, future proposals will be rejected`
+- **Reward deviation tolerance capped at `GOLD_POOL_SATOSHIS` (25 TIME) per recipient**
+  - Prevents modified nodes from skewing reward distribution within a tier pool
+  - Total block reward is still strictly validated (100 TIME + fees)
+  - Per-recipient deviations within the cap are accepted with a warning (handles masternode list divergence)
+
 ### Security — Masternode Collateral & UTXO Hardening
 - **CRITICAL: Prevent duplicate collateral registration across masternodes**
   - Same UTXO could register multiple masternodes (outpoint uniqueness not enforced)

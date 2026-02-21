@@ -149,9 +149,24 @@ All nodes MUST produce identical reward lists because:
 4. **Same selection**: Top 25 per tier, identical across all validators
 5. **Same arithmetic**: Integer division with remainder to last recipient
 
-### Validation
+### Pre-Vote Reward Validation
 
-Every validating node independently re-derives the expected reward list in `validate_pool_distribution()` and rejects blocks with incorrect distributions. Tolerance of 1 TIME per output handles minor chain-view divergence during sync.
+Block reward distribution is validated **before voting** in `validate_block_before_vote()`. If the proposed rewards deviate beyond `GOLD_POOL_SATOSHIS` (25 TIME) per recipient, the node refuses to vote. The block fails to reach consensus and TimeGuard fallback selects the next VRF producer.
+
+### Post-Consensus Tolerance
+
+During `add_block()`, per-recipient deviations up to `GOLD_POOL_SATOSHIS` (25 TIME) are accepted with a warning to handle minor masternode list divergence. Deviations beyond the cap are hard-rejected. The total block reward is always strictly validated.
+
+### Producer Misbehavior Tracking
+
+Each node tracks reward-distribution violations per block producer address (lifetime counter). After **3 violations** (`REWARD_VIOLATION_THRESHOLD`), the producer is marked as **misbehaving** and all future proposals from that address are rejected without voting. This prevents modified nodes from repeatedly submitting blocks with skewed reward distributions.
+
+**Log output:**
+```
+⚠️ Producer X reward violation (1/3 strikes)
+⚠️ Producer X reward violation (2/3 strikes)
+🚨 Producer X has 3 reward violation(s) — now MISBEHAVING, future proposals will be rejected
+```
 
 ---
 
@@ -167,6 +182,7 @@ Every validating node independently re-derives the expected reward list in `vali
 | `MIN_POOL_PAYOUT_SATOSHIS` | 10⁸ | Minimum 1 TIME per recipient |
 | `MAX_TIER_RECIPIENTS` | 25 | Max recipients per tier per block |
 | `FREE_MATURITY_BLOCKS` | 72 | Free tier maturity gate (mainnet) |
+| `REWARD_VIOLATION_THRESHOLD` | 3 | Strikes before producer is marked misbehaving |
 
 ---
 

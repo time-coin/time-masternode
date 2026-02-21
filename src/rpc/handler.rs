@@ -101,6 +101,7 @@ impl RpcHandler {
             "unlockorphanedutxos" => self.unlock_orphaned_utxos().await,
             "forceunlockall" => self.force_unlock_all().await,
             "gettransactions" => self.get_transactions_batch(&params_array).await,
+            "gettreasurybalance" => self.get_treasury_balance().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -887,6 +888,14 @@ impl RpcHandler {
         })?;
 
         Ok(json!(hex::encode(tx_bytes)))
+    }
+
+    async fn get_treasury_balance(&self) -> Result<Value, RpcError> {
+        let satoshis = self.blockchain.get_treasury_balance();
+        Ok(json!({
+            "balance": satoshis as f64 / 100_000_000.0,
+            "satoshis": satoshis
+        }))
     }
 
     async fn get_balance(&self, params: &[Value]) -> Result<Value, RpcError> {
@@ -1776,10 +1785,12 @@ impl RpcHandler {
             };
 
             // Sign all inputs with wallet key
-            self.consensus.sign_transaction(&mut tx).map_err(|e| RpcError {
-                code: -4,
-                message: format!("Failed to sign transaction: {}", e),
-            })?;
+            self.consensus
+                .sign_transaction(&mut tx)
+                .map_err(|e| RpcError {
+                    code: -4,
+                    message: format!("Failed to sign transaction: {}", e),
+                })?;
 
             let txid = tx.txid();
 
@@ -1979,10 +1990,12 @@ impl RpcHandler {
         };
 
         // Sign all inputs with wallet key
-        self.consensus.sign_transaction(&mut tx).map_err(|e| RpcError {
-            code: -4,
-            message: format!("Failed to sign transaction: {}", e),
-        })?;
+        self.consensus
+            .sign_transaction(&mut tx)
+            .map_err(|e| RpcError {
+                code: -4,
+                message: format!("Failed to sign transaction: {}", e),
+            })?;
 
         let txid = tx.txid();
 
