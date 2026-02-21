@@ -898,6 +898,9 @@ impl RpcHandler {
             addr.to_string()
         } else if let Some(local_mn) = self.registry.get_local_masternode().await {
             local_mn.reward_address
+        } else if let Some(wallet_addr) = self.registry.get_local_wallet_address().await {
+            // Fallback: masternode may have been deregistered but wallet address is still valid
+            wallet_addr
         } else {
             return Ok(json!({
                 "balance": 0.0,
@@ -947,6 +950,12 @@ impl RpcHandler {
             .get_local_masternode()
             .await
             .map(|mn| mn.reward_address);
+
+        // Fallback: if masternode was deregistered, use stored wallet address
+        let local_address = match local_address {
+            Some(addr) => Some(addr),
+            None => self.registry.get_local_wallet_address().await,
+        };
 
         let local_addr = match &local_address {
             Some(addr) => addr.clone(),
