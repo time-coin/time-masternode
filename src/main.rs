@@ -108,20 +108,37 @@ async fn main() {
     }
 
     // ─── Determine config path and network type ──────────────────────
-    // Priority: --conf flag > time.conf in data dir > legacy config.toml in cwd
+    // Priority: --conf flag > time.conf/config.toml in data dirs > config.toml in CWD
     let conf_path = if let Some(ref p) = args.conf {
         std::path::PathBuf::from(p)
     } else {
-        let data_dir = config::get_data_dir();
-        let time_conf = data_dir.join("time.conf");
-        if time_conf.exists() {
-            time_conf
+        let base_dir = config::get_data_dir();
+        let testnet_dir = config::get_network_data_dir(&NetworkType::Testnet);
+
+        if args.testnet {
+            // Explicit --testnet: check testnet dir first
+            if testnet_dir.join("time.conf").exists() {
+                testnet_dir.join("time.conf")
+            } else if testnet_dir.join("config.toml").exists() {
+                testnet_dir.join("config.toml")
+            } else {
+                testnet_dir.join("time.conf")
+            }
+        } else if base_dir.join("time.conf").exists() {
+            base_dir.join("time.conf")
+        } else if base_dir.join("config.toml").exists() {
+            base_dir.join("config.toml")
+        } else if testnet_dir.join("time.conf").exists() {
+            testnet_dir.join("time.conf")
+        } else if testnet_dir.join("config.toml").exists() {
+            // Legacy: config.toml in testnet dir (common existing setup)
+            testnet_dir.join("config.toml")
         } else if std::path::Path::new("config.toml").exists() {
-            // Legacy fallback
+            // Legacy fallback — config.toml in CWD
             std::path::PathBuf::from("config.toml")
         } else {
-            // Will be created on first run
-            time_conf
+            // Default: create in testnet dir (testnet is default network)
+            testnet_dir.join("time.conf")
         }
     };
 
