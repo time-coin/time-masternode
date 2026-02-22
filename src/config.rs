@@ -816,7 +816,7 @@ impl Config {
             println!("  ✓ Loaded configuration from {}", conf_path.display());
         } else {
             // Generate default time.conf on first run
-            generate_default_conf(conf_path)?;
+            generate_default_conf_for_network(conf_path, network_type)?;
             println!("  ✓ Generated default {}", conf_path.display());
         }
 
@@ -907,7 +907,9 @@ pub fn detect_network_from_conf(conf_path: &PathBuf) -> NetworkType {
             }
         }
     }
-    NetworkType::Testnet // default
+    // No explicit network setting — default to mainnet.
+    // Testnet nodes must have testnet=1 in their time.conf.
+    NetworkType::Mainnet
 }
 
 // ─── masternode.conf parser ──────────────────────────────────────────
@@ -974,9 +976,18 @@ pub fn parse_masternode_conf(
 // ─── Default file generation ─────────────────────────────────────────
 
 /// Generate a default time.conf with commented documentation.
+/// Pass `network_type` to set the `testnet=` line appropriately.
 #[allow(dead_code)]
-pub fn generate_default_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let contents = r#"# TIME Coin Configuration File
+pub fn generate_default_conf_for_network(
+    path: &PathBuf,
+    network_type: &NetworkType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let testnet_line = match network_type {
+        NetworkType::Testnet => "testnet=1",
+        NetworkType::Mainnet => "#testnet=0",
+    };
+    let contents = format!(
+        r#"# TIME Coin Configuration File
 # https://time-coin.io
 #
 # Lines beginning with # are comments.
@@ -984,7 +995,7 @@ pub fn generate_default_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::E
 
 # ─── Network ─────────────────────────────────────────────────
 # Run on testnet (1) or mainnet (0)
-testnet=1
+{}
 
 # Accept incoming connections
 listen=1
@@ -1013,7 +1024,7 @@ server=1
 # Collateral settings go in masternode.conf
 masternode=0
 
-# Masternode private key (generate with: time-cli masternodegenkey)
+# Masternode private key (generate with: time-cli masternode genkey)
 #masternodeprivkey=
 
 # ─── Peers ───────────────────────────────────────────────────
@@ -1031,13 +1042,21 @@ txindex=1
 
 # Custom data directory (leave commented for default)
 #datadir=
-"#;
+"#,
+        testnet_line
+    );
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, contents)?;
     Ok(())
+}
+
+/// Generate a default time.conf (mainnet defaults).
+#[allow(dead_code)]
+pub fn generate_default_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    generate_default_conf_for_network(path, &NetworkType::Mainnet)
 }
 
 /// Generate a default masternode.conf with instructions.
@@ -1190,15 +1209,20 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("time.conf");
 
+        // Mainnet default
         generate_default_conf(&path).unwrap();
         assert!(path.exists());
-
         let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("testnet=1"));
+        assert!(contents.contains("#testnet=0"));
         assert!(contents.contains("server=1"));
         assert!(contents.contains("masternode=0"));
 
-        // Verify it parses cleanly
+        fs::remove_file(&path).ok();
+
+        // Testnet explicit
+        generate_default_conf_for_network(&path, &NetworkType::Testnet).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("testnet=1"));
         let entries = parse_conf_file(&path).unwrap();
         assert_eq!(entries.get("testnet").unwrap(), &vec!["1".to_string()]);
 
@@ -1240,7 +1264,7 @@ mod tests {
         // testnet=0 → mainnet
         let path2 = dir.join("mainnet.conf");
         fs::write(&path2, "testnet=0\n").unwrap();
-        assert_eq!(detect_network_from_conf(&path2), NetworkType::Testnet);
+        assert_eq!(detect_network_from_conf(&path2), NetworkType::Mainnet);
 
         // mainnet=1
         let path3 = dir.join("mainnet2.conf");
