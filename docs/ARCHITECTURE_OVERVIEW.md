@@ -1,13 +1,30 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-02-09  
-**Version:** 1.1.0 (Fork Resolution & Dead Code Cleanup)
+**Last Updated:** 2026-02-22  
+**Version:** 1.2.0 (Fork Resolution Consolidation & VRF Tightening)
 
 ---
 
-## Recent Updates (v1.1.0 - February 1, 2026)
+## Recent Updates (v1.2.0 - February 22, 2026)
 
-### Critical Bug Fixes
+### Fork Resolution Simplification
+
+- **Removed stake override logic** from `fork_resolver.rs`: stake can no longer override the longest chain rule
+- **Three simple rules**: (1) reject future timestamps, (2) longer chain always wins, (3) same height uses stake then hash tiebreaker
+- **`handle_fork()`** simplified to flat early-return structure (no stake override acceptance path)
+- **`check_2_3_consensus_for_production()`** now counts behind-peers as agreeing and includes own weight in total
+
+### VRF Sortition Tightening
+
+- **`TARGET_PROPOSERS` reduced from 3 to 1**: targets exactly one block producer per slot, reducing competing blocks
+- **Wall-clock deadlock detection**: VRF threshold relaxation now uses real elapsed time waiting at a height, not time since slot was scheduled (prevents all nodes being eligible during catch-up)
+- **Free-tier sybil protection**: Free nodes require 60s of deadlock (attempt ≥ 6) before receiving VRF boost
+
+### Catch-up Micro-fork Prevention
+
+- **Non-consensus peer filter relaxed for small gaps**: blocks from peers 1-5 blocks ahead are accepted from any whitelisted peer (consensus list is stale during rapid catch-up)
+
+### Previous Updates (v1.1.0 - February 2026)
 
 **Bug #4: Fork Resolution Inconsistency (Feb 1, 2026)**
 - **Issue**: VRF tiebreaker used "higher score wins" but hash tiebreaker used "lower hash wins"
@@ -180,10 +197,10 @@ pub struct TimeLockConsensus {
 1. **Longer chain wins** - Higher block height is always canonical
 2. **Lower hash wins** - At equal height, lexicographically smaller block hash is canonical
 
-**Consistency:** This "lower hash wins" rule is applied uniformly across:
-- `blockchain.rs` - `choose_canonical_chain()` and `compare_chain_with_peers()` (2/3 weighted stake)
-- `ai/fork_resolver.rs` - Longest-chain fork decisions
-- `masternode_authority.rs` - Masternode chain authority analysis (tier-based tiebreaker)
+**Consistency:** This rule is applied uniformly across:
+- `blockchain.rs` - `compare_chain_with_peers()` (height-first, stake tiebreaker)
+- `ai/fork_resolver.rs` - Longest-chain fork decisions (3 simple rules)
+- `masternode_authority.rs` - Masternode chain authority analysis
 - `network/peer_connection.rs` - Peer chain comparison
 
 **Why lower hash?**

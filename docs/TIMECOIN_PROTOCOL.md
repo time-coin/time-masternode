@@ -678,7 +678,7 @@ Each masternode `i` in the AVS independently evaluates whether it is eligible to
 
 3. Check eligibility threshold:
    - `threshold_i = (effective_weight_i / total_effective_weight) × TARGET_PROPOSERS × 2^64`
-   - `TARGET_PROPOSERS = 3` (tuned for ≥95% probability of at least one proposer per slot)
+   - `TARGET_PROPOSERS = 1` (targets exactly one proposer per slot to minimize competing blocks)
    - Node is eligible if `score_i < threshold_i`
 
 4. If eligible, broadcast `TimeLockBlockProposal` containing the block with `vrf_proof`, `vrf_output`, and `vrf_score` in the header.
@@ -689,10 +689,10 @@ Lower `score_i` is better. Among multiple valid proposals, the one with the lowe
 - **Private selection:** Only the selected node knows it is eligible until it reveals the VRF proof (DDoS resistant)
 - **Verifiable:** Any node can verify the VRF proof using the proposer's public key
 - **Fair:** Fairness bonus ensures all tiers eventually produce blocks
-- **Reliable:** TARGET_PROPOSERS=3 ensures high probability (≥95%) of at least one proposer per slot
+- **Tight selection:** TARGET_PROPOSERS=1 ensures ~67% probability of exactly one proposer per slot with 6 equal-weight nodes; empty slots are resolved by the timeout fallback below
 
-**Timeout Fallback:**
-If no valid proposal is received within 10 seconds, nodes progressively relax the threshold by multiplying `effective_weight_i` by `2^attempt` (where attempt increments every 10s). After ~60 seconds, all nodes become eligible (emergency fallback).
+**Timeout Fallback (Deadlock Recovery):**
+If no valid proposal is received within 10 seconds of **wall-clock wait time** at the current height, nodes progressively relax the threshold by multiplying `effective_weight_i` by `2^attempt` (where attempt increments every 10s of real waiting). This uses actual elapsed time since the node started waiting for a given height, NOT time since the slot was scheduled—preventing all nodes from being immediately eligible during catch-up scenarios. After ~20 seconds of deadlock, probability of at least one proposer exceeds 99.9%. Free-tier nodes require 60s of deadlock (attempt ≥ 6) before receiving any VRF boost, maintaining sybil resistance.
 
 **Security Note (VRF Grinding Mitigation):**
 The VRF input MUST include `prev_block_hash` to prevent grinding attacks. The domain separator `"TIMECOIN_VRF_V2"` and block `height` are predictable, but `prev_block_hash` changes with each block and cannot be known in advance, making pre-computation attacks infeasible. This follows best practices from Algorand, Ethereum 2.0, and Cardano.
