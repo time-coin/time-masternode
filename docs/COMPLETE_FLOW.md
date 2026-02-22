@@ -275,18 +275,13 @@ FinalityVoteBroadcast
 
 ### 4.4 Fork Resolution
 
-Stake-weighted longest-chain rule with tiered override:
+Longest valid chain always wins (simplified in v1.2.0):
 
 **Chain comparison in `compare_chain_with_peers()` (blockchain.rs):**
 1. **Height-first** (primary): longest chain wins
-2. **Stake weight override** (within small gap): if both chains are within `MAX_STAKE_OVERRIDE_DEPTH` (2 blocks) of the tallest, stake weight becomes the primary criterion
-3. **Stake tiebreaker** (same height): higher cumulative `sampling_weight()` wins
-4. **Peer count** (same height + weight): more supporting peers wins
-5. **Deterministic hash** (final): lexicographically lower block hash wins
-
-**Stake override constants (`fork_resolver.rs`):**
-- `MAX_STAKE_OVERRIDE_DEPTH = 2` — maximum height deficit stake can override
-- `MIN_STAKE_OVERRIDE_RATIO = 2` — shorter chain needs ≥2× the taller chain's cumulative stake
+2. **Stake tiebreaker** (same height): higher cumulative `sampling_weight()` wins
+3. **Peer count** (same height + weight): more supporting peers wins
+4. **Deterministic hash** (final): lexicographically lower block hash wins
 
 **Masternode tier weights (`sampling_weight()`):**
 - Free = 1, Bronze = 10, Silver = 100, Gold = 1000
@@ -294,13 +289,11 @@ Stake-weighted longest-chain rule with tiered override:
 
 **`handle_fork()` decision flow (blockchain.rs):**
 1. Find common ancestor via binary search
-2. Security checks: reject genesis reorgs, reject depth > 500 blocks
-3. Compute cumulative `our_stake_weight` and `peer_stake_weight`
-4. Call `fork_resolver.resolve_fork()` which applies the three-tier logic:
+2. Security checks: reject genesis reorgs, reject depth > 500 blocks, reject future timestamps
+3. Call `fork_resolver.resolve_fork()` which applies simple rules:
+   - Longer chain always wins (regardless of stake)
    - Same height → stake tiebreaker, then hash
-   - Gap ≤ 2 blocks → shorter chain wins if it has ≥2× stake
-   - Gap > 2 blocks → longer chain always wins
-5. Accept reorg to shorter chain only if `stake_override = true`
+4. If accepted, perform reorg: roll back to ancestor, replay peer chain
 
 **Fork alert protocol (`message_handler.rs`):**
 - When we're ahead: send `ForkAlert` to lagging peers (rate-limited to once per 60s per peer)
@@ -329,7 +322,7 @@ TimeCoin integrates a centralized AI system (`AISystem` struct in `src/ai/mod.rs
 | **NetworkOptimizer** | Connection/bandwidth optimization, network health scoring | Peer metrics, network health |
 | **AIMetricsCollector** | Aggregate dashboard of all AI subsystem metrics | All other AI modules |
 | **ConsensusHealthMonitor** | Track peer agreement ratios, fork detection | Wired directly in Blockchain struct |
-| **ForkResolver** | Multi-factor fork resolution with AI scoring | Wired directly in Blockchain struct |
+| **ForkResolver** | Longest-chain fork resolution with stake tiebreaker | Wired directly in Blockchain struct |
 | **AITransactionValidator** | Spam/dust detection on incoming transactions | Wired via ConsensusEngine |
 
 **Removed modules (Feb 2026):** TransactionAnalyzer (results never queried), ResourceManager (methods never called)
@@ -582,8 +575,6 @@ Without the sled flush, dirty pages are lost, causing block corruption ("unexpec
 | Stall timeout | 30s | Time before liveness fallback triggers |
 | Fallback rounds | 5 max | Maximum fallback resolution rounds |
 | Max reorg depth | 500 blocks | Maximum fork rollback depth |
-| Stake override depth | 2 blocks | Max height gap for stake-weighted override |
-| Stake override ratio | 2× | Shorter chain needs ≥2× taller chain's stake |
 | Ping interval | 30s | Peer heartbeat |
 | Pong timeout | 90s (300s in peer_connection.rs) | Max time without pong |
 | Fork alert rate limit | 60s | Max fork alert frequency per peer |
@@ -606,7 +597,7 @@ src/
 │   ├── attack_detector.rs     # Sybil/eclipse/fork bombing detection + enforcement
 │   ├── adaptive_reconnection.rs # Smart peer reconnection delays
 │   ├── consensus_health.rs    # Network consensus health monitoring
-│   ├── fork_resolver.rs       # Stake-weighted fork resolution (longest chain + stake override)
+│   ├── fork_resolver.rs       # Longest-chain fork resolution with stake tiebreaker
 │   ├── metrics_dashboard.rs   # AI metrics aggregation dashboard
 │   ├── network_optimizer.rs   # Connection/bandwidth optimization
 │   ├── peer_selector.rs       # AI-powered peer scoring
