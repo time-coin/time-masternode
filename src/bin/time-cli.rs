@@ -251,7 +251,14 @@ enum Commands {
     // ============================================================
     // MASTERNODE COMMANDS
     // ============================================================
-    /// Get masternode information (connected only by default)
+    /// Masternode commands (genkey, list, status)
+    #[command(next_help_heading = "Masternode")]
+    Masternode {
+        #[command(subcommand)]
+        subcmd: MasternodeCommands,
+    },
+
+    /// Get masternode information (connected only by default) [alias for: masternode list]
     #[command(next_help_heading = "Masternode")]
     MasternodeList {
         /// Show all masternodes including disconnected
@@ -259,13 +266,9 @@ enum Commands {
         all: bool,
     },
 
-    /// Get masternode status
+    /// Get masternode status [alias for: masternode status]
     #[command(next_help_heading = "Masternode")]
     MasternodeStatus,
-
-    /// Generate a new masternode private key
-    #[command(next_help_heading = "Masternode")]
-    MasternodeGenkey,
 
     /// List all locked collaterals
     #[command(next_help_heading = "Masternode")]
@@ -356,6 +359,21 @@ enum Commands {
     ForceUnlockAll,
 }
 
+#[derive(Subcommand, Debug)]
+#[command(rename_all = "lowercase")]
+enum MasternodeCommands {
+    /// Generate a new masternode private key
+    Genkey,
+    /// Get masternode information (connected only by default)
+    List {
+        /// Show all masternodes including disconnected
+        #[arg(long)]
+        all: bool,
+    },
+    /// Get masternode status
+    Status,
+}
+
 #[derive(Serialize, Deserialize)]
 struct RpcRequest {
     jsonrpc: String,
@@ -436,7 +454,11 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } => ("listreceivedbyaddress", json!([minconf, include_empty])),
         Commands::MasternodeList { all } => ("masternodelist", json!([all])),
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
-        Commands::MasternodeGenkey => ("masternodegenkey", json!([])),
+        Commands::Masternode { subcmd } => match subcmd {
+            MasternodeCommands::Genkey => ("masternodegenkey", json!([])),
+            MasternodeCommands::List { all } => ("masternodelist", json!([all])),
+            MasternodeCommands::Status => ("masternodestatus", json!([])),
+        },
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
@@ -1030,7 +1052,9 @@ fn print_human_readable(
                 );
             }
         }
-        Commands::MasternodeGenkey => {
+        Commands::Masternode {
+            subcmd: MasternodeCommands::Genkey,
+        } => {
             if let Some(key) = result.as_str() {
                 println!("{}", key);
             } else {
