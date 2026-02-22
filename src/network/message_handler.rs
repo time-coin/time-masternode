@@ -1991,15 +1991,8 @@ impl MessageHandler {
             self.direction, peer_ip, tier
         );
 
-        // Verify masternode certificate (website-issued key)
-        if !crate::masternode_certificate::verify_masternode_certificate(&public_key, &certificate)
-        {
-            warn!(
-                "❌ [{}] Rejecting masternode {} — invalid certificate (not registered at time-coin.io)",
-                self.direction, peer_ip
-            );
-            return Ok(None);
-        }
+        // Certificate field ignored (certificate system removed in v1.2.0)
+        let _ = &certificate;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

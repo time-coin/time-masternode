@@ -235,6 +235,35 @@ async fn main() {
     };
     println!();
 
+    // Decode masternodeprivkey from time.conf if provided (used as consensus signing key)
+    let masternode_signing_key: Option<ed25519_dalek::SigningKey> =
+        if !config.masternode.masternodeprivkey.is_empty() {
+            match masternode_certificate::decode_masternode_key(
+                &config.masternode.masternodeprivkey,
+            ) {
+                Ok(secret_bytes) => {
+                    let key = ed25519_dalek::SigningKey::from_bytes(&secret_bytes);
+                    println!("✓ Loaded masternodeprivkey from time.conf");
+                    Some(key)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠️ Invalid masternodeprivkey in time.conf: {} — using wallet key",
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    // Public key for masternode identity: from masternodeprivkey if set, else wallet
+    let mn_public_key = masternode_signing_key
+        .as_ref()
+        .map(|k| k.verifying_key())
+        .unwrap_or(*wallet.public_key());
+
     // Initialize masternode info for later registration
     let mut masternode_info: Option<types::Masternode> = if config.masternode.enabled {
         // Always use the wallet's address (auto-generated per node)
@@ -315,7 +344,7 @@ async fn main() {
                 wallet_address.clone(),
                 resolved_tier.collateral(),
                 outpoint,
-                *wallet.public_key(),
+                mn_public_key,
                 resolved_tier,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -328,7 +357,7 @@ async fn main() {
                 ip_only,
                 wallet_address.clone(),
                 resolved_tier.collateral(),
-                *wallet.public_key(),
+                mn_public_key,
                 resolved_tier,
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -797,25 +826,6 @@ async fn main() {
     // Create sync completion notifier for masternode announcement
     let sync_complete = Arc::new(tokio::sync::Notify::new());
 
-    // Decode certificate from config early (needed for registry and announcements)
-    let mn_certificate: [u8; 64] = if !config.masternode.masternode_cert.is_empty() {
-        match masternode_certificate::decode_certificate(&config.masternode.masternode_cert) {
-            Ok(cert) => {
-                tracing::info!("🔑 Loaded masternode certificate from config");
-                cert
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "⚠️ Invalid masternode certificate in config: {} — using empty",
-                    e
-                );
-                [0u8; 64]
-            }
-        }
-    } else {
-        [0u8; 64]
-    };
-
     // Register this node if running as masternode
     let masternode_address = masternode_info.as_ref().map(|mn| mn.address.clone());
 
@@ -828,12 +838,18 @@ async fn main() {
                 // Mark this as our local masternode
                 registry.set_local_masternode(mn.address.clone()).await;
 
-                // Store certificate in registry for server.rs announcements
-                registry.set_local_certificate(mn_certificate).await;
+                // Store empty certificate in registry (certificate system removed)
+                registry.set_local_certificate([0u8; 64]).await;
 
-                // Set signing key for consensus engine - use wallet's signing key
-                // so it matches the public key we announced
-                let signing_key = wallet.signing_key().clone();
+                // Set signing key: use masternodeprivkey from time.conf if provided,
+                // otherwise fall back to the wallet's auto-generated key
+                let signing_key = if let Some(ref mn_key) = masternode_signing_key {
+                    tracing::info!("✓ Using masternodeprivkey for consensus signing");
+                    mn_key.clone()
+                } else {
+                    tracing::info!("✓ Using wallet key for consensus signing (no masternodeprivkey in time.conf)");
+                    wallet.signing_key().clone()
+                };
                 if let Err(e) =
                     consensus_engine.set_identity(mn.address.clone(), signing_key.clone())
                 {
@@ -1013,14 +1029,14 @@ async fn main() {
             // Wait 10 seconds for initial peer connections
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-            // Broadcast V3 announcement with certificate
+            // Broadcast V3 announcement (certificate field kept empty for compat)
             let announcement = NetworkMessage::MasternodeAnnouncementV3 {
                 address: mn_for_announcement.address.clone(),
                 reward_address: mn_for_announcement.wallet_address.clone(),
                 tier: mn_for_announcement.tier,
                 public_key: mn_for_announcement.public_key,
                 collateral_outpoint: mn_for_announcement.collateral_outpoint.clone(),
-                certificate: mn_certificate.to_vec(),
+                certificate: vec![0u8; 64],
             };
 
             peer_registry_for_announcement
