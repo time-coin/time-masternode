@@ -7739,50 +7739,35 @@ impl Blockchain {
                     resolution.accept_peer_chain, resolution.stake_override, reasoning_summary
                 );
 
-                // Decision: determine whether to accept peer chain
-                // Accepts longer chains, same-height stake/hash tiebreakers, and
-                // stake-override decisions where a shorter chain has dominant stake.
-                let accept_reason = if resolution.accept_peer_chain {
-                    if resolution.stake_override {
-                        Some(
-                            "stake-weighted override (shorter chain with dominant stake)"
-                                .to_string(),
-                        )
-                    } else {
-                        Some("longer valid chain".to_string())
-                    }
-                } else {
-                    None
-                };
+                // Decision: accept only if fork resolver says so
+                if !resolution.accept_peer_chain {
+                    info!("📊 Fork resolver rejected peer chain");
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Ok(());
+                }
 
-                if let Some(reason) = accept_reason {
-                    // CRITICAL SAFETY CHECK: Common ancestor cannot be higher than our chain
-                    if common_ancestor > our_height {
-                        warn!(
-                            "🚫 REJECTED REORG: Common ancestor {} > our height {} - bug in ancestor search!",
-                            common_ancestor, our_height
-                        );
-                        *self.fork_state.write().await = ForkResolutionState::None;
-                        return Ok(());
-                    }
+                // CRITICAL SAFETY CHECK: Common ancestor cannot be higher than our chain
+                if common_ancestor > our_height {
+                    warn!(
+                        "🚫 REJECTED REORG: Common ancestor {} > our height {} - bug in ancestor search!",
+                        common_ancestor, our_height
+                    );
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Ok(());
+                }
 
-                    // Reject reorgs to strictly shorter chains unless stake override is active
-                    if peer_tip_height < our_height {
-                        if resolution.stake_override {
-                            let depth = our_height - peer_tip_height;
-                            warn!(
-                                "⚖️  STAKE OVERRIDE REORG: Accepting shorter chain ({} < {}, depth {}) due to dominant stake (peer {} vs ours {})",
-                                peer_tip_height, our_height, depth, peer_stake_weight, our_stake_weight
-                            );
-                        } else {
-                            warn!(
-                                "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}).",
-                                peer_tip_height, our_height
-                            );
-                            *self.fork_state.write().await = ForkResolutionState::None;
-                            return Ok(());
-                        }
-                    }
+                // Reject reorgs to strictly shorter chains (safety net)
+                if peer_tip_height < our_height {
+                    warn!(
+                        "🚫 REJECTED REORG: Peer chain is SHORTER ({} < {}).",
+                        peer_tip_height, our_height
+                    );
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    return Ok(());
+                }
+
+                {
+                    let reason = "longest valid chain";
 
                     let peer_chain_length = peer_tip_height.saturating_sub(common_ancestor);
                     let our_chain_length = our_height.saturating_sub(common_ancestor);
@@ -8039,10 +8024,6 @@ impl Blockchain {
                     };
 
                     self.continue_fork_resolution().await
-                } else {
-                    info!("📊 Fork resolver rejected peer chain");
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    Ok(())
                 }
             }
             Err(e) => {
