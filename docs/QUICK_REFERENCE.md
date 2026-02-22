@@ -59,7 +59,7 @@ Max message:   4 MB
 Max peers:     50 (configurable)
 Port:          24000 (mainnet), 24100 (testnet)
 Storage:       Sled embedded database
-Bootstrap:     Configured in config.toml
+Bootstrap:     Configured in time.conf (addnode=)
 ```
 
 ---

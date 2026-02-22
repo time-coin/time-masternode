@@ -24,6 +24,14 @@
 
 - **Non-consensus peer filter relaxed for small gaps**: blocks from peers 1-5 blocks ahead are accepted from any whitelisted peer (consensus list is stale during rapid catch-up)
 
+### Masternode Key System (Dash-style)
+
+- **Replaced certificate-based key system** with single `masternodeprivkey` in `time.conf`
+- **`masternode genkey` RPC/CLI command**: generates base58check-encoded Ed25519 private key
+- **masternode.conf simplified**: 4-field format (alias, IP:port, txid, vout) — key is in time.conf, not masternode.conf
+- **Certificate system removed**: no more `MASTERNODE_AUTHORITY_PUBKEY`, `verify_masternode_certificate()`, or website registration
+- **Backward compatibility**: old 5/6-field masternode.conf formats still parsed (extra fields ignored)
+
 ### Previous Updates (v1.1.0 - February 2026)
 
 **Bug #4: Fork Resolution Inconsistency (Feb 1, 2026)**

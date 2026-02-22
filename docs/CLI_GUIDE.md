@@ -72,8 +72,8 @@ Blockchain Information:
 - `getblockcount` - Simple height display
 - `getbalance` - Balance with TIME label
 - `listunspent` - Table format
-- `masternodelist` - Table format
-- `masternodestatus` - Formatted status
+- `masternodelist` / `masternode list` - Table format
+- `masternodestatus` / `masternode status` - Formatted status
 - `getpeerinfo` - Table format
 - `uptime` - Days/hours/minutes/seconds format
 - All other commands default to pretty JSON
@@ -158,9 +158,15 @@ Lists unspent transaction outputs.
 
 ### Masternode Operations
 
+#### Generate Masternode Key
+```bash
+time-cli masternode genkey
+```
+Generates a new masternode private key (base58check-encoded Ed25519). Add the output to `masternodeprivkey=` in `time.conf`.
+
 #### List Masternodes
 ```bash
-time-cli masternodelist
+time-cli masternode list
 ```
 Returns list of all masternodes with their status, tier, and collateral lock status.
 
@@ -173,11 +179,13 @@ Returns list of all masternodes with their status, tier, and collateral lock sta
 
 #### Masternode Status
 ```bash
-time-cli masternodestatus
+time-cli masternode status
 ```
 Returns status of this node's masternode (if configured).
 
-> **Note:** Masternode registration and deregistration are managed via `config.toml`, not CLI commands. See the [Masternode Guide](MASTERNODE_GUIDE.md) for details.
+> **Note:** Masternode registration and deregistration are managed via `time.conf` and `masternode.conf`. See the [Masternode Guide](MASTERNODE_GUIDE.md) for details.
+
+> **Backward compatibility:** `masternodelist` and `masternodestatus` are still accepted as aliases.
 
 #### List Locked Collaterals
 ```bash
@@ -335,7 +343,7 @@ time-cli getconsensusinfo
 
 ### List all masternodes
 ```bash
-time-cli masternodelist
+time-cli masternode list
 ```
 
 ### Get blockchain info
@@ -427,7 +435,8 @@ Shows help for a specific command.
 | `bitcoin-cli sendtoaddress` | `time-cli sendtoaddress` | Identical |
 | `bitcoin-cli stop` | `time-cli stop` | Identical |
 | N/A | `time-cli getconsensusinfo` | TIME-specific |
-| N/A | `time-cli masternodelist` | TIME-specific |
+| N/A | `time-cli masternode genkey` | TIME-specific |
+| N/A | `time-cli masternode list` | TIME-specific |
 
 ---
 
