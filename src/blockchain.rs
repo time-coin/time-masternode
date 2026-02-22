@@ -3181,11 +3181,28 @@ impl Blockchain {
                 // Track peer state for diagnostics
                 peer_states.push((peer_ip.clone(), peer_height, peer_hash, peer_weight));
 
-                // Check if peer agrees on our (height, hash)
+                // Check if peer is on our chain:
+                // - Same height, same hash = exact agreement
+                // - Lower height, same hash at their height = on our chain, just behind
+                // - Different hash at any shared height = different fork (don't count)
                 if peer_height == our_height && peer_hash == our_hash {
+                    // Exact match
                     weight_on_our_chain += peer_weight;
                     peers_agreeing += 1;
+                } else if peer_height < our_height {
+                    // Peer is behind — check if they're on our chain
+                    match self.get_block_hash(peer_height) {
+                        Ok(our_hash_at_peer_height) if our_hash_at_peer_height == peer_hash => {
+                            // Peer is on our chain, just hasn't synced yet
+                            weight_on_our_chain += peer_weight;
+                            peers_agreeing += 1;
+                        }
+                        _ => {
+                            // Peer is on a different fork
+                        }
+                    }
                 }
+                // peer_height > our_height: peer is ahead on a different fork, don't count
             }
         }
 
@@ -3204,18 +3221,27 @@ impl Blockchain {
         // LONGEST CHAIN RULE: If no peer has a chain taller than ours, we have the
         // longest chain and should continue producing. Peers will sync to us.
         let max_peer_height = peer_states.iter().map(|(_, h, _, _)| *h).max().unwrap_or(0);
-        if max_peer_height < our_height {
+        if max_peer_height <= our_height {
             tracing::debug!(
-                "✅ Block production allowed: longest chain rule (our height {} > max peer height {})",
+                "✅ Block production allowed: longest chain rule (our height {} >= max peer height {})",
                 our_height,
                 max_peer_height
             );
             return true;
         }
 
-        // Require majority (50%+) of WEIGHTED stake to agree on our chain
-        let required_weight = total_weight / 2 + 1; // Strict majority
-        let has_consensus = weight_on_our_chain >= required_weight;
+        // Some peers are taller than us on a potentially different fork.
+        // Include our own weight in the calculation — we're on our own chain.
+        let our_weight = match self.masternode_registry.get_local_masternode().await {
+            Some(info) => info.masternode.tier.sampling_weight(),
+            None => crate::types::MasternodeTier::Free.sampling_weight(),
+        };
+        let total_network_weight = total_weight + our_weight;
+        let our_chain_weight = weight_on_our_chain + our_weight;
+
+        // Require majority (50%+) of total network weight on our chain
+        let required_weight = total_network_weight / 2 + 1;
+        let has_consensus = our_chain_weight >= required_weight;
 
         // CRITICAL: Also require a minimum NUMBER of peers in sync (not just weight).
         // Prevents a single high-weight node from enabling block production.
@@ -3225,11 +3251,11 @@ impl Blockchain {
 
         if has_consensus && enough_peers_in_sync {
             tracing::debug!(
-                "✅ Block production allowed: {}/{} weight, {}/{} peers agree on height {}",
-                weight_on_our_chain,
-                total_weight,
-                peers_agreeing,
-                peers_responding,
+                "✅ Block production allowed: {}/{} weight (incl. self), {}/{} peers on our chain at height {}",
+                our_chain_weight,
+                total_network_weight,
+                peers_agreeing + 1,
+                peers_responding + 1,
                 our_height
             );
             if peers_ignored > 0 {
@@ -3238,11 +3264,10 @@ impl Blockchain {
         } else {
             if !has_consensus {
                 tracing::warn!(
-                    "⚠️ Block production blocked: {} weight agrees on height {} (need {} for majority of {} total). Peer responses: {}/{}{}",
-                    weight_on_our_chain,
-                    our_height,
+                    "⚠️ Block production blocked: {} weight on our chain (need {} for majority of {} total incl. self). Peer responses: {}/{}{}",
+                    our_chain_weight,
                     required_weight,
-                    total_weight,
+                    total_network_weight,
                     peers_responding,
                     connected_peers.len(),
                     if peers_ignored > 0 { format!(", {} corrupted peers ignored", peers_ignored) } else { String::new() }
@@ -3265,10 +3290,15 @@ impl Blockchain {
                     hex::encode(&our_hash[..8])
                 );
                 for (peer_ip, peer_height, peer_hash, peer_weight) in &peer_states {
-                    let agrees = if *peer_height == our_height && peer_hash == &our_hash {
-                        "✅ AGREES"
+                    let on_our_chain = if *peer_height == our_height && peer_hash == &our_hash {
+                        "✅ SAME CHAIN (exact)"
+                    } else if *peer_height < our_height {
+                        match self.get_block_hash(*peer_height) {
+                            Ok(h) if h == *peer_hash => "✅ SAME CHAIN (behind)",
+                            _ => "❌ DIFFERENT FORK",
+                        }
                     } else {
-                        "❌ DIFFERS"
+                        "❌ DIFFERENT FORK (taller)"
                     };
                     tracing::warn!(
                         "   {} @ height {} hash {} weight {} {}",
@@ -3276,7 +3306,7 @@ impl Blockchain {
                         peer_height,
                         hex::encode(&peer_hash[..8]),
                         peer_weight,
-                        agrees
+                        on_our_chain
                     );
                 }
             }
