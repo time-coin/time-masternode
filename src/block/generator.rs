@@ -168,9 +168,8 @@ impl DeterministicBlockGenerator {
     pub fn validate_block_time(timestamp: i64) -> Result<(), String> {
         let now = chrono::Utc::now().timestamp();
 
-        // Allow up to 10 minutes + 2 minutes grace for deterministic block scheduling
-        // Blocks are created with deterministic timestamps that may be in the future
-        const MAX_FUTURE: i64 = 600 + 120; // 10 min + 2 min grace
+        // Blocks should be produced on time — allow only minor clock drift
+        const MAX_FUTURE: i64 = 5;
         if timestamp > now + MAX_FUTURE {
             return Err(format!(
                 "Block timestamp {} is too far in the future (now: {}, max: {})",

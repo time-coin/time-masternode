@@ -257,8 +257,8 @@ mod tests {
         let validator = BlockValidator::new(crate::NetworkType::Testnet);
         let now = chrono::Utc::now().timestamp();
 
-        let block1 = create_test_block(1, now);
-        let mut block2 = create_test_block(2, now + 10);
+        let block1 = create_test_block(1, now - 10);
+        let mut block2 = create_test_block(2, now);
 
         // Set block2's previous_hash to block1's hash
         block2.header.previous_hash = block1.hash();

@@ -3201,6 +3201,18 @@ impl Blockchain {
             return false;
         }
 
+        // LONGEST CHAIN RULE: If no peer has a chain taller than ours, we have the
+        // longest chain and should continue producing. Peers will sync to us.
+        let max_peer_height = peer_states.iter().map(|(_, h, _, _)| *h).max().unwrap_or(0);
+        if max_peer_height < our_height {
+            tracing::debug!(
+                "✅ Block production allowed: longest chain rule (our height {} > max peer height {})",
+                our_height,
+                max_peer_height
+            );
+            return true;
+        }
+
         // Require majority (50%+) of WEIGHTED stake to agree on our chain
         let required_weight = total_weight / 2 + 1; // Strict majority
         let has_consensus = weight_on_our_chain >= required_weight;
@@ -6833,31 +6845,14 @@ impl Blockchain {
             }
         }
 
-        // Find the maximum height to determine stake override eligibility
-        let max_chain_height = chain_counts.keys().map(|(h, _)| *h).max().unwrap_or(0);
-        let stake_override_threshold =
-            max_chain_height.saturating_sub(crate::ai::fork_resolver::MAX_STAKE_OVERRIDE_DEPTH);
-
         let consensus_chain = chain_counts
             .iter()
             .max_by(|((h1, hash1), peers1), ((h2, hash2), peers2)| {
                 let w1 = chain_weights.get(&(*h1, *hash1)).copied().unwrap_or(0);
                 let w2 = chain_weights.get(&(*h2, *hash2)).copied().unwrap_or(0);
-                let both_eligible =
-                    *h1 >= stake_override_threshold && *h2 >= stake_override_threshold;
 
-                if both_eligible && h1 != h2 {
-                    // Both chains are within stake override depth of the tallest:
-                    // use stake weight as primary criterion (PoS principle)
-                    let weight_cmp = w1.cmp(&w2);
-                    if weight_cmp != std::cmp::Ordering::Equal {
-                        return weight_cmp;
-                    }
-                    // If stake is equal, taller chain wins
-                    return h1.cmp(h2);
-                }
-
-                // Outside stake override range or same height: height-first ordering
+                // LONGEST CHAIN RULE: Height is always the primary criterion.
+                // Stake weight is only used as tiebreaker at equal heights.
                 let height_cmp = h1.cmp(h2);
                 if height_cmp != std::cmp::Ordering::Equal {
                     return height_cmp;

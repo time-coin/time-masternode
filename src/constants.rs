@@ -38,10 +38,9 @@ pub mod blockchain {
     /// Maximum block size in bytes (1 MB)
     pub const MAX_BLOCK_SIZE: usize = 1_000_000;
 
-    /// Maximum timestamp tolerance for future blocks (60 seconds for clock drift)
-    /// CRITICAL: Must be << BLOCK_TIME_SECONDS (600s) to prevent accepting
-    /// blocks that are ahead of schedule
-    pub const TIMESTAMP_TOLERANCE_SECS: i64 = 60;
+    /// Maximum timestamp tolerance for future blocks (5 seconds for clock drift)
+    /// Blocks should be produced on time — this only covers minor NTP drift.
+    pub const TIMESTAMP_TOLERANCE_SECS: i64 = 5;
 
     /// Maximum depth for blockchain reorganization
     /// SECURITY: Blocks deeper than this are considered FINAL and cannot be reorged
