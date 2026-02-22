@@ -1094,11 +1094,8 @@ async fn handle_peer(
 
                                     tracing::debug!("📨 Received V3 masternode announcement from {} (tier: {:?})", peer.addr, tier);
 
-                                    // Verify certificate
-                                    if !crate::masternode_certificate::verify_masternode_certificate(public_key, certificate) {
-                                        tracing::warn!("❌ Rejecting masternode {} — invalid certificate", peer_ip);
-                                        continue;
-                                    }
+                                    // Certificate field ignored (certificate system removed in v1.2.0)
+                                    let _ = certificate;
 
                                     let now = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)

@@ -102,6 +102,7 @@ impl RpcHandler {
             "forceunlockall" => self.force_unlock_all().await,
             "gettransactions" => self.get_transactions_batch(&params_array).await,
             "gettreasurybalance" => self.get_treasury_balance().await,
+            "masternodegenkey" => self.masternode_genkey().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -1319,6 +1320,13 @@ impl RpcHandler {
                 "message": "This node is not configured as a masternode"
             }))
         }
+    }
+
+    async fn masternode_genkey(&self) -> Result<Value, RpcError> {
+        let mut seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+        let key = crate::masternode_certificate::encode_masternode_key(&seed);
+        Ok(json!(key))
     }
 
     async fn validate_address(&self, params: &[Value]) -> Result<Value, RpcError> {

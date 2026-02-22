@@ -263,6 +263,10 @@ enum Commands {
     #[command(next_help_heading = "Masternode")]
     MasternodeStatus,
 
+    /// Generate a new masternode private key
+    #[command(next_help_heading = "Masternode")]
+    MasternodeGenkey,
+
     /// List all locked collaterals
     #[command(next_help_heading = "Masternode")]
     ListLockedCollaterals,
@@ -432,6 +436,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } => ("listreceivedbyaddress", json!([minconf, include_empty])),
         Commands::MasternodeList { all } => ("masternodelist", json!([all])),
         Commands::MasternodeStatus => ("masternodestatus", json!([])),
+        Commands::MasternodeGenkey => ("masternodegenkey", json!([])),
         Commands::ListLockedCollaterals => ("listlockedcollaterals", json!([])),
         Commands::GetConsensusInfo => ("getconsensusinfo", json!([])),
         Commands::GetTreasuryBalance => ("gettreasurybalance", json!([])),
@@ -1023,6 +1028,13 @@ fn print_human_readable(
                     "  Message:        {}",
                     result.get("message").and_then(|v| v.as_str()).unwrap_or("")
                 );
+            }
+        }
+        Commands::MasternodeGenkey => {
+            if let Some(key) = result.as_str() {
+                println!("{}", key);
+            } else {
+                println!("{}", serde_json::to_string_pretty(result)?);
             }
         }
         _ => {

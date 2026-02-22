@@ -227,21 +227,16 @@ pub struct MasternodeConfig {
     pub collateral_vout: u32,
     #[serde(default = "default_tier")]
     pub tier: String,
-    /// Base58check-encoded Ed25519 private key issued by the website
+    /// Base58check-encoded Ed25519 private key (generate with `time-cli masternodegenkey`)
     #[serde(default)]
-    pub masternode_key: String,
-    /// Hex-encoded certificate (authority signature over masternode pubkey)
-    #[serde(default)]
-    pub masternode_cert: String,
+    pub masternodeprivkey: String,
 }
 
-/// A parsed entry from masternode.conf
+/// A parsed entry from masternode.conf (collateral info only; key is in time.conf)
 #[derive(Debug, Clone)]
 pub struct MasternodeConfEntry {
     pub alias: String,
     pub address: String,
-    pub masternode_key: String,
-    pub masternode_cert: String,
     pub collateral_txid: String,
     pub collateral_vout: u32,
 }
@@ -573,8 +568,7 @@ impl Config {
                 collateral_txid: String::new(),
                 collateral_vout: 0,
                 tier: "free".to_string(),
-                masternode_key: String::new(),
-                masternode_cert: String::new(),
+                masternodeprivkey: String::new(),
             },
             security: SecurityConfig {
                 enable_rate_limiting: true,
@@ -813,6 +807,11 @@ impl Config {
                     config.storage.mode = "archive".to_string();
                 }
             }
+            if let Some(v) = entries.get("masternodeprivkey") {
+                if let Some(key) = v.last() {
+                    config.masternode.masternodeprivkey = key.clone();
+                }
+            }
 
             println!("  ✓ Loaded configuration from {}", conf_path.display());
         } else {
@@ -833,8 +832,6 @@ impl Config {
                 config.masternode.enabled = true;
                 config.masternode.collateral_txid = entry.collateral_txid.clone();
                 config.masternode.collateral_vout = entry.collateral_vout;
-                config.masternode.masternode_key = entry.masternode_key.clone();
-                config.masternode.masternode_cert = entry.masternode_cert.clone();
                 if !entry.address.is_empty() {
                     // Extract IP from IP:port
                     let ip = entry.address.split(':').next().unwrap_or(&entry.address);
@@ -916,7 +913,9 @@ pub fn detect_network_from_conf(conf_path: &PathBuf) -> NetworkType {
 // ─── masternode.conf parser ──────────────────────────────────────────
 
 /// Parse a masternode.conf file (one entry per line, space-delimited).
-/// Format: alias IP:port masternodekey masternodecert collateral_txid collateral_vout
+/// Format: alias IP:port collateral_txid collateral_vout
+/// Legacy 5-field (key) and 6-field (key+cert) formats are accepted for backward
+/// compatibility but the key/cert fields are ignored (key belongs in time.conf).
 #[allow(dead_code)]
 pub fn parse_masternode_conf(
     path: &PathBuf,
@@ -934,51 +933,39 @@ pub fn parse_masternode_conf(
 
         let parts: Vec<&str> = line.split_whitespace().collect();
 
-        if parts.len() == 6 {
-            // Full format with key + cert
-            let vout = parts[5].parse::<u32>().map_err(|e| {
-                format!(
-                    "masternode.conf:{}: invalid collateral_vout '{}': {}",
+        // All formats: alias is parts[0], address is parts[1]
+        // 4 fields: alias IP:port txid vout
+        // 5 fields: alias IP:port privkey txid vout (legacy, privkey ignored)
+        // 6 fields: alias IP:port key cert txid vout (legacy, key+cert ignored)
+        let (txid_idx, vout_idx) = match parts.len() {
+            4 => (2, 3),
+            5 => (3, 4),
+            6 => (4, 5),
+            _ => {
+                tracing::warn!(
+                    "⚠️ masternode.conf:{}: expected 4-6 fields, got {} — skipping",
                     line_num + 1,
-                    parts[5],
-                    e
-                )
-            })?;
+                    parts.len()
+                );
+                continue;
+            }
+        };
 
-            entries.push(MasternodeConfEntry {
-                alias: parts[0].to_string(),
-                address: parts[1].to_string(),
-                masternode_key: parts[2].to_string(),
-                masternode_cert: parts[3].to_string(),
-                collateral_txid: parts[4].to_string(),
-                collateral_vout: vout,
-            });
-        } else if parts.len() == 4 {
-            // Legacy format without key/cert (free nodes): alias IP:port txid vout
-            let vout = parts[3].parse::<u32>().map_err(|e| {
-                format!(
-                    "masternode.conf:{}: invalid collateral_vout '{}': {}",
-                    line_num + 1,
-                    parts[3],
-                    e
-                )
-            })?;
-
-            entries.push(MasternodeConfEntry {
-                alias: parts[0].to_string(),
-                address: parts[1].to_string(),
-                masternode_key: String::new(),
-                masternode_cert: String::new(),
-                collateral_txid: parts[2].to_string(),
-                collateral_vout: vout,
-            });
-        } else {
-            tracing::warn!(
-                "⚠️ masternode.conf:{}: expected 4 or 6 fields, got {} — skipping",
+        let vout = parts[vout_idx].parse::<u32>().map_err(|e| {
+            format!(
+                "masternode.conf:{}: invalid collateral_vout '{}': {}",
                 line_num + 1,
-                parts.len()
-            );
-        }
+                parts[vout_idx],
+                e
+            )
+        })?;
+
+        entries.push(MasternodeConfEntry {
+            alias: parts[0].to_string(),
+            address: parts[1].to_string(),
+            collateral_txid: parts[txid_idx].to_string(),
+            collateral_vout: vout,
+        });
     }
 
     Ok(entries)
@@ -1023,8 +1010,11 @@ server=1
 
 # ─── Masternode ──────────────────────────────────────────────
 # Enable masternode mode (0=off, 1=on)
-# Collateral and key settings go in masternode.conf
+# Collateral settings go in masternode.conf
 masternode=0
+
+# Masternode private key (generate with: time-cli masternodegenkey)
+#masternodeprivkey=
 
 # ─── Peers ───────────────────────────────────────────────────
 # Add seed nodes (one per line, can repeat)
@@ -1056,21 +1046,21 @@ pub fn generate_default_masternode_conf(path: &PathBuf) -> Result<(), Box<dyn st
     let contents = r#"# TIME Coin Masternode Configuration
 #
 # Format (one entry per line):
-#   alias  IP:port  masternodekey  masternodecert  collateral_txid  collateral_vout
+#   alias  IP:port  collateral_txid  collateral_vout
 #
 # Fields:
 #   alias            - A name for this masternode (e.g., mn1)
 #   IP:port          - Your masternode's public IP and port
-#   masternodekey    - Private key from time-coin.io registration (base58)
-#   masternodecert   - Certificate from time-coin.io registration (hex)
 #   collateral_txid  - Transaction ID of your collateral deposit
 #   collateral_vout  - Output index of your collateral (usually 0)
 #
-# Free nodes (no collateral) can omit key, cert, txid, and vout.
+# Your masternode private key goes in time.conf:
+#   masternodeprivkey=<key from `time-cli masternodegenkey`>
 #
 # Steps to set up a masternode:
-#   1. Register at https://time-coin.io/masternode-register with your email
-#   2. You'll receive a masternodekey and masternodecert
+#   1. Generate a masternode private key:
+#      time-cli masternodegenkey
+#   2. Add masternodeprivkey=<key> to your time.conf
 #   3. Send collateral to yourself:
 #      time-cli sendtoaddress <your_address> 1000    (Bronze = 1,000 TIME)
 #      time-cli sendtoaddress <your_address> 10000   (Silver = 10,000 TIME)
@@ -1080,7 +1070,7 @@ pub fn generate_default_masternode_conf(path: &PathBuf) -> Result<(), Box<dyn st
 #   5. Add a line below and restart timed
 #
 # Example:
-#   mn1  69.167.168.176:24100  5HueCGU8rMjxEXxiP...  a1b2c3d4e5f6...  fc5b049a39807958cf...  0
+#   mn1  69.167.168.176:24100  fc5b049a39807958cf...  0
 "#;
 
     if let Some(parent) = path.parent() {
@@ -1139,6 +1129,27 @@ mod tests {
 
         let mut f = fs::File::create(&path).unwrap();
         writeln!(f, "# comment").unwrap();
+        writeln!(f, "mn1 69.167.168.176:24100 txid123 0").unwrap();
+        drop(f);
+
+        let entries = parse_masternode_conf(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].alias, "mn1");
+        assert_eq!(entries[0].address, "69.167.168.176:24100");
+        assert_eq!(entries[0].collateral_txid, "txid123");
+        assert_eq!(entries[0].collateral_vout, 0);
+
+        fs::remove_file(&path).ok();
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_parse_masternode_conf_legacy_6field() {
+        let dir = std::env::temp_dir().join("timecoin_test_mn_legacy6");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("masternode.conf");
+
+        let mut f = fs::File::create(&path).unwrap();
         writeln!(
             f,
             "mn1 69.167.168.176:24100 5HueCGU8rMjxEXxiPuD cert123abc txid123 0"
@@ -1148,10 +1159,6 @@ mod tests {
 
         let entries = parse_masternode_conf(&path).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].alias, "mn1");
-        assert_eq!(entries[0].address, "69.167.168.176:24100");
-        assert_eq!(entries[0].masternode_key, "5HueCGU8rMjxEXxiPuD");
-        assert_eq!(entries[0].masternode_cert, "cert123abc");
         assert_eq!(entries[0].collateral_txid, "txid123");
         assert_eq!(entries[0].collateral_vout, 0);
 
@@ -1160,19 +1167,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_masternode_conf_legacy() {
-        let dir = std::env::temp_dir().join("timecoin_test_mn_legacy");
+    fn test_parse_masternode_conf_legacy_5field() {
+        let dir = std::env::temp_dir().join("timecoin_test_mn_legacy5");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("masternode.conf");
 
         let mut f = fs::File::create(&path).unwrap();
-        writeln!(f, "mn1 69.167.168.176:24100 txid123 0").unwrap();
+        writeln!(f, "mn1 69.167.168.176:24100 5HueCGU8rMjxEXxiPuD txid123 0").unwrap();
         drop(f);
 
         let entries = parse_masternode_conf(&path).unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].masternode_key, "");
-        assert_eq!(entries[0].masternode_cert, "");
         assert_eq!(entries[0].collateral_txid, "txid123");
 
         fs::remove_file(&path).ok();
@@ -1211,8 +1216,8 @@ mod tests {
         assert!(path.exists());
 
         let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("masternodekey"));
-        assert!(contents.contains("time-coin.io"));
+        assert!(contents.contains("masternodeprivkey"));
+        assert!(contents.contains("masternodegenkey"));
 
         // Should parse as empty (all lines are comments)
         let entries = parse_masternode_conf(&path).unwrap();
@@ -1290,8 +1295,7 @@ mod tests {
         config.logging.level = "debug".to_string();
         config.masternode.enabled = true;
         config.masternode.collateral_txid = "abc123".to_string();
-        config.masternode.masternode_key = "mykey".to_string();
-        config.masternode.masternode_cert = "mycert".to_string();
+        config.masternode.masternodeprivkey = "mykey".to_string();
 
         config.apply_hardcoded_defaults();
 

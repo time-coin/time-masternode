@@ -104,28 +104,8 @@ pub mod fork_resolution {
 
 /// Masternode authority constants
 pub mod masternode_authority {
-    /// Ed25519 public key of the TIME Coin masternode registration authority.
-    /// This key is used to verify that masternode keys were legitimately issued
-    /// by the TIME Coin website (time-coin.io). Only masternodes with a valid
-    /// certificate signed by this authority can register on the network.
-    ///
-    /// The corresponding private key is held securely on the website server.
-    /// To generate a new authority keypair, use: time-cli generate-authority-key
-    ///
-    /// PLACEHOLDER: Replace with real authority public key when website launches.
-    pub const MASTERNODE_AUTHORITY_PUBKEY: [u8; 32] = [
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00,
-    ];
-
     /// Number of reward violations before slashing collateral
     pub const REWARD_VIOLATION_THRESHOLD: u64 = 3;
-
-    /// Whether to enforce masternode certificate verification.
-    /// Set to false during development/testnet until the website is operational.
-    /// MUST be true on mainnet.
-    pub const ENFORCE_CERTIFICATE: bool = false;
 }
 
 /// Performance tuning constants
