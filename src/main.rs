@@ -2298,16 +2298,21 @@ async fn main() {
 
             // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
             // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
-            // SECURITY: Only Bronze+ tier nodes are eligible for emergency fallback.
-            // Free tier (zero collateral) is excluded to maintain sybil resistance.
+            // SECURITY: Free tier nodes only get emergency boost after extended deadlock
+            // (attempt >= 6 = 60s) to maintain sybil resistance while preventing permanent stalls.
             let effective_sampling_weight = if leader_attempt > 0 {
-                if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {
-                    our_sampling_weight // No emergency boost for Free tier
+                let allow_boost = if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {
+                    leader_attempt >= 6 // Free tier: only after 60s deadlock
                 } else {
+                    true // Paid tiers: immediate relaxation
+                };
+                if allow_boost {
                     let multiplier = 1u64 << leader_attempt.min(20); // Cap to prevent overflow
                     our_sampling_weight
                         .saturating_mul(multiplier)
                         .min(total_sampling_weight)
+                } else {
+                    our_sampling_weight
                 }
             } else {
                 our_sampling_weight
