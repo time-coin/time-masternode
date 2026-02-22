@@ -1698,6 +1698,7 @@ async fn main() {
         const LEADER_TIMEOUT_SECS: u64 = 10; // Wait 10s before rotating to backup leader (2x block production time)
         let mut waiting_for_height: Option<u64> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
+        let mut height_first_seen = std::time::Instant::now(); // Wall-clock time we started waiting at current height
 
         // CRITICAL: Periodic GetChainTip requests to keep peer_chain_tips cache fresh
         // This ensures block production can always verify consensus on peer heights
@@ -2202,26 +2203,29 @@ async fn main() {
                 }
             };
 
-            // VRF timeout tracking: if no block is produced within LEADER_TIMEOUT_SECS,
-            // progressively relax the VRF threshold so more nodes become eligible.
-            // Each attempt doubles the effective threshold (exponential relaxation).
-            // CRITICAL: Track elapsed time from SLOT START, not from when we first saw
-            // the height. Otherwise, the 10-minute wait between blocks inflates
-            // leader_attempt and makes every node think it's eligible at t=0.
+            // VRF timeout tracking: relax threshold ONLY on genuine deadlocks.
+            // A deadlock means no node (including peers) has produced a block for this height.
+            // During catch-up (far behind expected height), time_past_scheduled is huge but
+            // that's NOT a deadlock — blocks just haven't been produced yet.
+            //
+            // Track REAL wait time: how long we've been stuck at THIS height without ANY
+            // block arriving (from us or peers).
             if waiting_for_height != Some(next_height) {
                 waiting_for_height = Some(next_height);
                 leader_attempt = 0;
+                height_first_seen = std::time::Instant::now();
             }
-            // Compute elapsed from slot start (matches validator logic)
-            let slot_elapsed = time_past_scheduled.max(0) as u64;
-            let expected_attempt = slot_elapsed / LEADER_TIMEOUT_SECS;
+            // Only count time actually spent waiting at this height (wall clock),
+            // NOT time since the slot was scheduled (which is huge during catch-up)
+            let real_wait_secs = height_first_seen.elapsed().as_secs();
+            let expected_attempt = real_wait_secs / LEADER_TIMEOUT_SECS;
             if expected_attempt > leader_attempt {
                 leader_attempt = expected_attempt;
                 if leader_attempt > 0 {
                     tracing::warn!(
-                        "⏱️  No block for height {} after {}s past slot - relaxing VRF threshold (attempt {})",
+                        "⏱️  No block for height {} after {}s waiting (attempt {}) — relaxing VRF threshold",
                         next_height,
-                        slot_elapsed,
+                        real_wait_secs,
                         leader_attempt
                     );
                 }

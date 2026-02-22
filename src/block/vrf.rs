@@ -155,9 +155,12 @@ pub fn vrf_check_proposer_eligible(
         return false;
     }
 
-    // Target ~3 proposers per slot on average for reliability
-    // P(at least 1 proposer) = 1 - (1 - 3/N)^N ≈ 95% for N=6
-    const TARGET_PROPOSERS: u128 = 3;
+    // Target ~1 proposer per slot on average to minimize competing blocks.
+    // With 6 equal-weight nodes: P(eligible) = 1/6 per node, P(at least 1) ≈ 67%.
+    // Empty slots (~33%) are handled by the deadlock relaxation in main.rs which
+    // doubles effective weight every LEADER_TIMEOUT_SECS (10s) of wall-clock wait.
+    // After 10s: P(>=1) ≈ 91%, after 20s: P(>=1) ≈ 99.9%.
+    const TARGET_PROPOSERS: u128 = 1;
 
     // threshold = (node_weight / total_weight) * TARGET_PROPOSERS * u64::MAX
     // Capped at u64::MAX (100% probability)

@@ -2707,15 +2707,20 @@ impl MessageHandler {
                 );
             }
         } else if peer_height > our_height {
-            // Peer is ahead - check if they're part of consensus before syncing
-            let is_consensus_peer = context.blockchain.is_peer_in_consensus(&self.peer_ip).await;
-
-            if !is_consensus_peer {
-                warn!(
-                    "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {})",
-                    self.direction, self.peer_ip, peer_height, our_height
-                );
-                return Ok(None);
+            // Peer is ahead — accept blocks from peers that are close (≤5 blocks).
+            // Only check consensus membership for large gaps to avoid rejecting
+            // legitimate peers during rapid catch-up when consensus list is stale.
+            let height_gap = peer_height - our_height;
+            if height_gap > 5 {
+                let is_consensus_peer =
+                    context.blockchain.is_peer_in_consensus(&self.peer_ip).await;
+                if !is_consensus_peer {
+                    warn!(
+                        "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {}, gap {})",
+                        self.direction, self.peer_ip, peer_height, our_height, height_gap
+                    );
+                    return Ok(None);
+                }
             }
 
             // Peer is ahead and in consensus - sync from them
