@@ -137,8 +137,8 @@ async fn main() {
             // Legacy fallback — config.toml in CWD
             std::path::PathBuf::from("config.toml")
         } else {
-            // Default: create in testnet dir (testnet is default network)
-            testnet_dir.join("time.conf")
+            // No config found anywhere — default to mainnet base dir
+            base_dir.join("time.conf")
         }
     };
 
@@ -151,7 +151,7 @@ async fn main() {
         if let Ok(cfg) = Config::load_from_file(&conf_path.to_string_lossy()) {
             cfg.node.network_type()
         } else {
-            NetworkType::Testnet
+            NetworkType::Mainnet
         }
     } else {
         config::detect_network_from_conf(&conf_path)
@@ -162,7 +162,7 @@ async fn main() {
         std::fs::create_dir_all(&data_dir).ok();
         let gen_conf = data_dir.join("time.conf");
         let gen_mn = data_dir.join("masternode.conf");
-        match config::generate_default_conf(&gen_conf) {
+        match config::generate_default_conf_for_network(&gen_conf, &network_type) {
             Ok(_) => println!("✅ Generated {}", gen_conf.display()),
             Err(e) => {
                 eprintln!("❌ Failed to generate time.conf: {}", e);
@@ -187,6 +187,32 @@ async fn main() {
                     "  ✓ Loaded legacy configuration from {}",
                     conf_path.display()
                 );
+                // Generate time.conf + masternode.conf alongside legacy config.toml
+                // so the user has them ready for migration
+                let conf_dir = conf_path
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let new_conf = conf_dir.join("time.conf");
+                let new_mn = conf_dir.join("masternode.conf");
+                if !new_conf.exists() {
+                    if let Err(e) =
+                        config::generate_default_conf_for_network(&new_conf, &network_type)
+                    {
+                        eprintln!("  ⚠️ Could not generate time.conf: {}", e);
+                    } else {
+                        println!(
+                            "  ✓ Generated {} (migrate from config.toml when ready)",
+                            new_conf.display()
+                        );
+                    }
+                }
+                if !new_mn.exists() {
+                    if let Err(e) = config::generate_default_masternode_conf(&new_mn) {
+                        eprintln!("  ⚠️ Could not generate masternode.conf: {}", e);
+                    } else {
+                        println!("  ✓ Generated {}", new_mn.display());
+                    }
+                }
                 cfg
             }
             Err(e) => {

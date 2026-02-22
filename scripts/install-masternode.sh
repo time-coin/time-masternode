@@ -29,14 +29,15 @@ fi
 if [[ "$NETWORK" == "mainnet" ]]; then
     P2P_PORT="24000"
     RPC_PORT="24001"
+    TESTNET_FLAG="0"
 else
     P2P_PORT="24100"
     RPC_PORT="24101"
+    TESTNET_FLAG="1"
 fi
 
 # Configuration
 SERVICE_NAME="timed"
-SERVICE_USER="timecoin"
 INSTALL_DIR="/opt/timecoin"
 BIN_DIR="/usr/local/bin"
 
@@ -52,7 +53,7 @@ CONFIG_DIR="$DATA_DIR"  # Config goes in same directory as data
 LOG_DIR="$DATA_DIR/logs"
 
 # Version info
-VERSION="1.1.0"
+VERSION="1.2.0"
 
 #------------------------------------------------------------------------------
 # Helper Functions
@@ -134,10 +135,13 @@ check_dependencies() {
         "build-essential"
         "pkg-config"
         "libssl-dev"
+        "cmake"
+        "clang"
+        "libclang-dev"
     )
     
     for pkg in "${required_packages[@]}"; do
-        if ! dpkg -l | grep -q "^ii  $pkg"; then
+        if ! dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
             missing_deps+=("$pkg")
         fi
     done
@@ -161,6 +165,9 @@ install_dependencies() {
         build-essential \
         pkg-config \
         libssl-dev \
+        cmake \
+        clang \
+        libclang-dev \
         ca-certificates \
         gnupg \
         lsb-release
@@ -170,6 +177,11 @@ install_dependencies() {
 
 check_rust() {
     print_step "Checking for Rust installation..."
+    
+    # Ensure cargo is in PATH
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    fi
     
     if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
         local rust_version=$(rustc --version | cut -d' ' -f2)
@@ -185,9 +197,6 @@ check_rust() {
         else
             print_warn "Rust version $current_version is too old (need >= 1.75)"
             print_info "Updating Rust..."
-            if [ -f "$HOME/.cargo/env" ]; then
-                source "$HOME/.cargo/env"
-            fi
             rustup update stable
             return 0
         fi
@@ -200,14 +209,8 @@ check_rust() {
 install_rust() {
     print_step "Installing Rust..."
     
-    # Install rustup as the service user if it exists, otherwise as root
-    if id "$SERVICE_USER" &>/dev/null; then
-        sudo -u "$SERVICE_USER" bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
-        export PATH="/home/$SERVICE_USER/.cargo/bin:$PATH"
-    else
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
-    fi
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
     
     print_success "Rust installed"
 }
@@ -231,18 +234,6 @@ install_nasm() {
     apt-get install -y nasm
     
     print_success "NASM installed"
-}
-
-
-create_user() {
-    print_step "Creating service user..."
-    
-    if id "$SERVICE_USER" &>/dev/null; then
-        print_info "User $SERVICE_USER already exists"
-    else
-        useradd --system --no-create-home --shell /bin/false "$SERVICE_USER"
-        print_success "User $SERVICE_USER created"
-    fi
 }
 
 create_directories() {
@@ -330,6 +321,12 @@ install_binaries() {
     cp "$PROJECT_DIR/target/release/timed" "$BIN_DIR/"
     cp "$PROJECT_DIR/target/release/time-cli" "$BIN_DIR/"
     
+    # Also copy time-dashboard if it was built
+    if [ -f "$PROJECT_DIR/target/release/time-dashboard" ]; then
+        cp "$PROJECT_DIR/target/release/time-dashboard" "$BIN_DIR/"
+        chmod 755 "$BIN_DIR/time-dashboard"
+    fi
+    
     # Set permissions
     chmod 755 "$BIN_DIR/timed"
     chmod 755 "$BIN_DIR/time-cli"
@@ -337,8 +334,8 @@ install_binaries() {
     # Verify installation
     if [ -f "$BIN_DIR/timed" ] && [ -f "$BIN_DIR/time-cli" ]; then
         print_success "Binaries installed to $BIN_DIR"
-        print_info "timed version: $(timed --version 2>/dev/null || echo 'unknown')"
-        print_info "time-cli version: $(time-cli --version 2>/dev/null || echo 'unknown')"
+        print_info "timed version: $($BIN_DIR/timed --version 2>/dev/null || echo 'unknown')"
+        print_info "time-cli version: $($BIN_DIR/time-cli --version 2>/dev/null || echo 'unknown')"
     else
         print_error "Failed to install binaries"
         exit 1
@@ -346,47 +343,128 @@ install_binaries() {
 }
 
 create_config() {
-    print_step "Creating configuration file..."
-    
-    # Get the script's directory
-    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-    PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-    
-    # Copy default config if it exists
-    if [ -f "$PROJECT_DIR/config.toml" ]; then
-        cp "$PROJECT_DIR/config.toml" "$CONFIG_DIR/config.toml"
-        
-        # Update ports in config file
-        sed -i "s/listen_addr = \"0.0.0.0:[0-9]*\"/listen_addr = \"0.0.0.0:$P2P_PORT\"/g" "$CONFIG_DIR/config.toml"
-        sed -i "s/rpc_addr = \"127.0.0.1:[0-9]*\"/rpc_addr = \"127.0.0.1:$RPC_PORT\"/g" "$CONFIG_DIR/config.toml"
-        sed -i "s|data_dir = \".*\"|data_dir = \"$DATA_DIR\"|g" "$CONFIG_DIR/config.toml"
-        
-        chown root:root "$CONFIG_DIR/config.toml"
-        chmod 640 "$CONFIG_DIR/config.toml"
-        print_success "Configuration copied to $CONFIG_DIR/config.toml"
+    print_step "Creating configuration files..."
+
+    local TIME_CONF="$CONFIG_DIR/time.conf"
+    local MN_CONF="$CONFIG_DIR/masternode.conf"
+
+    # Detect external IP for masternode config
+    local EXTERNAL_IP
+    EXTERNAL_IP=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 icanhazip.com 2>/dev/null || echo "YOUR_IP")
+
+    # ── time.conf ────────────────────────────────────────────────
+    if [ -f "$TIME_CONF" ]; then
+        print_info "time.conf already exists, not overwriting"
     else
-        print_warn "No default config.toml found, creating minimal config"
-        
-        cat > "$CONFIG_DIR/config.toml" <<EOF
-# TIME Coin Configuration - $NETWORK
-[network]
-listen_addr = "0.0.0.0:$P2P_PORT"
-rpc_addr = "127.0.0.1:$RPC_PORT"
-network = "$NETWORK"
+        cat > "$TIME_CONF" <<EOF
+# TIME Coin Configuration File
+# https://time-coin.io
+#
+# Lines beginning with # are comments.
+# All settings are optional — defaults are shown below.
 
-[blockchain]
-data_dir = "$DATA_DIR"
+# ─── Network ─────────────────────────────────────────────────
+# Run on testnet (1) or mainnet (0)
+testnet=${TESTNET_FLAG}
 
-[logging]
-level = "info"
-log_dir = "$LOG_DIR"
+# Accept incoming connections
+listen=1
+
+# Override the default port (mainnet=24000, testnet=24100)
+#port=${P2P_PORT}
+
+# Your public IP address (required for masternodes)
+externalip=${EXTERNAL_IP}
+
+# Maximum peer connections
+#maxconnections=50
+
+# ─── RPC ─────────────────────────────────────────────────────
+# Enable JSON-RPC server
+server=1
+
+# RPC port (mainnet=24001, testnet=24101)
+#rpcport=${RPC_PORT}
+
+# Allow RPC connections from any IP (needed for remote time-cli)
+rpcbind=0.0.0.0
+rpcallowip=0.0.0.0/0
+
+# ─── Masternode ──────────────────────────────────────────────
+# Enable masternode mode (0=off, 1=on)
+# Collateral settings go in masternode.conf
+masternode=1
+
+# Masternode private key (generate with: time-cli masternode genkey)
+#masternodeprivkey=
+
+# ─── Peers ───────────────────────────────────────────────────
+# Add seed nodes (one per line, can repeat)
+#addnode=seed1.time-coin.io
+#addnode=seed2.time-coin.io
+
+# ─── Logging ─────────────────────────────────────────────────
+# Log level: trace, debug, info, warn, error
+debug=info
+
+# ─── Storage ─────────────────────────────────────────────────
+# Maintain a full transaction index
+txindex=1
+
+# Custom data directory (leave commented for default)
+#datadir=
 EOF
-        chown root:root "$CONFIG_DIR/config.toml"
-        chmod 640 "$CONFIG_DIR/config.toml"
-        print_success "Minimal configuration created"
+        chown root:root "$TIME_CONF"
+        chmod 640 "$TIME_CONF"
+        print_success "Created $TIME_CONF"
     fi
-    
-    print_info "Edit configuration: $CONFIG_DIR/config.toml"
+
+    # ── masternode.conf ──────────────────────────────────────────
+    if [ -f "$MN_CONF" ]; then
+        print_info "masternode.conf already exists, not overwriting"
+    else
+        cat > "$MN_CONF" <<EOF
+# TIME Coin Masternode Configuration
+#
+# Format (one entry per line):
+#   alias  IP:port  collateral_txid  collateral_vout
+#
+# Fields:
+#   alias            - A name for this masternode (e.g., mn1)
+#   IP:port          - Your masternode's public IP and port
+#   collateral_txid  - Transaction ID of your collateral deposit
+#   collateral_vout  - Output index of your collateral (usually 0)
+#
+# Your masternode private key goes in time.conf:
+#   masternodeprivkey=<key from 'time-cli masternode genkey'>
+#
+# Steps to set up a masternode:
+#   1. Generate a masternode private key:
+#      time-cli masternode genkey
+#   2. Add masternodeprivkey=<key> to your time.conf
+#   3. Send collateral to yourself:
+#      time-cli sendtoaddress <your_address> 1000    (Bronze = 1,000 TIME)
+#      time-cli sendtoaddress <your_address> 10000   (Silver = 10,000 TIME)
+#      time-cli sendtoaddress <your_address> 100000  (Gold   = 100,000 TIME)
+#   4. Find your collateral TXID:
+#      time-cli listtransactions
+#   5. Add a line below and restart timed
+#
+# Example:
+# mn1 ${EXTERNAL_IP}:${P2P_PORT} abc123def456789012345678901234567890123456789012345678901234abcd 0
+EOF
+        chown root:root "$MN_CONF"
+        chmod 640 "$MN_CONF"
+        print_success "Created $MN_CONF"
+    fi
+
+    # Remove legacy config.toml if time.conf now exists
+    if [ -f "$CONFIG_DIR/config.toml" ] && [ -f "$TIME_CONF" ]; then
+        print_warn "Legacy config.toml found alongside time.conf"
+        print_info "The daemon will use time.conf. You can remove config.toml when ready."
+    fi
+
+    print_info "Edit configuration: nano $TIME_CONF"
     print_info "Network: $NETWORK (P2P: $P2P_PORT, RPC: $RPC_PORT)"
 }
 
@@ -396,7 +474,7 @@ create_systemd_service() {
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=TIME Coin Masternode
-After=network.target
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -404,8 +482,8 @@ Type=simple
 User=root
 Group=root
 
-# Binary location
-ExecStart=$BIN_DIR/timed --config $CONFIG_DIR/config.toml
+# Binary location — uses time.conf from data dir automatically
+ExecStart=$BIN_DIR/timed --conf $CONFIG_DIR/time.conf
 
 # Working directory
 WorkingDirectory=$DATA_DIR
@@ -417,6 +495,9 @@ RestartSec=10
 # Resource limits
 LimitNOFILE=65535
 LimitNPROC=4096
+
+# Environment
+Environment="RUST_BACKTRACE=1"
 
 # Logging
 StandardOutput=journal
@@ -491,7 +572,8 @@ print_summary() {
     echo ""
     echo -e "${BLUE}Installed Components:${NC}"
     echo "  • Binaries: $BIN_DIR/timed, $BIN_DIR/time-cli"
-    echo "  • Config:   $CONFIG_DIR/config.toml"
+    echo "  • Config:   $CONFIG_DIR/time.conf"
+    echo "  • MN Conf:  $CONFIG_DIR/masternode.conf"
     echo "  • Data:     $DATA_DIR"
     echo "  • Logs:     $LOG_DIR"
     echo "  • Service:  ${SERVICE_NAME}.service"
@@ -502,18 +584,24 @@ print_summary() {
     echo "  • Stop service:    systemctl stop ${SERVICE_NAME}"
     echo "  • Start service:   systemctl start ${SERVICE_NAME}"
     echo "  • Restart service: systemctl restart ${SERVICE_NAME}"
-    echo "  • Edit config:     nano $CONFIG_DIR/config.toml"
+    echo "  • Edit config:     nano $CONFIG_DIR/time.conf"
+    echo "  • Edit MN config:  nano $CONFIG_DIR/masternode.conf"
     echo ""
     echo -e "${BLUE}CLI Tools:${NC}"
-    echo "  • time-cli --help"
-    echo "  • time-cli wallet create"
-    echo "  • time-cli wallet balance <address>"
+    echo "  • time-cli masternode genkey     # Generate masternode private key"
+    echo "  • time-cli masternode list       # List all masternodes"
+    echo "  • time-cli masternode status     # This node's masternode status"
+    echo "  • time-cli getblockchaininfo     # Blockchain info"
+    echo "  • time-cli getbalance            # Wallet balance"
+    echo "  • time-cli getpeerinfo           # Connected peers"
     echo ""
     echo -e "${YELLOW}Next Steps:${NC}"
-    echo "  1. Edit configuration: nano $CONFIG_DIR/config.toml"
-    echo "  2. Create a wallet: time-cli wallet create"
-    echo "  3. Fund your masternode address"
-    echo "  4. Check logs: journalctl -u ${SERVICE_NAME} -f"
+    echo "  1. Generate a masternode key:   time-cli masternode genkey"
+    echo "  2. Add key to config:           nano $CONFIG_DIR/time.conf"
+    echo "     → Set masternodeprivkey=<key from step 1>"
+    echo "  3. (Staked tiers) Send collateral and update masternode.conf"
+    echo "  4. Restart the service:         systemctl restart ${SERVICE_NAME}"
+    echo "  5. Check logs:                  journalctl -u ${SERVICE_NAME} -f"
     echo ""
 }
 
@@ -543,15 +631,14 @@ main() {
         install_nasm
     fi
     
-    # Create directories (service runs as root, no separate user needed)
-    # create_user  # Not needed - service runs as root
+    # Create directories (service runs as root)
     create_directories
     
     # Build and install
     build_binaries
     install_binaries
     
-    # Configuration
+    # Configuration (time.conf + masternode.conf)
     create_config
     
     # Setup systemd service
