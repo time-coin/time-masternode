@@ -7045,41 +7045,24 @@ impl Blockchain {
         }
 
         // Case 3: We're ahead of all known peers
-        // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical
-        // This can only happen if we have blocks that no peer has yet
-        //
-        // EXCEPTION: If we're only slightly ahead (1-5 blocks) and our chain diverges
-        // from what the majority of peers agree on, we're likely on a solo fork — not
-        // actually canonical. Compare our hash at consensus_height to detect this.
+        // LONGEST VALID CHAIN RULE: If we have a valid longer chain than any peer, WE are canonical.
+        // Peers will sync to us when they see our blocks. Even if hashes differ at a lower
+        // height, our chain is longer and should win — peers adopt the longest valid chain.
         if our_height > consensus_height {
-            // Check if our chain at consensus_height matches what peers have
-            // If it doesn't, we forked below consensus_height and built on a bad chain
+            // Log divergence for diagnostics but do NOT roll back
             if our_height - consensus_height <= 5 && consensus_peers.len() >= 2 {
                 match self.get_block_hash(consensus_height) {
                     Ok(our_hash_at_consensus) => {
                         if our_hash_at_consensus != consensus_hash {
-                            tracing::warn!(
-                                "🔀 SOLO FORK DETECTED: We're at {} but our hash at consensus height {} ({}) differs from {} peers ({})",
+                            tracing::info!(
+                                "📈 Longest chain rule: we're at {} (peers at {}). Hash differs at {} — peers should sync to us.",
                                 our_height,
                                 consensus_height,
-                                hex::encode(&our_hash_at_consensus[..8]),
-                                consensus_peers.len(),
-                                hex::encode(&consensus_hash[..8])
+                                consensus_height
                             );
-                            tracing::warn!(
-                                "   Switching to consensus chain (we likely missed a block and forked)"
-                            );
-                            return Some((consensus_height, consensus_peers[0].clone()));
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "🔄 Cannot verify our chain at height {}: {} — syncing to consensus",
-                            consensus_height,
-                            e
-                        );
-                        return Some((consensus_height, consensus_peers[0].clone()));
-                    }
+                    Err(_) => {}
                 }
             }
 
