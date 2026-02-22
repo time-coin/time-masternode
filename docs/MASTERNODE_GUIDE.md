@@ -2,7 +2,7 @@
 
 ## Overview
 
-TIME Coin supports tiered masternodes with locked collateral (Dash-style). Masternode management is **config-based** — you configure your masternode in `config.toml` and the daemon handles registration on startup.
+TIME Coin supports tiered masternodes with locked collateral (Dash-style). Configuration uses two files: `time.conf` (daemon settings and private key) and `masternode.conf` (collateral info). The daemon handles registration on startup.
 
 ---
 
@@ -14,11 +14,9 @@ TIME Coin supports tiered masternodes with locked collateral (Dash-style). Maste
 [windows]
 %APPDATA%\timecoin\ or %APPDATA%\timecoin\testnet
 
- Edit `config.toml`:
-```toml
-[masternode]
-enabled = true
-# No tier or collateral needed for free tier
+ Edit `time.conf`:
+```
+masternode=1
 ```
 
 2. Start/restart the daemon:
@@ -28,41 +26,49 @@ bash timecoin/target/release/timed
 
 3. Verify:
 ```bash
-time-cli masternodelist
+time-cli masternode list
 ```
 
 ### Staked Tier (Bronze/Silver/Gold)
 
-1. Send exact collateral to yourself:
+1. Generate a masternode private key:
+```bash
+time-cli masternode genkey
+# Output: 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+```
+
+2. Add the key to `time.conf`:
+```
+masternode=1
+masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+```
+
+3. Send exact collateral to yourself:
 ```bash
 time-cli sendtoaddress <your_address> 1000.0
 # Note the TXID from the output
 ```
 
-2. Wait for 3 confirmations (~30 minutes):
+4. Wait for 3 confirmations (~30 minutes):
 ```bash
 time-cli listunspent
 # Check confirmations >= 3, note the txid and vout
 ```
 
-3. Edit `config.toml`:
-```toml
-[masternode]
-enabled = true
-collateral_txid = "abc123def456..."
-collateral_vout = 0
-# tier is auto-detected from the collateral UTXO amount
+5. Add collateral info to `masternode.conf`:
+```
+mn1 <your_public_ip>:24100 <collateral_txid> <collateral_vout>
 ```
 
-4. Restart the daemon:
+6. Restart the daemon:
 ```bash
 sudo systemctl restart timed
 ```
 
-5. Verify:
+7. Verify:
 ```bash
 time-cli getbalance          # Should show locked collateral
-time-cli masternodelist      # Should show your masternode with 🔒 Locked
+time-cli masternode list     # Should show your masternode with 🔒 Locked
 time-cli listlockedcollaterals
 ```
 
@@ -94,7 +100,7 @@ time-cli listlockedcollaterals
    │ amount: 1000 TIME       │
    └─────────────────────────┘
             │
-            │ Edit config.toml
+            │ Edit time.conf + masternode.conf
             │ Restart daemon
             ▼
 4. LOCK COLLATERAL                   5. MASTERNODE ACTIVE
@@ -138,43 +144,61 @@ TIME Coin has four masternode tiers with different collateral requirements and d
 
 ## Configuration
 
-All masternode management is done through `config.toml`. No RPC commands are needed.
+Masternode configuration uses two files:
+- **`time.conf`** — daemon settings and masternode private key
+- **`masternode.conf`** — collateral info (alias, IP, txid, vout)
 
-### config.toml Settings
+### time.conf Settings
 
-```toml
-[masternode]
-enabled = true                          # Enable/disable masternode
-# tier = "auto"                         # Auto-detected from collateral (default). Options: auto, free, bronze, silver, gold
-collateral_txid = "abc123def456..."     # TXID of collateral UTXO (staked tiers only)
-collateral_vout = 0                     # Output index of collateral UTXO
+```
+masternode=1
+masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
 ```
 
-> **Tier auto-detection:** When `tier` is omitted or set to `"auto"` (default), the node automatically determines your tier from the collateral UTXO value on startup. You can still set `tier` explicitly if preferred.
+Generate a key with `time-cli masternode genkey`. If omitted, the node uses its wallet's auto-generated key.
+
+### masternode.conf Format
+
+```
+# alias  IP:port  collateral_txid  collateral_vout
+mn1  69.167.168.176:24100  abc123def456...  0
+```
 
 ### Free Tier (No Collateral)
 
-```toml
-[masternode]
-enabled = true
-collateral_txid = ""
-collateral_vout = 0
+In `time.conf`:
 ```
+masternode=1
+```
+
+No `masternode.conf` entry needed (or use 4-field format without collateral).
 
 ### Staked Tier (Bronze Example)
 
-```toml
-[masternode]
-enabled = true
-collateral_txid = "abc123def456789012345678901234567890123456789012345678901234abcd"
-collateral_vout = 0
+In `time.conf`:
+```
+masternode=1
+masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+```
+
+In `masternode.conf`:
+```
+mn1 69.167.168.176:24100 abc123def456789012345678901234567890123456789012345678901234abcd 0
 ```
 
 ---
 
 ## Setup Guide (Staked Tiers)
 
-### Step 1: Check Your Balance
+### Step 1: Generate Masternode Key
+
+```bash
+time-cli masternode genkey
+```
+
+Save this key — you'll add it to `time.conf`.
+
+### Step 2: Check Your Balance
 
 ```bash
 time-cli getbalance
@@ -188,7 +212,7 @@ Wallet Balance:
   Available:     1500.00000000 TIME (spendable)
 ```
 
-### Step 2: Create Collateral UTXO
+### Step 3: Create Collateral UTXO
 
 Send the exact collateral amount to yourself. A 0.1% network fee applies, so your wallet needs slightly more than the collateral amount:
 
@@ -213,7 +237,7 @@ time-cli sendtoaddress <your_address> 1000.0
 - Easier to track and manage
 - Standard practice (Dash-style)
 
-### Step 3: Wait for Confirmations
+### Step 4: Wait for Confirmations
 
 The UTXO needs 3 confirmations (~30 minutes):
 ```bash
@@ -227,19 +251,22 @@ time-cli listunspent
 # confirmations: 3  ← Must be 3+
 ```
 
-**Note the txid and vout** — you'll need these for the config file.
+**Note the txid and vout** — you'll need these for `masternode.conf`.
 
-### Step 4: Update config.toml
+### Step 5: Configure Files
 
-```toml
-[masternode]
-enabled = true
-collateral_txid = "abc123def456..."   # From Step 2
-collateral_vout = 0                    # From Step 3
-# tier is auto-detected from the collateral amount
+In `time.conf`:
+```
+masternode=1
+masternodeprivkey=<key from Step 1>
 ```
 
-### Step 5: Restart the Daemon
+In `masternode.conf`:
+```
+mn1 <your_ip>:24100 <txid_from_step_3> <vout>
+```
+
+### Step 6: Restart the Daemon
 
 ```bash
 sudo systemctl restart timed
@@ -254,7 +281,7 @@ The daemon will automatically:
 5. Register the masternode on the network
 6. Begin participating in consensus
 
-### Step 6: Verify Registration
+### Step 7: Verify Registration
 
 ```bash
 # Check your balance (should show locked collateral)
@@ -313,11 +340,10 @@ time-cli listlockedcollaterals
 
 ## Deregistering Your Masternode
 
-To stop your masternode and unlock collateral, edit `config.toml`:
+To stop your masternode and unlock collateral, edit `time.conf`:
 
-```toml
-[masternode]
-enabled = false
+```
+masternode=0
 ```
 
 Then restart the daemon:
@@ -333,10 +359,10 @@ Your collateral is now unlocked and spendable.
 
 To upgrade or downgrade your tier:
 
-1. Set `enabled = false` in config.toml and restart (unlocks current collateral)
+1. Set `masternode=0` in time.conf and restart (unlocks current collateral)
 2. Create a new collateral UTXO for the new tier amount
-3. Update `collateral_txid` and `collateral_vout` in config.toml
-4. Set `enabled = true` and restart (tier auto-detects from new collateral amount)
+3. Update `masternode.conf` with the new txid and vout
+4. Set `masternode=1` and restart (tier auto-detects from new collateral amount)
 
 ---
 
@@ -384,7 +410,7 @@ If collateral becomes invalid:
 2. Removed from reward rotation
 3. Logged in system
 
-> **Note:** The **local masternode** (this node) is never auto-deregistered by `cleanup_invalid_collaterals()`. The operator must explicitly set `enabled = false` in config to deregister. This prevents false deregistration during recollateralization when the new UTXO exists but hasn't been formally locked yet.
+> **Note:** The **local masternode** (this node) is never auto-deregistered by `cleanup_invalid_collaterals()`. The operator must explicitly set `masternode=0` in time.conf to deregister. This prevents false deregistration during recollateralization when the new UTXO exists but hasn't been formally locked yet.
 >
 > If the local masternode is unexpectedly deregistered, wallet RPCs (`getbalance`, `listunspent`) fall back to a stored `local_wallet_address` so UTXOs remain visible.
 
@@ -399,12 +425,12 @@ If collateral becomes invalid:
 **Solution:**
 ```bash
 time-cli listunspent
-# Verify the txid and vout in config.toml match an unspent UTXO
+# Verify the txid and vout in masternode.conf match an unspent UTXO
 ```
 
 ### Error: "Invalid collateral_txid hex"
 
-**Cause:** The `collateral_txid` in config.toml is not valid hex.
+**Cause:** The `collateral_txid` in masternode.conf is not valid hex.
 
 **Solution:** Ensure the txid is a 64-character hex string (no 0x prefix).
 
@@ -427,9 +453,9 @@ time-cli listunspent
 ## Security
 
 Masternode management is **local only**:
-- Registration and deregistration are done via `config.toml` on the node
+- Registration and deregistration are done via `time.conf` on the node
 - No RPC commands can register or deregister masternodes
-- The signing key is derived from your node's wallet
+- The signing key is set via `masternodeprivkey` in `time.conf` (generated with `masternode genkey`)
 - No one can remotely deregister your masternode
 
 ---
@@ -461,25 +487,25 @@ Masternode management is **local only**:
 ## FAQ
 
 ### Q: How do I register a masternode?
-**A:** Edit `config.toml` with your collateral info (tier is auto-detected), then start/restart the daemon.
+**A:** Generate a key with `time-cli masternode genkey`, add it to `time.conf`, configure collateral in `masternode.conf`, then start/restart the daemon.
 
 ### Q: How do I deregister a masternode?
-**A:** Set `enabled = false` in `config.toml` and restart the daemon.
+**A:** Set `masternode=0` in `time.conf` and restart the daemon.
 
 ### Q: What happens if I spend locked collateral?
-**A:** The transaction will be rejected — locked collateral UTXOs cannot be spent while the masternode is registered. Deregister first by setting `enabled = false` and restarting.
+**A:** The transaction will be rejected — locked collateral UTXOs cannot be spent while the masternode is registered. Deregister first by setting `masternode=0` and restarting.
 
 ### Q: How long to wait for rewards?
 **A:** Depends on total masternodes. With 50 MNs, expect rewards every ~50 minutes.
 
 ### Q: Can I change tier after registration?
-**A:** Yes. Deregister (set `enabled = false`, restart), create new collateral UTXO, update `collateral_txid`/`collateral_vout`, restart. Tier auto-detects.
+**A:** Yes. Deregister (`masternode=0`, restart), create new collateral UTXO, update `masternode.conf`, restart. Tier auto-detects.
 
 ### Q: What if my node goes offline?
 **A:** After 5 missed heartbeats (5 minutes), marked inactive. No rewards while inactive.
 
 ### Q: Do I need to save a signing key?
-**A:** No. The signing key is derived from your node's wallet automatically.
+**A:** Yes. The `masternodeprivkey` in `time.conf` is your signing key. Back it up securely. Generate one with `time-cli masternode genkey`.
 
 ---
 
@@ -487,26 +513,32 @@ Masternode management is **local only**:
 
 ### Commands
 ```bash
+# Generate masternode key
+time-cli masternode genkey
+
 # List masternodes
-time-cli masternodelist
+time-cli masternode list
 
 # List locked collaterals
 time-cli listlockedcollaterals
 
 # Check status
-time-cli masternodestatus
+time-cli masternode status
 
 # Check balance
 time-cli getbalance
 ```
 
 ### Config
-```toml
-[masternode]
-enabled = true
-# tier = "auto"                    # Auto-detected from collateral (default)
-collateral_txid = "abc123..."      # TXID of collateral UTXO
-collateral_vout = 0                # Output index
+**time.conf:**
+```
+masternode=1
+masternodeprivkey=<base58check_key>
+```
+
+**masternode.conf:**
+```
+mn1 <ip>:24100 <collateral_txid> <collateral_vout>
 ```
 
 ### Collateral Requirements
@@ -517,7 +549,8 @@ collateral_vout = 0                # Output index
 - **Confirmations:** 3 blocks (~30 minutes)
 
 ### Key Points
-- ✅ Config-based management (no RPC commands needed)
+- ✅ Two-file config: `time.conf` (key + settings) + `masternode.conf` (collateral)
+- ✅ Generate key with `time-cli masternode genkey`
 - ✅ Locked collateral prevents accidental spending
 - ✅ Automatic validation and cleanup
 - ✅ Local-only security (no remote deregistration)

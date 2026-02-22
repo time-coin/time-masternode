@@ -129,17 +129,23 @@ curl http://localhost:24101/rpc \
 
 ## 🖥️ Masternode Setup
 
-### 1. Configure Masternode
+### 1. Generate Masternode Key
 
-Edit config file (`config.toml` or `~/.timecoin/testnet/config.toml`):
-
-```toml
-[masternode]
-enabled = true
-# tier is auto-detected from collateral UTXO value (defaults to "auto")
-collateral_txid = ""  # Leave empty for free tier
-collateral_vout = 0
+```bash
+time-cli masternode genkey
+# Output: 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
 ```
+
+### 2. Configure Masternode
+
+Edit `time.conf` (in `~/.timecoin/` or `~/.timecoin/testnet/`):
+
+```
+masternode=1
+masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+```
+
+For free tier, omit `masternodeprivkey` (auto-generated from wallet).
 
 **Tier Requirements:**
 - **free**: No collateral, can receive rewards, cannot vote
@@ -147,7 +153,7 @@ collateral_vout = 0
 - **silver**: 10,000 TIME collateral (exact), voting enabled  
 - **gold**: 100,000 TIME collateral (exact), voting enabled
 
-### 2. For Staked Tiers (Bronze/Silver/Gold)
+### 3. For Staked Tiers (Bronze/Silver/Gold)
 
 ```bash
 # Create collateral UTXO
@@ -156,10 +162,11 @@ time-cli sendtoaddress <your_address> 1000.0  # Bronze example
 # Wait for confirmations, then note the txid and vout
 time-cli listunspent
 
-# Update config.toml with collateral_txid and collateral_vout, then restart
+# Add collateral to masternode.conf:
+# mn1 <ip>:24100 <txid> <vout>
 ```
 
-### 3. Run as Masternode
+### 4. Run as Masternode
 
 ```bash
 ./target/release/timed
@@ -170,7 +177,7 @@ Feb 12 01:00:00 timed[12345]:  INFO 📡 Broadcasting masternode announcement
 Feb 12 01:00:00 timed[12345]:  INFO ✅ Registered as active masternode
 ```
 
-To deregister: set `enabled = false` in config.toml and restart.
+To deregister: set `masternode=0` in time.conf and restart.
 
 ---
 
