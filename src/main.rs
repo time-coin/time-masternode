@@ -145,11 +145,18 @@ async fn main() {
     let is_legacy_toml = conf_path.extension().is_some_and(|ext| ext == "toml");
 
     // Determine network type
+    let in_testnet_dir = conf_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|name| name == "testnet");
+
     let network_type = if args.testnet {
         NetworkType::Testnet
     } else if is_legacy_toml {
         if let Ok(cfg) = Config::load_from_file(&conf_path.to_string_lossy()) {
             cfg.node.network_type()
+        } else if in_testnet_dir {
+            NetworkType::Testnet
         } else {
             NetworkType::Mainnet
         }
@@ -180,6 +187,22 @@ async fn main() {
     }
 
     // Load config — time.conf or legacy TOML
+    // If a legacy TOML path was specified but doesn't exist, use time.conf instead
+    let (conf_path, is_legacy_toml) = if is_legacy_toml && !conf_path.exists() {
+        let new_path = conf_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("time.conf");
+        println!(
+            "  ℹ️ {} not found, using {} instead",
+            conf_path.display(),
+            new_path.display()
+        );
+        (new_path, false)
+    } else {
+        (conf_path, is_legacy_toml)
+    };
+
     let mut config = if is_legacy_toml {
         match Config::load_or_create(&conf_path.to_string_lossy(), &network_type) {
             Ok(cfg) => {

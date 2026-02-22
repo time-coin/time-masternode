@@ -840,8 +840,8 @@ impl Config {
                 }
                 println!("  ✓ Loaded masternode config: alias={}", entry.alias);
             }
-        } else if config.masternode.enabled {
-            // Generate blank masternode.conf template
+        } else {
+            // Always generate masternode.conf template so it's ready to edit
             generate_default_masternode_conf(&mn_conf_path)?;
             println!("  ✓ Generated default {}", mn_conf_path.display());
         }
@@ -894,6 +894,13 @@ pub fn parse_conf_file(
 /// Detect network type from a time.conf without fully parsing it.
 #[allow(dead_code)]
 pub fn detect_network_from_conf(conf_path: &PathBuf) -> NetworkType {
+    // If the config file is inside a "testnet" directory, infer testnet
+    // even if the file doesn't exist yet (first run / migration)
+    let in_testnet_dir = conf_path
+        .parent()
+        .and_then(|p| p.file_name())
+        .is_some_and(|name| name == "testnet");
+
     if let Ok(entries) = parse_conf_file(conf_path) {
         if let Some(v) = entries.get("testnet") {
             if v.last().is_some_and(|s| s == "1") {
@@ -907,8 +914,12 @@ pub fn detect_network_from_conf(conf_path: &PathBuf) -> NetworkType {
             }
         }
     }
-    // No explicit network setting — default to mainnet.
-    // Testnet nodes must have testnet=1 in their time.conf.
+
+    if in_testnet_dir {
+        return NetworkType::Testnet;
+    }
+
+    // No explicit network setting, not in testnet dir — default to mainnet
     NetworkType::Mainnet
 }
 
@@ -1022,7 +1033,7 @@ server=1
 # ─── Masternode ──────────────────────────────────────────────
 # Enable masternode mode (0=off, 1=on)
 # Collateral settings go in masternode.conf
-masternode=0
+masternode=1
 
 # Masternode private key (generate with: time-cli masternode genkey)
 #masternodeprivkey=
@@ -1215,7 +1226,7 @@ mod tests {
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("#testnet=0"));
         assert!(contents.contains("server=1"));
-        assert!(contents.contains("masternode=0"));
+        assert!(contents.contains("masternode=1"));
 
         fs::remove_file(&path).ok();
 
@@ -1270,6 +1281,16 @@ mod tests {
         let path3 = dir.join("mainnet2.conf");
         fs::write(&path3, "mainnet=1\n").unwrap();
         assert_eq!(detect_network_from_conf(&path3), NetworkType::Mainnet);
+
+        // No file, not in testnet dir → mainnet
+        let path4 = dir.join("nonexistent.conf");
+        assert_eq!(detect_network_from_conf(&path4), NetworkType::Mainnet);
+
+        // No file, but inside a "testnet" directory → testnet
+        let testnet_dir = dir.join("testnet");
+        fs::create_dir_all(&testnet_dir).unwrap();
+        let path5 = testnet_dir.join("time.conf");
+        assert_eq!(detect_network_from_conf(&path5), NetworkType::Testnet);
 
         fs::remove_dir_all(&dir).ok();
     }
