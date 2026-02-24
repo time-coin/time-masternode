@@ -12,7 +12,7 @@ $CLI getmempoolinfo 2>&1
 
 echo ""
 echo "=== PENDING TRANSACTIONS ==="
-$CLI getrawmempool false 2>&1
+$CLI getrawmempool 2>&1
 
 echo ""
 echo "=== CONNECTED PEERS ==="

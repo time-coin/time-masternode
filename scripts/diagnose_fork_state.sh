@@ -7,7 +7,8 @@ echo "Fork Resolution Diagnostic Tool"
 echo "======================================"
 echo ""
 
-SERVERS=("LW-Michigan2" "LW-Arizona" "LW-London" "reitools" "NewYork")
+# Server list — override with SERVERS env var (space-separated) or edit below
+SERVERS=(${SERVERS:-LW-Michigan2 LW-Arizona LW-London reitools NewYork})
 
 echo "1. Checking Current Heights and Tip Hashes"
 echo "-------------------------------------------"

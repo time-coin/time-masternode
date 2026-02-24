@@ -21,19 +21,19 @@ echo "3️⃣ Testing CLI commands..."
 echo ""
 
 echo "📊 Get blockchain info:"
-./target/release/time-cli get-blockchain-info
+./target/release/time-cli getblockchaininfo
 echo ""
 
 echo "🔗 Get block count:"
-./target/release/time-cli get-block-count
+./target/release/time-cli getblockcount
 echo ""
 
 echo "🏛️ List masternodes:"
-./target/release/time-cli masternode-list
+./target/release/time-cli masternodelist
 echo ""
 
 echo "⚡ Get consensus info:"
-./target/release/time-cli get-consensus-info
+./target/release/time-cli getconsensusinfo
 echo ""
 
 echo "⏱️ Get uptime:"
@@ -41,7 +41,7 @@ echo "⏱️ Get uptime:"
 echo ""
 
 echo "🌐 Get network info:"
-./target/release/time-cli get-network-info
+./target/release/time-cli getnetworkinfo
 echo ""
 
 # Stop daemon

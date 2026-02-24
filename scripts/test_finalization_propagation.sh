@@ -30,7 +30,9 @@ log_warn() {
 }
 
 # Configuration
-# Add your node IPs/hostnames here
+# Add your node IPs/hostnames here (SSH-accessible)
+# Override via NODES env var: NODES="root@host1 root@host2" bash scripts/test_finalization_propagation.sh
+if [ -z "${NODES+x}" ]; then
 NODES=(
     "root@LW-Michigan"
     # "root@node2"
@@ -39,6 +41,7 @@ NODES=(
     # "root@node5"
     # "root@node6"
 )
+fi
 
 echo "================================================================"
 echo "  Multi-Node Finalization Propagation Test"

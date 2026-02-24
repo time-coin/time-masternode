@@ -4,7 +4,8 @@
 set -e
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NODES=(8081 8082 8083 8084 8085)
+NODES=(24111 24121 24131)
+CLI="${CLI_PATH:-time-cli}"
 DURATION=259200  # 72 hours in seconds
 INTERVAL=10      # Check every 10 seconds
 LOG_FILE="$PROJECT_ROOT/stability_test_$(date +%Y%m%d_%H%M%S).log"
@@ -27,8 +28,8 @@ FORK_DETECTED=0
 # Verify all nodes are running
 echo "🔍 Verifying nodes are running..."
 for port in "${NODES[@]}"; do
-    if ! curl -s http://localhost:$port/rpc -d '{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":"1"}' > /dev/null 2>&1; then
-        echo "❌ Node on port $port is not responding!"
+    if ! $CLI -r http://localhost:$port getblockcount > /dev/null 2>&1; then
+        echo "❌ Node on RPC port $port is not responding!"
     fi
 done
 echo "✅ All nodes responding"
@@ -43,9 +44,7 @@ while [ $(date +%s) -lt $END_TIME ]; do
     # Get heights from all nodes
     HEIGHTS=()
     for port in "${NODES[@]}"; do
-        HEIGHT=$(curl -s http://localhost:$port/rpc \
-            -d '{"jsonrpc":"2.0","method":"getblockcount","params":[],"id":"1"}' 2>/dev/null | \
-            jq -r '.result // empty' 2>/dev/null)
+        HEIGHT=$($CLI -r http://localhost:$port getblockcount 2>/dev/null)
         
         if [ -n "$HEIGHT" ] && [ "$HEIGHT" -gt 0 ]; then
             HEIGHTS+=("$HEIGHT")
@@ -65,9 +64,8 @@ while [ $(date +%s) -lt $END_TIME ]; do
     fi
     
     # Check mempool size
-    MEMPOOL_SIZE=$(curl -s http://localhost:8081/rpc \
-        -d '{"jsonrpc":"2.0","method":"getmempoolinfo","params":[],"id":"1"}' 2>/dev/null | \
-        jq -r '.result.size // 0' 2>/dev/null)
+    MEMPOOL_SIZE=$($CLI -r http://localhost:${NODES[0]} getmempoolinfo 2>/dev/null | \
+        jq -r '.size // 0' 2>/dev/null)
     
     # Log status
     ELAPSED=$(($(date +%s) - START_TIME))

@@ -47,7 +47,7 @@ fi
 
 if [ -n "$CLI" ]; then
     # Get blockchain info
-    INFO=$($CLI get-blockchain-info 2>/dev/null)
+    INFO=$($CLI getblockchaininfo 2>/dev/null)
     if [ $? -eq 0 ]; then
         HEIGHT=$(echo "$INFO" | jq -r '.height' 2>/dev/null)
         TIP_HASH=$(echo "$INFO" | jq -r '.tip_hash' 2>/dev/null)
@@ -113,7 +113,7 @@ echo ""
 echo "4. Network Connectivity"
 echo "-----------------------"
 if [ -n "$CLI" ]; then
-    PEER_INFO=$($CLI get-peer-info 2>/dev/null)
+    PEER_INFO=$($CLI getpeerinfo 2>/dev/null)
     if [ $? -eq 0 ]; then
         PEER_COUNT=$(echo "$PEER_INFO" | jq '. | length' 2>/dev/null || echo "0")
         echo "Connected peers: $PEER_COUNT"

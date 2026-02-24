@@ -9,11 +9,11 @@ echo "Testing RPC connectivity..."
 echo ""
 
 echo "Trying testnet RPC (24101):"
-./target/release/time-cli --rpc-url http://127.0.0.1:24101 get-block-count 2>&1 | head -5
+./target/release/time-cli --rpc-url http://127.0.0.1:24101 getblockcount 2>&1 | head -5
 echo ""
 
 echo "Trying mainnet RPC (24001):"
-./target/release/time-cli --rpc-url http://127.0.0.1:24001 get-block-count 2>&1 | head -5
+./target/release/time-cli --rpc-url http://127.0.0.1:24001 getblockcount 2>&1 | head -5
 echo ""
 
 echo "Checking what ports are listening:"
