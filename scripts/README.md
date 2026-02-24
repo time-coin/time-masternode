@@ -334,7 +334,7 @@ The installation script implements security best practices:
   - `PrivateTmp=true`
   - `ProtectSystem=strict`
   - `ProtectHome=true`
-- **Firewall**: Configures UFW to allow only P2P port (9333)
+- **Firewall**: Configures UFW to allow only P2P port (24000 mainnet / 24100 testnet)
 - **Resource Limits**: Prevents resource exhaustion
 
 ---
@@ -369,11 +369,11 @@ cargo build --release
 
 ### Port Already in Use
 ```bash
-# Check what's using port 9333
-sudo lsof -i :9333
+# Check what's using the P2P port
+sudo lsof -i :24100
 
 # Kill conflicting process or change port in config
-sudo nano /root/.timecoin/time.conf
+sudo nano /root/.timecoin/testnet/time.conf
 ```
 
 ### Firewall Blocking Connections
@@ -381,8 +381,11 @@ sudo nano /root/.timecoin/time.conf
 # Check UFW status
 sudo ufw status
 
-# Allow P2P port
-sudo ufw allow 9333/tcp
+# Allow P2P port (testnet)
+sudo ufw allow 24100/tcp
+
+# Allow P2P port (mainnet)
+sudo ufw allow 24000/tcp
 
 # Check iptables
 sudo iptables -L -n
@@ -488,9 +491,10 @@ sudo ./scripts/install-masternode.sh
 
 ### Masternode Tiers
 Different tiers have different collateral requirements:
-- **Tier 1**: 100 TIME
-- **Tier 2**: 500 TIME
-- **Tier 3**: 1000 TIME
+- **Free**: No collateral (basic rewards)
+- **Bronze**: 1,000 TIME
+- **Silver**: 10,000 TIME
+- **Gold**: 100,000 TIME
 
 See [MASTERNODE_TIERS.md](../docs/MASTERNODE_TIERS.md) for details.
 
@@ -516,7 +520,100 @@ See [LICENSE](../LICENSE) file in the repository root.
 
 ---
 
-**Last Updated**: 2026-02-14
+**Last Updated**: 2026-02-24
+
+---
+
+## 🛡️ Operations Scripts
+
+### backup-node.sh
+Automated backup of blockchain, wallet, and configuration.
+
+**Usage**:
+```bash
+# Full backup (stops daemon for consistency, restarts after)
+sudo bash scripts/backup-node.sh -n testnet
+
+# Wallet + config only (smaller, faster)
+sudo bash scripts/backup-node.sh -n testnet --wallet-only
+
+# Hot backup (no downtime, less consistent)
+sudo bash scripts/backup-node.sh -n testnet --hot
+
+# Custom output directory
+sudo bash scripts/backup-node.sh -n testnet -o /mnt/backups
+```
+
+### restore-node.sh
+Restore from a backup tarball created by backup-node.sh.
+
+**Usage**:
+```bash
+# Full restore (auto-detects network from filename)
+sudo bash scripts/restore-node.sh /root/timecoin_backup_testnet_20260224.tar.gz
+
+# Wallet-only restore
+sudo bash scripts/restore-node.sh backup.tar.gz --wallet-only
+
+# Skip confirmation
+sudo bash scripts/restore-node.sh backup.tar.gz -y
+```
+
+### health-check.sh
+Quick health probe returning exit codes for monitoring tools (cron, Nagios, uptime checks).
+
+**Exit codes**: 0 = Healthy, 1 = Degraded, 2 = Critical
+
+**Usage**:
+```bash
+# Quick check (human-readable output)
+bash scripts/health-check.sh --testnet
+
+# JSON output for automation
+bash scripts/health-check.sh --testnet --json
+
+# Quiet mode (exit code only, for cron)
+bash scripts/health-check.sh --testnet --quiet
+
+# Custom thresholds
+bash scripts/health-check.sh --testnet --max-behind 10 --min-peers 3
+
+# Cron example (alert if not healthy)
+*/5 * * * * bash /root/timecoin/scripts/health-check.sh --testnet --quiet || echo "Node unhealthy" | mail -s "ALERT" admin@example.com
+```
+
+### reindex.sh
+Safely reindex the blockchain (UTXO + transaction index rebuild).
+
+**Usage**:
+```bash
+# Transaction index only (fast, non-blocking)
+bash scripts/reindex.sh --testnet --tx-only
+
+# Full reindex (UTXOs + tx index, blocks until complete)
+bash scripts/reindex.sh --testnet
+```
+
+### node-monitor.sh
+Persistent log watcher with color-coded event filtering.
+
+**Usage**:
+```bash
+# Watch live (Ctrl+C to stop, shows summary)
+bash scripts/node-monitor.sh
+
+# Watch with log file output
+bash scripts/node-monitor.sh -o /tmp/node_events.log
+
+# Start from further back
+bash scripts/node-monitor.sh --since "1 hour ago"
+```
+
+**Event categories**:
+- 🔴 Errors, panics, crashes
+- 🟡 Forks, sync issues, deregistrations
+- 🟢 Block production, finalization
+- 🔵 Masternode status, collateral changes
 
 ---
 
