@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed - Config-Based Masternode Management
 - **BREAKING: Removed `masternoderegister` and `masternodeunlock` RPC/CLI commands**
-  - Masternode registration is now entirely config-based via `config.toml`
-  - Set `[masternode] enabled = true`, `collateral_txid`, `collateral_vout`
+  - Masternode registration is now entirely config-based (see [Unreleased] for time.conf migration)
+  - Set `masternode=1` in time.conf + collateral in masternode.conf (or legacy `config.toml`)
   - Tier is auto-detected from collateral UTXO value (or set explicitly with `tier`)
   - Daemon auto-registers on startup; deregister by setting `enabled = false`
   - Eliminates security vulnerability where anyone with RPC access could deregister masternodes
@@ -30,6 +30,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Removed unsigned `MasternodeUnlock` network message handling (any peer could forge deregistration)
 
 ## [Unreleased]
+
+### Changed — Config Migration (time.conf + masternode.conf)
+- **BREAKING: Configuration migrated from config.toml to time.conf + masternode.conf** (Dash-style)
+  - `time.conf`: key=value format for daemon settings (`masternode=1`, `masternodeprivkey=`, `testnet=1`, etc.)
+  - `masternode.conf`: collateral entries (`alias IP:port txid vout`)
+  - Legacy config.toml still supported but deprecated; daemon logs a warning
+- **Legacy TOML path now also loads masternode.conf and masternodeprivkey from time.conf**
+  - Existing deployments using `--config config.toml` work without changes
+- **Startup output defers tier/collateral display when auto-detection is pending**
+  - No longer shows misleading "Running as Free masternode / Collateral: 0 TIME" before UTXO lookup
+- **Removed all user-facing references to config.toml** (observer mode hint, comments, log messages)
+- **Scripts rewritten for new config system**:
+  - `configure-masternode.sh/.bat` — writes time.conf + masternode.conf (was editing TOML `[masternode]` section)
+  - `deploy-config.sh/.bat` — creates default time.conf + masternode.conf (was copying TOML templates)
+
+### Added — Per-Address UTXO Index & Auto-Consolidation
+- **Per-address UTXO index** (`DashMap<String, DashSet<OutPoint>>`) in UTXOStateManager
+  - O(n) in address UTXOs instead of scanning the entire UTXO set
+  - Maintained incrementally on add/spend/remove, built at startup from full scan
+  - Used by: `get_balance`, `list_unspent`, `list_received_by_address`, `send_to_address`, `merge_utxos`
+- **Auto-consolidation** in `sendtoaddress` when a transfer needs more than 5000 inputs
+  - Merges smallest UTXOs into a single consolidation TX, waits for finalization, retries original send
+  - Falls back to a clear error message if consolidation fails
+- **MAX_TX_INPUTS limit** (5000) with OOM-prevention error message recommending smaller amounts
+- **`scripts/migrate-systemd.sh`** — migrates deployed systemd service from `--config config.toml` to `--conf time.conf`
+
+### Removed
+- **config.mainnet.toml and config.testnet.toml** template files from repository root
 
 ### Fixed — Collateral Recollateralization Race Condition
 - **CRITICAL: `check_collateral_validity()` no longer falsely deregisters masternodes during recollateralization**
