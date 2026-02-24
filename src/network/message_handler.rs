@@ -1077,7 +1077,7 @@ impl MessageHandler {
 
         // Check if prepare consensus reached (>50% majority timevote)
         if consensus.timevote.check_prepare_consensus(block_hash) {
-            debug!(
+            info!(
                 "✅ [{}] Prepare consensus reached for block {}",
                 self.direction,
                 hex::encode(block_hash)
@@ -1191,7 +1191,7 @@ impl MessageHandler {
 
         // Check if precommit consensus reached (>50% majority timevote)
         if consensus.timevote.check_precommit_consensus(block_hash) {
-            debug!(
+            info!(
                 "✅ [{}] Precommit consensus reached for block {}",
                 self.direction,
                 hex::encode(block_hash)

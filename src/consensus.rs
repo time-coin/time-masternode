@@ -354,34 +354,47 @@ impl PrepareVoteAccumulator {
     /// Check if timevote consensus reached: majority of participating validator WEIGHT agrees.
     /// Uses accumulated stake weight (not raw vote count) to prevent Free-tier Sybil attacks.
     pub fn check_consensus(&self, block_hash: Hash256, _sample_size: usize) -> bool {
-        if let Some(entry) = self.votes.get(&block_hash) {
-            let vote_count = entry.len();
-
-            // SECURITY: Require at least 2 unique voters for this block.
-            // A solo node must never finalize its own block.
-            if vote_count < 2 {
-                return false;
+        // Extract vote data for target block, then DROP the Ref (shard read lock)
+        // before calling iter(). This prevents a potential deadlock: if a concurrent
+        // add_vote() has a pending write lock on the same shard, holding the get()
+        // Ref while calling iter() could deadlock under write-priority RwLock semantics.
+        let (vote_count, block_weight) = match self.votes.get(&block_hash) {
+            Some(entry) => {
+                let count = entry.len();
+                let weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+                (count, weight)
             }
+            None => return false,
+        };
+        // Ref is now dropped — shard read lock released
 
-            // Accumulate weight for this block hash
-            let block_weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+        // SECURITY: Require at least 2 unique voters for this block.
+        // A solo node must never finalize its own block.
+        if vote_count < 2 {
+            return false;
+        }
 
-            // Accumulate total participating weight across ALL block hashes
-            let mut total_weight: u64 = 0;
-            let mut seen_voters = std::collections::HashSet::new();
-            for entry in self.votes.iter() {
-                for (voter_id, w) in entry.value() {
-                    if seen_voters.insert(voter_id.clone()) {
-                        total_weight += w;
-                    }
+        // Accumulate total participating weight across ALL block hashes
+        let mut total_weight: u64 = 0;
+        let mut seen_voters = std::collections::HashSet::new();
+        for entry in self.votes.iter() {
+            for (voter_id, w) in entry.value() {
+                if seen_voters.insert(voter_id.clone()) {
+                    total_weight += w;
                 }
             }
-
-            // Majority: block weight must exceed 50% of total participating weight
-            total_weight > 0 && block_weight > total_weight / 2
-        } else {
-            false
         }
+
+        // Majority: block weight must exceed 50% of total participating weight
+        let result = total_weight > 0 && block_weight > total_weight / 2;
+        if !result && vote_count >= 2 {
+            tracing::debug!(
+                "🗳️  Consensus check: block_weight={}, total_weight={}, voters={} → {}",
+                block_weight, total_weight, vote_count,
+                if result { "PASS" } else { "FAIL" }
+            );
+        }
+        result
     }
 
     /// Get accumulated weight for a block
@@ -479,34 +492,43 @@ impl PrecommitVoteAccumulator {
     ///
     /// SECURITY: A minimum of 2 unique voters is required to prevent solo finalization.
     pub fn check_consensus(&self, block_hash: Hash256, _sample_size: usize) -> bool {
-        if let Some(entry) = self.votes.get(&block_hash) {
-            let vote_count = entry.len();
-
-            // SECURITY: Require at least 2 unique voters for this block.
-            // A solo node must never finalize its own block.
-            if vote_count < 2 {
-                return false;
+        // Extract vote data for target block, then DROP the Ref (shard read lock)
+        // before calling iter(). Prevents deadlock with concurrent add_vote().
+        let (vote_count, block_weight) = match self.votes.get(&block_hash) {
+            Some(entry) => {
+                let count = entry.len();
+                let weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+                (count, weight)
             }
+            None => return false,
+        };
 
-            // Accumulate weight for this block hash
-            let block_weight: u64 = entry.iter().map(|(_, w)| *w).sum();
+        // SECURITY: Require at least 2 unique voters for this block.
+        // A solo node must never finalize its own block.
+        if vote_count < 2 {
+            return false;
+        }
 
-            // Accumulate total participating weight across ALL block hashes
-            let mut total_weight: u64 = 0;
-            let mut seen_voters = std::collections::HashSet::new();
-            for entry in self.votes.iter() {
-                for (voter_id, w) in entry.value() {
-                    if seen_voters.insert(voter_id.clone()) {
-                        total_weight += w;
-                    }
+        // Accumulate total participating weight across ALL block hashes
+        let mut total_weight: u64 = 0;
+        let mut seen_voters = std::collections::HashSet::new();
+        for entry in self.votes.iter() {
+            for (voter_id, w) in entry.value() {
+                if seen_voters.insert(voter_id.clone()) {
+                    total_weight += w;
                 }
             }
-
-            // Majority: block weight must exceed 50% of total participating weight
-            total_weight > 0 && block_weight > total_weight / 2
-        } else {
-            false
         }
+
+        // Majority: block weight must exceed 50% of total participating weight
+        let result = total_weight > 0 && block_weight > total_weight / 2;
+        if !result && vote_count >= 2 {
+            tracing::debug!(
+                "🗳️  Precommit consensus check: block_weight={}, total_weight={}, voters={} → FAIL",
+                block_weight, total_weight, vote_count,
+            );
+        }
+        result
     }
 
     /// Get accumulated weight for a block

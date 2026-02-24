@@ -426,7 +426,9 @@ impl ConnectionResources {
 
                 res.connection_manager.mark_disconnected(&ip);
 
-                if is_masternode {
+                // Only mark masternode inactive if we don't have a live inbound connection
+                // (outbound may have been superseded by inbound via IP tiebreaker)
+                if is_masternode && !res.peer_registry.is_connected(&ip) {
                     if let Err(e) = res
                         .masternode_registry
                         .mark_inactive_on_disconnect(&ip)
@@ -578,8 +580,21 @@ async fn maintain_peer_connection(
 
     // Clean up on disconnect in both managers
     connection_manager.mark_disconnected(&peer_ip);
-    peer_registry.mark_disconnected(&peer_ip); // Use mark_disconnected for both inbound and outbound
-    peer_registry.unregister_peer(&peer_ip).await;
+    // Only clean up peer_registry if we're still the active outbound connection.
+    // If the connection was superseded by an inbound (IP tiebreaker in
+    // try_register_inbound), skip cleanup to avoid corrupting the new inbound.
+    if peer_registry.is_outbound(&peer_ip) {
+        peer_registry.mark_disconnected(&peer_ip);
+        peer_registry.unregister_peer(&peer_ip).await;
+    } else if !peer_registry.is_connected(&peer_ip) {
+        // No connection at all — clean up normally
+        peer_registry.unregister_peer(&peer_ip).await;
+    } else {
+        tracing::info!(
+            "🔄 Outbound to {} superseded by inbound — skipping cleanup",
+            peer_ip
+        );
+    }
 
     // If this peer is a registered masternode, mark it as inactive on disconnect
     if masternode_registry.is_registered(&peer_ip).await {

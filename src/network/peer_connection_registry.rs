@@ -572,7 +572,9 @@ impl PeerConnectionRegistry {
 
     /// Atomically register inbound connection if not already connected
     /// Returns true if registration succeeded, false if already exists
-    /// This prevents race conditions during concurrent connection attempts
+    /// This prevents race conditions during concurrent connection attempts.
+    /// Uses IP-based tiebreaker for simultaneous connections: the node with
+    /// the lower IP keeps its outbound; the higher IP yields and accepts inbound.
     pub fn try_register_inbound(&self, ip: &str) -> bool {
         use dashmap::mapref::entry::Entry;
 
@@ -585,16 +587,33 @@ impl PeerConnectionRegistry {
                 self.inbound_count.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            Entry::Occupied(e) => {
-                // Reject inbound if an outbound connection already exists
-                // Allowing both causes writer overwrite in peer_writers, corrupting
-                // the outbound connection's frame stream
+            Entry::Occupied(mut e) => {
                 if e.get().direction == ConnectionDirection::Outbound {
-                    tracing::debug!(
-                        "🔄 Rejecting inbound from {} - outbound connection already exists",
-                        ip
-                    );
-                    false
+                    // Simultaneous connection: we have outbound, peer is sending inbound.
+                    // Use deterministic tiebreaker: node with higher IP yields its outbound
+                    // and accepts inbound instead. This prevents the reconnect loop where
+                    // rejecting the inbound causes the peer to close our outbound too.
+                    if !self.should_connect_to(ip) {
+                        // Our IP is lower — we should yield outbound, accept inbound
+                        tracing::info!(
+                            "🔄 Simultaneous connection with {} — yielding outbound, accepting inbound (IP tiebreaker)",
+                            ip
+                        );
+                        self.outbound_count.fetch_sub(1, Ordering::Relaxed);
+                        e.insert(ConnectionState {
+                            direction: ConnectionDirection::Inbound,
+                            connected_at: Instant::now(),
+                        });
+                        self.inbound_count.fetch_add(1, Ordering::Relaxed);
+                        true
+                    } else {
+                        // Our IP is higher — keep outbound, reject inbound
+                        tracing::debug!(
+                            "🔄 Rejecting inbound from {} - outbound connection preferred (IP tiebreaker)",
+                            ip
+                        );
+                        false
+                    }
                 } else {
                     // Already have an inbound connection, reject duplicate
                     tracing::debug!(
@@ -634,6 +653,15 @@ impl PeerConnectionRegistry {
 
     pub fn is_connected(&self, ip: &str) -> bool {
         self.connections.contains_key(ip)
+    }
+
+    /// Check if the current connection to a peer is outbound.
+    /// Returns false if not connected or if the connection is inbound.
+    pub fn is_outbound(&self, ip: &str) -> bool {
+        self.connections
+            .get(ip)
+            .map(|s| s.direction == ConnectionDirection::Outbound)
+            .unwrap_or(false)
     }
 
     pub fn mark_inbound(&self, ip: &str) -> bool {

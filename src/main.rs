@@ -2696,6 +2696,45 @@ async fn main() {
                             block_height,
                             our_weight
                         );
+
+                        // Check if prepare consensus is already reached (peer votes
+                        // may have arrived and been accumulated before our self-vote).
+                        // Without this, the message handler's check_prepare_consensus
+                        // only triggers when a NEW peer vote arrives — if all peer
+                        // votes arrived first, no further trigger occurs.
+                        if block_consensus_engine
+                            .timevote
+                            .check_prepare_consensus(block_hash)
+                        {
+                            tracing::info!(
+                                "✅ Prepare consensus already reached for block {} — generating precommit",
+                                block_height
+                            );
+                            block_consensus_engine.timevote.generate_precommit_vote(
+                                block_hash,
+                                our_addr,
+                                our_weight,
+                            );
+
+                            // Broadcast our precommit vote
+                            let precommit_sig =
+                                if let Some(signing_key) = block_consensus_engine.get_signing_key() {
+                                    use ed25519_dalek::Signer;
+                                    let mut msg = Vec::new();
+                                    msg.extend_from_slice(&block_hash);
+                                    msg.extend_from_slice(our_addr.as_bytes());
+                                    msg.extend_from_slice(b"PRECOMMIT");
+                                    signing_key.sign(&msg).to_bytes().to_vec()
+                                } else {
+                                    vec![]
+                                };
+                            let precommit = crate::network::message::NetworkMessage::TimeVotePrecommit {
+                                block_hash,
+                                voter_id: our_addr.clone(),
+                                signature: precommit_sig,
+                            };
+                            block_peer_registry.broadcast(precommit).await;
+                        }
                     }
 
                     // Step 4: Wait for consensus — EVENT-DRIVEN via block_added_signal.
