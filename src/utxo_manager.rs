@@ -6,6 +6,7 @@
 use crate::storage::UtxoStorage;
 use crate::types::*;
 use dashmap::DashMap;
+use dashmap::DashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +48,8 @@ pub struct UTXOStateManager {
     pub locked_collaterals: DashMap<OutPoint, LockedCollateral>,
     /// Persistent storage for collateral locks (survives restarts independently of registry)
     collateral_db: Option<sled::Tree>,
+    /// Per-address UTXO index for efficient lookups
+    address_index: DashMap<String, DashSet<OutPoint>>,
 }
 
 impl Default for UTXOStateManager {
@@ -63,6 +66,7 @@ impl UTXOStateManager {
             utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
             locked_collaterals: DashMap::new(),
             collateral_db: None,
+            address_index: DashMap::new(),
         }
     }
 
@@ -73,6 +77,7 @@ impl UTXOStateManager {
             utxo_states: DashMap::with_capacity(EXPECTED_UTXO_COUNT),
             locked_collaterals: DashMap::new(),
             collateral_db: None,
+            address_index: DashMap::new(),
         }
     }
 
@@ -136,13 +141,20 @@ impl UTXOStateManager {
         for utxo in utxos {
             // Only initialize if not already in state map
             if !self.utxo_states.contains_key(&utxo.outpoint) {
-                self.utxo_states.insert(utxo.outpoint, UTXOState::Unspent);
+                self.utxo_states
+                    .insert(utxo.outpoint.clone(), UTXOState::Unspent);
             }
+            // Build address index
+            self.address_index
+                .entry(utxo.address.clone())
+                .or_insert_with(DashSet::new)
+                .insert(utxo.outpoint);
         }
 
         tracing::info!(
-            "✅ UTXO state initialization complete: {} entries",
-            self.utxo_states.len()
+            "✅ UTXO state initialization complete: {} entries, {} addresses indexed",
+            self.utxo_states.len(),
+            self.address_index.len()
         );
         Ok(count)
     }
@@ -158,6 +170,7 @@ impl UTXOStateManager {
         // Clear in-memory state maps
         self.utxo_states.clear();
         self.locked_collaterals.clear();
+        self.address_index.clear();
 
         // Clear persisted collateral locks
         if let Some(tree) = &self.collateral_db {
@@ -181,6 +194,7 @@ impl UTXOStateManager {
 
     pub async fn add_utxo(&self, utxo: UTXO) -> Result<(), UtxoError> {
         let outpoint = utxo.outpoint.clone();
+        let address = utxo.address.clone();
 
         // Check if UTXO already exists
         if let Some(existing_state) = self.utxo_states.get(&outpoint) {
@@ -202,12 +216,22 @@ impl UTXOStateManager {
         }
 
         self.storage.add_utxo(utxo).await?;
-        self.utxo_states.insert(outpoint, UTXOState::Unspent);
+        self.utxo_states
+            .insert(outpoint.clone(), UTXOState::Unspent);
+        // Update address index
+        self.address_index
+            .entry(address)
+            .or_insert_with(DashSet::new)
+            .insert(outpoint);
         Ok(())
     }
 
     #[allow(dead_code)]
     pub async fn remove_utxo(&self, outpoint: &OutPoint) -> Result<(), UtxoError> {
+        // Remove from address index before removing from storage
+        if let Some(utxo) = self.storage.get_utxo(outpoint).await {
+            self.remove_from_address_index(&utxo.address, outpoint);
+        }
         self.storage.remove_utxo(outpoint).await?;
         self.utxo_states.remove(outpoint);
         Ok(())
@@ -226,6 +250,11 @@ impl UTXOStateManager {
         // Check if UTXO is locked as collateral
         if self.is_collateral_locked(outpoint) {
             return Err(UtxoError::LockedAsCollateral);
+        }
+
+        // Remove from address index before removing from storage
+        if let Some(utxo) = self.storage.get_utxo(outpoint).await {
+            self.remove_from_address_index(&utxo.address, outpoint);
         }
 
         self.storage.remove_utxo(outpoint).await?;
@@ -489,6 +518,33 @@ impl UTXOStateManager {
     /// Get all UTXOs (for diagnostics)
     pub async fn list_all_utxos(&self) -> Vec<UTXO> {
         self.storage.list_utxos().await
+    }
+
+    /// Get UTXOs for a specific address using the address index (O(n) in address UTXOs, not all UTXOs)
+    pub async fn list_utxos_by_address(&self, address: &str) -> Vec<UTXO> {
+        let outpoints: Vec<OutPoint> = match self.address_index.get(address) {
+            Some(set) => set.iter().map(|op| op.clone()).collect(),
+            None => return Vec::new(),
+        };
+
+        let mut utxos = Vec::with_capacity(outpoints.len());
+        for outpoint in &outpoints {
+            if let Some(utxo) = self.storage.get_utxo(outpoint).await {
+                utxos.push(utxo);
+            }
+        }
+        utxos
+    }
+
+    /// Remove an outpoint from the address index
+    fn remove_from_address_index(&self, address: &str, outpoint: &OutPoint) {
+        if let Some(set) = self.address_index.get(address) {
+            set.remove(outpoint);
+            if set.is_empty() {
+                drop(set);
+                self.address_index.remove(address);
+            }
+        }
     }
 
     #[allow(dead_code)]
