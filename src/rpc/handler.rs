@@ -1607,6 +1607,9 @@ impl RpcHandler {
     }
 
     async fn send_to_address(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // Maximum inputs per transaction (~9000 would hit 1MB TX size limit;
+        // cap lower to leave headroom and prevent excessive memory use)
+        const MAX_TX_INPUTS: usize = 5000;
         // Parse parameters: sendtoaddress "address" amount
         let to_address = params
             .first()
@@ -1725,6 +1728,9 @@ impl RpcHandler {
             let mut selected_utxos = Vec::new();
             let mut total_input = 0u64;
             for utxo in &utxos {
+                if selected_utxos.len() >= MAX_TX_INPUTS {
+                    break;
+                }
                 selected_utxos.push(utxo.clone());
                 total_input += utxo.value;
                 let needed = if subtract_fee {
@@ -1735,6 +1741,19 @@ impl RpcHandler {
                 if total_input >= needed {
                     break;
                 }
+            }
+
+            // Check if we hit the input limit before gathering enough funds
+            if selected_utxos.len() >= MAX_TX_INPUTS && total_input < amount_units + fee {
+                return Err(RpcError {
+                    code: -6,
+                    message: format!(
+                        "Transaction requires too many inputs ({} UTXOs selected but still insufficient). \
+                         Try sending a smaller amount or consolidate your UTXOs first by sending \
+                         smaller amounts to yourself.",
+                        selected_utxos.len()
+                    ),
+                });
             }
 
             let send_amount = if subtract_fee {
