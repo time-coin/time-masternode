@@ -19,7 +19,7 @@ use crate::state_notifier::StateNotifier;
 use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use ed25519_dalek::{Signer, Verifier, VerifyingKey};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
@@ -315,6 +315,8 @@ impl VotingState {
 pub struct PrepareVoteAccumulator {
     /// block_hash -> Vec<(voter_id, weight)>
     votes: DashMap<Hash256, Vec<(String, u64)>>,
+    /// Track which blocks already reached consensus (prevents duplicate actions)
+    consensus_signaled: DashSet<Hash256>,
 }
 
 impl Default for PrepareVoteAccumulator {
@@ -327,6 +329,7 @@ impl PrepareVoteAccumulator {
     pub fn new() -> Self {
         Self {
             votes: DashMap::new(),
+            consensus_signaled: DashSet::new(),
         }
     }
 
@@ -353,7 +356,13 @@ impl PrepareVoteAccumulator {
 
     /// Check if timevote consensus reached: majority of participating validator WEIGHT agrees.
     /// Uses accumulated stake weight (not raw vote count) to prevent Free-tier Sybil attacks.
+    /// Returns true only ONCE per block hash to prevent duplicate actions.
     pub fn check_consensus(&self, block_hash: Hash256, _sample_size: usize) -> bool {
+        // Short-circuit: consensus already signaled for this block
+        if self.consensus_signaled.contains(&block_hash) {
+            return false;
+        }
+
         // Extract vote data for target block, then DROP the Ref (shard read lock)
         // before calling iter(). This prevents a potential deadlock: if a concurrent
         // add_vote() has a pending write lock on the same shard, holding the get()
@@ -387,11 +396,13 @@ impl PrepareVoteAccumulator {
 
         // Majority: block weight must exceed 50% of total participating weight
         let result = total_weight > 0 && block_weight > total_weight / 2;
-        if !result && vote_count >= 2 {
+        if result {
+            // Mark as signaled so subsequent checks return false
+            self.consensus_signaled.insert(block_hash);
+        } else if vote_count >= 2 {
             tracing::debug!(
-                "🗳️  Consensus check: block_weight={}, total_weight={}, voters={} → {}",
+                "🗳️  Consensus check: block_weight={}, total_weight={}, voters={} → FAIL",
                 block_weight, total_weight, vote_count,
-                if result { "PASS" } else { "FAIL" }
             );
         }
         result
@@ -425,11 +436,13 @@ impl PrepareVoteAccumulator {
     /// Clear votes for a block after finalization
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
+        self.consensus_signaled.remove(&block_hash);
     }
 
     /// Clear ALL votes (used when advancing to a new block height)
     pub fn clear_all(&self) {
         self.votes.clear();
+        self.consensus_signaled.clear();
     }
 
     /// Get all voters across all block hashes (for merging into last_block_voters)
@@ -451,6 +464,8 @@ impl PrepareVoteAccumulator {
 pub struct PrecommitVoteAccumulator {
     /// block_hash -> Vec<(voter_id, weight)>
     votes: DashMap<Hash256, Vec<(String, u64)>>,
+    /// Track which blocks already reached consensus (prevents duplicate actions)
+    consensus_signaled: DashSet<Hash256>,
 }
 
 impl Default for PrecommitVoteAccumulator {
@@ -463,6 +478,7 @@ impl PrecommitVoteAccumulator {
     pub fn new() -> Self {
         Self {
             votes: DashMap::new(),
+            consensus_signaled: DashSet::new(),
         }
     }
 
@@ -489,9 +505,15 @@ impl PrecommitVoteAccumulator {
 
     /// Check if timevote consensus reached: majority of participating validator WEIGHT agrees.
     /// Uses accumulated stake weight (not raw vote count) to prevent Free-tier Sybil attacks.
+    /// Returns true only ONCE per block hash to prevent duplicate actions.
     ///
     /// SECURITY: A minimum of 2 unique voters is required to prevent solo finalization.
     pub fn check_consensus(&self, block_hash: Hash256, _sample_size: usize) -> bool {
+        // Short-circuit: consensus already signaled for this block
+        if self.consensus_signaled.contains(&block_hash) {
+            return false;
+        }
+
         // Extract vote data for target block, then DROP the Ref (shard read lock)
         // before calling iter(). Prevents deadlock with concurrent add_vote().
         let (vote_count, block_weight) = match self.votes.get(&block_hash) {
@@ -522,7 +544,10 @@ impl PrecommitVoteAccumulator {
 
         // Majority: block weight must exceed 50% of total participating weight
         let result = total_weight > 0 && block_weight > total_weight / 2;
-        if !result && vote_count >= 2 {
+        if result {
+            // Mark as signaled so subsequent checks return false
+            self.consensus_signaled.insert(block_hash);
+        } else if vote_count >= 2 {
             tracing::debug!(
                 "🗳️  Precommit consensus check: block_weight={}, total_weight={}, voters={} → FAIL",
                 block_weight, total_weight, vote_count,
@@ -550,11 +575,13 @@ impl PrecommitVoteAccumulator {
     /// Clear votes for a block after finalization
     pub fn clear(&self, block_hash: Hash256) {
         self.votes.remove(&block_hash);
+        self.consensus_signaled.remove(&block_hash);
     }
 
     /// Clear ALL votes (used when advancing to a new block height)
     pub fn clear_all(&self) {
         self.votes.clear();
+        self.consensus_signaled.clear();
     }
 
     /// Get all voters across all block hashes (for merging into last_block_voters)
