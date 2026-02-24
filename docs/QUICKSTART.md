@@ -37,61 +37,52 @@ ls -lh target/release/timed
 
 ### 2. Configuration
 
-The configuration file is automatically created in:
-- **Linux/Mac:** `~/.timecoin/config.toml` (testnet: `~/.timecoin/testnet/config.toml`)
-- **Windows:** `%APPDATA%\timecoin\config.toml` (testnet: `%APPDATA%\timecoin\testnet\config.toml`)
+Configuration files are automatically created on first run in:
+- **Linux/Mac:** `~/.timecoin/time.conf` (testnet: `~/.timecoin/testnet/time.conf`)
+- **Windows:** `%APPDATA%\timecoin\time.conf` (testnet: `%APPDATA%\timecoin\testnet\time.conf`)
 
-You can also specify a custom config file with `--config` flag.
+You can also specify a custom config file with the `--conf` flag.
 
-**Basic testnet config.toml:**
+**Basic testnet `time.conf`:**
 
-```toml
-[node]
-name = "TIME Coin Node"
-version = "1.0.0"
-network = "testnet"  # or "mainnet"
+```ini
+# Network
+testnet=1
 
-[network]
-listen_address = "0.0.0.0"  # Auto-uses port 24100 for testnet
-max_peers = 50
-enable_peer_discovery = true
-bootstrap_peers = []  # Add seed nodes if available
+# Accept connections
+listen=1
+server=1
 
-[rpc]
-enabled = true
-listen_address = "127.0.0.1"  # Auto-uses port 24101 for testnet
+# Masternode mode (0=off, 1=on)
+masternode=1
 
-[storage]
-backend = "sled"
-data_dir = ""  # Auto-configured: ~/.timecoin/testnet/
-cache_size_mb = 256
+# Masternode private key (optional, wallet key used if omitted)
+#masternodeprivkey=<key from time-cli masternode genkey>
 
-[consensus]
-min_masternodes = 3  # Genesis generated dynamically when masternodes register
+# Peers (add seed nodes if available)
+#addnode=seed1.time-coin.io
 
-[logging]
-level = "info"
-format = "pretty"
-output = "stdout"
-file_path = "./logs/testnet-node.log"
+# Logging: trace, debug, info, warn, error
+debug=info
 
-[masternode]
-enabled = false  # Set to true if running a masternode
-# tier defaults to "auto" (auto-detected from collateral UTXO value)
+# Storage
+txindex=1
+```
 
-[security]
-enable_rate_limiting = true
-enable_message_signing = true
+Collateral for staked tiers goes in `masternode.conf` (same directory):
+```
+# alias IP:port collateral_txid collateral_vout
+mn1 <your_ip>:24100 <txid> 0
 ```
 
 ### 3. Run Node
 
 ```bash
-# Using default config location (~/.timecoin/testnet/config.toml)
+# Using default config location (~/.timecoin/testnet/time.conf)
 ./target/release/timed
 
 # Or specify custom config
-./target/release/timed --config config.toml
+./target/release/timed --conf time.conf
 
 # Expected output
 Jan 02 01:00:00 timed[12345]:  INFO 🚀 Starting TIME Coin Node v1.0.0
@@ -222,47 +213,38 @@ journalctl -u timed -f
 
 ### Node 1 (Seed Node)
 
-```toml
-[node]
-network = "testnet"
-
-[network]
-listen_address = "0.0.0.0"  # Port 24100
-external_address = "192.168.1.100"  # Your public IP
-bootstrap_peers = []
-
-[rpc]
-listen_address = "127.0.0.1"  # Port 24101
-
-[storage]
-data_dir = "./data_node1"
+Create `node1/time.conf`:
+```ini
+testnet=1
+listen=1
+server=1
+masternode=1
+externalip=192.168.1.100
+debug=info
+txindex=1
 ```
 
 Run:
 ```bash
-./target/release/timed --config config_node1.toml
+./target/release/timed --conf node1/time.conf
 ```
 
 ### Node 2-N (Regular Nodes)
 
-```toml
-[node]
-network = "testnet"
-
-[network]
-listen_address = "0.0.0.0:24102"
-bootstrap_peers = ["192.168.1.100:24100"]
-
-[rpc]
-listen_address = "127.0.0.1:24103"
-
-[storage]
-data_dir = "./data_node2"
+Create `node2/time.conf`:
+```ini
+testnet=1
+listen=1
+server=1
+masternode=1
+addnode=192.168.1.100
+debug=info
+txindex=1
 ```
 
 Run:
 ```bash
-./target/release/timed --config config_node2.toml
+./target/release/timed --conf node2/time.conf
 ```
 
 ### Verify Network

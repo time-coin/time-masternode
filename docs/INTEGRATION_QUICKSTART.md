@@ -145,19 +145,12 @@ let mut writer = BufWriter::new(write_half);
 
 ### Step 7: Update Configuration (30 minutes)
 
-**File**: `config.toml`
+**File**: `time.conf`
 
-```toml
-[network]
-# Security settings
-require_signed_messages = true          # Enforce signature verification
-tls_enabled = true                      # Enable TLS encryption
-tls_cert_path = "./certs/node.pem"     # Optional: custom certificate
-tls_key_path = "./certs/node.key"      # Optional: custom private key
-max_message_age_seconds = 60           # Reject older messages
-
-# Migration settings (for gradual rollout)
-accept_unsigned_messages = false        # Allow unsigned during transition?
+These settings are configured at compile time / runtime defaults:
+```ini
+# Security settings are built-in defaults (no config needed for standard deployment)
+# TLS is automatically enabled for P2P connections
 accept_plain_connections = false        # Allow non-TLS during transition?
 ```
 
@@ -321,9 +314,7 @@ If something goes wrong:
 ```bash
 # Quick rollback:
 1. Stop the node: systemctl stop timed
-2. Edit config.toml:
-   tls_enabled = false
-   require_signed_messages = false
+2. Check time.conf settings
 3. Restart: systemctl start timed
 ```
 

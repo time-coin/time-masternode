@@ -567,7 +567,7 @@ pub struct BlockHeader {
 
 **Code References:**
 - `src/types.rs:268-298` - Chain-ID in SignedMessage
-- `config.mainnet.toml` vs `config.toml` - Separate configurations
+- `time.conf` (mainnet) vs `time.conf` (testnet) with `testnet=1` - Separate configurations
 
 ---
 

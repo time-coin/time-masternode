@@ -59,7 +59,7 @@ cargo clippy -- -D warnings
 ./target/release/timed
 
 # Start with specific config
-./target/release/timed --config config.mainnet.toml
+./target/release/timed --conf /path/to/time.conf
 
 # CLI commands
 ./target/release/time-cli getblockchaininfo
@@ -155,7 +155,7 @@ Without this, consensus engine cannot communicate with the network and transacti
 - Collateral UTXOs are **locked on-chain** (Dash-style), not just tracked off-chain
 - States: `Locked` UTXO state prevents accidental spending
 - Registration: Transaction creates locked UTXO → Wait 30 min confirmation → Register masternode
-- Cleanup: Set `enabled = false` in config.toml and restart to deregister and unlock collateral
+- Cleanup: Set `masternode=0` in time.conf and restart to deregister and unlock collateral
 
 ### Transaction Pool Management
 

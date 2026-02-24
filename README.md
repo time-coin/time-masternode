@@ -123,14 +123,20 @@ For complete deployment guide, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
 
 #### Configuration
 
-Edit `config.toml` (or `~/.timecoin/testnet/config.toml` for testnet):
+Edit `time.conf` (mainnet: `~/.timecoin/time.conf`, testnet: `~/.timecoin/testnet/time.conf`):
 
-```toml
-[masternode]
-enabled = true
-tier = "bronze"  # free, bronze, silver, or gold
-collateral_txid = ""  # Set after creating collateral (not needed for free tier)
-collateral_vout = 0
+```ini
+# Enable masternode mode
+masternode=1
+
+# Optional: dedicated masternode private key
+#masternodeprivkey=<key from time-cli masternode genkey>
+```
+
+Collateral goes in `masternode.conf` (same directory):
+```
+# Format: alias IP:port collateral_txid collateral_vout
+mn1 <your_ip>:24000 <txid> 0
 ```
 
 #### Setting Up a Staked Masternode (Bronze/Silver/Gold)
@@ -142,10 +148,8 @@ time-cli sendtoaddress <your_address> 1000.0  # For Bronze
 # 2. Wait for confirmations (30 minutes)
 time-cli listunspent  # Note the txid and vout
 
-# 3. Update config.toml with collateral info
-#    tier = "bronze"
-#    collateral_txid = "<txid from step 2>"
-#    collateral_vout = 0
+# 3. Update masternode.conf with collateral info
+#    mn1 <your_ip>:24000 <txid from step 2> 0
 
 # 4. Restart the daemon
 sudo systemctl restart timed
@@ -157,7 +161,7 @@ time-cli masternodelist   # Shows 🔒 Locked
 
 #### Deregistering a Masternode
 
-Set `enabled = false` in `config.toml` and restart the daemon. Collateral is automatically unlocked.
+Set `masternode=0` in `time.conf` and restart the daemon. Collateral is automatically unlocked.
 
 See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup guide.
 
@@ -332,8 +336,6 @@ timecoin/
 │   └── (deployment and maintenance scripts)
 ├── tests/                   # Integration tests
 │   └── (test suites)
-├── config.toml              # Default config (testnet)
-├── config.mainnet.toml      # Mainnet configuration
 ├── CHANGELOG.md             # Version history
 ├── CONTRIBUTING.md          # Contribution guidelines
 ├── Cargo.toml               # Rust dependencies
@@ -453,26 +455,31 @@ cargo clippy
 
 ## 📝 Configuration
 
-Create `config.toml`:
+Configuration uses two files in your data directory (`~/.timecoin/` for mainnet, `~/.timecoin/testnet/` for testnet):
 
-```toml
-[node]
-network = "mainnet"  # or "testnet"
+**`time.conf`** — Daemon settings (key=value format):
+```ini
+# Network (uncomment for testnet)
+#testnet=1
 
-[network]
-listen_address = "0.0.0.0"
-external_address = ""  # Your public IP (required for masternodes)
-max_peers = 50
+listen=1
+server=1
+masternode=1
 
-[masternode]
-enabled = true
-tier = "free"          # free, bronze, silver, or gold
-collateral_txid = ""   # TXID of collateral UTXO (staked tiers only)
-collateral_vout = 0    # Output index of collateral UTXO
+# Masternode private key (optional, wallet key used if omitted)
+#masternodeprivkey=<key from time-cli masternode genkey>
 
-[consensus]
-min_masternodes = 3
-quorum_percentage = 51
+# Peers
+#addnode=seed1.time-coin.io
+
+debug=info
+txindex=1
+```
+
+**`masternode.conf`** — Collateral (one line per masternode):
+```
+# alias IP:port collateral_txid collateral_vout
+mn1 1.2.3.4:24000 abc123...def456 0
 ```
 
 ## 🛣️ Development Status
@@ -526,7 +533,7 @@ quorum_percentage = 51
 ### 🔮 Future Roadmap
 
 **v1.2.0** (Q2 2026):
-- [x] Config-based masternode management (auto-registration from config.toml)
+- [x] Config-based masternode management (auto-registration from time.conf + masternode.conf)
 - [x] Network-aware CLI and dashboard (--testnet flag)
 - [ ] TLS encryption for P2P (infrastructure ready)
 - [ ] Hot/cold wallet separation
