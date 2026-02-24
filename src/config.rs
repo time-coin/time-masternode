@@ -1,8 +1,8 @@
 //! Configuration management for TIME Coin daemon.
 //!
 //! Supports two config formats:
-//! 1. **time.conf** (Dash-style key=value) — the primary format going forward
-//! 2. **config.toml** (legacy TOML) — still supported for backward compatibility
+//! 1. **time.conf** (Dash-style key=value) — the primary format
+//! 2. **Legacy TOML** — still loaded for backward compatibility, auto-migrates
 //!
 //! On first run, if no config exists, time.conf and masternode.conf are
 //! auto-generated with free-node defaults in the data directory.
