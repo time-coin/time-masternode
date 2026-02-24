@@ -902,8 +902,6 @@ impl RpcHandler {
     async fn get_balance(&self, params: &[Value]) -> Result<Value, RpcError> {
         let address = params.first().and_then(|v| v.as_str());
 
-        let utxos = self.utxo_manager.list_all_utxos().await;
-
         let filter_addr = if let Some(addr) = address {
             addr.to_string()
         } else if let Some(local_mn) = self.registry.get_local_masternode().await {
@@ -919,11 +917,13 @@ impl RpcHandler {
             }));
         };
 
+        let utxos = self.utxo_manager.list_utxos_by_address(&filter_addr).await;
+
         let mut spendable: u64 = 0;
         let mut locked_collateral: u64 = 0;
         let mut pending: u64 = 0;
 
-        for u in utxos.iter().filter(|u| u.address == filter_addr) {
+        for u in &utxos {
             if self.utxo_manager.is_collateral_locked(&u.outpoint) {
                 locked_collateral += u.value;
                 continue;
@@ -951,7 +951,6 @@ impl RpcHandler {
         let addresses = params.get(2).and_then(|v| v.as_array());
         let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
 
-        let utxos = self.utxo_manager.list_all_utxos().await;
         let current_height = self.blockchain.get_height();
 
         // Get local masternode's reward address to filter UTXOs
@@ -972,6 +971,9 @@ impl RpcHandler {
             None => return Ok(json!([])),
         };
 
+        // Use address index instead of scanning all UTXOs
+        let utxos = self.utxo_manager.list_utxos_by_address(&local_addr).await;
+
         // Collect txids already in the on-chain UTXO set to avoid duplicates
         let mut seen_outpoints: std::collections::HashSet<(Vec<u8>, u32)> =
             std::collections::HashSet::new();
@@ -979,12 +981,7 @@ impl RpcHandler {
         let mut filtered: Vec<Value> = utxos
             .iter()
             .filter(|u| {
-                // First filter by local wallet address (only show this node's UTXOs)
-                if u.address != local_addr {
-                    return false;
-                }
-
-                // Then filter by specific addresses if provided
+                // Filter by specific addresses if provided (already filtered to local_addr)
                 if let Some(addrs) = addresses {
                     addrs.iter().any(|a| a.as_str() == Some(&u.address))
                 } else {
@@ -1101,31 +1098,26 @@ impl RpcHandler {
         let minconf = params.first().and_then(|v| v.as_u64()).unwrap_or(1);
         let include_empty = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
 
-        let utxos = self.utxo_manager.list_all_utxos().await;
         let current_height = self.blockchain.get_height();
 
         // Get local masternode's reward address to filter UTXOs
-        let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address);
+        let local_address = match self.registry.get_local_masternode().await {
+            Some(mn) => mn.reward_address,
+            None => {
+                return Ok(json!([]));
+            }
+        };
+
+        let utxos = self
+            .utxo_manager
+            .list_utxos_by_address(&local_address)
+            .await;
 
         // Group UTXOs by address: (total_amount, tx_count, min_confirmations)
         use std::collections::HashMap;
         let mut address_map: HashMap<String, (u64, usize, u64)> = HashMap::new();
 
         for utxo in utxos.iter() {
-            // Only show this node's addresses
-            if let Some(ref local_addr) = local_address {
-                if utxo.address != *local_addr {
-                    continue;
-                }
-            } else {
-                // If not a masternode, don't show any addresses
-                continue;
-            }
-
             let confirmations = self
                 .blockchain
                 .tx_index
@@ -1662,16 +1654,16 @@ impl RpcHandler {
                 );
             }
 
-            // Get UTXOs for this wallet (fresh each attempt)
-            let all_utxos = self.utxo_manager.list_all_utxos().await;
+            // Get UTXOs for this wallet using address index (fresh each attempt)
+            let wallet_utxos = self
+                .utxo_manager
+                .list_utxos_by_address(&wallet_address)
+                .await;
 
-            // Filter: our address, unspent, not collateral, not in exclusion set
-            let mut utxos: Vec<_> = all_utxos
+            // Filter: unspent, not collateral, not in exclusion set
+            let mut utxos: Vec<_> = wallet_utxos
                 .into_iter()
                 .filter(|u| {
-                    if u.address != wallet_address {
-                        return false;
-                    }
                     if excluded.contains(&u.outpoint) {
                         return false;
                     }
@@ -1743,17 +1735,121 @@ impl RpcHandler {
                 }
             }
 
-            // Check if we hit the input limit before gathering enough funds
+            // Check if we hit the input limit before gathering enough funds — auto-consolidate
             if selected_utxos.len() >= MAX_TX_INPUTS && total_input < amount_units + fee {
-                return Err(RpcError {
-                    code: -6,
-                    message: format!(
-                        "Transaction requires too many inputs ({} UTXOs selected but still insufficient). \
-                         Try sending a smaller amount or consolidate your UTXOs first by sending \
-                         smaller amounts to yourself.",
-                        selected_utxos.len()
-                    ),
-                });
+                // Auto-consolidate: merge up to MAX_TX_INPUTS smallest UTXOs into one
+                tracing::info!(
+                    "🔄 Auto-consolidating {} UTXOs (need more inputs for {} TIME transfer)",
+                    MAX_TX_INPUTS,
+                    amount / 100_000_000.0
+                );
+
+                // Take the smallest UTXOs for consolidation (they're sorted desc, so take from end)
+                let consolidate_count = MAX_TX_INPUTS.min(utxos.len());
+                let mut consolidate_utxos: Vec<_> = utxos
+                    .iter()
+                    .rev()
+                    .take(consolidate_count)
+                    .cloned()
+                    .collect();
+                // But cap at MAX_TX_INPUTS
+                consolidate_utxos.truncate(MAX_TX_INPUTS);
+
+                let consolidate_total: u64 = consolidate_utxos.iter().map(|u| u.value).sum();
+                let consolidate_fee = (consolidate_total / 1000).max(1_000);
+
+                if consolidate_total <= consolidate_fee {
+                    return Err(RpcError {
+                        code: -6,
+                        message: "UTXOs too small to consolidate — total value less than fee"
+                            .to_string(),
+                    });
+                }
+
+                let cons_inputs: Vec<TxInput> = consolidate_utxos
+                    .iter()
+                    .map(|utxo| TxInput {
+                        previous_output: utxo.outpoint.clone(),
+                        script_sig: vec![],
+                        sequence: 0xFFFFFFFF,
+                    })
+                    .collect();
+
+                let cons_outputs = vec![TxOutput {
+                    value: consolidate_total - consolidate_fee,
+                    script_pubkey: wallet_address.as_bytes().to_vec(),
+                }];
+
+                let mut cons_tx = Transaction {
+                    version: 1,
+                    inputs: cons_inputs,
+                    outputs: cons_outputs,
+                    lock_time: 0,
+                    timestamp: chrono::Utc::now().timestamp(),
+                };
+
+                self.consensus
+                    .sign_transaction(&mut cons_tx)
+                    .map_err(|e| RpcError {
+                        code: -4,
+                        message: format!("Failed to sign consolidation transaction: {}", e),
+                    })?;
+
+                let cons_txid = cons_tx.txid();
+                let cons_txid_hex = hex::encode(cons_txid);
+
+                match self.consensus.submit_transaction(cons_tx).await {
+                    Ok(_) => {
+                        tracing::info!(
+                            "✅ Consolidation TX {} submitted ({} UTXOs → 1, {} TIME)",
+                            &cons_txid_hex[..16],
+                            consolidate_utxos.len(),
+                            (consolidate_total - consolidate_fee) / 100_000_000
+                        );
+
+                        // Wait for consolidation to finalize before retrying the original send
+                        let timeout = Duration::from_secs(30);
+                        let start = tokio::time::Instant::now();
+                        while start.elapsed() < timeout {
+                            if self.consensus.tx_pool.is_finalized(&cons_txid) {
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                        }
+
+                        if !self.consensus.tx_pool.is_finalized(&cons_txid) {
+                            return Err(RpcError {
+                                code: -26,
+                                message: format!(
+                                    "Consolidation TX {} submitted but not finalized within 30s. \
+                                     Retry your send after it confirms.",
+                                    cons_txid_hex
+                                ),
+                            });
+                        }
+
+                        tracing::info!(
+                            "✅ Consolidation TX {} finalized — retrying original send",
+                            &cons_txid_hex[..16]
+                        );
+                        // Reset exclusions and retry with the newly consolidated UTXO
+                        excluded.clear();
+                        last_error = "auto-consolidation".to_string();
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(RpcError {
+                            code: -26,
+                            message: format!(
+                                "Transaction requires too many inputs ({} UTXOs). \
+                                 Auto-consolidation failed: {}. \
+                                 Try sending a smaller amount.",
+                                selected_utxos.len(),
+                                e
+                            ),
+                        });
+                    }
+                }
             }
 
             let send_amount = if subtract_fee {
@@ -1916,9 +2012,6 @@ impl RpcHandler {
 
         let filter_address = params.get(2).and_then(|v| v.as_str());
 
-        // Get all UTXOs
-        let mut utxos = self.utxo_manager.list_all_utxos().await;
-
         // Get local masternode's reward address
         let local_address = self
             .registry
@@ -1930,12 +2023,14 @@ impl RpcHandler {
             })?
             .reward_address;
 
-        // Filter to only this node's UTXOs, or specific address if provided
-        if let Some(addr) = filter_address {
-            utxos.retain(|utxo| utxo.address == addr);
+        // Get UTXOs filtered by address using the address index
+        let mut utxos = if let Some(addr) = filter_address {
+            self.utxo_manager.list_utxos_by_address(addr).await
         } else {
-            utxos.retain(|utxo| utxo.address == local_address);
-        }
+            self.utxo_manager
+                .list_utxos_by_address(&local_address)
+                .await
+        };
 
         // Filter out collateral locked and non-Unspent UTXOs
         utxos.retain(|u| {
