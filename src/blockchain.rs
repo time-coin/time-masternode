@@ -6863,15 +6863,30 @@ impl Blockchain {
 
         // Log stake weights when there are multiple chains (fork)
         if should_log && num_chains > 1 {
+            let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
+            let max_h = heights.iter().max().copied().unwrap_or(0);
+            let min_h = heights.iter().min().copied().unwrap_or(0);
+            let is_benign_lag = max_h - min_h <= 1;
+
             for ((height, hash), peers) in &chain_counts {
                 let w = chain_weights.get(&(*height, *hash)).copied().unwrap_or(0);
-                tracing::info!(
-                    "   ⚖️  Chain @ height {}, hash {}: stake_weight={} ({} peers)",
-                    height,
-                    hex::encode(&hash[..8]),
-                    w,
-                    peers.len()
-                );
+                if is_benign_lag {
+                    tracing::debug!(
+                        "   ⚖️  Chain @ height {}, hash {}: stake_weight={} ({} peers)",
+                        height,
+                        hex::encode(&hash[..8]),
+                        w,
+                        peers.len()
+                    );
+                } else {
+                    tracing::info!(
+                        "   ⚖️  Chain @ height {}, hash {}: stake_weight={} ({} peers)",
+                        height,
+                        hex::encode(&hash[..8]),
+                        w,
+                        peers.len()
+                    );
+                }
             }
         }
 
