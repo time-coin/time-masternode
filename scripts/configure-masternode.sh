@@ -1,9 +1,9 @@
 #!/bin/bash
 #
 # TIME Coin Masternode Configuration Script
-# 
-# This script helps you configure your masternode settings in config.toml
-# It prompts for all necessary information and updates the configuration file.
+#
+# Configures time.conf and masternode.conf for masternode operation.
+# Usage: ./configure-masternode.sh [mainnet|testnet]
 #
 
 set -e
@@ -15,164 +15,119 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Determine user's home directory
-if [ -n "$HOME" ]; then
-    USER_HOME="$HOME"
-else
-    USER_HOME="$HOME"
-fi
+USER_HOME="${HOME:-/root}"
 
 echo -e "${BLUE}╔════════════════════════════════════════════════╗${NC}"
 echo -e "${BLUE}║   TIME Coin Masternode Configuration Tool     ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════╝${NC}"
 echo ""
 
-# Check for command-line argument
+# Network selection
 if [ -n "$1" ]; then
     NETWORK_ARG=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     case "$NETWORK_ARG" in
-        mainnet)
-            CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
-            NETWORK="mainnet"
-            ;;
-        testnet)
-            CONFIG_FILE="$USER_HOME/.timecoin/testnet/config.toml"
-            NETWORK="testnet"
-            ;;
+        mainnet) NETWORK="mainnet" ;;
+        testnet) NETWORK="testnet" ;;
         *)
             echo -e "${RED}Error: Invalid network '$1'${NC}"
             echo "Usage: $0 [mainnet|testnet]"
-            echo ""
-            echo "Examples:"
-            echo "  $0 mainnet    # Configure mainnet"
-            echo "  $0 testnet    # Configure testnet"
-            echo "  $0            # Defaults to mainnet"
             exit 1
             ;;
     esac
 else
-    # Default to mainnet if no argument provided
-    CONFIG_FILE="$USER_HOME/.timecoin/config.toml"
     NETWORK="mainnet"
     echo -e "${BLUE}No network specified, defaulting to mainnet${NC}"
     echo ""
 fi
 
-# Check if config file exists
-if [ ! -f "$CONFIG_FILE" ]; then
-    echo -e "${RED}Error: Config file not found: $CONFIG_FILE${NC}"
-    echo ""
-    echo "Possible reasons:"
-    echo "  1. Node has not been run yet (run 'timed' first to create config)"
-    echo "  2. Config is in a different location"
-    echo ""
-    echo "Would you like to specify a custom config file path? (y/n)"
-    read -p "> " custom_path
-    if [[ "$custom_path" =~ ^[yY]$ ]]; then
-        echo "Enter full path to config.toml:"
-        read -p "> " CONFIG_FILE
-        if [ ! -f "$CONFIG_FILE" ]; then
-            echo -e "${RED}Error: File not found: $CONFIG_FILE${NC}"
-            exit 1
-        fi
-    else
-        exit 1
-    fi
+# Determine data directory
+if [ "$NETWORK" = "testnet" ]; then
+    DATA_DIR="$USER_HOME/.timecoin/testnet"
+else
+    DATA_DIR="$USER_HOME/.timecoin"
 fi
 
-echo ""
-echo "This script will help you configure your masternode settings."
-echo "Network: $NETWORK"
-echo "Configuration file: $CONFIG_FILE"
+CONF_FILE="$DATA_DIR/time.conf"
+MN_CONF_FILE="$DATA_DIR/masternode.conf"
+
+echo "Network:          $NETWORK"
+echo "Data directory:   $DATA_DIR"
+echo "Config file:      $CONF_FILE"
+echo "Masternode conf:  $MN_CONF_FILE"
 echo ""
 
-# Function to validate yes/no input
+# Create data directory if it doesn't exist
+mkdir -p "$DATA_DIR"
+
+# ─── Helpers ──────────────────────────────────────────────────
 validate_yes_no() {
-    local input="$1"
-    case "$input" in
+    case "$1" in
         y|Y|yes|Yes|YES) return 0 ;;
         n|N|no|No|NO) return 1 ;;
         *) return 2 ;;
     esac
 }
 
-# Function to validate tier
-validate_tier() {
-    local tier="$1"
-    case "$tier" in
-        free|Free|FREE) echo "free"; return 0 ;;
-        bronze|Bronze|BRONZE) echo "bronze"; return 0 ;;
-        silver|Silver|SILVER) echo "silver"; return 0 ;;
-        gold|Gold|GOLD) echo "gold"; return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-# Function to validate txid (64 hex characters)
 validate_txid() {
-    local txid="$1"
-    if [[ "$txid" =~ ^[a-fA-F0-9]{64}$ ]]; then
-        return 0
-    else
-        return 1
-    fi
+    [[ "$1" =~ ^[a-fA-F0-9]{64}$ ]]
 }
 
-# Function to validate vout (non-negative integer)
 validate_vout() {
-    local vout="$1"
-    if [[ "$vout" =~ ^[0-9]+$ ]]; then
-        return 0
-    else
-        return 1
-    fi
+    [[ "$1" =~ ^[0-9]+$ ]]
 }
 
-# Function to validate TIME address
 validate_address() {
-    local addr="$1"
-    # TIME addresses start with "TIME" followed by base58 characters
-    if [[ "$addr" =~ ^TIME[a-zA-Z0-9]{30,}$ ]]; then
-        return 0
+    [[ "$1" =~ ^TIME[a-zA-Z0-9]{30,}$ ]]
+}
+
+# Helper: set or update a key=value in time.conf
+set_conf_value() {
+    local key="$1" value="$2" file="$3"
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i.tmp "s|^${key}=.*|${key}=${value}|" "$file"
+        rm -f "${file}.tmp"
+    elif grep -q "^#${key}=" "$file" 2>/dev/null; then
+        sed -i.tmp "s|^#${key}=.*|${key}=${value}|" "$file"
+        rm -f "${file}.tmp"
     else
-        return 1
+        echo "${key}=${value}" >> "$file"
     fi
 }
 
-# Backup existing config
-BACKUP_FILE="${CONFIG_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
-cp "$CONFIG_FILE" "$BACKUP_FILE"
-echo -e "${GREEN}✓${NC} Created backup: $BACKUP_FILE"
+# ─── Backup existing configs ─────────────────────────────────
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+if [ -f "$CONF_FILE" ]; then
+    cp "$CONF_FILE" "${CONF_FILE}.backup.${TIMESTAMP}"
+    echo -e "${GREEN}✓${NC} Backed up time.conf"
+fi
+if [ -f "$MN_CONF_FILE" ]; then
+    cp "$MN_CONF_FILE" "${MN_CONF_FILE}.backup.${TIMESTAMP}"
+    echo -e "${GREEN}✓${NC} Backed up masternode.conf"
+fi
 echo ""
 
-# Step 1: Enable masternode?
+# ─── Step 1: Enable masternode? ──────────────────────────────
 echo -e "${YELLOW}Step 1: Enable Masternode${NC}"
 echo "Do you want to enable masternode functionality? (y/n)"
 while true; do
     read -p "> " enable_input
     if validate_yes_no "$enable_input"; then
-        MASTERNODE_ENABLED="true"
         break
     elif [ $? -eq 1 ]; then
-        MASTERNODE_ENABLED="false"
-        break
+        echo -e "${BLUE}Masternode will be disabled.${NC}"
+        # Ensure time.conf exists, set masternode=0
+        [ ! -f "$CONF_FILE" ] && touch "$CONF_FILE"
+        set_conf_value "masternode" "0" "$CONF_FILE"
+        echo -e "${GREEN}✓${NC} Set masternode=0 in time.conf"
+        exit 0
     else
         echo -e "${RED}Invalid input. Please enter 'y' or 'n'${NC}"
     fi
 done
 
-if [ "$MASTERNODE_ENABLED" = "false" ]; then
-    echo -e "${BLUE}Masternode will be disabled.${NC}"
-    # Update config to disable masternode
-    sed -i.tmp "s/^enabled = .*/enabled = false/" "$CONFIG_FILE"
-    rm -f "${CONFIG_FILE}.tmp"
-    echo -e "${GREEN}✓${NC} Configuration updated successfully!"
-    exit 0
-fi
-
 echo ""
 
-# Step 2: Select tier
+# ─── Step 2: Select tier ─────────────────────────────────────
 echo -e "${YELLOW}Step 2: Select Masternode Tier${NC}"
 echo "Available tiers:"
 echo "  - Free:   No collateral (basic rewards, no governance voting)"
@@ -183,80 +138,69 @@ echo ""
 echo "Enter tier (free/bronze/silver/gold):"
 while true; do
     read -p "> " tier_input
-    if TIER=$(validate_tier "$tier_input"); then
-        break
-    else
-        echo -e "${RED}Invalid tier. Please enter: free, bronze, silver, or gold${NC}"
-    fi
+    tier_lower=$(echo "$tier_input" | tr '[:upper:]' '[:lower:]')
+    case "$tier_lower" in
+        free|bronze|silver|gold) TIER="$tier_lower"; break ;;
+        *) echo -e "${RED}Invalid tier. Please enter: free, bronze, silver, or gold${NC}" ;;
+    esac
 done
 
 echo ""
 
-# Step 3: Get reward address
-echo -e "${YELLOW}Step 3: Reward Address${NC}"
-echo "Enter your TIME address where you want to receive rewards:"
-echo "(Must start with 'TIME' - example: TIME1abc...)"
-while true; do
-    read -p "> " reward_address
-    if [ -z "$reward_address" ]; then
-        echo -e "${RED}Reward address cannot be empty${NC}"
-        continue
+# ─── Step 3: Masternode private key ──────────────────────────
+echo -e "${YELLOW}Step 3: Masternode Private Key${NC}"
+EXISTING_KEY=""
+if [ -f "$CONF_FILE" ]; then
+    EXISTING_KEY=$(grep -E "^masternodeprivkey=" "$CONF_FILE" 2>/dev/null | head -1 | cut -d= -f2-)
+fi
+if [ -n "$EXISTING_KEY" ]; then
+    echo "Existing masternodeprivkey found: ${EXISTING_KEY:0:8}..."
+    echo "Keep existing key? (y/n)"
+    read -p "> " keep_key
+    if validate_yes_no "$keep_key"; then
+        MN_PRIVKEY="$EXISTING_KEY"
     fi
-    if validate_address "$reward_address"; then
-        REWARD_ADDRESS="$reward_address"
-        break
-    else
-        echo -e "${YELLOW}Warning: Address format looks incorrect (should start with TIME)${NC}"
-        echo "Continue anyway? (y/n)"
-        read -p "> " continue_anyway
-        if validate_yes_no "$continue_anyway"; then
-            REWARD_ADDRESS="$reward_address"
-            break
-        fi
-    fi
-done
+fi
+if [ -z "$MN_PRIVKEY" ]; then
+    echo "Enter your masternode private key"
+    echo "(Generate one with: time-cli masternode genkey)"
+    echo "Or press Enter to skip (wallet key will be used):"
+    read -p "> " MN_PRIVKEY
+fi
 
 echo ""
 
-# Step 4: Collateral information (only if not free tier)
+# ─── Step 4: Collateral information (non-free tiers) ─────────
+COLLATERAL_TXID=""
+COLLATERAL_VOUT=""
 if [ "$TIER" != "free" ]; then
     echo -e "${YELLOW}Step 4: Collateral Information${NC}"
     echo ""
-    echo "To lock collateral, you need to provide the UTXO details:"
+    echo "To set up collateral, provide the UTXO details:"
     echo "  1. Run: time-cli listunspent"
     echo "  2. Find the UTXO with your collateral amount"
     echo "  3. Note the txid and vout"
     echo ""
-    
-    # Get collateral txid
+
     echo "Enter collateral transaction ID (txid):"
-    echo "(64 hex characters - example: abc123def456...)"
     while true; do
         read -p "> " collateral_txid
         if [ -z "$collateral_txid" ]; then
-            echo -e "${YELLOW}You can leave this empty and configure later${NC}"
-            echo "Continue without collateral txid? (y/n)"
-            read -p "> " skip_collateral
-            if validate_yes_no "$skip_collateral"; then
-                COLLATERAL_TXID=""
-                COLLATERAL_VOUT=""
-                break 2
-            fi
+            echo "Skip collateral for now? (y/n)"
+            read -p "> " skip
+            if validate_yes_no "$skip"; then break; fi
             continue
         fi
         if validate_txid "$collateral_txid"; then
             COLLATERAL_TXID="$collateral_txid"
             break
         else
-            echo -e "${RED}Invalid txid format (must be 64 hex characters)${NC}"
+            echo -e "${RED}Invalid txid (must be 64 hex characters)${NC}"
         fi
     done
-    
-    # Get collateral vout (only if txid provided)
+
     if [ -n "$COLLATERAL_TXID" ]; then
-        echo ""
         echo "Enter collateral output index (vout):"
-        echo "(Usually 0 or 1 - check listunspent output)"
         while true; do
             read -p "> " collateral_vout
             if validate_vout "$collateral_vout"; then
@@ -267,23 +211,40 @@ if [ "$TIER" != "free" ]; then
             fi
         done
     fi
-else
-    COLLATERAL_TXID=""
-    COLLATERAL_VOUT=""
 fi
 
+# ─── Step 5: Public IP ───────────────────────────────────────
+echo ""
+echo -e "${YELLOW}Step 5: Public IP Address${NC}"
+DETECTED_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || true)
+if [ -n "$DETECTED_IP" ]; then
+    echo "Detected public IP: $DETECTED_IP"
+    echo "Use this IP? (y/n)"
+    read -p "> " use_detected
+    if validate_yes_no "$use_detected"; then
+        PUBLIC_IP="$DETECTED_IP"
+    fi
+fi
+if [ -z "$PUBLIC_IP" ]; then
+    echo "Enter your public IP address (or press Enter for auto-detect at startup):"
+    read -p "> " PUBLIC_IP
+fi
+
+# ─── Summary ─────────────────────────────────────────────────
 echo ""
 echo -e "${BLUE}════════════════════════════════════════════════${NC}"
 echo -e "${BLUE}Configuration Summary${NC}"
 echo -e "${BLUE}════════════════════════════════════════════════${NC}"
-echo "Masternode Enabled:  $MASTERNODE_ENABLED"
+echo "Network:             $NETWORK"
+echo "Masternode:          enabled"
 echo "Tier:                $TIER"
-echo "Reward Address:      $REWARD_ADDRESS"
+[ -n "$MN_PRIVKEY" ] && echo "Private Key:         ${MN_PRIVKEY:0:8}..." || echo "Private Key:         (wallet key)"
+[ -n "$PUBLIC_IP" ] && echo "Public IP:           $PUBLIC_IP" || echo "Public IP:           (auto-detect)"
 if [ -n "$COLLATERAL_TXID" ]; then
     echo "Collateral TXID:     $COLLATERAL_TXID"
     echo "Collateral VOUT:     $COLLATERAL_VOUT"
-else
-    echo "Collateral:          Not configured (can register later via CLI)"
+elif [ "$TIER" != "free" ]; then
+    echo "Collateral:          Not configured yet"
 fi
 echo -e "${BLUE}════════════════════════════════════════════════${NC}"
 echo ""
@@ -291,107 +252,120 @@ echo "Save this configuration? (y/n)"
 read -p "> " confirm
 if ! validate_yes_no "$confirm"; then
     echo -e "${RED}Configuration cancelled${NC}"
-    echo "Backup preserved at: $BACKUP_FILE"
     exit 1
 fi
 
-# Update config.toml
+# ─── Write time.conf ─────────────────────────────────────────
 echo ""
-echo "Updating config.toml..."
+echo "Writing time.conf..."
 
-# Use sed to update the [masternode] section
-# Note: This assumes the [masternode] section exists in config.toml
+# Create time.conf if it doesn't exist
+if [ ! -f "$CONF_FILE" ]; then
+    cat > "$CONF_FILE" <<EOF
+# TIME Coin Configuration File
+# https://time-coin.io
 
-# Update enabled
-sed -i.tmp "/^\[masternode\]/,/^\[/ s/^enabled = .*/enabled = $MASTERNODE_ENABLED/" "$CONFIG_FILE"
+# Network
+$([ "$NETWORK" = "testnet" ] && echo "testnet=1" || echo "#testnet=0")
 
-# Update tier
-sed -i.tmp "/^\[masternode\]/,/^\[/ s/^tier = .*/tier = \"$TIER\"/" "$CONFIG_FILE"
+listen=1
+server=1
 
-# Update reward_address (add if doesn't exist)
-if grep -q "^reward_address = " "$CONFIG_FILE"; then
-    sed -i.tmp "/^\[masternode\]/,/^\[/ s|^reward_address = .*|reward_address = \"$REWARD_ADDRESS\"|" "$CONFIG_FILE"
+# Masternode
+masternode=1
+
+# Peers
+#addnode=seed1.time-coin.io
+
+# Logging
+debug=info
+
+# Storage
+txindex=1
+EOF
+    echo -e "${GREEN}✓${NC} Created new time.conf"
 else
-    # Add reward_address after tier line
-    sed -i.tmp "/^\[masternode\]/,/^\[/ s|^tier = .*|&\nreward_address = \"$REWARD_ADDRESS\"|" "$CONFIG_FILE"
+    echo -e "${GREEN}✓${NC} Updating existing time.conf"
 fi
 
-# Update collateral_txid
+set_conf_value "masternode" "1" "$CONF_FILE"
+
+if [ -n "$MN_PRIVKEY" ]; then
+    set_conf_value "masternodeprivkey" "$MN_PRIVKEY" "$CONF_FILE"
+fi
+
+if [ -n "$PUBLIC_IP" ]; then
+    set_conf_value "externalip" "$PUBLIC_IP" "$CONF_FILE"
+fi
+
+echo -e "${GREEN}✓${NC} time.conf updated"
+
+# ─── Write masternode.conf ────────────────────────────────────
+echo "Writing masternode.conf..."
+
 if [ -n "$COLLATERAL_TXID" ]; then
-    sed -i.tmp "/^\[masternode\]/,/^\[/ s/^collateral_txid = .*/collateral_txid = \"$COLLATERAL_TXID\"/" "$CONFIG_FILE"
-else
-    sed -i.tmp "/^\[masternode\]/,/^\[/ s/^collateral_txid = .*/collateral_txid = \"\"/" "$CONFIG_FILE"
-fi
-
-# Update collateral_vout (add if doesn't exist)
-if [ -n "$COLLATERAL_VOUT" ]; then
-    if grep -q "^collateral_vout = " "$CONFIG_FILE"; then
-        sed -i.tmp "/^\[masternode\]/,/^\[/ s/^collateral_vout = .*/collateral_vout = $COLLATERAL_VOUT/" "$CONFIG_FILE"
+    # Determine port
+    if [ "$NETWORK" = "testnet" ]; then
+        MN_PORT="24100"
     else
-        # Add collateral_vout after collateral_txid line
-        sed -i.tmp "/^\[masternode\]/,/^\[/ s|^collateral_txid = .*|&\ncollateral_vout = $COLLATERAL_VOUT|" "$CONFIG_FILE"
+        MN_PORT="24000"
     fi
+
+    MN_IP="${PUBLIC_IP:-0.0.0.0}"
+    MN_LINE="mn1 ${MN_IP}:${MN_PORT} ${COLLATERAL_TXID} ${COLLATERAL_VOUT}"
+
+    if [ ! -f "$MN_CONF_FILE" ] || ! grep -q "^mn1 " "$MN_CONF_FILE" 2>/dev/null; then
+        cat > "$MN_CONF_FILE" <<EOF
+# TIME Coin Masternode Configuration
+# Format: alias IP:port collateral_txid collateral_vout
+$MN_LINE
+EOF
+    else
+        sed -i.tmp "s|^mn1 .*|${MN_LINE}|" "$MN_CONF_FILE"
+        rm -f "${MN_CONF_FILE}.tmp"
+    fi
+    echo -e "${GREEN}✓${NC} masternode.conf updated with collateral"
+elif [ ! -f "$MN_CONF_FILE" ]; then
+    cat > "$MN_CONF_FILE" <<EOF
+# TIME Coin Masternode Configuration
+# Format: alias IP:port collateral_txid collateral_vout
+#
+# Example:
+#   mn1 1.2.3.4:24100 abc123...def456 0
+#
+# Add your collateral line and restart timed.
+EOF
+    echo -e "${GREEN}✓${NC} Created masternode.conf template"
+else
+    echo -e "${GREEN}✓${NC} masternode.conf unchanged (no collateral provided)"
 fi
 
-# Clean up temporary files
-rm -f "${CONFIG_FILE}.tmp"
-
-echo -e "${GREEN}✓${NC} Configuration saved successfully!"
+# ─── Next Steps ───────────────────────────────────────────────
 echo ""
 echo -e "${BLUE}Next Steps:${NC}"
 echo ""
 
 if [ "$TIER" = "free" ]; then
-    echo "1. Restart your node to apply changes"
-    echo "   ./target/release/timed"
-    echo ""
-    echo "2. Check masternode status"
-    echo "   time-cli masternodestatus"
+    echo "1. Restart your node:  systemctl restart timed"
+    echo "2. Check status:       time-cli masternodestatus"
 else
     if [ -z "$COLLATERAL_TXID" ]; then
-        echo "1. Create collateral UTXO:"
-        echo "   time-cli sendtoaddress $REWARD_ADDRESS <amount>"
-        echo ""
         REQUIRED_AMOUNT=""
         case "$TIER" in
-            bronze) REQUIRED_AMOUNT="1000.0" ;;
-            silver) REQUIRED_AMOUNT="10000.0" ;;
-            gold) REQUIRED_AMOUNT="100000.0" ;;
+            bronze) REQUIRED_AMOUNT="1000" ;;
+            silver) REQUIRED_AMOUNT="10000" ;;
+            gold)   REQUIRED_AMOUNT="100000" ;;
         esac
-        if [ -n "$REQUIRED_AMOUNT" ]; then
-            echo "   Required amount: $REQUIRED_AMOUNT TIME"
-            echo ""
-        fi
-        echo "2. Wait for 3 confirmations (~30 minutes)"
-        echo "   time-cli listunspent"
-        echo ""
-        echo "3. Register masternode with collateral:"
-        echo "   time-cli masternoderegister \\"
-        echo "     --tier $TIER \\"
-        echo "     --collateral-txid <txid> \\"
-        echo "     --vout <vout> \\"
-        echo "     --reward-address $REWARD_ADDRESS"
-        echo ""
-        echo "4. Verify registration:"
-        echo "   time-cli masternodelist"
-        echo "   time-cli listlockedcollaterals"
+        echo "1. Send exactly ${REQUIRED_AMOUNT} TIME to your wallet address"
+        echo "2. Find the collateral UTXO:  time-cli listunspent"
+        echo "3. Edit $MN_CONF_FILE:"
+        echo "   mn1 <your_ip>:$([ "$NETWORK" = "testnet" ] && echo 24100 || echo 24000) <txid> <vout>"
+        echo "4. Restart:  systemctl restart timed"
     else
-        echo "1. Restart your node to apply changes"
-        echo "   ./target/release/timed"
-        echo ""
-        echo "2. Register masternode with collateral:"
-        echo "   time-cli masternoderegister \\"
-        echo "     --tier $TIER \\"
-        echo "     --collateral-txid $COLLATERAL_TXID \\"
-        echo "     --vout $COLLATERAL_VOUT \\"
-        echo "     --reward-address $REWARD_ADDRESS"
-        echo ""
-        echo "3. Verify registration:"
-        echo "   time-cli masternodelist"
-        echo "   time-cli listlockedcollaterals"
+        echo "1. Restart your node:  systemctl restart timed"
+        echo "2. Verify:  time-cli masternodelist"
     fi
 fi
 
 echo ""
-echo -e "${GREEN}Configuration complete!${NC}"
-echo "Backup saved at: $BACKUP_FILE"
+echo -e "${GREEN}✓ Configuration complete!${NC}"

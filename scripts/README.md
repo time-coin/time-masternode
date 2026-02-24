@@ -12,17 +12,17 @@ This directory contains scripts for installing, managing, configuring, and unins
 **Features**:
 - ✅ Interactive prompts for all masternode settings
 - ✅ Validates all inputs (addresses, txids, vouts)
-- ✅ Automatically updates config.toml in user's data directory
+- ✅ Writes time.conf and masternode.conf in user's data directory
 - ✅ Creates backup before making changes
 - ✅ Provides next steps after configuration
 - ✅ Cross-platform (Linux/macOS via .sh, Windows via .bat)
 - ✅ Supports both mainnet and testnet
 
 **Config File Locations**:
-- **Linux/macOS Mainnet**: `~/.timecoin/config.toml`
-- **Linux/macOS Testnet**: `~/.timecoin/testnet/config.toml`
-- **Windows Mainnet**: `%APPDATA%\timecoin\config.toml`
-- **Windows Testnet**: `%APPDATA%\timecoin\testnet\config.toml`
+- **Linux/macOS Mainnet**: `~/.timecoin/time.conf` + `~/.timecoin/masternode.conf`
+- **Linux/macOS Testnet**: `~/.timecoin/testnet/time.conf` + `~/.timecoin/testnet/masternode.conf`
+- **Windows Mainnet**: `%APPDATA%\timecoin\time.conf` + `%APPDATA%\timecoin\masternode.conf`
+- **Windows Testnet**: `%APPDATA%\timecoin\testnet\time.conf` + `%APPDATA%\timecoin\testnet\masternode.conf`
 
 **Usage (Linux/macOS)**:
 ```bash
@@ -152,13 +152,15 @@ After running `install-masternode.sh`, files will be organized as:
 └── time-cli           # CLI tool
 
 /root/.timecoin/       # Mainnet data (when using mainnet)
-├── config.toml        # Configuration file
+├── time.conf          # Daemon configuration
+├── masternode.conf    # Collateral configuration
 ├── blockchain/        # Blockchain database
 ├── wallets/           # Wallet files
 └── logs/              # Log files
 
 /root/.timecoin/testnet/  # Testnet data (when using testnet)
-├── config.toml        # Testnet configuration file
+├── time.conf          # Testnet daemon configuration
+├── masternode.conf    # Testnet collateral configuration
 ├── blockchain/        # Testnet blockchain database
 ├── wallets/           # Testnet wallet files
 └── logs/              # Testnet log files
@@ -203,13 +205,10 @@ time-cli sendtoaddress <your_address> 1000.0
 time-cli listunspent
 ```
 
-**Step 4: Update config.toml**
-```toml
-[masternode]
-enabled = true
-tier = "bronze"
-collateral_txid = "<txid from step 3>"
-collateral_vout = 0
+**Step 4: Update masternode.conf**
+```
+# Format: alias IP:port collateral_txid collateral_vout
+mn1 <your_ip>:24100 <txid from step 3> 0
 ```
 
 **Step 5: Restart and Verify**
@@ -242,10 +241,13 @@ sudo ./scripts/install-masternode.sh testnet
 ### 2. Configure
 ```bash
 # Edit configuration (mainnet)
-sudo nano /root/.timecoin/config.toml
+sudo nano /root/.timecoin/time.conf
+
+# Edit collateral (mainnet)
+sudo nano /root/.timecoin/masternode.conf
 
 # Edit configuration (testnet)
-sudo nano /root/.timecoin/testnet/config.toml
+sudo nano /root/.timecoin/testnet/time.conf
 
 # Restart service to apply changes
 sudo systemctl restart timed
@@ -310,7 +312,7 @@ sudo systemctl start timed
 
 ### Edit Configuration
 ```bash
-sudo nano /etc/timecoin/config.toml
+sudo nano /root/.timecoin/time.conf
 # Then restart: sudo systemctl restart timed
 ```
 
@@ -345,7 +347,7 @@ The installation script implements security best practices:
 journalctl -u timed -n 50 --no-pager
 
 # Check config syntax
-timed --config /etc/timecoin/config.toml --check-config
+timed --conf /root/.timecoin/time.conf
 
 # Verify permissions
 ls -la /etc/timecoin/
@@ -371,7 +373,7 @@ cargo build --release
 sudo lsof -i :9333
 
 # Kill conflicting process or change port in config
-sudo nano /etc/timecoin/config.toml
+sudo nano /root/.timecoin/time.conf
 ```
 
 ### Firewall Blocking Connections
@@ -406,44 +408,42 @@ sudo swapon /swapfile
 
 ## 📝 Configuration Options
 
-Key configuration options in `/root/.timecoin/config.toml` (mainnet) or `/root/.timecoin/testnet/config.toml` (testnet):
+Key configuration options in `time.conf` (mainnet: `~/.timecoin/time.conf`, testnet: `~/.timecoin/testnet/time.conf`):
 
-```toml
-[network]
-# P2P listening address
-# Mainnet: 24000, Testnet: 24100
-listen_addr = "0.0.0.0:24000"
+```ini
+# Network (uncomment for testnet)
+#testnet=1
 
-# RPC listening address (local only for security)
-# Mainnet: 24001, Testnet: 24101
-rpc_addr = "127.0.0.1:24001"
+# Accept connections
+listen=1
+server=1
 
-# Network type
-network = "mainnet"  # or "testnet"
+# Masternode mode (0=off, 1=on)
+masternode=1
 
-# Seed nodes to connect to
-seed_nodes = [
-    "seed1.time-coin.io:24000",
-    "seed2.time-coin.io:24000"
-]
+# Masternode private key (generate with: time-cli masternode genkey)
+#masternodeprivkey=<key>
 
-[blockchain]
-# Data directory
-data_dir = "/root/.timecoin"
+# Public IP (auto-detected if omitted)
+#externalip=1.2.3.4
 
-[logging]
-# Log level: trace, debug, info, warn, error
-level = "info"
+# Peers
+#addnode=seed1.time-coin.io
 
-# Log directory
-log_dir = "/root/.timecoin/logs"
+# Logging: trace, debug, info, warn, error
+debug=info
 
-[masternode]
-# Your masternode reward address
-reward_address = "TIME_YOUR_ADDRESS_HERE"
+# RPC port (mainnet=24001, testnet=24101)
+#rpcport=24101
 
-# Masternode tier (1, 2, or 3)
-tier = 1
+# Storage
+txindex=1
+```
+
+Collateral is configured in `masternode.conf`:
+```
+# Format: alias IP:port collateral_txid collateral_vout
+mn1 1.2.3.4:24000 abc123...def456 0
 ```
 
 ---

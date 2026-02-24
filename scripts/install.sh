@@ -44,9 +44,17 @@ fi
 
 # Copy config
 echo "⚙️  Installing configuration..."
-if [ ! -f "/etc/timecoin/config.toml" ]; then
-    cp config.testnet.toml /etc/timecoin/config.toml
-    echo "✓ Config installed to /etc/timecoin/"
+if [ ! -f "/etc/timecoin/time.conf" ]; then
+    mkdir -p /etc/timecoin
+    cat > /etc/timecoin/time.conf <<EOF
+# TIME Coin Configuration
+listen=1
+server=1
+masternode=1
+debug=info
+txindex=1
+EOF
+    echo "✓ Config installed to /etc/timecoin/time.conf"
 else
     echo "⚠  Config already exists, skipping"
 fi
@@ -63,7 +71,7 @@ echo ""
 echo "✅ Installation complete!"
 echo ""
 echo "Next steps:"
-echo "  1. Edit config: sudo nano /etc/timecoin/config.toml"
+echo "  1. Edit config: sudo nano /etc/timecoin/time.conf"
 echo "  2. Start service: sudo systemctl start timed"
 echo "  3. Check status: sudo systemctl status timed"
 echo "  4. View logs: sudo journalctl -u timed -f"

@@ -17,7 +17,7 @@ echo.
 
 REM Start daemon in background
 echo 1️⃣ Starting daemon...
-start /B "" %DAEMON% --config config.toml > timed.log 2>&1
+start /B "" %DAEMON% --conf time.conf > timed.log 2>&1
 timeout /t 2 /nobreak > nul
 echo    Daemon started
 echo.

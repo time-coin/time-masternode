@@ -36,8 +36,11 @@ else
     TIMED_PID=$(echo "$TIMED_PROCESS" | awk '{print $2}')
     TIMED_CWD=$(pwdx $TIMED_PID 2>/dev/null | awk '{print $2}')
     
-    if [ -n "$TIMED_CWD" ] && [ -f "$TIMED_CWD/config.toml" ]; then
-        echo "Config from working directory: $TIMED_CWD/config.toml"
+    if [ -n "$TIMED_CWD" ] && [ -f "$TIMED_CWD/time.conf" ]; then
+        echo "Config from working directory: $TIMED_CWD/time.conf"
+        CONFIG_FILE="$TIMED_CWD/time.conf"
+    elif [ -n "$TIMED_CWD" ] && [ -f "$TIMED_CWD/config.toml" ]; then
+        echo "Legacy config from working directory: $TIMED_CWD/config.toml"
         CONFIG_FILE="$TIMED_CWD/config.toml"
     else
         echo -e "${YELLOW}⚠ Cannot determine config file used by timed${NC}"
@@ -45,9 +48,10 @@ else
         
         # Try common locations
         CONFIG_LOCATIONS=(
+            "$HOME/.timecoin/testnet/time.conf"
+            "$HOME/.timecoin/time.conf"
             "$HOME/.timecoin/testnet/config.toml"
             "$HOME/.timecoin/config.toml"
-            "./config.toml"
         )
         
         CONFIG_FILE=""

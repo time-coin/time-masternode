@@ -18,7 +18,7 @@ echo ""
 
 # Start daemon in background
 echo "1️⃣ Starting daemon..."
-$DAEMON --config config.toml > /tmp/timed.log 2>&1 &
+$DAEMON --conf time.conf > /tmp/timed.log 2>&1 &
 DAEMON_PID=$!
 echo "   Daemon started (PID: $DAEMON_PID)"
 
