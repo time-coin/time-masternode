@@ -56,6 +56,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MAX_TX_INPUTS limit** (5000) with OOM-prevention error message recommending smaller amounts
 - **`scripts/migrate-systemd.sh`** — migrates deployed systemd service from `--config config.toml` to `--conf time.conf`
 
+### Added — Operational Scripts
+- **`scripts/backup-node.sh`** — Full/wallet-only backup with timestamped tarballs, hot backup mode, disk space check
+- **`scripts/restore-node.sh`** — Restore from backup with integrity verification, safety wallet backup, confirmation prompt
+- **`scripts/health-check.sh`** — Production health probe returning exit codes 0/1/2 (healthy/degraded/critical), JSON output mode, cron-friendly quiet mode
+- **`scripts/reindex.sh`** — Safe blockchain reindex with full (blocking) and tx-only (background) modes, progress monitoring
+- **`scripts/node-monitor.sh`** — Persistent log watcher with color-coded event categories (errors, forks, blocks, masternode events), optional log file output
+
+### Fixed — Script Correctness
+- **All scripts now use correct camelCase CLI commands** (was kebab-case `get-block-count` → `getblockcount`, etc.)
+- **`setup_local_testnet.sh` rewritten** — uses `--conf`/`--datadir` flags and generates time.conf per node (was using nonexistent `--validator-id`/`--port`/`--peers` flags)
+- **Server lists parameterized** — `diagnose_fork_state.sh`, `emergency_recovery.sh`, `test_finalization_propagation.sh` accept `SERVERS`/`NODES` env var override
+- **`stability_test.sh`** — updated ports to match local testnet (24111/24121/24131)
+- **`diagnose_status.sh`** — removed invalid positional arg from `getrawmempool`
+
 ### Removed
 - **config.mainnet.toml and config.testnet.toml** template files from repository root
 
