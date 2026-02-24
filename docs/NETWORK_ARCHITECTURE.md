@@ -56,7 +56,7 @@ pub fn get_connected_peers(&self) -> Vec<String>
 **Purpose:** Bootstrap peer service for network discovery
 
 **Current Implementation:**
-- Returns configured bootstrap peers from `config.toml`
+- Returns configured bootstrap peers from `time.conf` (addnode entries)
 - Ready for HTTP-based peer discovery service
 
 **Methods:**
@@ -385,19 +385,20 @@ Application Layer (Consensus Engine)
 
 ## Configuration
 
-### Network Settings (config.toml)
+### Network Settings (time.conf)
 
-```toml
-[network]
-listen_address = "0.0.0.0"
-external_address = ""  # Your public IP (for nat/firewalls)
-max_peers = 50
-enable_upnp = false
-enable_peer_discovery = true
-bootstrap_peers = []
+```ini
+# Accept incoming connections
+listen=1
 
-[security]
-enable_tls = true
+# Your public IP (for NAT/firewalls)
+#externalip=1.2.3.4
+
+# Maximum peer connections
+#maxconnections=50
+
+# Add seed nodes
+#addnode=seed1.time-coin.io
 enable_message_signing = true
 message_max_age_seconds = 300  # 5 minutes
 enable_rate_limiting = true

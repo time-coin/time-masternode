@@ -309,15 +309,18 @@ impl UtxoStorage for SledUtxoStorage {
 
 **Optimizations:**
 - ✅ DashMap for lock-free concurrent access
+- ✅ Per-address UTXO index (`DashMap<String, DashSet<OutPoint>>`) for O(n-per-address) lookups
 - ✅ Streaming UTXO iteration
 - ✅ Efficient hash calculation
 - ✅ Entry API for atomic operations
+- ✅ Auto-consolidation when transfers need >5000 inputs
 
 **Data Structures:**
 ```rust
 pub struct UTXOStateManager {
     storage: Arc<dyn UtxoStorage>,
-    utxo_states: DashMap<OutPoint, UTXOState>,    // Lock-free state
+    utxo_states: DashMap<OutPoint, UTXOState>,              // Lock-free state
+    address_index: DashMap<String, DashSet<OutPoint>>,      // Per-address UTXO index
 }
 
 pub enum UTXOState {

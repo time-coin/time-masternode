@@ -11,35 +11,36 @@ TIME Coin supports two networks with different ports and address prefixes:
 
 ## Configuration Files
 
-- `config.toml` - Default testnet configuration
-- `config.mainnet.toml` - Mainnet configuration template
+- `time.conf` — Daemon configuration (key=value format, Dash-style)
+- `masternode.conf` — Collateral entries (one per line)
+
+Both files go in the data directory:
+- **Mainnet:** `~/.timecoin/`
+- **Testnet:** `~/.timecoin/testnet/`
 
 ## Network Type
 
-The network type is specified in the `[node]` section:
+The network is set in `time.conf`:
 
-```toml
-[node]
-network = "testnet"  # or "mainnet"
+```ini
+# Testnet
+testnet=1
+
+# Mainnet (default when testnet is not set)
+#testnet=0
 ```
 
 ## Port Selection
 
-Ports are automatically selected based on the network type:
+Ports are automatically selected based on the network type.
+Override in `time.conf` if needed:
 
-```toml
-[network]
-listen_address = "0.0.0.0"  # Auto-selects network-appropriate port
+```ini
+# Override P2P port (default: mainnet=24000, testnet=24100)
+#port=24100
 
-[rpc]
-listen_address = "127.0.0.1"  # Auto-selects network-appropriate port
-```
-
-You can also explicitly specify ports:
-
-```toml
-[network]
-listen_address = "0.0.0.0:24100"  # Explicit port for testnet
+# Override RPC port (default: mainnet=24001, testnet=24101)
+#rpcport=24101
 ```
 
 ## Address Prefixes
@@ -56,7 +57,9 @@ Both networks use the same address format, but transactions are network-isolated
 ### Testnet (Default)
 
 ```bash
-./target/release/timed --config config.toml
+./target/release/timed
+# Or explicitly:
+./target/release/timed --conf ~/.timecoin/testnet/time.conf
 ```
 
 Output will show:
@@ -69,7 +72,7 @@ Output will show:
 ### Mainnet
 
 ```bash
-./target/release/timed --config config.mainnet.toml
+./target/release/timed --conf ~/.timecoin/time.conf
 ```
 
 Output will show:
@@ -81,23 +84,29 @@ Output will show:
 
 ## Masternode Configuration
 
-### Free Tier Example
+### Free Tier
 
-```toml
-[masternode]
-enabled = true
-# tier defaults to "auto" (auto-detected from collateral UTXO value)
+In `time.conf`:
+```ini
+masternode=1
 ```
 
-### Paid Tier Example
+No `masternode.conf` entry needed (Free tier requires no collateral).
 
-```toml
-[masternode]
-enabled = true
-collateral_txid = "a1b2c3d4..."
-collateral_vout = 0
-# tier is auto-detected from collateral UTXO value
+### Staked Tier (Bronze/Silver/Gold)
+
+In `time.conf`:
+```ini
+masternode=1
+masternodeprivkey=<key from time-cli masternode genkey>
 ```
+
+In `masternode.conf`:
+```
+mn1 <your_ip>:24000 <collateral_txid> <collateral_vout>
+```
+
+Tier is auto-detected from the collateral UTXO value.
 
 ## Reward Weights
 
@@ -124,17 +133,14 @@ Nodes on different networks will reject each other's messages.
 ## CLI Commands
 
 ```bash
-# Generate testnet config
-./target/release/timed --gen-config --config my-testnet.toml
+# Run testnet node (default)
+./target/release/timed
 
-# Run testnet node
-./target/release/timed --config my-testnet.toml
-
-# Run mainnet node
-./target/release/timed --config config.mainnet.toml
+# Run with custom config
+./target/release/timed --conf /path/to/time.conf
 
 # Query blockchain info (auto-detects network)
-./target/release/time-cli get-blockchain-info
+./target/release/time-cli getblockchaininfo
 ```
 
 ## Peer Discovery

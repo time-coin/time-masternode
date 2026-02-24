@@ -103,7 +103,7 @@ The automated installation script handles everything for you:
 
 **What gets installed**:
 - Binaries: `/usr/local/bin/timed`, `/usr/local/bin/time-cli`
-- Config: `/root/.timecoin/config.toml` (mainnet) or `/root/.timecoin/testnet/config.toml` (testnet)
+- Config: `/root/.timecoin/time.conf` + `masternode.conf` (mainnet) or `/root/.timecoin/testnet/time.conf` + `masternode.conf` (testnet)
 - Data: `/root/.timecoin/` (mainnet) or `/root/.timecoin/testnet/` (testnet)
 - Service: `/etc/systemd/system/timed.service`
 
@@ -171,11 +171,11 @@ time-cli --version
 # Create data directory
 mkdir -p ~/.timecoin
 
-# Copy config file
-cp config.mainnet.toml ~/.timecoin/config.toml
+# Deploy default config
+./scripts/deploy-config.sh mainnet
 
 # Edit configuration
-nano ~/.timecoin/config.toml
+nano ~/.timecoin/time.conf
 ```
 
 **For Testnet**:
@@ -183,11 +183,11 @@ nano ~/.timecoin/config.toml
 # Create data directory
 mkdir -p ~/.timecoin/testnet
 
-# Copy config file
-cp config.toml ~/.timecoin/testnet/config.toml
+# Deploy default config
+./scripts/deploy-config.sh testnet
 
 # Edit configuration
-nano ~/.timecoin/testnet/config.toml
+nano ~/.timecoin/testnet/time.conf
 ```
 
 #### Step 6: Create Systemd Service (Optional)
@@ -203,7 +203,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=/home/$USER/.timecoin
-ExecStart=/usr/local/bin/timed --config /home/$USER/.timecoin/config.toml
+ExecStart=/usr/local/bin/timed --conf /home/$USER/.timecoin/time.conf
 Restart=always
 RestartSec=10
 
@@ -223,7 +223,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=/home/$USER/.timecoin/testnet
-ExecStart=/usr/local/bin/timed --config /home/$USER/.timecoin/testnet/config.toml
+ExecStart=/usr/local/bin/timed --conf /home/$USER/.timecoin/testnet/time.conf
 Restart=always
 RestartSec=10
 
@@ -277,20 +277,21 @@ time-cli wallet balance <your-address>
 
 ### 4. Configure Masternode (Optional)
 
-Edit your config file:
+Edit your config files:
 ```bash
 # Mainnet
-sudo nano /root/.timecoin/config.toml
+sudo nano /root/.timecoin/time.conf
+sudo nano /root/.timecoin/masternode.conf
 
 # Testnet
-sudo nano /root/.timecoin/testnet/config.toml
+sudo nano /root/.timecoin/testnet/time.conf
+sudo nano /root/.timecoin/testnet/masternode.conf
 ```
 
-Update the masternode section:
-```toml
-[masternode]
-enabled = true
-# tier is auto-detected from collateral UTXO value (defaults to "auto")
+Ensure `masternode=1` in time.conf, and add collateral in masternode.conf:
+```
+# Format: alias IP:port collateral_txid collateral_vout
+mn1 <your_ip>:24000 <txid> 0
 ```
 
 Restart the service:
@@ -600,7 +601,8 @@ After installation, your files will be organized as:
 └── time-cli           # CLI tool
 
 /root/.timecoin/       # Data directory
-├── config.toml        # Configuration
+├── time.conf          # Daemon configuration
+├── masternode.conf    # Collateral configuration
 ├── time-wallet.dat    # Wallet
 ├── blockchain/        # Blockchain database
 ├── blocks/            # Block storage
@@ -611,7 +613,8 @@ After installation, your files will be organized as:
 ### Testnet
 ```
 /root/.timecoin/testnet/
-├── config.toml        # Testnet config
+├── time.conf          # Testnet config
+├── masternode.conf    # Testnet collateral config
 ├── time-wallet.dat    # Testnet wallet
 ├── blockchain/        # Testnet blockchain
 ├── blocks/            # Testnet blocks
@@ -625,29 +628,35 @@ After installation, your files will be organized as:
 
 ### Essential Configuration Options
 
-```toml
-[node]
-network = "mainnet"  # or "testnet"
+**`time.conf`** (key=value format):
+```ini
+# Network (uncomment for testnet)
+#testnet=1
 
-[network]
-listen_address = "0.0.0.0"
-external_address = ""  # Set your public IP or domain
-max_peers = 50
+# Accept connections
+listen=1
+server=1
 
-[rpc]
-enabled = true
-listen_address = "127.0.0.1"  # Localhost only for security
+# Masternode mode (0=off, 1=on)
+masternode=1
 
-[storage]
-backend = "sled"
-data_dir = ""  # Leave empty for automatic
-cache_size_mb = 512
+# Masternode private key (optional)
+#masternodeprivkey=<key>
 
-[masternode]
-enabled = false
-# tier defaults to "auto" (auto-detected from collateral UTXO value)
-collateral_txid = ""
-collateral_vout = 0
+# Public IP (auto-detected if omitted)
+#externalip=1.2.3.4
+
+# Logging: trace, debug, info, warn, error
+debug=info
+
+# Storage
+txindex=1
+```
+
+**`masternode.conf`** (collateral entries):
+```
+# alias IP:port collateral_txid collateral_vout
+mn1 1.2.3.4:24000 abc123...def456 0
 ```
 
 See [Network Configuration Guide](./NETWORK_CONFIG.md) for full reference.
