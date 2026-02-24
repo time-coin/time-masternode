@@ -58,7 +58,7 @@ use wallet::WalletManager;
 #[command(name = "timed")]
 #[command(about = "TIME Coin Protocol Daemon", long_about = None)]
 struct Args {
-    /// Config file path (time.conf or legacy config.toml)
+    /// Config file path (time.conf or legacy TOML)
     #[arg(short, long, alias = "config")]
     conf: Option<String>,
 
@@ -108,7 +108,7 @@ async fn main() {
     }
 
     // ─── Determine config path and network type ──────────────────────
-    // Priority: --conf flag > time.conf/config.toml in data dirs > config.toml in CWD
+    // Priority: --conf flag > time.conf in data dirs > legacy TOML fallback
     let conf_path = if let Some(ref p) = args.conf {
         std::path::PathBuf::from(p)
     } else {
@@ -131,10 +131,10 @@ async fn main() {
         } else if testnet_dir.join("time.conf").exists() {
             testnet_dir.join("time.conf")
         } else if testnet_dir.join("config.toml").exists() {
-            // Legacy: config.toml in testnet dir (common existing setup)
+            // Legacy: TOML in testnet dir (common existing setup)
             testnet_dir.join("config.toml")
         } else if std::path::Path::new("config.toml").exists() {
-            // Legacy fallback — config.toml in CWD
+            // Legacy fallback — TOML in CWD
             std::path::PathBuf::from("config.toml")
         } else {
             // No config found anywhere — default to mainnet base dir
@@ -210,7 +210,7 @@ async fn main() {
                     "  ✓ Loaded legacy configuration from {}",
                     conf_path.display()
                 );
-                // Generate time.conf + masternode.conf alongside legacy config.toml
+                // Generate time.conf + masternode.conf alongside legacy TOML
                 // so the user has them ready for migration
                 let conf_dir = conf_path
                     .parent()
@@ -224,7 +224,7 @@ async fn main() {
                         eprintln!("  ⚠️ Could not generate time.conf: {}", e);
                     } else {
                         println!(
-                            "  ✓ Generated {} (migrate from config.toml when ready)",
+                            "  ✓ Generated {} (migrate from legacy TOML when ready)",
                             new_conf.display()
                         );
                     }
@@ -243,17 +243,12 @@ async fn main() {
                     match config::parse_masternode_conf(&new_mn) {
                         Ok(entries) => {
                             if let Some(entry) = entries.first() {
-                                cfg.masternode.collateral_txid =
-                                    entry.collateral_txid.clone();
+                                cfg.masternode.collateral_txid = entry.collateral_txid.clone();
                                 cfg.masternode.collateral_vout = entry.collateral_vout;
                                 if !entry.address.is_empty() {
-                                    cfg.network.external_address =
-                                        Some(entry.address.clone());
+                                    cfg.network.external_address = Some(entry.address.clone());
                                 }
-                                println!(
-                                    "  ✓ Loaded masternode.conf: alias={}",
-                                    entry.alias
-                                );
+                                println!("  ✓ Loaded masternode.conf: alias={}", entry.alias);
                             }
                         }
                         Err(e) => eprintln!("  ⚠️ Could not parse masternode.conf: {}", e),
@@ -466,16 +461,19 @@ async fn main() {
         };
 
         let display_tier = masternode.tier;
-        println!("✓ Running as {:?} masternode", display_tier);
-        println!("  └─ Wallet: {}", wallet_address);
-        println!(
-            "  └─ Collateral: {} TIME",
-            display_tier.collateral() / 100_000_000
-        );
+        let auto_detecting = has_collateral && display_tier == types::MasternodeTier::Free;
+        if !auto_detecting {
+            println!("✓ Running as {:?} masternode", display_tier);
+            println!("  └─ Wallet: {}", wallet_address);
+            println!(
+                "  └─ Collateral: {} TIME",
+                display_tier.collateral() / 100_000_000
+            );
+        }
         Some(masternode)
     } else {
         println!("⚠ No masternode configured - node will run in observer mode");
-        println!("  To enable: Set masternode.enabled = true in config.toml");
+        println!("  To enable: Set masternode=1 in time.conf");
         None
     };
 
@@ -596,9 +594,10 @@ async fn main() {
                     if let Some(detected_tier) =
                         types::MasternodeTier::from_collateral_value(utxo.value)
                     {
+                        println!("✓ Running as {:?} masternode", detected_tier);
+                        println!("  └─ Wallet: {}", mn.address);
                         println!(
-                            "✓ Auto-detected tier: {:?} (collateral: {} TIME)",
-                            detected_tier,
+                            "  └─ Collateral: {} TIME (auto-detected from UTXO)",
                             utxo.value / 100_000_000
                         );
                         mn.tier = detected_tier;
@@ -616,7 +615,10 @@ async fn main() {
                         "⚠️ Warning: Could not look up collateral UTXO for tier auto-detection: {}",
                         e
                     );
-                    eprintln!("   Node will start as Free tier. Set tier explicitly in config.toml or ensure collateral UTXO exists.");
+                    eprintln!("   Node will start as Free tier. Set tier= in time.conf or ensure collateral UTXO exists.");
+                    println!("✓ Running as Free masternode");
+                    println!("  └─ Wallet: {}", mn.address);
+                    println!("  └─ Collateral: 0 TIME");
                 }
             }
         }

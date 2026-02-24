@@ -2165,7 +2165,7 @@ impl MessageHandler {
         _context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         warn!(
-            "⚠️ [{}] Ignoring MasternodeUnlock from {} for {} (deprecated — use config.toml)",
+            "⚠️ [{}] Ignoring MasternodeUnlock from {} for {} (deprecated — use time.conf)",
             self.direction, self.peer_ip, address
         );
         Ok(None)
