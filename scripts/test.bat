@@ -15,19 +15,19 @@ echo 2. Testing CLI commands...
 echo.
 
 echo Get blockchain info:
-.\target\release\time-cli.exe get-blockchain-info
+.\target\release\time-cli.exe getblockchaininfo
 echo.
 
 echo Get block count:
-.\target\release\time-cli.exe get-block-count
+.\target\release\time-cli.exe getblockcount
 echo.
 
 echo List masternodes:
-.\target\release\time-cli.exe masternode-list
+.\target\release\time-cli.exe masternodelist
 echo.
 
 echo Get consensus info:
-.\target\release\time-cli.exe get-consensus-info
+.\target\release\time-cli.exe getconsensusinfo
 echo.
 
 echo Get uptime:
@@ -35,7 +35,7 @@ echo Get uptime:
 echo.
 
 echo Get network info:
-.\target\release\time-cli.exe get-network-info
+.\target\release\time-cli.exe getnetworkinfo
 echo.
 
 echo 3. Stopping daemon...

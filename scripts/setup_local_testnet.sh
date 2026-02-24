@@ -1,5 +1,8 @@
 #!/bin/bash
 # setup_local_testnet.sh - Local 3-node testnet setup for testing
+#
+# Creates 3 separate data directories with their own time.conf,
+# each running on different ports so they can peer with each other.
 
 set -e
 
@@ -14,6 +17,7 @@ echo "📦 Building release binary..."
 cargo build --release 2>&1 | grep -E "Compiling|Finished|error|warning" || true
 
 BINARY="$PROJECT_ROOT/target/release/timed"
+CLI="$PROJECT_ROOT/target/release/time-cli"
 
 if [ ! -f "$BINARY" ]; then
     echo "❌ Build failed - binary not found"
@@ -22,45 +26,56 @@ fi
 
 echo "✅ Build complete!"
 
-# Create test directories
-echo "📁 Creating node directories..."
-mkdir -p "$PROJECT_ROOT/nodes"/{node1,node2,node3}
+# Create test directories with config files
+echo "📁 Creating node directories and configs..."
+for i in 1 2 3; do
+    NODE_DIR="$PROJECT_ROOT/nodes/node${i}"
+    mkdir -p "$NODE_DIR"
 
-echo "
-🎯 Starting 3-Node Testnet
+    P2P_PORT=$((24100 + i * 10))      # 24110, 24120, 24130
+    RPC_PORT=$((24100 + i * 10 + 1))   # 24111, 24121, 24131
 
-You need to open 3 terminals and run these commands:
+    # Build addnode lines for the other two nodes
+    ADDNODES=""
+    for j in 1 2 3; do
+        [ "$j" -eq "$i" ] && continue
+        ADDNODES="${ADDNODES}addnode=127.0.0.1:$((24100 + j * 10))\n"
+    done
 
-Terminal 1 (Node 1):
-  RUST_LOG=info $BINARY \\
-    --validator-id validator1 \\
-    --port 8001 \\
-    --peers localhost:8002,localhost:8003 \\
-    --rpc-bind 0.0.0.0:8081
+    cat > "$NODE_DIR/time.conf" <<EOF
+testnet=1
+listen=1
+server=1
+port=${P2P_PORT}
+rpcport=${RPC_PORT}
+$(echo -e "$ADDNODES")debug=info
+EOF
 
-Terminal 2 (Node 2):
-  RUST_LOG=info $BINARY \\
-    --validator-id validator2 \\
-    --port 8002 \\
-    --peers localhost:8001,localhost:8003 \\
-    --rpc-bind 0.0.0.0:8082
+    echo "  Node $i: P2P=$P2P_PORT  RPC=$RPC_PORT  datadir=$NODE_DIR"
+done
 
-Terminal 3 (Node 3):
-  RUST_LOG=info $BINARY \\
-    --validator-id validator3 \\
-    --port 8003 \\
-    --peers localhost:8001,localhost:8002 \\
-    --rpc-bind 0.0.0.0:8083
+echo ""
+echo "🎯 Starting 3-Node Testnet"
+echo ""
+echo "Open 3 terminals and run these commands:"
+echo ""
 
-Verification Commands:
-  # Check block count
-  curl -s http://localhost:8081/rpc -d '{\"jsonrpc\":\"2.0\",\"method\":\"getblockcount\",\"params\":[],\"id\":\"1\"}' | jq .result
-  
-  # Check network info
-  curl -s http://localhost:8081/rpc -d '{\"jsonrpc\":\"2.0\",\"method\":\"getnetworkinfo\",\"params\":[],\"id\":\"1\"}' | jq .result
-  
-  # Check masternode list
-  curl -s http://localhost:8081/rpc -d '{\"jsonrpc\":\"2.0\",\"method\":\"masternodelist\",\"params\":[],\"id\":\"1\"}' | jq .result
+for i in 1 2 3; do
+    P2P_PORT=$((24100 + i * 10))
+    RPC_PORT=$((24100 + i * 10 + 1))
+    echo "Terminal $i (Node $i — P2P $P2P_PORT, RPC $RPC_PORT):"
+    echo "  RUST_LOG=info $BINARY --conf $PROJECT_ROOT/nodes/node${i}/time.conf --datadir $PROJECT_ROOT/nodes/node${i}"
+    echo ""
+done
 
-Press Ctrl+C when finished testing.
-"
+echo "Verification Commands:"
+echo "  # Check block count (node 1)"
+echo "  $CLI -r http://127.0.0.1:24111 getblockcount"
+echo ""
+echo "  # Check network info (node 2)"
+echo "  $CLI -r http://127.0.0.1:24121 getnetworkinfo"
+echo ""
+echo "  # Check masternode list (node 3)"
+echo "  $CLI -r http://127.0.0.1:24131 masternodelist"
+echo ""
+echo "Press Ctrl+C when finished testing."

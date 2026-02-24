@@ -71,7 +71,7 @@ if [ -z "$CONFIG_FILE" ] || [ ! -f "$CONFIG_FILE" ]; then
     echo "Please specify RPC port manually:"
     echo "  For mainnet: export RPC_URL=http://127.0.0.1:24001"
     echo "  For testnet: export RPC_URL=http://127.0.0.1:24101"
-    echo "  Then run: ./target/release/time-cli --rpc-url \$RPC_URL get-block-count"
+    echo "  Then run: ./target/release/time-cli --rpc-url \$RPC_URL getblockcount"
     exit 1
 fi
 
@@ -154,7 +154,7 @@ echo ""
 # 2. Check blockchain height
 echo "2. Checking blockchain height..."
 if [ -n "$CLI" ]; then
-    HEIGHT_OUTPUT=$($CLI get-block-count 2>&1)
+    HEIGHT_OUTPUT=$($CLI getblockcount 2>&1)
     HEIGHT=$(echo "$HEIGHT_OUTPUT" | grep -o '[0-9]\+' | head -1)
     if [ -n "$HEIGHT" ] && [ "$HEIGHT" -gt 0 ] 2>/dev/null; then
         echo -e "${GREEN}✓ Current height: $HEIGHT${NC}"
@@ -172,7 +172,7 @@ echo ""
 # 3. Check block hash at current height
 echo "3. Checking block hash..."
 if [ -n "$CLI" ] && [ -n "$HEIGHT" ]; then
-    BLOCK_OUTPUT=$($CLI get-block $HEIGHT 2>&1)
+    BLOCK_OUTPUT=$($CLI getblock $HEIGHT 2>&1)
     HASH=$(echo "$BLOCK_OUTPUT" | grep -oP '"hash":\s*"\K[^"]+' | head -1)
     if [ -n "$HASH" ]; then
         echo -e "${GREEN}✓ Hash at height $HEIGHT: ${HASH:0:16}...${NC}"
@@ -187,7 +187,7 @@ echo ""
 # 4. Check peer/masternode information
 echo "4. Checking peer/masternode information..."
 if [ -n "$CLI" ]; then
-    PEER_OUTPUT=$($CLI get-peer-info 2>&1)
+    PEER_OUTPUT=$($CLI getpeerinfo 2>&1)
     # Count masternodes (each has "addr" field)
     PEER_COUNT=$(echo "$PEER_OUTPUT" | grep -o '"addr"' | wc -l)
     
