@@ -236,6 +236,39 @@ async fn main() {
                         println!("  ✓ Generated {}", new_mn.display());
                     }
                 }
+                // Even in legacy TOML mode, load masternode.conf for collateral
+                // and time.conf for masternodeprivkey (the new config files)
+                let mut cfg = cfg;
+                if new_mn.exists() {
+                    match config::parse_masternode_conf(&new_mn) {
+                        Ok(entries) => {
+                            if let Some(entry) = entries.first() {
+                                cfg.masternode.collateral_txid =
+                                    entry.collateral_txid.clone();
+                                cfg.masternode.collateral_vout = entry.collateral_vout;
+                                if !entry.address.is_empty() {
+                                    cfg.network.external_address =
+                                        Some(entry.address.clone());
+                                }
+                                println!(
+                                    "  ✓ Loaded masternode.conf: alias={}",
+                                    entry.alias
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!("  ⚠️ Could not parse masternode.conf: {}", e),
+                    }
+                }
+                if new_conf.exists() {
+                    if let Ok(conf_values) = config::parse_conf_file(&new_conf) {
+                        if let Some(keys) = conf_values.get("masternodeprivkey") {
+                            if let Some(key) = keys.first() {
+                                cfg.masternode.masternodeprivkey = key.clone();
+                                println!("  ✓ Loaded masternodeprivkey from time.conf");
+                            }
+                        }
+                    }
+                }
                 cfg
             }
             Err(e) => {
