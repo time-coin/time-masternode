@@ -113,6 +113,8 @@ impl RpcHandler {
             "forceunlockall" => self.force_unlock_all().await,
             "gettransactions" => self.get_transactions_batch(&params_array).await,
             "gettreasurybalance" => self.get_treasury_balance().await,
+            "getbalances" => self.get_balances(&params_array).await,
+            "listunspentmulti" => self.list_unspent_multi(&params_array).await,
             "masternodegenkey" => self.masternode_genkey().await,
             _ => Err(RpcError {
                 code: -32601,
@@ -979,6 +981,160 @@ impl RpcHandler {
             "locked": locked_collateral as f64 / 100_000_000.0,
             "available": spendable as f64 / 100_000_000.0
         }))
+    }
+
+    /// Get combined balance across multiple addresses (batch query for HD wallets)
+    /// Params: [["addr1", "addr2", ...]]
+    async fn get_balances(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let addresses = params
+            .first()
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected array of addresses".to_string(),
+            })?;
+
+        if addresses.len() > 1000 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Too many addresses (max 1000)".to_string(),
+            });
+        }
+
+        let mut total_spendable: u64 = 0;
+        let mut total_locked: u64 = 0;
+        let mut total_pending: u64 = 0;
+        let mut per_address = Vec::new();
+
+        for addr_val in addresses {
+            let addr = addr_val.as_str().unwrap_or("");
+            if addr.is_empty() {
+                continue;
+            }
+
+            let utxos = self.utxo_manager.list_utxos_by_address(addr).await;
+
+            let mut spendable: u64 = 0;
+            let mut locked: u64 = 0;
+            let mut pending: u64 = 0;
+
+            for u in &utxos {
+                if self.utxo_manager.is_collateral_locked(&u.outpoint) {
+                    locked += u.value;
+                    continue;
+                }
+                match self.utxo_manager.get_state(&u.outpoint) {
+                    Some(crate::types::UTXOState::Unspent) => spendable += u.value,
+                    _ => pending += u.value,
+                }
+            }
+
+            if spendable > 0 || locked > 0 || pending > 0 {
+                per_address.push(json!({
+                    "address": addr,
+                    "balance": (spendable + locked + pending) as f64 / 100_000_000.0,
+                    "available": spendable as f64 / 100_000_000.0,
+                    "locked": locked as f64 / 100_000_000.0,
+                }));
+            }
+
+            total_spendable += spendable;
+            total_locked += locked;
+            total_pending += pending;
+        }
+
+        let total = total_spendable + total_locked + total_pending;
+
+        Ok(json!({
+            "balance": total as f64 / 100_000_000.0,
+            "locked": total_locked as f64 / 100_000_000.0,
+            "available": total_spendable as f64 / 100_000_000.0,
+            "addresses": per_address,
+            "address_count": addresses.len(),
+        }))
+    }
+
+    /// List unspent outputs across multiple addresses (batch query for HD wallets)
+    /// Params: [["addr1", "addr2", ...], min_conf, max_conf, limit]
+    async fn list_unspent_multi(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let addresses = params
+            .first()
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected array of addresses".to_string(),
+            })?;
+
+        if addresses.len() > 1000 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Too many addresses (max 1000)".to_string(),
+            });
+        }
+
+        let min_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
+        let max_conf = params.get(2).and_then(|v| v.as_u64()).unwrap_or(9999999);
+        let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+
+        let current_height = self.blockchain.get_height();
+        let mut result: Vec<Value> = Vec::new();
+
+        for addr_val in addresses {
+            let addr = addr_val.as_str().unwrap_or("");
+            if addr.is_empty() {
+                continue;
+            }
+
+            let utxos = self.utxo_manager.list_utxos_by_address(addr).await;
+
+            for u in &utxos {
+                if result.len() >= limit {
+                    break;
+                }
+
+                let state = self.utxo_manager.get_state(&u.outpoint);
+                let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
+
+                let (spendable, state_str) = match state {
+                    Some(crate::types::UTXOState::Unspent) if !is_locked => (true, "unspent"),
+                    Some(crate::types::UTXOState::Unspent) if is_locked => {
+                        (false, "collateral_locked")
+                    }
+                    Some(crate::types::UTXOState::Locked { .. }) => (false, "locked"),
+                    Some(crate::types::UTXOState::SpentPending { .. }) => (false, "spending"),
+                    Some(crate::types::UTXOState::SpentFinalized { .. }) => (false, "spent"),
+                    Some(crate::types::UTXOState::Archived { .. }) => (false, "archived"),
+                    None => (false, "unknown"),
+                    _ => (false, "unavailable"),
+                };
+
+                let confirmations = self
+                    .blockchain
+                    .tx_index
+                    .as_ref()
+                    .and_then(|idx| idx.get_location(&u.outpoint.txid))
+                    .map(|loc| current_height.saturating_sub(loc.block_height) + 1)
+                    .unwrap_or(0);
+
+                if confirmations >= min_conf && confirmations <= max_conf {
+                    result.push(json!({
+                        "txid": hex::encode(u.outpoint.txid),
+                        "vout": u.outpoint.vout,
+                        "address": u.address,
+                        "amount": u.value as f64 / 100_000_000.0,
+                        "confirmations": confirmations,
+                        "spendable": spendable,
+                        "state": state_str,
+                    }));
+                }
+            }
+
+            if result.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(json!(result))
     }
 
     async fn list_unspent(&self, params: &[Value]) -> Result<Value, RpcError> {
