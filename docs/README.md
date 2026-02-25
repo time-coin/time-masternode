@@ -89,5 +89,5 @@ For development documentation and implementation status, see `/analysis/README.m
 
 ## License
 
-MIT License - See LICENSE file for details.
+Business Source License 1.1 - See LICENSE file for details.
 
