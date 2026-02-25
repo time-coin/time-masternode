@@ -144,7 +144,7 @@ impl TransactionPool {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
             tracing::info!(
-                "📦 TxPool: Finalized TX {:?}, pool now has {} finalized",
+                "📦 TxPool: Finalized TX {}, pool now has {} finalized",
                 hex::encode(txid),
                 self.finalized.len()
             );

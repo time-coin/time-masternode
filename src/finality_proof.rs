@@ -142,7 +142,7 @@ impl FinalityProofManager {
         self.timeproofs.insert(txid, timeproof.clone());
 
         tracing::info!(
-            "📦 Stored TimeProof for TX {:?} (slot: {}, votes: {})",
+            "📦 Stored TimeProof for TX {} (slot: {}, votes: {})",
             hex::encode(txid),
             timeproof.slot_index,
             timeproof.votes.len()

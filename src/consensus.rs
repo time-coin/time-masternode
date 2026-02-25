@@ -910,7 +910,7 @@ impl TimeVoteConsensus {
         // Check if this voter already voted
         if votes.iter().any(|v| v.voter_mn_id == vote.voter_mn_id) {
             return Err(format!(
-                "Duplicate vote from {} for TX {:?}",
+                "Duplicate vote from {} for TX {}",
                 vote.voter_mn_id,
                 hex::encode(txid)
             ));
@@ -928,7 +928,7 @@ impl TimeVoteConsensus {
         } else {
             // Reject votes are tracked but don't contribute to weight
             tracing::debug!(
-                "Reject vote from {} for TX {:?} (not counted toward finality)",
+                "Reject vote from {} for TX {} (not counted toward finality)",
                 vote.voter_mn_id,
                 hex::encode(txid)
             );
@@ -936,7 +936,7 @@ impl TimeVoteConsensus {
         };
 
         tracing::debug!(
-            "Accumulated vote from {} for TX {:?} (decision: {:?}, weight: {}, total: {})",
+            "Accumulated vote from {} for TX {} (decision: {:?}, weight: {}, total: {})",
             vote.voter_mn_id,
             hex::encode(txid),
             vote.decision,
@@ -1225,7 +1225,7 @@ impl TimeVoteConsensus {
         self.txs_finalized.fetch_add(1, Ordering::Relaxed);
 
         tracing::info!(
-            "✅ TX {:?} finalized with weight {} (total finalized: {})",
+            "✅ TX {} finalized with weight {} (total finalized: {})",
             hex::encode(txid),
             accumulated_weight,
             self.txs_finalized.load(Ordering::Relaxed)
@@ -1243,7 +1243,7 @@ impl TimeVoteConsensus {
         let all_votes = self.get_accumulated_votes(&txid);
 
         if all_votes.is_empty() {
-            return Err(format!("No votes found for TX {:?}", hex::encode(txid)));
+            return Err(format!("No votes found for TX {}", hex::encode(txid)));
         }
 
         // Filter to only Accept votes (per Protocol §8.2)
@@ -1254,7 +1254,7 @@ impl TimeVoteConsensus {
 
         if accept_votes.is_empty() {
             return Err(format!(
-                "No Accept votes found for TX {:?}",
+                "No Accept votes found for TX {}",
                 hex::encode(txid)
             ));
         }
@@ -1265,7 +1265,7 @@ impl TimeVoteConsensus {
         // Verify all votes have the same slot_index
         if !accept_votes.iter().all(|v| v.slot_index == slot_index) {
             return Err(format!(
-                "Votes have mismatched slot_index for TX {:?}",
+                "Votes have mismatched slot_index for TX {}",
                 hex::encode(txid)
             ));
         }
@@ -1277,7 +1277,7 @@ impl TimeVoteConsensus {
             .all(|v| v.txid == txid && v.tx_hash_commitment == ref_commitment)
         {
             return Err(format!(
-                "Votes have mismatched txid or commitment for TX {:?}",
+                "Votes have mismatched txid or commitment for TX {}",
                 hex::encode(txid)
             ));
         }
@@ -1293,7 +1293,7 @@ impl TimeVoteConsensus {
         let total_weight: u64 = accept_votes.iter().map(|v| v.voter_weight).sum();
 
         tracing::info!(
-            "📜 Assembled TimeProof for TX {:?} with {} Accept votes (total weight: {})",
+            "📜 Assembled TimeProof for TX {} with {} Accept votes (total weight: {})",
             hex::encode(txid),
             accept_votes.len(),
             total_weight
@@ -1335,7 +1335,7 @@ impl TimeVoteConsensus {
         let accumulated_weight = timeproof.verify(total_avs_weight, get_pubkey)?;
 
         tracing::info!(
-            "✅ TimeProof verified for TX {:?}: weight={}/{} ({}%), {} votes",
+            "✅ TimeProof verified for TX {}: weight={}/{} ({}%), {} votes",
             hex::encode(timeproof.txid),
             accumulated_weight,
             total_avs_weight,
@@ -2180,7 +2180,7 @@ impl ConsensusEngine {
     /// Broadcast TimeProof to all network peers (Protocol §8.2)
     pub async fn broadcast_timeproof(&self, proof: TimeProof) {
         tracing::info!(
-            "📡 Broadcasting TimeProof for TX {:?} to network",
+            "📡 Broadcasting TimeProof for TX {} to network",
             hex::encode(proof.txid)
         );
         self.broadcast(NetworkMessage::TimeProofBroadcast { proof })
@@ -2636,7 +2636,7 @@ impl ConsensusEngine {
         let validators_for_consensus = self.timevote.get_validators();
 
         tracing::warn!(
-            "🔄 Starting TimeVote consensus for TX {:?} with {} validators: {:?}",
+            "🔄 Starting TimeVote consensus for TX {} with {} validators: {:?}",
             hex::encode(txid),
             validators_for_consensus.len(),
             validators_for_consensus
@@ -2655,12 +2655,12 @@ impl ConsensusEngine {
         if validators_for_consensus.len() < 3 || dev_mode {
             if dev_mode {
                 tracing::warn!(
-                    "⚡ DEV MODE: Auto-finalizing TX {:?} (TIMECOIN_DEV_MODE=1)",
+                    "⚡ DEV MODE: Auto-finalizing TX {} (TIMECOIN_DEV_MODE=1)",
                     hex::encode(txid)
                 );
             } else {
                 tracing::warn!(
-                    "⚡ Auto-finalizing TX {:?} - insufficient validators ({} < 3) for consensus",
+                    "⚡ Auto-finalizing TX {} - insufficient validators ({} < 3) for consensus",
                     hex::encode(txid),
                     validators_for_consensus.len()
                 );
@@ -2672,7 +2672,7 @@ impl ConsensusEngine {
             self.tx_pool.finalize_transaction(txid); // Drop private return type
 
             if self.tx_pool.is_finalized(&txid) {
-                tracing::info!("✅ TX {:?} auto-finalized", hex::encode(txid));
+                tracing::info!("✅ TX {} auto-finalized", hex::encode(txid));
 
                 // CRITICAL: Transition UTXOs from Locked → SpentFinalized
                 // Without this, other nodes reject blocks containing this TX
@@ -2747,7 +2747,7 @@ impl ConsensusEngine {
 
         if let Some(callback) = self.broadcast_callback.read().await.as_ref() {
             tracing::info!(
-                "📡 Broadcasting TimeVoteRequest for TX {:?} (slot {}) to all validators",
+                "📡 Broadcasting TimeVoteRequest for TX {} (slot {}) to all validators",
                 hex::encode(txid),
                 slot_index
             );
@@ -2791,14 +2791,14 @@ impl ConsensusEngine {
                 // Check if already finalized (by server.rs TimeVoteResponse handler)
                 if consensus.finalized_txs.contains_key(&txid) {
                     tracing::debug!(
-                        "✅ TX {:?} finalized via TimeVote (detected by voting loop)",
+                        "✅ TX {} finalized via TimeVote (detected by voting loop)",
                         hex::encode(txid)
                     );
                     break;
                 }
 
                 if tx_pool.is_finalized(&txid) {
-                    tracing::debug!("✅ TX {:?} already in finalized pool", hex::encode(txid));
+                    tracing::debug!("✅ TX {} already in finalized pool", hex::encode(txid));
                     break;
                 }
 
@@ -2831,7 +2831,7 @@ impl ConsensusEngine {
 
                     if q_percent == 51 {
                         tracing::warn!(
-                            "⚠️ TX {:?} stalled >30s — liveness fallback to 51% threshold",
+                            "⚠️ TX {} stalled >30s — liveness fallback to 51% threshold",
                             hex::encode(txid)
                         );
                     }
@@ -2839,7 +2839,7 @@ impl ConsensusEngine {
                     if weight < min_weight_floor && vote_deadline < max_deadline {
                         vote_deadline += Duration::from_secs(5);
                         tracing::info!(
-                            "⏳ TX {:?} weight {} < floor {} — extending deadline to {}s",
+                            "⏳ TX {} weight {} < floor {} — extending deadline to {}s",
                             hex::encode(txid),
                             weight,
                             min_weight_floor,
@@ -2851,7 +2851,7 @@ impl ConsensusEngine {
                     if preference == Preference::Accept {
                         // Auto-finalize: UTXOs are locked, double-spend impossible
                         tracing::warn!(
-                            "⚠️ TX {:?} timed out after {}s (weight: {}, floor: {}). Auto-finalizing (UTXOs locked)",
+                            "⚠️ TX {} timed out after {}s (weight: {}, floor: {}). Auto-finalizing (UTXOs locked)",
                             hex::encode(txid),
                             vote_deadline.as_secs(),
                             weight,
@@ -2863,7 +2863,7 @@ impl ConsensusEngine {
 
                         if tx_pool.is_finalized(&txid) {
                             tracing::info!(
-                                "✅ TX {:?} auto-finalized (UTXO-lock protected, weight: {})",
+                                "✅ TX {} auto-finalized (UTXO-lock protected, weight: {})",
                                 hex::encode(txid),
                                 weight
                             );
@@ -2872,7 +2872,7 @@ impl ConsensusEngine {
                             match consensus.assemble_timeproof(txid) {
                                 Ok(proof) => {
                                     tracing::info!(
-                                        "📜 TimeProof assembled for TX {:?} with {} votes",
+                                        "📜 TimeProof assembled for TX {} with {} votes",
                                         hex::encode(txid),
                                         proof.votes.len()
                                     );
@@ -2886,14 +2886,14 @@ impl ConsensusEngine {
                                         consensus_engine_clone.broadcast_timeproof(proof).await;
                                     } else {
                                         tracing::debug!(
-                                            "⏭️ Skipping TimeProof broadcast for auto-finalized TX {:?} (weight {} < threshold {})",
+                                            "⏭️ Skipping TimeProof broadcast for auto-finalized TX {} (weight {} < threshold {})",
                                             hex::encode(txid), weight, threshold
                                         );
                                     }
                                 }
                                 Err(_) => {
                                     tracing::debug!(
-                                        "No votes available for TimeProof assembly on TX {:?}",
+                                        "No votes available for TimeProof assembly on TX {}",
                                         hex::encode(txid)
                                     );
                                 }
@@ -2930,7 +2930,7 @@ impl ConsensusEngine {
             // Cleanup
             consensus.tx_state.remove(&txid);
             tracing::debug!(
-                "🧹 Cleaned up consensus state for TX {:?}",
+                "🧹 Cleaned up consensus state for TX {}",
                 hex::encode(txid)
             );
         });
@@ -3042,7 +3042,7 @@ impl ConsensusEngine {
                     .update_state(&input.previous_output, new_state.clone());
 
                 tracing::debug!(
-                    "UTXO {:?} → SpentPending (txid: {})",
+                    "UTXO {} → SpentPending (txid: {})",
                     input.previous_output,
                     hex::encode(txid)
                 );

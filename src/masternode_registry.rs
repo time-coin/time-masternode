@@ -1096,7 +1096,7 @@ impl MasternodeRegistry {
 
         // For now, we'll just log a warning if we can't verify confirmations
         tracing::debug!(
-            "Collateral validation passed for outpoint {:?} (tier: {:?}, amount: {})",
+            "Collateral validation passed for outpoint {} (tier: {:?}, amount: {})",
             outpoint,
             tier,
             utxo.value / 100_000_000

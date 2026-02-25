@@ -108,7 +108,7 @@ impl TimeVoteHandler {
         self.consensus.initiate_consensus(txid, Preference::Accept);
 
         tracing::debug!(
-            "📋 Submitted TX {:?} for TimeVote consensus",
+            "📋 Submitted TX {} for TimeVote consensus",
             hex::encode(txid)
         );
 
@@ -283,7 +283,7 @@ pub async fn run_timevote_loop(
             // Process finality events
             Some(event) = finality_rx.recv() => {
                 tracing::info!(
-                    "🏔️ Finality achieved: TX {:?} - {}",
+                    "🏔️ Finality achieved: TX {} - {}",
                     hex::encode(event.txid),
                     event.preference
                 );
@@ -299,7 +299,7 @@ pub async fn run_timevote_loop(
 
                 for txid in pending {
                     if handler.is_finalized(&txid) {
-                        tracing::debug!("TX {:?} finalized (detected by timevote loop)", hex::encode(txid));
+                        tracing::debug!("TX {} finalized (detected by timevote loop)", hex::encode(txid));
                     }
                 }
             }

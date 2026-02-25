@@ -10,6 +10,23 @@ use std::sync::Arc;
 pub type Hash256 = [u8; 32];
 pub type Signature = [u8; 64];
 
+/// Display wrapper for Hash256 that formats as hex string
+pub struct HexHash<'a>(pub &'a Hash256);
+
+impl<'a> std::fmt::Display for HexHash<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
+}
+
+/// Format a Hash256 as a hex string for logging
+pub fn hex_hash(h: &Hash256) -> String {
+    hex::encode(h)
+}
+
 /// Type-safe wrapper for stake-weighted sampling weight (used in VRF sortition and TimeVote).
 /// Prevents accidental interchange with GovernanceWeight.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
