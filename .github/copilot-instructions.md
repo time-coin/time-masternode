@@ -4,8 +4,8 @@
 
 ### Building
 ```bash
-# Debug build
-cargo build
+# Default: format, check, and lint (run these instead of cargo build)
+cargo fmt && cargo check && cargo clippy
 
 # Release build (optimized, ~1 minute)
 cargo build --release
