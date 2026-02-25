@@ -531,7 +531,9 @@ impl ConnectionManager {
             .collect()
     }
 
-    /// Reset peers stuck in Connecting/Reconnecting state for longer than the timeout.
+    /// Reset peers stuck in Connecting state for longer than the timeout.
+    /// Only resets Connecting (stuck TCP handshakes), NOT Reconnecting
+    /// (intentional AI-managed delays that may legitimately last minutes).
     /// Returns the number of peers reset to Disconnected.
     pub fn cleanup_stale_connecting(&self, timeout: Duration) -> usize {
         let now = Instant::now();
@@ -539,9 +541,7 @@ impl ConnectionManager {
         for mut entry in self.connections.iter_mut() {
             let key = entry.key().clone();
             let info = entry.value_mut();
-            if info.state == PeerConnectionState::Connecting
-                || info.state == PeerConnectionState::Reconnecting
-            {
+            if info.state == PeerConnectionState::Connecting {
                 let started = info.last_message_at.unwrap_or(now);
                 if now.duration_since(started) > timeout {
                     tracing::debug!("🧹 Resetting stale {:?} state for peer {}", info.state, key);

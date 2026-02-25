@@ -402,7 +402,9 @@ impl PrepareVoteAccumulator {
         } else if vote_count >= 2 {
             tracing::debug!(
                 "🗳️  Consensus check: block_weight={}, total_weight={}, voters={} → FAIL",
-                block_weight, total_weight, vote_count,
+                block_weight,
+                total_weight,
+                vote_count,
             );
         }
         result
@@ -550,7 +552,9 @@ impl PrecommitVoteAccumulator {
         } else if vote_count >= 2 {
             tracing::debug!(
                 "🗳️  Precommit consensus check: block_weight={}, total_weight={}, voters={} → FAIL",
-                block_weight, total_weight, vote_count,
+                block_weight,
+                total_weight,
+                vote_count,
             );
         }
         result

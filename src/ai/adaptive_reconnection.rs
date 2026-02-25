@@ -101,7 +101,7 @@ impl Default for ReconnectionConfig {
             max_retry_delay_secs: 300.0, // 5 minutes max
             backoff_multiplier: 1.5,
             reliability_threshold: 0.3,
-            max_consecutive_failures: 10,
+            max_consecutive_failures: 3,
             cooldown_period_secs: 600, // 10 minute cooldown
             learning_rate: 0.1,
         }
