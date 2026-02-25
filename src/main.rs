@@ -2481,21 +2481,32 @@ async fn main() {
                 time_past_scheduled
             );
 
-            // RACE CONDITION PREVENTION: Check if a peer's block proposal at this height
-            // was already received (and voted for) by the message handler. If the cached
-            // proposal has a better or equal VRF score, skip production — our vote is already
-            // committed to that proposal and producing a competing block causes forks.
+            // RACE CONDITION PREVENTION: Check if a block proposal at this height
+            // was already received (or produced by us) and cached. If a peer's cached
+            // proposal has a strictly better VRF score, skip production — our vote is
+            // already committed to that proposal and producing a competing block causes forks.
+            // If it's our own cached proposal, skip silently (already produced & broadcast).
             let (_, vrf_block_cache_opt, _) = block_peer_registry.get_timelock_resources().await;
             if let Some(ref cache) = vrf_block_cache_opt {
                 if let Some(existing) = cache.get_by_height(next_height) {
-                    if existing.header.vrf_score > 0 && existing.header.vrf_score <= vrf_score {
-                        tracing::info!(
-                            "⏭️  Skipping block production for height {}: cached proposal has better VRF score ({} <= {})",
-                            next_height,
-                            existing.header.vrf_score,
-                            vrf_score
-                        );
-                        continue;
+                    if existing.header.vrf_score > 0 {
+                        if existing.header.leader == our_addr {
+                            // Our own cached proposal — already produced and broadcast
+                            tracing::debug!(
+                                "⏭️  Already proposed block for height {}, waiting for consensus",
+                                next_height,
+                            );
+                            continue;
+                        } else if existing.header.vrf_score < vrf_score {
+                            // A peer's proposal has a strictly better (lower) VRF score
+                            tracing::info!(
+                                "⏭️  Skipping block production for height {}: peer proposal has better VRF score ({} < {})",
+                                next_height,
+                                existing.header.vrf_score,
+                                vrf_score
+                            );
+                            continue;
+                        }
                     }
                 }
             }
