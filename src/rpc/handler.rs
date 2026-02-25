@@ -103,6 +103,7 @@ impl RpcHandler {
             "getblacklist" => self.get_blacklist().await,
             "listreceivedbyaddress" => self.list_received_by_address(&params_array).await,
             "listtransactions" => self.list_transactions(&params_array).await,
+            "listtransactionsmulti" => self.list_transactions_multi(&params_array).await,
             "reindextransactions" => self.reindex_transactions().await,
             "reindex" => self.reindex_full().await,
             "gettxindexstatus" => self.get_tx_index_status().await,
@@ -1357,17 +1358,38 @@ impl RpcHandler {
     /// List recent transactions involving this wallet (sent and received).
     /// Params: [count (default 10)]
     async fn list_transactions(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let count = params.first().and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-
-        let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address)
-            .ok_or_else(|| RpcError {
-                code: -4,
-                message: "Node is not configured as a masternode".to_string(),
-            })?;
+        // params: [address, count] or [count] (legacy)
+        let (local_address, count) = match params.first() {
+            Some(Value::String(addr)) => {
+                let count = params.get(1).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+                (addr.clone(), count)
+            }
+            Some(Value::Number(n)) => {
+                let count = n.as_u64().unwrap_or(10) as usize;
+                let addr = self
+                    .registry
+                    .get_local_masternode()
+                    .await
+                    .map(|mn| mn.reward_address)
+                    .ok_or_else(|| RpcError {
+                        code: -4,
+                        message: "No address provided and node is not a masternode".to_string(),
+                    })?;
+                (addr, count)
+            }
+            _ => {
+                let addr = self
+                    .registry
+                    .get_local_masternode()
+                    .await
+                    .map(|mn| mn.reward_address)
+                    .ok_or_else(|| RpcError {
+                        code: -4,
+                        message: "No address provided and node is not a masternode".to_string(),
+                    })?;
+                (addr, 10)
+            }
+        };
 
         let chain_height = self.blockchain.get_height();
         let mut transactions: Vec<Value> = Vec::new();
@@ -1482,6 +1504,158 @@ impl RpcHandler {
         }
 
         // Truncate to requested count
+        transactions.truncate(count);
+
+        Ok(json!(transactions))
+    }
+
+    /// List transactions across multiple addresses (batch query for HD wallets)
+    /// Params: [["addr1", "addr2", ...], count]
+    async fn list_transactions_multi(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let addresses = params
+            .first()
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected array of addresses".to_string(),
+            })?;
+
+        if addresses.len() > 1000 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Too many addresses (max 1000)".to_string(),
+            });
+        }
+
+        let count = params.get(1).and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
+
+        // Build a set of addresses for fast lookup
+        let addr_set: std::collections::HashSet<String> = addresses
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+            .collect();
+
+        if addr_set.is_empty() {
+            return Ok(json!([]));
+        }
+
+        let chain_height = self.blockchain.get_height();
+        let mut transactions: Vec<Value> = Vec::new();
+
+        for height in (0..=chain_height).rev() {
+            if transactions.len() >= count {
+                break;
+            }
+
+            let block = match self.blockchain.get_block(height) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+
+            let block_hash = hex::encode(block.hash());
+            let block_time = block.header.timestamp;
+
+            for (tx_idx, tx) in block.transactions.iter().enumerate() {
+                let txid = hex::encode(tx.txid());
+
+                // Check outputs for any of our addresses
+                let mut received: u64 = 0;
+                let mut recv_address = String::new();
+                for output in &tx.outputs {
+                    let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    if addr_set.contains(&addr) {
+                        received += output.value;
+                        if recv_address.is_empty() {
+                            recv_address = addr;
+                        }
+                    }
+                }
+
+                // Check inputs for any of our addresses
+                let mut sent: u64 = 0;
+                let mut send_address = String::new();
+                for input in &tx.inputs {
+                    let spent_txid = input.previous_output.txid;
+                    let spent_vout = input.previous_output.vout;
+
+                    if let Some(ref txi) = self.blockchain.tx_index {
+                        if let Some(loc) = txi.get_location(&spent_txid) {
+                            if let Ok(src_block) = self.blockchain.get_block(loc.block_height) {
+                                if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
+                                    if let Some(src_output) =
+                                        src_tx.outputs.get(spent_vout as usize)
+                                    {
+                                        let src_addr =
+                                            String::from_utf8_lossy(&src_output.script_pubkey)
+                                                .to_string();
+                                        if addr_set.contains(&src_addr) {
+                                            sent += src_output.value;
+                                            if send_address.is_empty() {
+                                                send_address = src_addr;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if sent > 0 || received > 0 {
+                    let category = if tx_idx <= 1 {
+                        "generate"
+                    } else if sent > 0 && received > 0 {
+                        "send"
+                    } else if sent > 0 {
+                        "send"
+                    } else {
+                        "receive"
+                    };
+
+                    let net_amount = if category == "send" {
+                        -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
+                    } else {
+                        received as f64 / 100_000_000.0
+                    };
+
+                    let fee = if category == "send" {
+                        let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                        if sent > total_out {
+                            Some(-((sent - total_out) as f64 / 100_000_000.0))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    let address = if !recv_address.is_empty() {
+                        &recv_address
+                    } else {
+                        &send_address
+                    };
+
+                    let mut entry = json!({
+                        "txid": txid,
+                        "address": address,
+                        "category": category,
+                        "amount": net_amount,
+                        "confirmations": chain_height.saturating_sub(height) + 1,
+                        "blockhash": block_hash,
+                        "blockheight": height,
+                        "blocktime": block_time,
+                        "time": block_time,
+                    });
+
+                    if let Some(f) = fee {
+                        entry["fee"] = json!(f);
+                    }
+
+                    transactions.push(entry);
+                }
+            }
+        }
+
         transactions.truncate(count);
 
         Ok(json!(transactions))
