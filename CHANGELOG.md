@@ -721,7 +721,7 @@ This is the first production-ready release of TimeCoin, featuring a complete AI 
 timecoin/
 ├── README.md                    # Project overview
 ├── CONTRIBUTING.md              # Contribution guidelines
-├── LICENSE                      # MIT License
+├── LICENSE                      # Business Source License 1.1
 ├── CHANGELOG.md                 # This file (NEW)
 ├── docs/                        # Public documentation (19 files)
 │   ├── TIMECOIN_PROTOCOL.md    # Canonical protocol spec (V6)

@@ -343,7 +343,7 @@ timecoin/
 ├── build.rs                 # Build script
 ├── Dockerfile               # Docker container definition
 ├── timed.service            # systemd service file
-└── LICENSE                  # MIT License
+└── LICENSE                  # Business Source License 1.1
 ```
 
 ## 📚 Documentation
@@ -567,7 +567,7 @@ Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md)
 
 ## 📜 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Business Source License 1.1 - see the [LICENSE](LICENSE) file for details. The license converts to Apache License 2.0 four years after each release.
 
 ## 🔗 Links
 
@@ -613,7 +613,7 @@ TIME Coin is production-ready software that has undergone security audits. Howev
 - Always test on testnet before mainnet deployment
 - Keep your private keys secure
 - Review the code and documentation before use
-- No warranty is provided (see MIT License)
+- No warranty is provided (see Business Source License 1.1)
 
 ---
 
