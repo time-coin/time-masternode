@@ -2710,29 +2710,29 @@ async fn main() {
                                 "✅ Prepare consensus already reached for block {} — generating precommit",
                                 block_height
                             );
-                            block_consensus_engine.timevote.generate_precommit_vote(
-                                block_hash,
-                                our_addr,
-                                our_weight,
-                            );
+                            block_consensus_engine
+                                .timevote
+                                .generate_precommit_vote(block_hash, our_addr, our_weight);
 
                             // Broadcast our precommit vote
-                            let precommit_sig =
-                                if let Some(signing_key) = block_consensus_engine.get_signing_key() {
-                                    use ed25519_dalek::Signer;
-                                    let mut msg = Vec::new();
-                                    msg.extend_from_slice(&block_hash);
-                                    msg.extend_from_slice(our_addr.as_bytes());
-                                    msg.extend_from_slice(b"PRECOMMIT");
-                                    signing_key.sign(&msg).to_bytes().to_vec()
-                                } else {
-                                    vec![]
-                                };
-                            let precommit = crate::network::message::NetworkMessage::TimeVotePrecommit {
-                                block_hash,
-                                voter_id: our_addr.clone(),
-                                signature: precommit_sig,
+                            let precommit_sig = if let Some(signing_key) =
+                                block_consensus_engine.get_signing_key()
+                            {
+                                use ed25519_dalek::Signer;
+                                let mut msg = Vec::new();
+                                msg.extend_from_slice(&block_hash);
+                                msg.extend_from_slice(our_addr.as_bytes());
+                                msg.extend_from_slice(b"PRECOMMIT");
+                                signing_key.sign(&msg).to_bytes().to_vec()
+                            } else {
+                                vec![]
                             };
+                            let precommit =
+                                crate::network::message::NetworkMessage::TimeVotePrecommit {
+                                    block_hash,
+                                    voter_id: our_addr.clone(),
+                                    signature: precommit_sig,
+                                };
                             block_peer_registry.broadcast(precommit).await;
                         }
                     }

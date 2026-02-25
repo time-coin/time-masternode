@@ -246,7 +246,7 @@ impl NetworkClient {
             loop {
                 sleep(peer_discovery_interval).await;
 
-                // Clean up stale Connecting/Reconnecting states (stuck >30s)
+                // Clean up stale Connecting states (stuck >30s)
                 let stale = connection_manager.cleanup_stale_connecting(Duration::from_secs(30));
                 if stale > 0 {
                     tracing::info!("🧹 Reset {} stale connecting peer(s)", stale);
