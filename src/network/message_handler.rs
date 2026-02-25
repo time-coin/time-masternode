@@ -3513,7 +3513,10 @@ impl MessageHandler {
                         let slot_time = genesis_ts + (block.header.height as i64 * 600);
                         let now = chrono::Utc::now().timestamp();
                         let elapsed = (now - slot_time).max(0) as u64;
-                        let timeout_attempts = elapsed / 10; // Same 10s timeout as producer
+                        // Add 10s grace period to match producer's relaxation window.
+                        // The producer uses wall-clock time since it started waiting,
+                        // which can be ahead of the validator's slot-based elapsed time.
+                        let timeout_attempts = (elapsed + 10) / 10;
 
                         if timeout_attempts > 0 {
                             let multiplier = 1u64 << timeout_attempts.min(20);
