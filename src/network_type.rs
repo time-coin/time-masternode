@@ -38,6 +38,14 @@ impl NetworkType {
     }
 
     #[allow(dead_code)]
+    pub fn default_ws_port(&self) -> u16 {
+        match self {
+            NetworkType::Mainnet => 24002,
+            NetworkType::Testnet => 24102,
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn genesis_timestamp(&self) -> i64 {
         match self {
             NetworkType::Mainnet => 1767225600, // 2026-01-01 00:00:00 UTC
