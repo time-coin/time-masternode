@@ -61,18 +61,25 @@ impl RpcServer {
         registry: Arc<MasternodeRegistry>,
         blockchain: Arc<crate::blockchain::Blockchain>,
         blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
+        tx_event_sender: Option<tokio::sync::broadcast::Sender<super::websocket::TransactionEvent>>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
-        let handler = Arc::new(RpcHandler::new(
+        let mut handler = RpcHandler::new(
             consensus,
             utxo_manager,
             network,
             registry,
             blockchain,
             blacklist,
-        ));
+        );
+        if let Some(sender) = tx_event_sender {
+            handler.set_tx_event_sender(sender);
+        }
 
-        Ok(Self { listener, handler })
+        Ok(Self {
+            listener,
+            handler: Arc::new(handler),
+        })
     }
 
     pub async fn run(&mut self) -> Result<(), std::io::Error> {

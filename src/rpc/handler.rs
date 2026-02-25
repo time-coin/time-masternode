@@ -23,7 +23,9 @@ pub struct RpcHandler {
     blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
     start_time: SystemTime,
     network: NetworkType,
-    // Note: mempool field removed - use consensus.tx_pool instead for accurate state
+    /// Broadcast channel for notifying WebSocket clients of new transactions
+    tx_event_sender:
+        Option<tokio::sync::broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
 }
 
 impl RpcHandler {
@@ -43,7 +45,16 @@ impl RpcHandler {
             blacklist,
             start_time: SystemTime::now(),
             network,
+            tx_event_sender: None,
         }
+    }
+
+    /// Set the transaction event broadcast sender for WebSocket notifications
+    pub fn set_tx_event_sender(
+        &mut self,
+        sender: tokio::sync::broadcast::Sender<crate::rpc::websocket::TransactionEvent>,
+    ) {
+        self.tx_event_sender = Some(sender);
     }
     pub async fn handle_request(&self, request: RpcRequest) -> RpcResponse {
         // Convert params Value to array
@@ -756,6 +767,33 @@ impl RpcHandler {
         // Start TimeVote consensus to finalize this transaction
         let txid_hex = hex::encode(txid);
         tracing::info!("📤 Submitting transaction {} to consensus", &txid_hex[..16]);
+
+        // Emit WebSocket notification for subscribed wallets
+        if let Some(ref tx_sender) = self.tx_event_sender {
+            let outputs: Vec<crate::rpc::websocket::TxOutputInfo> = tx
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(i, out)| {
+                    let address = String::from_utf8(out.script_pubkey.clone())
+                        .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                    crate::rpc::websocket::TxOutputInfo {
+                        address,
+                        amount: out.value as f64 / 100_000_000.0,
+                        index: i as u32,
+                    }
+                })
+                .collect();
+
+            let event = crate::rpc::websocket::TransactionEvent {
+                txid: txid_hex.clone(),
+                outputs,
+                timestamp: chrono::Utc::now().timestamp(),
+            };
+
+            let _ = tx_sender.send(event);
+        }
+
         tokio::spawn({
             let consensus = self.consensus.clone();
             let tx_for_consensus = tx.clone();

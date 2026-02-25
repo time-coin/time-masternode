@@ -76,6 +76,10 @@ zstd = "0.13"                                       # Fast compression for block
 # Network
 socket2 = "0.5"                                     # Socket configuration
 
+# WebSocket support for real-time wallet notifications
+tokio-tungstenite = "0.24"                          # WebSocket server
+futures-util = "0.3"                                # Stream utilities for WebSocket
+
 # TUI dashboard dependencies
 ratatui = "0.26"                                    # Terminal UI framework
 crossterm = "0.27"                                  # Terminal control

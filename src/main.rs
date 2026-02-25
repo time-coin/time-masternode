@@ -3192,6 +3192,10 @@ async fn main() {
                 });
             }
 
+            // Create broadcast channel for WebSocket transaction notifications
+            let (tx_event_sender, _) =
+                tokio::sync::broadcast::channel::<rpc::websocket::TransactionEvent>(1000);
+
             // Start RPC server with access to blacklist
             let rpc_consensus = consensus_engine.clone();
             let rpc_utxo = utxo_mgr.clone();
@@ -3201,6 +3205,7 @@ async fn main() {
             let rpc_network = network_type;
             let rpc_shutdown_token = shutdown_token.clone();
             let rpc_blacklist = server.blacklist.clone();
+            let rpc_tx_sender = tx_event_sender.clone();
 
             let rpc_handle = tokio::spawn(async move {
                 match RpcServer::new(
@@ -3211,6 +3216,7 @@ async fn main() {
                     rpc_registry,
                     rpc_blockchain,
                     rpc_blacklist,
+                    Some(rpc_tx_sender),
                 )
                 .await
                 {
@@ -3232,6 +3238,20 @@ async fn main() {
                 }
             });
             shutdown_manager.register_task(rpc_handle);
+
+            // Start WebSocket server for real-time wallet notifications
+            let ws_addr = format!("0.0.0.0:{}", network_type.default_ws_port());
+            let ws_shutdown = shutdown_token.clone();
+            let ws_tx_sender = tx_event_sender.clone();
+            let ws_addr_display = ws_addr.clone();
+            let ws_handle = tokio::spawn(async move {
+                if let Err(e) =
+                    rpc::websocket::start_ws_server(&ws_addr, ws_tx_sender, ws_shutdown).await
+                {
+                    eprintln!("  ❌ WebSocket server error: {}", e);
+                }
+            });
+            shutdown_manager.register_task(ws_handle);
 
             // Now create network client for outbound connections
             let mut network_client = network::client::NetworkClient::new(
@@ -3313,6 +3333,7 @@ async fn main() {
             println!("║  Storage:    {:<40} ║", config.storage.backend);
             println!("║  P2P Port:   {:<40} ║", p2p_addr);
             println!("║  RPC Port:   {:<40} ║", rpc_addr);
+            println!("║  WS Port:    {:<40} ║", ws_addr_display);
             println!("║  Consensus:  TimeLock + TimeVote Hybrid               ║");
             println!("║  Finality:   Instant (<10 seconds)                    ║");
             println!("╚═══════════════════════════════════════════════════════╝");
