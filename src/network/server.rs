@@ -835,7 +835,7 @@ async fn handle_peer(
                                     // Log important locks
                                     if let UTXOState::Locked { txid, .. } = state {
                                         tracing::info!(
-                                            "🔒 Applied UTXO lock from peer {} for TX {:?}",
+                                            "🔒 Applied UTXO lock from peer {} for TX {}",
                                             peer.addr,
                                             hex::encode(txid)
                                         );
@@ -1563,7 +1563,7 @@ async fn handle_peer(
 
                                     tokio::spawn(async move {
                                         tracing::info!(
-                                            "🗳️  TimeVoteRequest from {} for TX {:?} (slot {}){}",
+                                            "🗳️  TimeVoteRequest from {} for TX {} (slot {}){}",
                                             peer_addr_str,
                                             hex::encode(txid_val),
                                             slot_index_val,
@@ -1577,7 +1577,7 @@ async fn handle_peer(
                                         if tx_opt.is_none() {
                                             if let Some(tx_from_req) = tx_from_request {
                                                 tracing::debug!(
-                                                    "📥 TX {:?} not in mempool, adding from TimeVoteRequest",
+                                                    "📥 TX {} not in mempool, adding from TimeVoteRequest",
                                                     hex::encode(txid_val)
                                                 );
 
@@ -1595,7 +1595,7 @@ async fn handle_peer(
                                                 let fee = input_sum.saturating_sub(output_sum);
 
                                                 if consensus_clone.tx_pool.add_pending(tx_from_req.clone(), fee).is_ok() {
-                                                    tracing::debug!("✅ TX {:?} added to mempool from request", hex::encode(txid_val));
+                                                    tracing::debug!("✅ TX {} added to mempool from request", hex::encode(txid_val));
                                                     tx_opt = Some(tx_from_req);
                                                 }
                                             }
@@ -1606,7 +1606,7 @@ async fn handle_peer(
                                             let actual_commitment = crate::types::TimeVote::calculate_tx_commitment(&tx);
                                             if actual_commitment != tx_hash_commitment_val {
                                                 tracing::warn!(
-                                                    "⚠️  TX {:?} commitment mismatch: expected {:?}, got {:?}",
+                                                    "⚠️  TX {} commitment mismatch: expected {:?}, got {:?}",
                                                     hex::encode(txid_val),
                                                     hex::encode(actual_commitment),
                                                     hex::encode(tx_hash_commitment_val)
@@ -1616,17 +1616,17 @@ async fn handle_peer(
                                                 // Step 3: Verify UTXOs are available (basic validation)
                                                 match consensus_clone.validate_transaction(&tx).await {
                                                     Ok(_) => {
-                                                        tracing::info!("✅ TX {:?} validated successfully for vote", hex::encode(txid_val));
+                                                        tracing::info!("✅ TX {} validated successfully for vote", hex::encode(txid_val));
                                                         crate::types::VoteDecision::Accept
                                                     }
                                                     Err(e) => {
-                                                        tracing::warn!("⚠️  TX {:?} validation failed: {}", hex::encode(txid_val), e);
+                                                        tracing::warn!("⚠️  TX {} validation failed: {}", hex::encode(txid_val), e);
                                                         crate::types::VoteDecision::Reject
                                                     }
                                                 }
                                             }
                                         } else {
-                                            tracing::debug!("⚠️  TX {:?} not found in mempool and not included in request", hex::encode(txid_val));
+                                            tracing::debug!("⚠️  TX {} not found in mempool and not included in request", hex::encode(txid_val));
                                             crate::types::VoteDecision::Reject
                                         };
 
@@ -1644,7 +1644,7 @@ async fn handle_peer(
                                             match peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await {
                                                 Ok(_) => {
                                                     tracing::info!(
-                                                        "✅ TimeVoteResponse sent to {} for TX {:?} (decision: {:?})",
+                                                        "✅ TimeVoteResponse sent to {} for TX {} (decision: {:?})",
                                                         ip_str_clone,
                                                         hex::encode(txid_val),
                                                         decision
@@ -1652,7 +1652,7 @@ async fn handle_peer(
                                                 }
                                                 Err(e) => {
                                                     tracing::warn!(
-                                                        "❌ Failed to send TimeVoteResponse to {} for TX {:?}: {}",
+                                                        "❌ Failed to send TimeVoteResponse to {} for TX {}: {}",
                                                         ip_str_clone,
                                                         hex::encode(txid_val),
                                                         e
@@ -1661,7 +1661,7 @@ async fn handle_peer(
                                             }
                                         } else {
                                             tracing::warn!(
-                                                "⚠️ TimeVote signing skipped for TX {:?} (not a masternode or identity not set)",
+                                                "⚠️ TimeVote signing skipped for TX {} (not a masternode or identity not set)",
                                                 hex::encode(txid_val)
                                             );
                                         }
@@ -1673,7 +1673,7 @@ async fn handle_peer(
 
                                     // Received a signed TimeVote from a peer
                                     tracing::info!(
-                                        "📥 TimeVoteResponse from {} for TX {:?} (decision: {:?}, weight: {})",
+                                        "📥 TimeVoteResponse from {} for TX {} (decision: {:?}, weight: {})",
                                         peer.addr,
                                         hex::encode(vote.txid),
                                         vote.decision,
@@ -1692,7 +1692,7 @@ async fn handle_peer(
                                             Ok(weight) => weight,
                                             Err(e) => {
                                                 tracing::warn!(
-                                                    "Failed to accumulate vote for TX {:?}: {}",
+                                                    "Failed to accumulate vote for TX {}: {}",
                                                     hex::encode(txid),
                                                     e
                                                 );
@@ -1701,7 +1701,7 @@ async fn handle_peer(
                                         };
 
                                         tracing::info!(
-                                            "Vote accumulated for TX {:?}, total weight: {}",
+                                            "Vote accumulated for TX {}, total weight: {}",
                                             hex::encode(txid),
                                             accumulated_weight
                                         );
@@ -1712,7 +1712,7 @@ async fn handle_peer(
                                         let finality_threshold = ((total_avs_weight as f64) * 0.67).ceil() as u64;
 
                                         tracing::info!(
-                                            "Finality check for TX {:?}: accumulated={}, threshold={} (67% of {})",
+                                            "Finality check for TX {}: accumulated={}, threshold={} (67% of {})",
                                             hex::encode(txid),
                                             accumulated_weight,
                                             finality_threshold,
@@ -1722,7 +1722,7 @@ async fn handle_peer(
                                         // Step 3: If threshold met, finalize transaction
                                         if accumulated_weight >= finality_threshold {
                                             tracing::info!(
-                                                "🎉 TX {:?} reached finality threshold! ({} >= {})",
+                                                "🎉 TX {} reached finality threshold! ({} >= {})",
                                                 hex::encode(txid),
                                                 accumulated_weight,
                                                 finality_threshold
@@ -1737,14 +1737,14 @@ async fn handle_peer(
                                                     e.insert((crate::consensus::Preference::Accept, std::time::Instant::now()));
 
                                                     tracing::info!(
-                                                        "🔒 Acquired finalization lock for TX {:?}",
+                                                        "🔒 Acquired finalization lock for TX {}",
                                                         hex::encode(txid)
                                                     );
 
                                                     // Move transaction from pending to finalized
                                                     if tx_pool.finalize_transaction(txid) {
                                                         tracing::info!(
-                                                            "✅ TX {:?} moved to finalized pool",
+                                                            "✅ TX {} moved to finalized pool",
                                                             hex::encode(txid)
                                                         );
 
@@ -1755,7 +1755,7 @@ async fn handle_peer(
                                                         match consensus_clone.timevote.assemble_timeproof(txid) {
                                                             Ok(timeproof) => {
                                                                 tracing::info!(
-                                                                    "📜 TimeProof assembled for TX {:?} with {} votes",
+                                                                    "📜 TimeProof assembled for TX {} with {} votes",
                                                                     hex::encode(txid),
                                                                     timeproof.votes.len()
                                                                 );
@@ -1763,7 +1763,7 @@ async fn handle_peer(
                                                                 // Store TimeProof in finality_proof_manager
                                                                 if let Err(e) = consensus_clone.finality_proof_mgr.store_timeproof(timeproof.clone()) {
                                                                     tracing::error!(
-                                                                        "❌ Failed to store TimeProof for TX {:?}: {}",
+                                                                        "❌ Failed to store TimeProof for TX {}: {}",
                                                                         hex::encode(txid),
                                                                         e
                                                                     );
@@ -1774,7 +1774,7 @@ async fn handle_peer(
                                                             }
                                                             Err(e) => {
                                                                 tracing::error!(
-                                                                    "❌ Failed to assemble TimeProof for TX {:?}: {}",
+                                                                    "❌ Failed to assemble TimeProof for TX {}: {}",
                                                                     hex::encode(txid),
                                                                     e
                                                                 );
@@ -1782,7 +1782,7 @@ async fn handle_peer(
                                                         }
                                                     } else {
                                                         tracing::warn!(
-                                                            "⚠️  Failed to finalize TX {:?} - not found in pending pool",
+                                                            "⚠️  Failed to finalize TX {} - not found in pending pool",
                                                             hex::encode(txid)
                                                         );
                                                     }
@@ -1790,7 +1790,7 @@ async fn handle_peer(
                                                 Entry::Occupied(_) => {
                                                     // Another task already finalized this TX - skip
                                                     tracing::debug!(
-                                                        "TX {:?} already finalized by another task",
+                                                        "TX {} already finalized by another task",
                                                         hex::encode(txid)
                                                     );
                                                 }
@@ -1810,7 +1810,7 @@ async fn handle_peer(
                                     // Spawn verification (non-blocking)
                                     tokio::spawn(async move {
                                         tracing::info!(
-                                            "📜 Received TimeProof from {} for TX {:?} with {} votes",
+                                            "📜 Received TimeProof from {} for TX {} with {} votes",
                                             peer_addr_str,
                                             hex::encode(proof_clone.txid),
                                             proof_clone.votes.len()
@@ -1820,20 +1820,20 @@ async fn handle_peer(
                                         match consensus_clone.timevote.verify_timeproof(&proof_clone) {
                                             Ok(_accumulated_weight) => {
                                                 tracing::info!(
-                                                    "✅ TimeProof verified for TX {:?}",
+                                                    "✅ TimeProof verified for TX {}",
                                                     hex::encode(proof_clone.txid)
                                                 );
 
                                                 // Store verified TimeProof
                                                 if let Err(e) = consensus_clone.finality_proof_mgr.store_timeproof(proof_clone.clone()) {
                                                     tracing::error!(
-                                                        "❌ Failed to store TimeProof for TX {:?}: {}",
+                                                        "❌ Failed to store TimeProof for TX {}: {}",
                                                         hex::encode(proof_clone.txid),
                                                         e
                                                     );
                                                 } else {
                                                     tracing::info!(
-                                                        "💾 TimeProof stored for TX {:?}",
+                                                        "💾 TimeProof stored for TX {}",
                                                         hex::encode(proof_clone.txid)
                                                     );
                                                 }
@@ -1860,7 +1860,7 @@ async fn handle_peer(
                                     let peer_registry_clone = Arc::clone(&peer_registry);
 
                                     tokio::spawn(async move {
-                                        tracing::debug!("🗳️  Vote request from {} for TX {:?}", peer_addr_str, hex::encode(txid_val));
+                                        tracing::debug!("🗳️  Vote request from {} for TX {}", peer_addr_str, hex::encode(txid_val));
 
                                         // Get our preference (Accept/Reject) for this transaction
                                         let preference = if consensus_clone.tx_pool.is_pending(&txid_val) || consensus_clone.tx_pool.get_pending(&txid_val).is_some() {
@@ -1876,7 +1876,7 @@ async fn handle_peer(
                                         };
                                         let _ = peer_registry_clone.send_to_peer(&ip_str_clone, vote_response).await;
 
-                                        tracing::debug!("✅ Vote response sent for TX {:?}", hex::encode(txid_val));
+                                        tracing::debug!("✅ Vote response sent for TX {}", hex::encode(txid_val));
                                     });
                                 }
                                 NetworkMessage::TransactionVoteResponse { txid, preference } => {
@@ -1884,7 +1884,7 @@ async fn handle_peer(
                                     check_rate_limit!("vote");
 
                                     // Received a vote from a peer
-                                    tracing::debug!("📥 Vote from {} for TX {:?}: {}", peer.addr, hex::encode(txid), preference);
+                                    tracing::debug!("📥 Vote from {} for TX {}: {}", peer.addr, hex::encode(txid), preference);
 
                                     // Update our timevote consensus with this vote
                                     // Convert preference string to Preference enum
@@ -1900,14 +1900,14 @@ async fn handle_peer(
 
                                     // Submit vote to timevote consensus
                                     // Legacy VoteBroadcast path - real votes come via TimeVoteResponse
-                                    tracing::debug!("✅ Vote recorded for TX {:?} (preference: {:?})", hex::encode(txid), pref);
+                                    tracing::debug!("✅ Vote recorded for TX {} (preference: {:?})", hex::encode(txid), pref);
                                 }
                                 NetworkMessage::FinalityVoteBroadcast { vote } => {
                                     check_message_size!(MAX_VOTE_SIZE, "FinalityVote");
                                     check_rate_limit!("vote");
 
                                     // Received a finality vote from a peer
-                                    tracing::debug!("📥 Finality vote from {} for TX {:?}", peer.addr, hex::encode(vote.txid));
+                                    tracing::debug!("📥 Finality vote from {} for TX {}", peer.addr, hex::encode(vote.txid));
 
                                     // Accumulate the finality vote in consensus
                                     if let Err(e) = consensus.timevote.accumulate_finality_vote(vote.clone()) {

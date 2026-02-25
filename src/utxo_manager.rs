@@ -719,7 +719,7 @@ impl UTXOStateManager {
                 }
             }
             tracing::info!(
-                "🔓 Unlocked collateral UTXO {:?} (was {} TIME for {})",
+                "🔓 Unlocked collateral UTXO {} (was {} TIME for {})",
                 outpoint,
                 locked.amount,
                 locked.masternode_address

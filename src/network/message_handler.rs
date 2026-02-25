@@ -3746,7 +3746,7 @@ impl MessageHandler {
             .ok_or("No consensus engine available for TimeVoteRequest")?;
 
         tracing::info!(
-            "🗳️  TimeVoteRequest from {} for TX {:?} (slot {}){}",
+            "🗳️  TimeVoteRequest from {} for TX {} (slot {}){}",
             self.peer_ip,
             hex::encode(txid),
             slot_index,
@@ -3791,19 +3791,19 @@ impl MessageHandler {
         let decision = if let Some(tx) = tx_opt {
             let actual_commitment = crate::types::TimeVote::calculate_tx_commitment(&tx);
             if actual_commitment != tx_hash_commitment {
-                tracing::warn!("⚠️  TX {:?} commitment mismatch", hex::encode(txid));
+                tracing::warn!("⚠️  TX {} commitment mismatch", hex::encode(txid));
                 crate::types::VoteDecision::Reject
             } else {
                 match consensus.validate_transaction(&tx).await {
                     Ok(_) => {
                         tracing::info!(
-                            "✅ TX {:?} validated successfully for vote",
+                            "✅ TX {} validated successfully for vote",
                             hex::encode(txid)
                         );
                         crate::types::VoteDecision::Accept
                     }
                     Err(e) => {
-                        tracing::warn!("⚠️  TX {:?} validation failed: {}", hex::encode(txid), e);
+                        tracing::warn!("⚠️  TX {} validation failed: {}", hex::encode(txid), e);
                         crate::types::VoteDecision::Reject
                     }
                 }
@@ -3816,13 +3816,13 @@ impl MessageHandler {
                 || consensus.timevote.finalized_txs.contains_key(&txid)
             {
                 tracing::debug!(
-                    "✅ TX {:?} already finalized, voting Accept for late vote request",
+                    "✅ TX {} already finalized, voting Accept for late vote request",
                     hex::encode(txid)
                 );
                 crate::types::VoteDecision::Accept
             } else {
                 tracing::debug!(
-                    "⚠️  TX {:?} not found in mempool and not included in request",
+                    "⚠️  TX {} not found in mempool and not included in request",
                     hex::encode(txid)
                 );
                 crate::types::VoteDecision::Reject
@@ -3834,14 +3834,14 @@ impl MessageHandler {
 
         if let Some(vote) = vote_opt {
             tracing::info!(
-                "✅ TimeVoteResponse ready for TX {:?} (decision: {:?})",
+                "✅ TimeVoteResponse ready for TX {} (decision: {:?})",
                 hex::encode(txid),
                 decision
             );
             Ok(Some(NetworkMessage::TimeVoteResponse { vote }))
         } else {
             tracing::info!(
-                "ℹ️ TimeVote signing skipped for TX {:?} (this node is not a registered masternode)",
+                "ℹ️ TimeVote signing skipped for TX {} (this node is not a registered masternode)",
                 hex::encode(txid)
             );
             Ok(None)
@@ -3861,7 +3861,7 @@ impl MessageHandler {
         let txid = vote.txid;
 
         tracing::info!(
-            "📥 TimeVoteResponse from {} for TX {:?} (decision: {:?}, weight: {})",
+            "📥 TimeVoteResponse from {} for TX {} (decision: {:?}, weight: {})",
             self.peer_ip,
             hex::encode(txid),
             vote.decision,
@@ -3873,7 +3873,7 @@ impl MessageHandler {
             Ok(weight) => weight,
             Err(e) => {
                 tracing::warn!(
-                    "Failed to accumulate vote for TX {:?}: {}",
+                    "Failed to accumulate vote for TX {}: {}",
                     hex::encode(txid),
                     e
                 );
@@ -3882,7 +3882,7 @@ impl MessageHandler {
         };
 
         tracing::info!(
-            "Vote accumulated for TX {:?}, total weight: {}",
+            "Vote accumulated for TX {}, total weight: {}",
             hex::encode(txid),
             accumulated_weight
         );
@@ -3893,7 +3893,7 @@ impl MessageHandler {
         let finality_threshold = ((total_avs_weight as f64) * 0.67).ceil() as u64;
 
         tracing::info!(
-            "Finality check for TX {:?}: accumulated={}, threshold={} (67% of {})",
+            "Finality check for TX {}: accumulated={}, threshold={} (67% of {})",
             hex::encode(txid),
             accumulated_weight,
             finality_threshold,
@@ -3903,7 +3903,7 @@ impl MessageHandler {
         // Step 3: If threshold met, finalize transaction
         if accumulated_weight >= finality_threshold {
             tracing::info!(
-                "🎉 TX {:?} reached finality threshold! ({} >= {})",
+                "🎉 TX {} reached finality threshold! ({} >= {})",
                 hex::encode(txid),
                 accumulated_weight,
                 finality_threshold
@@ -3918,7 +3918,7 @@ impl MessageHandler {
                     ));
 
                     if consensus.tx_pool.finalize_transaction(txid) {
-                        tracing::info!("✅ TX {:?} moved to finalized pool", hex::encode(txid));
+                        tracing::info!("✅ TX {} moved to finalized pool", hex::encode(txid));
 
                         consensus
                             .timevote
@@ -3927,7 +3927,7 @@ impl MessageHandler {
                         match consensus.timevote.assemble_timeproof(txid) {
                             Ok(timeproof) => {
                                 tracing::info!(
-                                    "📜 TimeProof assembled for TX {:?} with {} votes",
+                                    "📜 TimeProof assembled for TX {} with {} votes",
                                     hex::encode(txid),
                                     timeproof.votes.len()
                                 );
@@ -3937,7 +3937,7 @@ impl MessageHandler {
                                     .store_timeproof(timeproof.clone())
                                 {
                                     tracing::error!(
-                                        "❌ Failed to store TimeProof for TX {:?}: {}",
+                                        "❌ Failed to store TimeProof for TX {}: {}",
                                         hex::encode(txid),
                                         e
                                     );
@@ -3947,7 +3947,7 @@ impl MessageHandler {
                             }
                             Err(e) => {
                                 tracing::error!(
-                                    "❌ Failed to assemble TimeProof for TX {:?}: {}",
+                                    "❌ Failed to assemble TimeProof for TX {}: {}",
                                     hex::encode(txid),
                                     e
                                 );
@@ -3955,14 +3955,14 @@ impl MessageHandler {
                         }
                     } else {
                         tracing::warn!(
-                            "⚠️  Failed to finalize TX {:?} - not found in pending pool",
+                            "⚠️  Failed to finalize TX {} - not found in pending pool",
                             hex::encode(txid)
                         );
                     }
                 }
                 Entry::Occupied(_) => {
                     tracing::debug!(
-                        "TX {:?} already finalized by another task",
+                        "TX {} already finalized by another task",
                         hex::encode(txid)
                     );
                 }
@@ -3983,7 +3983,7 @@ impl MessageHandler {
             .ok_or("No consensus engine available for TimeProofBroadcast")?;
 
         tracing::info!(
-            "📜 Received TimeProof from {} for TX {:?} with {} votes",
+            "📜 Received TimeProof from {} for TX {} with {} votes",
             self.peer_ip,
             hex::encode(proof.txid),
             proof.votes.len()
@@ -3991,7 +3991,7 @@ impl MessageHandler {
 
         match consensus.timevote.verify_timeproof(&proof) {
             Ok(_) => {
-                tracing::info!("✅ TimeProof verified for TX {:?}", hex::encode(proof.txid));
+                tracing::info!("✅ TimeProof verified for TX {}", hex::encode(proof.txid));
 
                 if let Err(e) = consensus.finality_proof_mgr.store_timeproof(proof) {
                     tracing::error!("❌ Failed to store TimeProof: {}", e);
