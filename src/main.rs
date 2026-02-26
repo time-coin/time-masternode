@@ -318,7 +318,6 @@ async fn main() {
     let wallet = match wallet_manager.get_or_create_wallet(network_type) {
         Ok(w) => {
             println!("✓ Wallet initialized");
-            println!("  └─ Address: {}", w.address());
             println!("  └─ File: {}", wallet_manager.default_wallet_path());
             w
         }
