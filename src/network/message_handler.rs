@@ -3961,10 +3961,7 @@ impl MessageHandler {
                     }
                 }
                 Entry::Occupied(_) => {
-                    tracing::debug!(
-                        "TX {} already finalized by another task",
-                        hex::encode(txid)
-                    );
+                    tracing::debug!("TX {} already finalized by another task", hex::encode(txid));
                 }
             }
         }
