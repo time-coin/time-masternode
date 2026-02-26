@@ -65,6 +65,9 @@ pub struct MessageContext {
     pub blacklist: Option<Arc<RwLock<IPBlacklist>>>,
     // AI System for recording events and making intelligent decisions
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
+    // WebSocket transaction event sender for real-time wallet notifications
+    pub tx_event_sender:
+        Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
 }
 
 impl MessageContext {
@@ -88,6 +91,7 @@ impl MessageContext {
             node_masternode_address: None,
             blacklist: None,
             ai_system: None,
+            tx_event_sender: None,
         }
     }
 
@@ -115,6 +119,7 @@ impl MessageContext {
             node_masternode_address,
             blacklist: None,
             ai_system: None,
+            tx_event_sender: None,
         }
     }
 
@@ -136,6 +141,9 @@ impl MessageContext {
         // Populate utxo_manager from consensus engine if available
         let utxo_manager = consensus.as_ref().map(|c| Arc::clone(&c.utxo_manager));
 
+        // Fetch WebSocket tx event sender from peer registry
+        let tx_event_sender = peer_registry.get_tx_event_sender().await;
+
         Self {
             blockchain,
             peer_registry,
@@ -150,6 +158,7 @@ impl MessageContext {
             node_masternode_address,
             blacklist: None,
             ai_system,
+            tx_event_sender,
         }
     }
 
@@ -1883,13 +1892,39 @@ impl MessageHandler {
 
                     // Gossip to other peers
                     if let Some(broadcast_tx) = &context.broadcast_tx {
-                        let msg = NetworkMessage::TransactionBroadcast(tx);
+                        let msg = NetworkMessage::TransactionBroadcast(tx.clone());
                         if let Ok(receivers) = broadcast_tx.send(msg) {
                             debug!(
                                 "🔄 [{}] Gossiped transaction to {} peer(s)",
                                 self.direction, receivers
                             );
                         }
+                    }
+
+                    // Emit WebSocket notification for subscribed wallets
+                    if let Some(ref tx_sender) = context.tx_event_sender {
+                        let outputs: Vec<crate::rpc::websocket::TxOutputInfo> = tx
+                            .outputs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, out)| {
+                                let address = String::from_utf8(out.script_pubkey.clone())
+                                    .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                                crate::rpc::websocket::TxOutputInfo {
+                                    address,
+                                    amount: out.value as f64 / 100_000_000.0,
+                                    index: i as u32,
+                                }
+                            })
+                            .collect();
+
+                        let event = crate::rpc::websocket::TransactionEvent {
+                            txid: hex::encode(&txid),
+                            outputs,
+                            timestamp: chrono::Utc::now().timestamp(),
+                            finalized: false,
+                        };
+                        let _ = tx_sender.send(event);
                     }
                 }
                 Err(e) => {
