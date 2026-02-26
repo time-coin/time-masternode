@@ -2803,6 +2803,19 @@ async fn main() {
                                 .cleanup_block_votes(block_hash);
                         }
                         _ => {
+                            // Timeout — check if block was already finalized
+                            let current_height = block_blockchain.get_height();
+                            if current_height >= block_height {
+                                tracing::debug!(
+                                    "✅ Block {} already finalized (chain at {}), skipping fallback",
+                                    block_height,
+                                    current_height
+                                );
+                                block_consensus_engine
+                                    .timevote
+                                    .cleanup_block_votes(block_hash);
+                                // Skip rest of timeout handling
+                            } else {
                             // Timeout — use fallback: add block directly as leader
                             let prepare_weight = block_consensus_engine
                                 .timevote
@@ -2857,6 +2870,7 @@ async fn main() {
                             block_consensus_engine
                                 .timevote
                                 .cleanup_block_votes(block_hash);
+                            }
                         }
                     }
 
