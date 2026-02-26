@@ -2827,15 +2827,15 @@ async fn main() {
                                     .cleanup_block_votes(block_hash);
                                 // Skip rest of timeout handling
                             } else {
-                            // Timeout — use fallback: add block directly as leader
-                            let prepare_weight = block_consensus_engine
-                                .timevote
-                                .get_prepare_weight(block_hash);
-                            let precommit_weight = block_consensus_engine
-                                .timevote
-                                .get_precommit_weight(block_hash);
+                                // Timeout — use fallback: add block directly as leader
+                                let prepare_weight = block_consensus_engine
+                                    .timevote
+                                    .get_prepare_weight(block_hash);
+                                let precommit_weight = block_consensus_engine
+                                    .timevote
+                                    .get_precommit_weight(block_hash);
 
-                            tracing::warn!(
+                                tracing::warn!(
                                 "⏰ Consensus timeout for block {} after {}s (prepare={}, precommit={})",
                                 block_height,
                                 consensus_timeout.as_secs(),
@@ -2843,44 +2843,48 @@ async fn main() {
                                 precommit_weight
                             );
 
-                            let validator_count =
-                                block_consensus_engine.timevote.get_validators().len();
-                            // Only fallback when we have SOME consensus support or the
-                            // network is too small for normal voting. Never force-add a
-                            // block with zero votes — that creates forks.
-                            let should_fallback = prepare_weight > 0 || validator_count <= 2;
+                                let validator_count =
+                                    block_consensus_engine.timevote.get_validators().len();
+                                // Only fallback when we have SOME consensus support or the
+                                // network is too small for normal voting. Never force-add a
+                                // block with zero votes — that creates forks.
+                                let should_fallback = prepare_weight > 0 || validator_count <= 2;
 
-                            if should_fallback {
-                                tracing::warn!(
+                                if should_fallback {
+                                    tracing::warn!(
                                     "⚡ Fallback: Adding block {} (prepare_weight={}, validators={})",
                                     block_height,
                                     prepare_weight,
                                     validator_count
                                 );
-                                if let Err(e) = block_blockchain.add_block(block.clone()).await {
-                                    tracing::error!("❌ Failed to add block in fallback: {}", e);
-                                } else {
-                                    let finalized_msg =
+                                    if let Err(e) = block_blockchain.add_block(block.clone()).await
+                                    {
+                                        tracing::error!(
+                                            "❌ Failed to add block in fallback: {}",
+                                            e
+                                        );
+                                    } else {
+                                        let finalized_msg =
                                         crate::network::message::NetworkMessage::TimeLockBlockProposal {
                                             block: block.clone(),
                                         };
-                                    block_peer_registry.broadcast(finalized_msg).await;
-                                    tracing::info!(
-                                        "✅ Block {} added via fallback, broadcast to peers",
-                                        block_height
-                                    );
-                                }
-                            } else {
-                                tracing::error!(
+                                        block_peer_registry.broadcast(finalized_msg).await;
+                                        tracing::info!(
+                                            "✅ Block {} added via fallback, broadcast to peers",
+                                            block_height
+                                        );
+                                    }
+                                } else {
+                                    tracing::error!(
                                     "❌ Cannot add block {}: no votes and too many validators ({})",
                                     block_height,
                                     validator_count
                                 );
-                            }
+                                }
 
-                            block_consensus_engine
-                                .timevote
-                                .cleanup_block_votes(block_hash);
+                                block_consensus_engine
+                                    .timevote
+                                    .cleanup_block_votes(block_hash);
                             }
                         }
                     }
