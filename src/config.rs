@@ -540,8 +540,8 @@ impl Config {
             },
             rpc: RpcConfig {
                 enabled: true,
-                listen_address: "127.0.0.1".to_string(),
-                allow_origins: vec!["http://localhost:3000".to_string()],
+                listen_address: "0.0.0.0".to_string(),
+                allow_origins: vec!["*".to_string()],
             },
             storage: StorageConfig {
                 backend: "sled".to_string(),
@@ -760,7 +760,14 @@ impl Config {
             }
             if let Some(v) = entries.get("rpcport") {
                 if let Some(port) = v.last() {
-                    config.rpc.listen_address = format!("127.0.0.1:{}", port);
+                    // Preserve existing bind address, only change the port
+                    let host = config
+                        .rpc
+                        .listen_address
+                        .split(':')
+                        .next()
+                        .unwrap_or("0.0.0.0");
+                    config.rpc.listen_address = format!("{}:{}", host, port);
                 }
             }
             if let Some(v) = entries.get("rpcbind") {
