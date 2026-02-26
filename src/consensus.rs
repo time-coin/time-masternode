@@ -2929,10 +2929,7 @@ impl ConsensusEngine {
 
             // Cleanup
             consensus.tx_state.remove(&txid);
-            tracing::debug!(
-                "🧹 Cleaned up consensus state for TX {}",
-                hex::encode(txid)
-            );
+            tracing::debug!("🧹 Cleaned up consensus state for TX {}", hex::encode(txid));
         });
 
         Ok(())

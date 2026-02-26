@@ -281,23 +281,31 @@ impl MasternodeRegistry {
         let mut nodes = self.masternodes.write().await;
         let now = Self::now();
 
-        // Prevent duplicate collateral: reject if another masternode already uses this outpoint
+        // Check for duplicate collateral: if another masternode uses this outpoint,
+        // treat it as an IP migration — unregister the old entry and allow the new one
         if let Some(ref outpoint) = masternode.collateral_outpoint {
+            let mut old_addr_to_remove = None;
             for (addr, info) in nodes.iter() {
                 if addr != &masternode.address {
                     if let Some(ref existing_outpoint) = info.masternode.collateral_outpoint {
                         if existing_outpoint == outpoint {
-                            tracing::warn!(
-                                "🚫 Rejected masternode {} — collateral {}:{} already used by {}",
-                                masternode.address,
-                                hex::encode(outpoint.txid),
-                                outpoint.vout,
-                                addr
-                            );
-                            return Err(RegistryError::DuplicateCollateral);
+                            old_addr_to_remove = Some(addr.clone());
+                            break;
                         }
                     }
                 }
+            }
+            if let Some(old_addr) = old_addr_to_remove {
+                tracing::info!(
+                    "🔄 Masternode IP migration: collateral {} moving from {} to {}",
+                    outpoint,
+                    old_addr,
+                    masternode.address
+                );
+                nodes.remove(&old_addr);
+                // Remove old entry from persistent storage
+                let key = format!("masternode:{}", old_addr);
+                let _ = self.db.remove(key.as_bytes());
             }
         }
 
