@@ -459,6 +459,30 @@ async fn main() {
             )
         };
 
+        // Validate external address matches actual public IP
+        let mut masternode = masternode;
+        if let Ok(public_ip_output) = std::process::Command::new("curl")
+            .args(["-s", "--max-time", "5", "https://api.ipify.org"])
+            .output()
+        {
+            if public_ip_output.status.success() {
+                if let Ok(detected_ip) = String::from_utf8(public_ip_output.stdout) {
+                    let detected_ip = detected_ip.trim().to_string();
+                    if !detected_ip.is_empty()
+                        && detected_ip.parse::<std::net::IpAddr>().is_ok()
+                        && detected_ip != masternode.address
+                    {
+                        eprintln!(
+                            "⚠️  Config external IP ({}) does not match detected public IP ({})",
+                            masternode.address, detected_ip
+                        );
+                        eprintln!("  └─ Using detected IP: {}", detected_ip);
+                        masternode.address = detected_ip;
+                    }
+                }
+            }
+        }
+
         let display_tier = masternode.tier;
         let auto_detecting = has_collateral && display_tier == types::MasternodeTier::Free;
         if !auto_detecting {
