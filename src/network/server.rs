@@ -518,6 +518,9 @@ async fn handle_peer(
 
     let ip_str = ip.to_string();
 
+    // Get WebSocket tx event sender for real-time wallet notifications
+    let ws_tx_event_sender = peer_registry.get_tx_event_sender().await;
+
     tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let _connection_start = std::time::Instant::now();
 
@@ -868,6 +871,32 @@ async fn handle_peer(
                                     match consensus.process_transaction(tx.clone()).await {
                                         Ok(_) => {
                                             tracing::debug!("✅ Transaction {} processed", hex::encode(txid));
+
+                                            // Emit WebSocket notification for subscribed wallets
+                                            if let Some(ref tx_sender) = ws_tx_event_sender {
+                                                let outputs: Vec<crate::rpc::websocket::TxOutputInfo> = tx
+                                                    .outputs
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(i, out)| {
+                                                        let address = String::from_utf8(out.script_pubkey.clone())
+                                                            .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                                                        crate::rpc::websocket::TxOutputInfo {
+                                                            address,
+                                                            amount: out.value as f64 / 100_000_000.0,
+                                                            index: i as u32,
+                                                        }
+                                                    })
+                                                    .collect();
+
+                                                let event = crate::rpc::websocket::TransactionEvent {
+                                                    txid: hex::encode(txid),
+                                                    outputs,
+                                                    timestamp: chrono::Utc::now().timestamp(),
+                                                    finalized: false,
+                                                };
+                                                let _ = tx_sender.send(event);
+                                            }
 
                                             // Gossip to other peers
                                             match broadcast_tx.send(msg.clone()) {
