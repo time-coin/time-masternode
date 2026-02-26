@@ -3305,6 +3305,55 @@ async fn main() {
             });
             shutdown_manager.register_task(ws_handle);
 
+            // Spawn a listener that emits WS notifications when transactions reach
+            // consensus finality. This uses the ConsensusEngine's finalization signal
+            // so wallets connected to ANY masternode get notified instantly.
+            let finality_tx_pool = consensus_engine.tx_pool.clone();
+            let finality_ws_sender = tx_event_sender.clone();
+            let mut finality_rx = consensus_engine.subscribe_tx_finalized();
+            let finality_shutdown = shutdown_token.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        result = finality_rx.recv() => {
+                            match result {
+                                Ok(txid) => {
+                                    // Look up the transaction to get outputs
+                                    if let Some(tx) = finality_tx_pool.get_transaction(&txid) {
+                                        let outputs: Vec<rpc::websocket::TxOutputInfo> = tx
+                                            .outputs
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(i, out)| {
+                                                let address = String::from_utf8(out.script_pubkey.clone())
+                                                    .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                                                rpc::websocket::TxOutputInfo {
+                                                    address,
+                                                    amount: out.value as f64 / 100_000_000.0,
+                                                    index: i as u32,
+                                                }
+                                            })
+                                            .collect();
+
+                                        let event = rpc::websocket::TransactionEvent {
+                                            txid: hex::encode(txid),
+                                            outputs,
+                                            timestamp: chrono::Utc::now().timestamp(),
+                                        };
+                                        let _ = finality_ws_sender.send(event);
+                                    }
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                    tracing::warn!("Finality WS notifier lagged by {} events", n);
+                                }
+                                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            }
+                        }
+                        _ = finality_shutdown.cancelled() => break,
+                    }
+                }
+            });
+
             // Now create network client for outbound connections
             let mut network_client = network::client::NetworkClient::new(
                 peer_manager.clone(),

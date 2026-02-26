@@ -1605,6 +1605,10 @@ pub struct ConsensusEngine {
     avg_finality_ms: Arc<parking_lot::RwLock<Vec<f64>>>,
     /// Latest known block hash — used to add unpredictability to fallback leader election
     prev_block_hash: Arc<parking_lot::RwLock<Hash256>>,
+    /// Broadcast channel for notifying listeners when a transaction reaches finality.
+    /// Subscribers (e.g. WebSocket server) receive the txid so they can look up the
+    /// transaction and notify wallet clients.
+    tx_finalized_sender: tokio::sync::broadcast::Sender<Hash256>,
 }
 
 impl ConsensusEngine {
@@ -1630,6 +1634,7 @@ impl ConsensusEngine {
             finality_times: Arc::new(DashMap::new()),
             avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
             prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
+            tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
         }
     }
 
@@ -1659,12 +1664,24 @@ impl ConsensusEngine {
             finality_times: Arc::new(DashMap::new()),
             avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
             prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
+            tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
         }
     }
 
     pub fn enable_ai_validation(&mut self, db: Arc<sled::Db>) {
         self.ai_validator = Some(Arc::new(crate::ai::AITransactionValidator::new(db)));
         tracing::info!("🤖 AI transaction validation enabled");
+    }
+
+    /// Subscribe to transaction finality notifications.
+    /// Returns a receiver that yields txids when transactions reach consensus finality.
+    pub fn subscribe_tx_finalized(&self) -> tokio::sync::broadcast::Receiver<Hash256> {
+        self.tx_finalized_sender.subscribe()
+    }
+
+    /// Signal that a transaction has been finalized (for WS notification).
+    pub fn signal_tx_finalized(&self, txid: Hash256) {
+        let _ = self.tx_finalized_sender.send(txid);
     }
 
     /// Update the latest known block hash (called when a new block is finalized)
@@ -2736,6 +2753,9 @@ impl ConsensusEngine {
                 },
             );
 
+            // Notify WS subscribers about finalized transaction
+            self.signal_tx_finalized(txid);
+
             return Ok(());
         }
 
@@ -2796,8 +2816,10 @@ impl ConsensusEngine {
             finality_times: self.finality_times.clone(),
             avg_finality_ms: self.avg_finality_ms.clone(),
             prev_block_hash: self.prev_block_hash.clone(),
+            tx_finalized_sender: self.tx_finalized_sender.clone(),
         });
         let tx_status_map = self.timevote.tx_status.clone();
+        let finalized_signal = self.tx_finalized_sender.clone();
 
         // PRIORITY: Spawn with high priority for instant finality
         tokio::spawn(async move {
@@ -2943,6 +2965,9 @@ impl ConsensusEngine {
                                 vfp_weight: weight,
                             },
                         );
+
+                        // Notify WS subscribers about finalized transaction
+                        let _ = finalized_signal.send(txid);
                     }
                     break;
                 }
