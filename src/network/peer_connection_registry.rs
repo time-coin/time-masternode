@@ -69,6 +69,9 @@ pub struct PeerConnectionRegistry {
     timelock_consensus: Arc<RwLock<Option<Arc<ConsensusEngine>>>>,
     timelock_block_cache: Arc<RwLock<Option<Arc<crate::network::block_cache::BlockCache>>>>,
     timelock_broadcast: Arc<RwLock<Option<broadcast::Sender<NetworkMessage>>>>,
+    // WebSocket transaction event sender for real-time wallet notifications
+    ws_tx_event_sender:
+        Arc<RwLock<Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>>>,
     // Blacklist reference for checking whitelist status
     blacklist: Arc<RwLock<Option<Arc<RwLock<crate::network::blacklist::IPBlacklist>>>>>,
     // Discovered peer candidates from peer exchange
@@ -112,6 +115,7 @@ impl PeerConnectionRegistry {
             timelock_consensus: Arc::new(RwLock::new(None)),
             timelock_block_cache: Arc::new(RwLock::new(None)),
             timelock_broadcast: Arc::new(RwLock::new(None)),
+            ws_tx_event_sender: Arc::new(RwLock::new(None)),
             blacklist: Arc::new(RwLock::new(None)),
             discovered_peers: Arc::new(RwLock::new(HashSet::new())),
             incompatible_peers: Arc::new(RwLock::new(HashMap::new())),
@@ -537,6 +541,21 @@ impl PeerConnectionRegistry {
                 .as_ref()
                 .map(|tx| tx.clone()),
         )
+    }
+
+    /// Set WebSocket transaction event sender for real-time wallet notifications
+    pub async fn set_tx_event_sender(
+        &self,
+        sender: broadcast::Sender<crate::rpc::websocket::TransactionEvent>,
+    ) {
+        *self.ws_tx_event_sender.write().await = Some(sender);
+    }
+
+    /// Get WebSocket transaction event sender
+    pub async fn get_tx_event_sender(
+        &self,
+    ) -> Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>> {
+        self.ws_tx_event_sender.read().await.clone()
     }
 
     // ===== Connection Direction Logic =====

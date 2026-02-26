@@ -3249,6 +3249,12 @@ async fn main() {
             let (tx_event_sender, _) =
                 tokio::sync::broadcast::channel::<rpc::websocket::TransactionEvent>(1000);
 
+            // Share WebSocket tx event sender with peer connection registry
+            // so incoming network transactions trigger wallet notifications
+            peer_connection_registry
+                .set_tx_event_sender(tx_event_sender.clone())
+                .await;
+
             // Start RPC server with access to blacklist
             let rpc_consensus = consensus_engine.clone();
             let rpc_utxo = utxo_mgr.clone();
