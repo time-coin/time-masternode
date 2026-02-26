@@ -1751,6 +1751,9 @@ async fn handle_peer(
                                                         // Record finalization weight
                                                         consensus_clone.timevote.record_finalization(txid, accumulated_weight);
 
+                                                        // Notify WS subscribers about finalized transaction
+                                                        consensus_clone.signal_tx_finalized(txid);
+
                                                         // Assemble TimeProof certificate
                                                         match consensus_clone.timevote.assemble_timeproof(txid) {
                                                             Ok(timeproof) => {

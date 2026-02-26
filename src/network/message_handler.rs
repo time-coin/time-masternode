@@ -3924,6 +3924,9 @@ impl MessageHandler {
                             .timevote
                             .record_finalization(txid, accumulated_weight);
 
+                        // Signal WS subscribers about finalized transaction
+                        consensus.signal_tx_finalized(txid);
+
                         match consensus.timevote.assemble_timeproof(txid) {
                             Ok(timeproof) => {
                                 tracing::info!(
