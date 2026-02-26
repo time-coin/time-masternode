@@ -1589,6 +1589,8 @@ pub struct ConsensusEngine {
     masternode_registry: Arc<MasternodeRegistry>,
     // Set once at startup - use OnceLock
     identity: OnceLock<NodeIdentity>,
+    // Wallet key for signing transactions (may differ from identity/consensus key)
+    wallet_signing_key: OnceLock<ed25519_dalek::SigningKey>,
     pub utxo_manager: Arc<UTXOStateManager>,
     pub tx_pool: Arc<TransactionPool>,
     pub broadcast_callback: BroadcastCallback,
@@ -1617,6 +1619,7 @@ impl ConsensusEngine {
         Self {
             masternode_registry,
             identity: OnceLock::new(),
+            wallet_signing_key: OnceLock::new(),
             utxo_manager,
             tx_pool: Arc::new(TransactionPool::new()),
             broadcast_callback: Arc::new(TokioRwLock::new(None)),
@@ -1645,6 +1648,7 @@ impl ConsensusEngine {
         Self {
             masternode_registry,
             identity: OnceLock::new(),
+            wallet_signing_key: OnceLock::new(),
             utxo_manager,
             tx_pool: Arc::new(TransactionPool::new()),
             broadcast_callback: Arc::new(TokioRwLock::new(None)),
@@ -2034,6 +2038,17 @@ impl ConsensusEngine {
             .map_err(|_| "Identity already set".to_string())
     }
 
+    /// Set the wallet signing key used to authorize spending of UTXOs.
+    /// This is separate from the identity/consensus key (`set_identity`) which signs
+    /// votes and blocks.  When `masternodeprivkey` is configured in time.conf the two
+    /// keys differ; transaction signing must always use the wallet key so that the
+    /// derived address matches the `script_pubkey` stored in the UTXOs.
+    pub fn set_wallet_signing_key(&self, key: ed25519_dalek::SigningKey) -> Result<(), String> {
+        self.wallet_signing_key
+            .set(key)
+            .map_err(|_| "Wallet signing key already set".to_string())
+    }
+
     /// Get the signing key for this node (for VRF generation in block production)
     pub fn get_signing_key(&self) -> Option<ed25519_dalek::SigningKey> {
         self.identity.get().map(|id| id.signing_key.clone())
@@ -2042,8 +2057,15 @@ impl ConsensusEngine {
     /// Sign all inputs of a transaction using this node's wallet key.
     /// Each input's script_sig is set to [32-byte pubkey || 64-byte Ed25519 signature].
     pub fn sign_transaction(&self, tx: &mut Transaction) -> Result<(), String> {
+        // Use the dedicated wallet signing key when available.  Fall back to the
+        // identity key only for nodes that have not called set_wallet_signing_key
+        // (e.g. unit-test instances).  This ensures the derived address in the
+        // signature always matches the UTXO's script_pubkey (wallet address).
         let signing_key = self
-            .get_signing_key()
+            .wallet_signing_key
+            .get()
+            .cloned()
+            .or_else(|| self.get_signing_key())
             .ok_or("No signing key available — node identity not set")?;
         let pubkey_bytes = signing_key.verifying_key().to_bytes();
 
@@ -2763,6 +2785,7 @@ impl ConsensusEngine {
         let consensus_engine_clone = Arc::new(ConsensusEngine {
             masternode_registry: self.masternode_registry.clone(),
             identity: OnceLock::new(),
+            wallet_signing_key: OnceLock::new(),
             utxo_manager: self.utxo_manager.clone(),
             tx_pool: self.tx_pool.clone(),
             broadcast_callback: self.broadcast_callback.clone(),

@@ -980,6 +980,17 @@ async fn main() {
                     eprintln!("⚠️ Failed to set consensus identity: {}", e);
                 }
 
+                // Always set the wallet key for transaction signing.
+                // The identity key (above) may be masternodeprivkey, which is only used
+                // for consensus operations (votes, proofs, block signing).
+                // Transaction inputs must be signed with the wallet key so the derived
+                // address matches the UTXOs' script_pubkey.
+                if let Err(e) =
+                    consensus_engine.set_wallet_signing_key(wallet.signing_key().clone())
+                {
+                    eprintln!("⚠️ Failed to set wallet signing key: {}", e);
+                }
+
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Consensus engine identity configured with wallet key");
 

@@ -4,6 +4,8 @@
 
 ### Building
 ```bash
+# Minimum Rust version: 1.75 (see rust-version in Cargo.toml)
+
 # Default: format, check, and lint (run these instead of cargo build)
 cargo fmt && cargo check && cargo clippy
 
@@ -53,6 +55,18 @@ cargo clippy
 cargo clippy -- -D warnings
 ```
 
+### Known Pre-existing Test Failures
+
+8 tests fail before any changes and are unrelated to normal development:
+- `consensus::tests::test_initiate_consensus`
+- `consensus::tests::test_validator_management`
+- `consensus::tests::test_vote_submission`
+- `consensus::tests::test_timevote_init`
+- `network::secure_transport::tests::test_config_creation`
+- `network::secure_transport::tests::test_tls_transport`
+- `network::tls::tests::test_create_self_signed_config`
+- `network::tls::tests::test_tls_handshake`
+
 ### Running
 ```bash
 # Start daemon (testnet by default)
@@ -98,15 +112,12 @@ Transactions finalize during Voting phase, not block inclusion. This enables ins
 
 ### AI Optimization Modules
 
-8 AI systems (not just helpers, actively running):
-- `peer_selector.rs`: ML-based peer scoring (70% faster sync)
-- `fork_resolver.rs`: Multi-factor fork resolution with AI scoring
+Located in `src/ai/`, integrated throughout consensus and network layers:
+- `peer_selector.rs`: Peer scoring for optimized sync
+- `fork_resolver.rs`: Fork resolution — **simplified to longest-chain rule** (not ML-based; multi-factor AI scoring was removed in v1.2.0)
 - `anomaly_detector.rs`: Real-time security monitoring
 - `predictive_sync.rs`: Block arrival prediction
-- Transaction analysis and validation
-- Network optimization and resource management
-
-Located in `src/ai/`, integrated throughout consensus and network layers.
+- `transaction_validator.rs`, `network_optimizer.rs`, `consensus_health.rs`, `attack_detector.rs`, `adaptive_reconnection.rs`: supporting modules
 
 ### Critical Broadcast Bug (Fixed in v1.1.0)
 
@@ -124,7 +135,7 @@ Without this, consensus engine cannot communicate with the network and transacti
 
 ### Module Organization
 
-- **Binary entry points**: `src/main.rs` (daemon), `src/bin/time-cli.rs`, `src/bin/time-dashboard.rs`
+- **Binary entry points**: `src/main.rs` (daemon), `src/bin/time-cli.rs`, `src/bin/time-dashboard.rs`, `src/bin/migrate_db.rs`
 - **Library re-export trick**: `src/lib.rs` includes main.rs for testability (expect "dead code" warnings)
 - **Module structure**: Each major component (network, consensus, ai, block, crypto) has its own directory with `mod.rs`
 
@@ -134,6 +145,14 @@ Without this, consensus engine cannot communicate with the network and transacti
 - **Storage operations**: Sled is sync, wrap in `tokio::spawn_blocking` for CPU-intensive work
 - **Consensus engine**: Internally async but exposed API is sync-friendly with channels
 - **Lock-free where possible**: Use DashMap, AtomicBool, Arc for shared state (avoid RwLock in hot paths)
+
+### Type-Safe Weight Wrappers
+
+`types.rs` defines two distinct newtype wrappers to prevent accidental interchange:
+- `SamplingWeight(u64)`: Used for VRF sortition and TimeVote stake weighting
+- `GovernanceWeight(u64)`: Used for on-chain governance proposals
+
+Never use raw `u64` for stake values — use the appropriate wrapper.
 
 ### Error Handling
 
@@ -197,8 +216,8 @@ Two separate pools:
 ## Common Development Tasks
 
 ### Adding a new RPC method
-1. Add method to `src/rpc/methods.rs`
-2. Update method routing in `handle_request()`
+1. Add method implementation to `src/rpc/handler.rs`
+2. Register it in the `match request.method.as_str()` block inside `handle_request()`
 3. Add corresponding CLI command in `src/bin/time-cli.rs`
 4. Document in `docs/CLI_GUIDE.md`
 
