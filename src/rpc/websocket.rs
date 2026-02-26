@@ -1,12 +1,13 @@
 //! WebSocket server for real-time wallet notifications.
 //!
 //! Provides instant push notifications when transactions involving
-//! subscribed addresses enter the mempool or get confirmed.
+//! subscribed addresses enter the mempool or get finalized by consensus.
 //!
 //! Protocol:
 //!   Client → Server: {"method":"subscribe","params":{"address":"TIME0..."}}
 //!   Client → Server: {"method":"unsubscribe","params":{"address":"TIME0..."}}
-//!   Server → Client: {"type":"tx_notification","data":{...}}
+//!   Server → Client: {"type":"tx_notification","data":{...}}   (mempool entry)
+//!   Server → Client: {"type":"utxo_finalized","data":{...}}    (consensus reached)
 //!   Server → Client: {"type":"pong"}
 //!   Client → Server: {"method":"ping"}
 
@@ -18,12 +19,16 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Event emitted when a transaction enters the mempool
+/// Event emitted for transaction lifecycle (mempool entry or finalization)
 #[derive(Clone, Debug, Serialize)]
 pub struct TransactionEvent {
     pub txid: String,
     pub outputs: Vec<TxOutputInfo>,
     pub timestamp: i64,
+    /// If true, this is a finality event (UTXO consensus reached).
+    /// If false, the transaction just entered the mempool.
+    #[serde(skip)]
+    pub finalized: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -88,18 +93,35 @@ impl SubscriptionManager {
 
     /// Notify all subscribers for affected addresses
     pub fn notify_transaction(&self, event: &TransactionEvent) {
+        let msg_type = if event.finalized {
+            "utxo_finalized"
+        } else {
+            "tx_notification"
+        };
+
         for output in &event.outputs {
             if let Some(senders) = self.subscriptions.get(&output.address) {
-                let notification = ServerNotification {
-                    msg_type: "tx_notification".to_string(),
-                    data: Some(serde_json::json!({
+                let data = if event.finalized {
+                    serde_json::json!({
+                        "txid": event.txid,
+                        "address": output.address,
+                        "output_index": output.index,
+                        "timestamp": event.timestamp,
+                    })
+                } else {
+                    serde_json::json!({
                         "txid": event.txid,
                         "address": output.address,
                         "amount": output.amount,
                         "output_index": output.index,
                         "timestamp": event.timestamp,
                         "confirmations": 0,
-                    })),
+                    })
+                };
+
+                let notification = ServerNotification {
+                    msg_type: msg_type.to_string(),
+                    data: Some(data),
                 };
 
                 for sender in senders.iter() {
@@ -173,7 +195,7 @@ pub async fn start_ws_server(
         }
     });
 
-    // Spawn transaction event dispatcher
+    // Spawn transaction event dispatcher (mempool notifications)
     let event_mgr = sub_manager.clone();
     let mut event_rx = tx_events.subscribe();
     let event_shutdown = shutdown.clone();

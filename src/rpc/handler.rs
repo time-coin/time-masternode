@@ -792,6 +792,7 @@ impl RpcHandler {
                 txid: txid_hex.clone(),
                 outputs,
                 timestamp: chrono::Utc::now().timestamp(),
+                finalized: false,
             };
 
             let _ = tx_sender.send(event);
