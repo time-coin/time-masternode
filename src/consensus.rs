@@ -35,8 +35,46 @@ const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
 #[allow(dead_code)] // Used by TransactionPool for mempool size limits
 const MAX_MEMPOOL_SIZE_BYTES: usize = 300_000_000; // 300MB
 const MAX_TX_SIZE: usize = 1_000_000; // 1MB
-const MIN_TX_FEE: u64 = 1_000; // 0.00001 TIME minimum fee
+const MIN_TX_FEE: u64 = 1_000_000; // 0.01 TIME minimum fee
 const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
+const SATOSHIS_PER_TIME: u64 = 100_000_000;
+
+/// Governance-adjustable fee schedule.
+/// Stored in consensus state so governance proposals can update tiers and
+/// minimum fee without requiring a software upgrade or hard fork.
+#[derive(Clone, Debug)]
+pub struct FeeSchedule {
+    /// (upper_bound_satoshis, rate_basis_points). Ordered smallest first.
+    pub tiers: Vec<(u64, u64)>,
+    pub min_fee: u64,
+}
+
+impl Default for FeeSchedule {
+    fn default() -> Self {
+        Self {
+            tiers: vec![
+                (100 * SATOSHIS_PER_TIME,    100), // < 100 TIME  → 1%
+                (1_000 * SATOSHIS_PER_TIME,   50), // < 1k TIME   → 0.5%
+                (10_000 * SATOSHIS_PER_TIME,  25), // < 10k TIME  → 0.25%
+                (u64::MAX,                    10), // >= 10k TIME → 0.1%
+            ],
+            min_fee: MIN_TX_FEE,
+        }
+    }
+}
+
+impl FeeSchedule {
+    fn required_fee(&self, send_amount: u64) -> u64 {
+        let rate_bps = self
+            .tiers
+            .iter()
+            .find(|(up_to, _)| send_amount < *up_to)
+            .map(|(_, bps)| *bps)
+            .unwrap_or(10);
+        let proportional = send_amount * rate_bps / 10_000;
+        proportional.max(self.min_fee)
+    }
+}
 
 // §7.6 Liveness Fallback Protocol Parameters
 const STALL_TIMEOUT: Duration = Duration::from_secs(30); // Protocol §7.6.1
@@ -2320,15 +2358,15 @@ impl ConsensusEngine {
             ));
         }
 
-        // Also check proportional fee (0.1% of transaction input value)
-        // Fee is based on inputs (economic value moved) not outputs (which include change)
-        let fee_rate = 1000; // 0.1% = 1/1000
-        let min_proportional_fee = input_sum / fee_rate;
+        // Check tiered proportional fee (governance-adjustable schedule)
+        let fee_schedule = FeeSchedule::default();
+        let send_amount = tx.outputs.first().map(|o| o.value).unwrap_or(output_sum);
+        let min_proportional_fee = fee_schedule.required_fee(send_amount);
 
         if actual_fee < min_proportional_fee {
             return Err(format!(
-                "Insufficient fee: {} satoshis < {} satoshis required (0.1% of {})",
-                actual_fee, min_proportional_fee, input_sum
+                "Insufficient fee: {} satoshis < {} satoshis required for send amount {}",
+                actual_fee, min_proportional_fee, send_amount
             ));
         }
 

@@ -148,6 +148,35 @@ impl SubscriptionManager {
         }
     }
 
+    /// Notify all subscribers about a rejected transaction
+    pub fn notify_rejection(&self, txid: &str, reason: &str) {
+        let notification = ServerNotification {
+            msg_type: "tx_rejected".to_string(),
+            data: Some(serde_json::json!({
+                "txid": txid,
+                "reason": reason,
+            })),
+        };
+
+        // Broadcast to all connected clients (sender may not be in outputs)
+        let mut notified = std::collections::HashSet::new();
+        for entry in self.subscriptions.iter() {
+            for sender in entry.value().iter() {
+                let ptr = sender as *const _ as usize;
+                if notified.insert(ptr) {
+                    let _ = sender.send(notification.clone());
+                }
+            }
+        }
+
+        tracing::info!(
+            "📡 WS tx_rejected: txid={}..., reason={}, notified {} client(s)",
+            &txid[..std::cmp::min(16, txid.len())],
+            reason,
+            notified.len(),
+        );
+    }
+
     /// Clean up dead connections
     fn cleanup_dead(&self) {
         let mut empty_keys = Vec::new();

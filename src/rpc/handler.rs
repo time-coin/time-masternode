@@ -117,6 +117,7 @@ impl RpcHandler {
             "getbalances" => self.get_balances(&params_array).await,
             "listunspentmulti" => self.list_unspent_multi(&params_array).await,
             "masternodegenkey" => self.masternode_genkey().await,
+            "getfeeschedule" => self.get_fee_schedule().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -1917,6 +1918,24 @@ impl RpcHandler {
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
         let key = crate::masternode_certificate::encode_masternode_key(&seed);
         Ok(json!(key))
+    }
+
+    async fn get_fee_schedule(&self) -> Result<Value, RpcError> {
+        let schedule = crate::consensus::FeeSchedule::default();
+        let tiers: Vec<Value> = schedule
+            .tiers
+            .iter()
+            .map(|(up_to, bps)| {
+                json!({
+                    "up_to": up_to,
+                    "rate_bps": bps,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "tiers": tiers,
+            "min_fee": schedule.min_fee,
+        }))
     }
 
     async fn validate_address(&self, params: &[Value]) -> Result<Value, RpcError> {
