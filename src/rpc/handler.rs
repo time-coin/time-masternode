@@ -2316,22 +2316,9 @@ impl RpcHandler {
             // Sort by value descending (use largest UTXOs first for efficiency)
             utxos.sort_by(|a, b| b.value.cmp(&a.value));
 
-            // Estimate fee
-            let mut estimated_input = 0u64;
-            let mut temp_fee = 1_000u64;
-            for utxo in &utxos {
-                estimated_input += utxo.value;
-                temp_fee = (estimated_input / 1000).max(1_000);
-                let needed = if subtract_fee {
-                    amount_units
-                } else {
-                    amount_units + temp_fee
-                };
-                if estimated_input >= needed {
-                    break;
-                }
-            }
-            let fee = temp_fee;
+            // Calculate fee using governance-adjustable tiered schedule
+            let fee_schedule = crate::consensus::FeeSchedule::default();
+            let fee = fee_schedule.required_fee(amount_units);
 
             // Select sufficient UTXOs
             let mut selected_utxos = Vec::new();
@@ -2373,7 +2360,7 @@ impl RpcHandler {
                 consolidate_utxos.truncate(MAX_TX_INPUTS);
 
                 let consolidate_total: u64 = consolidate_utxos.iter().map(|u| u.value).sum();
-                let consolidate_fee = (consolidate_total / 1000).max(1_000);
+                let consolidate_fee = fee_schedule.required_fee(consolidate_total);
 
                 if consolidate_total <= consolidate_fee {
                     return Err(RpcError {
@@ -2476,7 +2463,7 @@ impl RpcHandler {
                         message: "Insufficient funds".to_string(),
                     });
                 }
-                let fee = (total_input / 1000).max(1_000);
+                let fee = fee_schedule.required_fee(amount_units);
                 if amount_units <= fee {
                     return Err(RpcError {
                         code: -6,
