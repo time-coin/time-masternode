@@ -121,6 +121,7 @@ impl SubscriptionManager {
                     serde_json::json!({
                         "txid": event.txid,
                         "address": output.address,
+                        "amount": output.amount,
                         "output_index": output.index,
                         "timestamp": event.timestamp,
                     })
