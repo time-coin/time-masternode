@@ -193,7 +193,8 @@ impl TimeVoteHandler {
                                 outpoint: outpoint.clone(),
                                 value: output.value,
                                 script_pubkey: output.script_pubkey.clone(),
-                                address: String::new(),
+                                address: String::from_utf8(output.script_pubkey.clone())
+                                    .unwrap_or_default(),
                             };
 
                             let _ = self.utxo_manager.add_utxo(utxo).await;
