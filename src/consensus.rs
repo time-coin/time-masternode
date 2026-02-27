@@ -53,10 +53,10 @@ impl Default for FeeSchedule {
     fn default() -> Self {
         Self {
             tiers: vec![
-                (100 * SATOSHIS_PER_TIME,    100), // < 100 TIME  → 1%
-                (1_000 * SATOSHIS_PER_TIME,   50), // < 1k TIME   → 0.5%
-                (10_000 * SATOSHIS_PER_TIME,  25), // < 10k TIME  → 0.25%
-                (u64::MAX,                    10), // >= 10k TIME → 0.1%
+                (100 * SATOSHIS_PER_TIME, 100),   // < 100 TIME  → 1%
+                (1_000 * SATOSHIS_PER_TIME, 50),  // < 1k TIME   → 0.5%
+                (10_000 * SATOSHIS_PER_TIME, 25), // < 10k TIME  → 0.25%
+                (u64::MAX, 10),                   // >= 10k TIME → 0.1%
             ],
             min_fee: MIN_TX_FEE,
         }
@@ -64,7 +64,7 @@ impl Default for FeeSchedule {
 }
 
 impl FeeSchedule {
-    fn required_fee(&self, send_amount: u64) -> u64 {
+    pub fn required_fee(&self, send_amount: u64) -> u64 {
         let rate_bps = self
             .tiers
             .iter()
