@@ -1507,6 +1507,90 @@ impl RpcHandler {
         // Truncate to requested count
         transactions.truncate(count);
 
+        // Include finalized-but-not-yet-in-block transactions from consensus pool
+        let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
+        let existing_txids: std::collections::HashSet<String> = transactions
+            .iter()
+            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+
+        for tx in &finalized_txs {
+            let txid = hex::encode(tx.txid());
+            if existing_txids.contains(&txid) {
+                continue;
+            }
+
+            let mut received: u64 = 0;
+            for output in &tx.outputs {
+                let addr = String::from_utf8_lossy(&output.script_pubkey);
+                if addr == local_address {
+                    received += output.value;
+                }
+            }
+
+            let mut sent: u64 = 0;
+            for input in &tx.inputs {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                    if utxo.address == local_address {
+                        sent += utxo.value;
+                    }
+                }
+            }
+
+            if sent > 0 || received > 0 {
+                let category = if sent > 0 { "send" } else { "receive" };
+                let net_amount = if category == "send" {
+                    -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
+                } else {
+                    received as f64 / 100_000_000.0
+                };
+
+                transactions.insert(0, json!({
+                    "txid": txid,
+                    "category": category,
+                    "amount": net_amount,
+                    "confirmations": 0,
+                    "finalized": true,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                }));
+            }
+        }
+
+        // Also include pending (not yet finalized) transactions
+        let pending_txs = self.consensus.tx_pool.get_pending_transactions();
+        let existing_txids: std::collections::HashSet<String> = transactions
+            .iter()
+            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+
+        for tx in &pending_txs {
+            let txid = hex::encode(tx.txid());
+            if existing_txids.contains(&txid) {
+                continue;
+            }
+
+            let mut received: u64 = 0;
+            for output in &tx.outputs {
+                let addr = String::from_utf8_lossy(&output.script_pubkey);
+                if addr == local_address {
+                    received += output.value;
+                }
+            }
+
+            if received > 0 {
+                transactions.insert(0, json!({
+                    "txid": txid,
+                    "category": "receive",
+                    "amount": received as f64 / 100_000_000.0,
+                    "confirmations": 0,
+                    "finalized": false,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                }));
+            }
+        }
+
         Ok(json!(transactions))
     }
 
@@ -1658,6 +1742,111 @@ impl RpcHandler {
         }
 
         transactions.truncate(count);
+
+        // Include finalized-but-not-yet-in-block transactions from consensus pool
+        let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
+        let existing_txids: std::collections::HashSet<String> = transactions
+            .iter()
+            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+
+        for tx in &finalized_txs {
+            let txid = hex::encode(tx.txid());
+            if existing_txids.contains(&txid) {
+                continue;
+            }
+
+            let mut received: u64 = 0;
+            let mut recv_address = String::new();
+            for output in &tx.outputs {
+                let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                if addr_set.contains(&addr) {
+                    received += output.value;
+                    if recv_address.is_empty() {
+                        recv_address = addr;
+                    }
+                }
+            }
+
+            let mut sent: u64 = 0;
+            let mut send_address = String::new();
+            for input in &tx.inputs {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                    let src_addr = utxo.address.clone();
+                    if addr_set.contains(&src_addr) {
+                        sent += utxo.value;
+                        if send_address.is_empty() {
+                            send_address = src_addr;
+                        }
+                    }
+                }
+            }
+
+            if sent > 0 || received > 0 {
+                let category = if sent > 0 { "send" } else { "receive" };
+                let net_amount = if category == "send" {
+                    -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
+                } else {
+                    received as f64 / 100_000_000.0
+                };
+
+                let address = if !recv_address.is_empty() {
+                    &recv_address
+                } else {
+                    &send_address
+                };
+
+                transactions.insert(0, json!({
+                    "txid": txid,
+                    "address": address,
+                    "category": category,
+                    "amount": net_amount,
+                    "confirmations": 0,
+                    "finalized": true,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                }));
+            }
+        }
+
+        // Also include pending (not yet finalized) transactions
+        let pending_txs = self.consensus.tx_pool.get_pending_transactions();
+        let existing_txids: std::collections::HashSet<String> = transactions
+            .iter()
+            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+
+        for tx in &pending_txs {
+            let txid = hex::encode(tx.txid());
+            if existing_txids.contains(&txid) {
+                continue;
+            }
+
+            let mut received: u64 = 0;
+            let mut recv_address = String::new();
+            for output in &tx.outputs {
+                let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+                if addr_set.contains(&addr) {
+                    received += output.value;
+                    if recv_address.is_empty() {
+                        recv_address = addr;
+                    }
+                }
+            }
+
+            if received > 0 {
+                transactions.insert(0, json!({
+                    "txid": txid,
+                    "address": recv_address,
+                    "category": "receive",
+                    "amount": received as f64 / 100_000_000.0,
+                    "confirmations": 0,
+                    "finalized": false,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                }));
+            }
+        }
 
         Ok(json!(transactions))
     }
