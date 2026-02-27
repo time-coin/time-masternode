@@ -3348,7 +3348,10 @@ async fn main() {
                                             timestamp: chrono::Utc::now().timestamp(),
                                             finalized: true,
                                         };
-                                        let _ = finality_ws_sender.send(event);
+                                        match finality_ws_sender.send(event) {
+                                            Ok(n) => tracing::info!("📡 WS utxo_finalized sent to {} receiver(s)", n),
+                                            Err(_) => tracing::warn!("📡 WS utxo_finalized failed: no receivers"),
+                                        }
                                     }
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {

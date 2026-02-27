@@ -99,7 +99,23 @@ impl SubscriptionManager {
             "tx_notification"
         };
 
+        let sub_count = self.total_subscriptions();
+        let sub_addrs: Vec<String> = self.subscriptions.iter().map(|e| e.key().clone()).collect();
+        tracing::info!(
+            "📡 WS notify_transaction: type={}, txid={}..., {} outputs, {} active subscriptions, subscribed addrs: {:?}",
+            msg_type,
+            &event.txid[..std::cmp::min(16, event.txid.len())],
+            event.outputs.len(),
+            sub_count,
+            sub_addrs,
+        );
+
         for output in &event.outputs {
+            tracing::info!(
+                "📡 WS checking output: address={}, subscribed={}",
+                &output.address,
+                self.subscriptions.contains_key(&output.address),
+            );
             if let Some(senders) = self.subscriptions.get(&output.address) {
                 let data = if event.finalized {
                     serde_json::json!({
@@ -205,6 +221,11 @@ pub async fn start_ws_server(
                 result = event_rx.recv() => {
                     match result {
                         Ok(event) => {
+                            tracing::info!(
+                                "📡 WS dispatcher received event: txid={}..., finalized={}",
+                                &event.txid[..std::cmp::min(16, event.txid.len())],
+                                event.finalized,
+                            );
                             event_mgr.notify_transaction(&event);
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {

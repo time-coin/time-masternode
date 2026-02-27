@@ -895,7 +895,10 @@ async fn handle_peer(
                                                     timestamp: chrono::Utc::now().timestamp(),
                                                     finalized: false,
                                                 };
-                                                let _ = tx_sender.send(event);
+                                                match tx_sender.send(event) {
+                                                    Ok(n) => tracing::info!("📡 WS tx_notification (server.rs) sent to {} receiver(s)", n),
+                                                    Err(_) => tracing::warn!("📡 WS tx_notification (server.rs) failed: no receivers"),
+                                                }
                                             }
 
                                             // Gossip to other peers

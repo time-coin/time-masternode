@@ -795,7 +795,14 @@ impl RpcHandler {
                 finalized: false,
             };
 
-            let _ = tx_sender.send(event);
+            match tx_sender.send(event) {
+                Ok(receivers) => {
+                    tracing::info!("📡 WS tx_notification sent to {} receiver(s)", receivers);
+                }
+                Err(e) => {
+                    tracing::warn!("📡 WS tx_notification send failed (no receivers): {}", e);
+                }
+            }
         }
 
         tokio::spawn({
