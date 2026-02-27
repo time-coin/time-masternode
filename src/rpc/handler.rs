@@ -979,7 +979,11 @@ impl RpcHandler {
             }
             match self.utxo_manager.get_state(&u.outpoint) {
                 Some(crate::types::UTXOState::Unspent) => spendable += u.value,
-                _ => pending += u.value,
+                Some(crate::types::UTXOState::Locked { .. }) => pending += u.value,
+                Some(crate::types::UTXOState::SpentPending { .. }) => {} // being spent, don't count
+                Some(crate::types::UTXOState::SpentFinalized { .. }) => {} // spent, don't count
+                Some(crate::types::UTXOState::Archived { .. }) => {}     // spent & archived
+                None => {}                                               // unknown state
             }
         }
 
@@ -1034,7 +1038,11 @@ impl RpcHandler {
                 }
                 match self.utxo_manager.get_state(&u.outpoint) {
                     Some(crate::types::UTXOState::Unspent) => spendable += u.value,
-                    _ => pending += u.value,
+                    Some(crate::types::UTXOState::Locked { .. }) => pending += u.value,
+                    Some(crate::types::UTXOState::SpentPending { .. }) => {} // being spent, don't count
+                    Some(crate::types::UTXOState::SpentFinalized { .. }) => {} // spent, don't count
+                    Some(crate::types::UTXOState::Archived { .. }) => {}     // spent & archived
+                    None => {}                                               // unknown state
                 }
             }
 
@@ -1104,15 +1112,20 @@ impl RpcHandler {
                 let state = self.utxo_manager.get_state(&u.outpoint);
                 let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
 
+                // Skip spent/archived UTXOs
+                match &state {
+                    Some(crate::types::UTXOState::SpentPending { .. })
+                    | Some(crate::types::UTXOState::SpentFinalized { .. })
+                    | Some(crate::types::UTXOState::Archived { .. }) => continue,
+                    _ => {}
+                }
+
                 let (spendable, state_str) = match state {
                     Some(crate::types::UTXOState::Unspent) if !is_locked => (true, "unspent"),
                     Some(crate::types::UTXOState::Unspent) if is_locked => {
                         (false, "collateral_locked")
                     }
                     Some(crate::types::UTXOState::Locked { .. }) => (false, "locked"),
-                    Some(crate::types::UTXOState::SpentPending { .. }) => (false, "spending"),
-                    Some(crate::types::UTXOState::SpentFinalized { .. }) => (false, "spent"),
-                    Some(crate::types::UTXOState::Archived { .. }) => (false, "archived"),
                     None => (false, "unknown"),
                     _ => (false, "unavailable"),
                 };
@@ -1156,47 +1169,53 @@ impl RpcHandler {
 
         let current_height = self.blockchain.get_height();
 
-        // Get local masternode's reward address to filter UTXOs
-        let local_address = self
-            .registry
-            .get_local_masternode()
-            .await
-            .map(|mn| mn.reward_address);
-
-        // Fallback: if masternode was deregistered, use stored wallet address
-        let local_address = match local_address {
-            Some(addr) => Some(addr),
-            None => self.registry.get_local_wallet_address().await,
+        // Determine which addresses to query UTXOs for
+        let query_addresses: Vec<String> = if let Some(addrs) = addresses {
+            // Use explicitly provided addresses
+            addrs
+                .iter()
+                .filter_map(|a| a.as_str().map(|s| s.to_string()))
+                .collect()
+        } else {
+            // Fallback to local masternode/wallet address
+            let local_address = self
+                .registry
+                .get_local_masternode()
+                .await
+                .map(|mn| mn.reward_address);
+            let local_address = match local_address {
+                Some(addr) => Some(addr),
+                None => self.registry.get_local_wallet_address().await,
+            };
+            match local_address {
+                Some(addr) => vec![addr],
+                None => return Ok(json!([])),
+            }
         };
-
-        let local_addr = match &local_address {
-            Some(addr) => addr.clone(),
-            None => return Ok(json!([])),
-        };
-
-        // Use address index instead of scanning all UTXOs
-        let utxos = self.utxo_manager.list_utxos_by_address(&local_addr).await;
 
         // Collect txids already in the on-chain UTXO set to avoid duplicates
         let mut seen_outpoints: std::collections::HashSet<(Vec<u8>, u32)> =
             std::collections::HashSet::new();
 
-        let mut filtered: Vec<Value> = utxos
-            .iter()
-            .filter(|u| {
-                // Filter by specific addresses if provided (already filtered to local_addr)
-                if let Some(addrs) = addresses {
-                    addrs.iter().any(|a| a.as_str() == Some(&u.address))
-                } else {
-                    true
-                }
-            })
-            .map(|u| {
+        let mut filtered: Vec<Value> = Vec::new();
+
+        for query_addr in &query_addresses {
+            let utxos = self.utxo_manager.list_utxos_by_address(query_addr).await;
+
+            for u in &utxos {
                 seen_outpoints.insert((u.outpoint.txid.to_vec(), u.outpoint.vout));
 
                 // Get UTXO state
                 let state = self.utxo_manager.get_state(&u.outpoint);
                 let is_locked = self.utxo_manager.is_collateral_locked(&u.outpoint);
+
+                // Skip spent/archived UTXOs — listunspent only returns unspent outputs
+                match &state {
+                    Some(crate::types::UTXOState::SpentPending { .. })
+                    | Some(crate::types::UTXOState::SpentFinalized { .. })
+                    | Some(crate::types::UTXOState::Archived { .. }) => continue,
+                    _ => {}
+                }
 
                 let (spendable, state_str) = match state {
                     Some(crate::types::UTXOState::Unspent) if !is_locked => (true, "unspent"),
@@ -1204,9 +1223,6 @@ impl RpcHandler {
                         (false, "collateral_locked")
                     }
                     Some(crate::types::UTXOState::Locked { .. }) => (false, "locked"),
-                    Some(crate::types::UTXOState::SpentPending { .. }) => (false, "spending"),
-                    Some(crate::types::UTXOState::SpentFinalized { .. }) => (false, "spent"),
-                    Some(crate::types::UTXOState::Archived { .. }) => (false, "archived"),
                     None => (false, "unknown"),
                     _ => (false, "unavailable"),
                 };
@@ -1219,47 +1235,36 @@ impl RpcHandler {
                     .map(|loc| current_height.saturating_sub(loc.block_height) + 1)
                     .unwrap_or(0);
 
-                json!({
-                    "txid": hex::encode(u.outpoint.txid),
-                    "vout": u.outpoint.vout,
-                    "address": u.address,
-                    "amount": u.value as f64 / 100_000_000.0,
-                    "confirmations": confirmations,
-                    "spendable": spendable,
-                    "state": state_str,
-                    "solvable": true,
-                    "safe": true
-                })
-            })
-            .filter(|v| {
-                let c = v.get("confirmations").and_then(|v| v.as_u64()).unwrap_or(0);
-                c >= min_conf && c <= max_conf
-            })
-            .collect();
+                if confirmations >= min_conf && confirmations <= max_conf {
+                    filtered.push(json!({
+                        "txid": hex::encode(u.outpoint.txid),
+                        "vout": u.outpoint.vout,
+                        "address": u.address,
+                        "amount": u.value as f64 / 100_000_000.0,
+                        "confirmations": confirmations,
+                        "spendable": spendable,
+                        "state": state_str,
+                        "solvable": true,
+                        "safe": true
+                    }));
+                }
+            }
+        }
 
         // Include outputs from finalized transactions not yet in a block.
         // TIME Coin achieves instant finality via TimeVote consensus (67% threshold),
         // so finalized transaction outputs are safe to display before block inclusion.
         if min_conf == 0 {
+            let addr_set: std::collections::HashSet<&str> =
+                query_addresses.iter().map(|s| s.as_str()).collect();
             let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
             for tx in &finalized_txs {
                 let txid = tx.txid();
                 for (vout, output) in tx.outputs.iter().enumerate() {
-                    // Decode address from script_pubkey
                     let output_address = String::from_utf8_lossy(&output.script_pubkey).to_string();
-                    if output_address != local_addr {
+                    if !addr_set.contains(output_address.as_str()) {
                         continue;
                     }
-                    // Filter by specific addresses if provided
-                    if let Some(addrs) = addresses {
-                        if !addrs
-                            .iter()
-                            .any(|a| a.as_str() == Some(output_address.as_str()))
-                        {
-                            continue;
-                        }
-                    }
-                    // Skip if already in the on-chain UTXO set
                     if seen_outpoints.contains(&(txid.to_vec(), vout as u32)) {
                         continue;
                     }
@@ -1269,7 +1274,7 @@ impl RpcHandler {
                         "address": output_address,
                         "amount": output.value as f64 / 100_000_000.0,
                         "confirmations": 0,
-                        "spendable": false,
+                        "spendable": true,
                         "state": "finalized",
                         "solvable": true,
                         "safe": true
@@ -1518,7 +1523,11 @@ impl RpcHandler {
         let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
         let existing_txids: std::collections::HashSet<String> = transactions
             .iter()
-            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|t| {
+                t.get("txid")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         for tx in &finalized_txs {
@@ -1552,15 +1561,18 @@ impl RpcHandler {
                     received as f64 / 100_000_000.0
                 };
 
-                transactions.insert(0, json!({
-                    "txid": txid,
-                    "category": category,
-                    "amount": net_amount,
-                    "confirmations": 0,
-                    "finalized": true,
-                    "time": tx.timestamp,
-                    "blocktime": tx.timestamp,
-                }));
+                transactions.insert(
+                    0,
+                    json!({
+                        "txid": txid,
+                        "category": category,
+                        "amount": net_amount,
+                        "confirmations": 0,
+                        "finalized": true,
+                        "time": tx.timestamp,
+                        "blocktime": tx.timestamp,
+                    }),
+                );
             }
         }
 
@@ -1568,7 +1580,11 @@ impl RpcHandler {
         let pending_txs = self.consensus.tx_pool.get_pending_transactions();
         let existing_txids: std::collections::HashSet<String> = transactions
             .iter()
-            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|t| {
+                t.get("txid")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         for tx in &pending_txs {
@@ -1586,15 +1602,18 @@ impl RpcHandler {
             }
 
             if received > 0 {
-                transactions.insert(0, json!({
-                    "txid": txid,
-                    "category": "receive",
-                    "amount": received as f64 / 100_000_000.0,
-                    "confirmations": 0,
-                    "finalized": false,
-                    "time": tx.timestamp,
-                    "blocktime": tx.timestamp,
-                }));
+                transactions.insert(
+                    0,
+                    json!({
+                        "txid": txid,
+                        "category": "receive",
+                        "amount": received as f64 / 100_000_000.0,
+                        "confirmations": 0,
+                        "finalized": false,
+                        "time": tx.timestamp,
+                        "blocktime": tx.timestamp,
+                    }),
+                );
             }
         }
 
@@ -1754,7 +1773,11 @@ impl RpcHandler {
         let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
         let existing_txids: std::collections::HashSet<String> = transactions
             .iter()
-            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|t| {
+                t.get("txid")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         for tx in &finalized_txs {
@@ -1803,16 +1826,19 @@ impl RpcHandler {
                     &send_address
                 };
 
-                transactions.insert(0, json!({
-                    "txid": txid,
-                    "address": address,
-                    "category": category,
-                    "amount": net_amount,
-                    "confirmations": 0,
-                    "finalized": true,
-                    "time": tx.timestamp,
-                    "blocktime": tx.timestamp,
-                }));
+                transactions.insert(
+                    0,
+                    json!({
+                        "txid": txid,
+                        "address": address,
+                        "category": category,
+                        "amount": net_amount,
+                        "confirmations": 0,
+                        "finalized": true,
+                        "time": tx.timestamp,
+                        "blocktime": tx.timestamp,
+                    }),
+                );
             }
         }
 
@@ -1820,7 +1846,11 @@ impl RpcHandler {
         let pending_txs = self.consensus.tx_pool.get_pending_transactions();
         let existing_txids: std::collections::HashSet<String> = transactions
             .iter()
-            .filter_map(|t| t.get("txid").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|t| {
+                t.get("txid")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         for tx in &pending_txs {
@@ -1842,16 +1872,19 @@ impl RpcHandler {
             }
 
             if received > 0 {
-                transactions.insert(0, json!({
-                    "txid": txid,
-                    "address": recv_address,
-                    "category": "receive",
-                    "amount": received as f64 / 100_000_000.0,
-                    "confirmations": 0,
-                    "finalized": false,
-                    "time": tx.timestamp,
-                    "blocktime": tx.timestamp,
-                }));
+                transactions.insert(
+                    0,
+                    json!({
+                        "txid": txid,
+                        "address": recv_address,
+                        "category": "receive",
+                        "amount": received as f64 / 100_000_000.0,
+                        "confirmations": 0,
+                        "finalized": false,
+                        "time": tx.timestamp,
+                        "blocktime": tx.timestamp,
+                    }),
+                );
             }
         }
 

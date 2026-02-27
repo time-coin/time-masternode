@@ -66,8 +66,7 @@ pub struct MessageContext {
     // AI System for recording events and making intelligent decisions
     pub ai_system: Option<Arc<crate::ai::AISystem>>,
     // WebSocket transaction event sender for real-time wallet notifications
-    pub tx_event_sender:
-        Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
+    pub tx_event_sender: Option<broadcast::Sender<crate::rpc::websocket::TransactionEvent>>,
 }
 
 impl MessageContext {
