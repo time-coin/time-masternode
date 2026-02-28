@@ -20,7 +20,7 @@ pub struct Address {
 }
 
 impl Address {
-    /// Create address from a 33-byte compressed secp256k1 public key
+    /// Create address from a public key (Ed25519: 32 bytes)
     pub fn from_public_key(pubkey: &[u8], network: NetworkType) -> Self {
         let pubkey_hash = Self::hash_public_key(pubkey);
         Self {
@@ -205,22 +205,21 @@ pub enum AddressError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use k256::ecdsa::SigningKey;
+    use ed25519_dalek::SigningKey;
 
     #[test]
     fn test_address_generation() {
-        let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
-        let pubkey = signing_key.verifying_key().to_encoded_point(true);
-        let pubkey_bytes = pubkey.as_bytes();
+        let signing_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let pubkey_bytes = signing_key.verifying_key().to_bytes();
 
         // Test testnet address
-        let testnet_addr = Address::from_public_key(pubkey_bytes, NetworkType::Testnet);
+        let testnet_addr = Address::from_public_key(&pubkey_bytes, NetworkType::Testnet);
         let testnet_str = testnet_addr.to_string();
         assert!(testnet_str.starts_with("TIME0"));
         assert!(testnet_str.len() >= 35 && testnet_str.len() <= 45);
 
         // Test mainnet address
-        let mainnet_addr = Address::from_public_key(pubkey_bytes, NetworkType::Mainnet);
+        let mainnet_addr = Address::from_public_key(&pubkey_bytes, NetworkType::Mainnet);
         let mainnet_str = mainnet_addr.to_string();
         assert!(mainnet_str.starts_with("TIME1"));
         assert!(mainnet_str.len() >= 35 && mainnet_str.len() <= 45);
@@ -228,10 +227,10 @@ mod tests {
 
     #[test]
     fn test_address_round_trip() {
-        let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
-        let pubkey = signing_key.verifying_key().to_encoded_point(true);
+        let signing_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let pubkey_bytes = signing_key.verifying_key().to_bytes();
 
-        let addr = Address::from_public_key(pubkey.as_bytes(), NetworkType::Mainnet);
+        let addr = Address::from_public_key(&pubkey_bytes, NetworkType::Mainnet);
         let addr_str = addr.to_string();
         let parsed = Address::from_string(&addr_str).unwrap();
 
