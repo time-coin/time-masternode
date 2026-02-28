@@ -185,6 +185,31 @@ impl TransactionPool {
             .collect()
     }
 
+    /// Get all mempool entries with metadata (for dashboard/verbose RPC)
+    pub fn get_all_entries_verbose(&self) -> Vec<(Transaction, u64, u64, String)> {
+        // Returns (tx, fee, age_secs, status)
+        let mut entries = Vec::new();
+        for e in self.pending.iter() {
+            let age = e.value().added_at.elapsed().as_secs();
+            entries.push((
+                e.value().tx.clone(),
+                e.value().fee,
+                age,
+                "pending".to_string(),
+            ));
+        }
+        for e in self.finalized.iter() {
+            let age = e.value().added_at.elapsed().as_secs();
+            entries.push((
+                e.value().tx.clone(),
+                e.value().fee,
+                age,
+                "finalized".to_string(),
+            ));
+        }
+        entries
+    }
+
     /// Clear finalized transactions (after block inclusion)
     pub fn clear_finalized(&self) {
         let count = self.finalized.len();

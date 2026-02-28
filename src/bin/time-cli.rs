@@ -44,6 +44,7 @@ Commands:
   Mempool
     getmempoolinfo         Get memory pool information
     getrawmempool          Get raw memory pool
+    getmempoolverbose      Get detailed mempool transactions
   Consensus
     getconsensusinfo       Get consensus information
   Treasury
@@ -289,6 +290,10 @@ enum Commands {
         verbose: bool,
     },
 
+    /// Get detailed mempool transactions
+    #[command(next_help_heading = "Mempool")]
+    GetMempoolVerbose,
+
     // ============================================================
     // CONSENSUS COMMANDS
     // ============================================================
@@ -475,6 +480,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::ForceUnlockAll => ("forceunlockall", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
+        Commands::GetMempoolVerbose => ("getmempoolverbose", json!([])),
         Commands::SendToAddress {
             address,
             amount,

@@ -210,9 +210,7 @@ mod tests {
     #[test]
     fn test_address_generation() {
         let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
-        let pubkey = signing_key
-            .verifying_key()
-            .to_encoded_point(true);
+        let pubkey = signing_key.verifying_key().to_encoded_point(true);
         let pubkey_bytes = pubkey.as_bytes();
 
         // Test testnet address
@@ -231,9 +229,7 @@ mod tests {
     #[test]
     fn test_address_round_trip() {
         let signing_key = SigningKey::random(&mut rand::rngs::OsRng);
-        let pubkey = signing_key
-            .verifying_key()
-            .to_encoded_point(true);
+        let pubkey = signing_key.verifying_key().to_encoded_point(true);
 
         let addr = Address::from_public_key(pubkey.as_bytes(), NetworkType::Mainnet);
         let addr_str = addr.to_string();

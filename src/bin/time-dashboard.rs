@@ -102,6 +102,31 @@ struct ConsensusInfo {
 struct MempoolInfo {
     size: usize,
     bytes: usize,
+    #[serde(default)]
+    pending: usize,
+    #[serde(default)]
+    finalized: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MempoolTx {
+    txid: String,
+    status: String,
+    fee: u64,
+    #[serde(default)]
+    fee_time: f64,
+    #[serde(default)]
+    amount: f64,
+    #[serde(default)]
+    size: usize,
+    #[serde(default)]
+    inputs: usize,
+    #[serde(default)]
+    outputs: usize,
+    #[serde(default)]
+    age_secs: u64,
+    #[serde(default)]
+    to: String,
 }
 
 struct DashboardData {
@@ -112,6 +137,7 @@ struct DashboardData {
     masternode: Option<MasternodeStatus>,
     consensus: Option<ConsensusInfo>,
     mempool: Option<MempoolInfo>,
+    mempool_txs: Vec<MempoolTx>,
     last_update: DateTime<Utc>,
     update_count: u64,
 }
@@ -126,6 +152,7 @@ impl Default for DashboardData {
             masternode: None,
             consensus: None,
             mempool: None,
+            mempool_txs: Vec::new(),
             last_update: Utc::now(),
             update_count: 0,
         }
@@ -139,6 +166,8 @@ struct App {
     current_tab: usize,
     should_quit: bool,
     error_message: Option<String>,
+    mempool_scroll: usize,
+    mempool_detail: Option<usize>,
 }
 
 impl App {
@@ -150,6 +179,8 @@ impl App {
             current_tab: 0,
             should_quit: false,
             error_message: None,
+            mempool_scroll: 0,
+            mempool_detail: None,
         }
     }
 
@@ -208,6 +239,15 @@ impl App {
         match self.rpc_call::<MempoolInfo>("getmempoolinfo", vec![]).await {
             Ok(info) => self.data.mempool = Some(info),
             Err(e) => self.error_message = Some(format!("getmempoolinfo: {}", e)),
+        }
+
+        // Fetch verbose mempool transactions
+        match self
+            .rpc_call::<Vec<MempoolTx>>("getmempoolverbose", vec![])
+            .await
+        {
+            Ok(txs) => self.data.mempool_txs = txs,
+            Err(_) => self.data.mempool_txs = Vec::new(),
         }
 
         self.data.last_update = Utc::now();
@@ -335,9 +375,12 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  "),
+        Span::raw("Height: "),
         Span::styled(
-            format!("Height: {}", block_height),
-            Style::default().fg(Color::Green),
+            format!("{}", block_height),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  "),
         Span::styled(
@@ -653,28 +696,241 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_mempool(f: &mut Frame, area: Rect, app: &App) {
-    if let Some(mempool) = &app.data.mempool {
-        let info = vec![
-            Line::from(vec![
-                Span::raw("Transactions: "),
-                Span::styled(
-                    format!("{}", mempool.size),
-                    Style::default().fg(Color::Yellow),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("Size: "),
-                Span::styled(
-                    format!("{:.2} KB", mempool.bytes as f64 / 1024.0),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ]),
-        ];
+    // Detail view
+    if let Some(idx) = app.mempool_detail {
+        if let Some(tx) = app.data.mempool_txs.get(idx) {
+            render_mempool_detail(f, area, tx);
+            return;
+        }
+    }
 
-        let block = Paragraph::new(info)
-            .block(Block::default().borders(Borders::ALL).title("Mempool"))
-            .style(Style::default().fg(Color::White));
-        f.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(6), Constraint::Min(8)])
+        .split(area);
+
+    // Summary section
+    let pending = app.data.mempool.as_ref().map(|m| m.pending).unwrap_or(0);
+    let finalized = app.data.mempool.as_ref().map(|m| m.finalized).unwrap_or(0);
+    let total = app.data.mempool.as_ref().map(|m| m.size).unwrap_or(0);
+    let bytes = app.data.mempool.as_ref().map(|m| m.bytes).unwrap_or(0);
+
+    let total_fees: f64 = app.data.mempool_txs.iter().map(|t| t.fee_time).sum();
+
+    let summary = vec![
+        Line::from(vec![
+            Span::raw("Total: "),
+            Span::styled(format!("{}", total), Style::default().fg(Color::Yellow)),
+            Span::raw("  Pending: "),
+            Span::styled(format!("{}", pending), Style::default().fg(Color::Magenta)),
+            Span::raw("  Finalized: "),
+            Span::styled(format!("{}", finalized), Style::default().fg(Color::Green)),
+        ]),
+        Line::from(vec![
+            Span::raw("Size: "),
+            Span::styled(
+                format!("{:.2} KB", bytes as f64 / 1024.0),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw("  Total Fees: "),
+            Span::styled(
+                format!("{:.8} TIME", total_fees),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "↑↓ Navigate  Enter: Details  q: Quit",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let summary_block = Paragraph::new(summary)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Mempool Summary"),
+        )
+        .style(Style::default().fg(Color::White));
+    f.render_widget(summary_block, chunks[0]);
+
+    // Transaction list
+    if app.data.mempool_txs.is_empty() {
+        let empty = Paragraph::new("No transactions in mempool")
+            .block(Block::default().borders(Borders::ALL).title("Transactions"))
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from(" # "),
+        Cell::from("TxID"),
+        Cell::from("Status"),
+        Cell::from("Amount"),
+        Cell::from("Fee"),
+        Cell::from("To"),
+        Cell::from("Age"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let visible_height = chunks[1].height.saturating_sub(3) as usize;
+    let start = app.mempool_scroll;
+    let end = (start + visible_height).min(app.data.mempool_txs.len());
+
+    let rows: Vec<Row> = app.data.mempool_txs[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, tx)| {
+            let idx = start + i;
+            let selected = idx == app.mempool_scroll;
+            let status_style = if tx.status == "finalized" {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::Magenta)
+            };
+            let short_txid = if tx.txid.len() > 12 {
+                format!("{}…", &tx.txid[..12])
+            } else {
+                tx.txid.clone()
+            };
+            let short_to = if tx.to.len() > 16 {
+                format!("{}…", &tx.to[..16])
+            } else {
+                tx.to.clone()
+            };
+            let age = format_age(tx.age_secs);
+            let row = Row::new(vec![
+                Cell::from(format!("{:>3}", idx + 1)),
+                Cell::from(short_txid),
+                Cell::from(tx.status.clone()).style(status_style),
+                Cell::from(format!("{:.4}", tx.amount)),
+                Cell::from(format!("{:.4}", tx.fee_time)),
+                Cell::from(short_to),
+                Cell::from(age),
+            ]);
+            if selected {
+                row.style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(14),
+            Constraint::Length(10),
+            Constraint::Length(12),
+            Constraint::Length(10),
+            Constraint::Min(16),
+            Constraint::Length(8),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "Transactions ({}/{})",
+        start + 1,
+        app.data.mempool_txs.len()
+    )));
+    f.render_widget(table, chunks[1]);
+}
+
+fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
+    let status_color = if tx.status == "finalized" {
+        Color::Green
+    } else {
+        Color::Magenta
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("TxID: ", Style::default().fg(Color::Yellow)),
+            Span::styled(&tx.txid, Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Status: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                tx.status.to_uppercase(),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Amount: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:.8} TIME", tx.amount),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Fee:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:.8} TIME ({} sats)", tx.fee_time, tx.fee),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Inputs:  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}", tx.inputs), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Outputs: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}", tx.outputs), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Size:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{} bytes", tx.size),
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Age:     ", Style::default().fg(Color::Yellow)),
+            Span::styled(format_age(tx.age_secs), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("To: ", Style::default().fg(Color::Yellow)),
+            Span::styled(&tx.to, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Enter or Esc to go back",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let block = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Transaction Detail"),
+        )
+        .style(Style::default().fg(Color::White));
+    f.render_widget(block, area);
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -821,17 +1077,54 @@ async fn run_app<B: ratatui::backend::Backend>(
                 if key.kind == KeyEventKind::Press {
                     match key.code {
                         KeyCode::Char('q') => {
-                            app.should_quit = true;
+                            if app.mempool_detail.is_some() {
+                                app.mempool_detail = None;
+                            } else {
+                                app.should_quit = true;
+                            }
                         }
                         KeyCode::Char('r') => {
                             app.update_data().await;
                             last_update = Instant::now();
                         }
                         KeyCode::Tab | KeyCode::Right => {
-                            app.next_tab();
+                            if app.mempool_detail.is_none() {
+                                app.next_tab();
+                                app.mempool_scroll = 0;
+                            }
                         }
                         KeyCode::Left => {
-                            app.previous_tab();
+                            if app.mempool_detail.is_none() {
+                                app.previous_tab();
+                                app.mempool_scroll = 0;
+                            }
+                        }
+                        KeyCode::Up => {
+                            if app.current_tab == 3 && app.mempool_detail.is_none() {
+                                app.mempool_scroll = app.mempool_scroll.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if app.current_tab == 3 && app.mempool_detail.is_none() {
+                                let max = app.data.mempool_txs.len().saturating_sub(1);
+                                if app.mempool_scroll < max {
+                                    app.mempool_scroll += 1;
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if app.current_tab == 3 {
+                                if app.mempool_detail.is_some() {
+                                    app.mempool_detail = None;
+                                } else if !app.data.mempool_txs.is_empty() {
+                                    app.mempool_detail = Some(app.mempool_scroll);
+                                }
+                            }
+                        }
+                        KeyCode::Esc => {
+                            if app.mempool_detail.is_some() {
+                                app.mempool_detail = None;
+                            }
                         }
                         _ => {}
                     }

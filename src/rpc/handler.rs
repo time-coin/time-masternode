@@ -93,6 +93,7 @@ impl RpcHandler {
             "getinfo" => self.get_info().await,
             "getmempoolinfo" => self.get_mempool_info().await,
             "getrawmempool" => self.get_raw_mempool().await,
+            "getmempoolverbose" => self.get_mempool_verbose().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
             "mergeutxos" => self.merge_utxos(&params_array).await,
             "gettransactionfinality" => self.get_transaction_finality(&params_array).await,
@@ -2023,6 +2024,36 @@ impl RpcHandler {
         }
 
         Ok(json!(txids))
+    }
+
+    async fn get_mempool_verbose(&self) -> Result<Value, RpcError> {
+        let entries = self.consensus.tx_pool.get_all_entries_verbose();
+        let txs: Vec<Value> = entries
+            .iter()
+            .map(|(tx, fee, age_secs, status)| {
+                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                let first_output_addr = tx
+                    .outputs
+                    .first()
+                    .map(|o| String::from_utf8_lossy(&o.script_pubkey).to_string())
+                    .unwrap_or_default();
+                let size = bincode::serialize(tx).map(|b| b.len()).unwrap_or(0);
+                json!({
+                    "txid": hex::encode(tx.txid()),
+                    "status": status,
+                    "fee": *fee,
+                    "fee_time": *fee as f64 / 100_000_000.0,
+                    "amount": output_sum as f64 / 100_000_000.0,
+                    "amount_sats": output_sum,
+                    "size": size,
+                    "inputs": tx.inputs.len(),
+                    "outputs": tx.outputs.len(),
+                    "age_secs": age_secs,
+                    "to": first_output_addr,
+                })
+            })
+            .collect();
+        Ok(json!(txs))
     }
 
     async fn get_consensus_info(&self) -> Result<Value, RpcError> {
