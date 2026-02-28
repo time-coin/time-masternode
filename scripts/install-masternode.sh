@@ -272,7 +272,7 @@ build_binaries() {
     # Verify we're in the right place
     if [ ! -f "Cargo.toml" ]; then
         print_error "Cargo.toml not found in $PROJECT_DIR"
-        print_error "Script must be run from the timecoin/scripts/ directory"
+        print_error "Script must be run from the time-masternode/scripts/ directory"
         exit 1
     fi
     

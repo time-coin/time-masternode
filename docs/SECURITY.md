@@ -163,7 +163,7 @@ We follow responsible disclosure practices:
 
 - Security Email: security@time-coin.io
 - General Contact: info@time-coin.io
-- GitHub: https://github.com/time-coin/timecoin
+- GitHub: https://github.com/time-coin/time-masternode
 
 ## Acknowledgments
 

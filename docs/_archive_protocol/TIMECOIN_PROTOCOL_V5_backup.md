@@ -1122,6 +1122,6 @@ The protocol is production-ready and suitable for:
 ---
 
 **For more information**:
-- GitHub: https://github.com/time-coin/timecoin
-- Documentation: https://github.com/time-coin/timecoin/tree/main/docs
+- GitHub: https://github.com/time-coin/time-masternode
+- Documentation: https://github.com/time-coin/time-masternode/tree/main/docs
 - Community: (Discord/Telegram links)

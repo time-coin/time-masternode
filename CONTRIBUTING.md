@@ -12,7 +12,7 @@ Thank you for your interest in contributing to TIME Coin! This document provides
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/time-coin/timecoin.git`
+2. Clone your fork: `git clone https://github.com/time-coin/time-masternode.git`
 3. Create a branch: `git checkout -b feature/your-feature`
 4. Make your changes
 5. Test your changes: `cargo test && cargo clippy`

@@ -20,8 +20,8 @@
 
 ```bash
 # Clone repository
-git clone https://github.com/time-coin/timecoin.git
-cd timecoin
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
 
 # Build release binary
 cargo build --release

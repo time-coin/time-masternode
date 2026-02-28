@@ -215,8 +215,8 @@ analysis/
 ## 📞 Support & Community
 
 ### Get Help
-- **GitHub Issues**: [Report bugs](https://github.com/time-coin/timecoin/issues)
-- **GitHub Discussions**: [Ask questions](https://github.com/time-coin/timecoin/discussions)
+- **GitHub Issues**: [Report bugs](https://github.com/time-coin/time-masternode/issues)
+- **GitHub Discussions**: [Ask questions](https://github.com/time-coin/time-masternode/discussions)
 - **Website**: [time-coin.io](https://time-coin.io)
 - **Email**: [support@time-coin.io](mailto:support@time-coin.io)
 

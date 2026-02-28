@@ -40,8 +40,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/time-coin/timecoin.git
-cd timecoin
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
 
 # Run the installer
 chmod +x scripts/install-masternode.sh
@@ -55,8 +55,8 @@ systemctl status timed
 
 ```bash
 # Clone the repository
-git clone https://github.com/time-coin/timecoin.git
-cd timecoin
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
 
 # Run the installer
 chmod +x scripts/install-masternode.sh
@@ -84,8 +84,8 @@ The automated installation script handles everything for you:
 
 1. **Download the project**:
    ```bash
-   git clone https://github.com/time-coin/timecoin.git
-   cd timecoin
+   git clone https://github.com/time-coin/time-masternode.git
+   cd time-masternode
    ```
 
 2. **Run the installer**:
@@ -138,8 +138,8 @@ rustc --version
 
 ```bash
 # Clone repository
-git clone https://github.com/time-coin/timecoin.git
-cd timecoin
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
 
 # Build release binaries
 cargo build --release
@@ -520,7 +520,7 @@ systemctl status timed
 ### Upgrading with Installation Script
 
 ```bash
-cd timecoin
+cd time-masternode
 git pull origin main
 sudo ./scripts/install-masternode.sh mainnet
 ```
@@ -537,7 +537,7 @@ sudo systemctl stop timed
 cp ~/.timecoin/time-wallet.dat ~/time-wallet-backup.dat
 
 # Pull latest code
-cd timecoin
+cd time-masternode
 git pull origin main
 
 # Rebuild
@@ -561,7 +561,7 @@ systemctl status timed
 ### Using Uninstall Script
 
 ```bash
-cd timecoin
+cd time-masternode
 sudo ./scripts/uninstall-masternode.sh mainnet
 ```
 
@@ -696,8 +696,8 @@ See [Network Configuration Guide](./NETWORK_CONFIG.md) for full reference.
 
 ## Support
 
-- **Documentation**: [https://github.com/time-coin/timecoin/tree/main/docs](../README.md)
-- **Issues**: [GitHub Issues](https://github.com/time-coin/timecoin/issues)
+- **Documentation**: [https://github.com/time-coin/time-masternode/tree/main/docs](../README.md)
+- **Issues**: [GitHub Issues](https://github.com/time-coin/time-masternode/issues)
 - **Community**: [time-coin.io](https://time-coin.io)
 
 ---

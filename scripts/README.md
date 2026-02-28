@@ -225,8 +225,8 @@ time-cli getbalance
 ### 1. Install (Mainnet)
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/timecoin.git
-cd timecoin
+git clone https://github.com/yourusername/time-masternode.git
+cd time-masternode
 
 # Run installer for mainnet
 sudo ./scripts/install-masternode.sh mainnet
@@ -363,7 +363,7 @@ sudo apt-get install build-essential pkg-config libssl-dev nasm
 rustc --version
 
 # Try manual build
-cd /path/to/timecoin
+cd /path/to/time-masternode
 cargo build --release
 ```
 
@@ -460,7 +460,7 @@ To upgrade to a new version:
 sudo systemctl stop timed
 
 # Pull latest code
-cd /path/to/timecoin
+cd /path/to/time-masternode
 git pull origin main
 
 # Rebuild and reinstall
@@ -579,7 +579,7 @@ bash scripts/health-check.sh --testnet --quiet
 bash scripts/health-check.sh --testnet --max-behind 10 --min-peers 3
 
 # Cron example (alert if not healthy)
-*/5 * * * * bash /root/timecoin/scripts/health-check.sh --testnet --quiet || echo "Node unhealthy" | mail -s "ALERT" admin@example.com
+*/5 * * * * bash /root/time-masternode/scripts/health-check.sh --testnet --quiet || echo "Node unhealthy" | mail -s "ALERT" admin@example.com
 ```
 
 ### reindex.sh

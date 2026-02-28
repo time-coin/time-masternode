@@ -12,7 +12,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-DEFAULT_REPO_DIR="$HOME/timecoin"
+DEFAULT_REPO_DIR="$HOME/time-masternode"
 BIN_DIR="/usr/local/bin"
 
 # Print functions
@@ -54,11 +54,11 @@ check_root() {
     fi
 }
 
-# Find the timecoin repository
+# Find the time-masternode repository
 find_repo() {
     local repo_dir=""
     
-    # Check if we're already in the timecoin directory
+    # Check if we're already in the time-masternode directory
     if [ -f "Cargo.toml" ] && grep -q "name = \"timed\"" Cargo.toml 2>/dev/null; then
         repo_dir="$(pwd)"
         print_success "Found repository in current directory" >&2
@@ -68,8 +68,8 @@ find_repo() {
         print_success "Found repository at $DEFAULT_REPO_DIR" >&2
     # Search in common locations
     else
-        print_step "Searching for timecoin repository..." >&2
-        for dir in "$HOME/timecoin" "/root/timecoin" "/opt/timecoin" "$HOME/projects/timecoin"; do
+        print_step "Searching for time-masternode repository..." >&2
+        for dir in "$HOME/time-masternode" "/root/time-masternode" "/opt/time-masternode" "$HOME/projects/time-masternode"; do
             if [ -d "$dir/.git" ] && [ -f "$dir/Cargo.toml" ]; then
                 repo_dir="$dir"
                 print_success "Found repository at $dir" >&2
@@ -79,9 +79,9 @@ find_repo() {
     fi
     
     if [ -z "$repo_dir" ]; then
-        print_error "Could not find timecoin repository" >&2
+        print_error "Could not find time-masternode repository" >&2
         echo "Please specify the repository directory:" >&2
-        echo "  sudo $0 /path/to/timecoin" >&2
+        echo "  sudo $0 /path/to/time-masternode" >&2
         exit 1
     fi
     
