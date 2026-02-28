@@ -30,6 +30,7 @@ Commands:
     listunspent            List unspent transaction outputs
     listtransactions       List recent wallet transactions
     sendtoaddress          Send TIME to an address
+    sendfrom               Send TIME from a specific address
     mergeutxos             Merge UTXOs to reduce UTXO set size
   Transaction
     gettransaction         Get information about a transaction
@@ -182,6 +183,23 @@ enum Commands {
     SendToAddress {
         /// Recipient address
         address: String,
+        /// Amount to send (in TIME)
+        amount: f64,
+        /// Subtract fee from amount (recipient gets amount minus fee)
+        #[arg(long, default_value = "false")]
+        subtract_fee: bool,
+        /// Return TXID immediately without waiting for finality
+        #[arg(long, default_value = "false")]
+        nowait: bool,
+    },
+
+    /// Send TIME from a specific address
+    #[command(next_help_heading = "Wallet")]
+    SendFrom {
+        /// Source address to spend UTXOs from
+        from_address: String,
+        /// Recipient address
+        to_address: String,
         /// Amount to send (in TIME)
         amount: f64,
         /// Subtract fee from amount (recipient gets amount minus fee)
@@ -489,6 +507,16 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } => (
             "sendtoaddress",
             json!([address, amount, subtract_fee, nowait]),
+        ),
+        Commands::SendFrom {
+            from_address,
+            to_address,
+            amount,
+            subtract_fee,
+            nowait,
+        } => (
+            "sendfrom",
+            json!([from_address, to_address, amount, subtract_fee, nowait]),
         ),
         Commands::MergeUtxos {
             min_count,

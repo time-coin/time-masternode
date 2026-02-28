@@ -95,6 +95,7 @@ impl RpcHandler {
             "getrawmempool" => self.get_raw_mempool().await,
             "getmempoolverbose" => self.get_mempool_verbose().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
+            "sendfrom" => self.send_from(&params_array).await,
             "mergeutxos" => self.merge_utxos(&params_array).await,
             "gettransactionfinality" => self.get_transaction_finality(&params_array).await,
             "waittransactionfinality" => self.wait_transaction_finality(&params_array).await,
@@ -2247,10 +2248,7 @@ impl RpcHandler {
     }
 
     async fn send_to_address(&self, params: &[Value]) -> Result<Value, RpcError> {
-        // Maximum inputs per transaction (~9000 would hit 1MB TX size limit;
-        // cap lower to leave headroom and prevent excessive memory use)
-        const MAX_TX_INPUTS: usize = 5000;
-        // Parse parameters: sendtoaddress "address" amount
+        // sendtoaddress "to_address" amount [subtract_fee] [nowait]
         let to_address = params
             .first()
             .and_then(|v| v.as_str())
@@ -2267,16 +2265,10 @@ impl RpcHandler {
                 message: "Invalid params: expected amount".to_string(),
             })?;
 
-        // Optional 3rd param: subtract_fee_from_amount (default: false)
         let subtract_fee = params.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
-
-        // Optional 4th param: nowait - return TXID immediately without waiting for finality
         let nowait = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
 
-        // Convert TIME to smallest unit (like satoshis)
-        let amount_units = (amount * 100_000_000.0) as u64;
-
-        // Get wallet address for UTXO filtering and change output
+        // Use default wallet address
         let wallet_address = self
             .registry
             .get_local_masternode()
@@ -2286,6 +2278,58 @@ impl RpcHandler {
                 code: -4,
                 message: "Node is not configured as a masternode - no wallet address".to_string(),
             })?;
+
+        self.send_coins(&wallet_address, to_address, amount, subtract_fee, nowait)
+            .await
+    }
+
+    async fn send_from(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // sendfrom "from_address" "to_address" amount [subtract_fee] [nowait]
+        let from_address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected from_address".to_string(),
+            })?;
+
+        let to_address = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected to_address".to_string(),
+            })?;
+
+        let amount = params
+            .get(2)
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected amount".to_string(),
+            })?;
+
+        let subtract_fee = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
+        let nowait = params.get(4).and_then(|v| v.as_bool()).unwrap_or(false);
+
+        self.send_coins(from_address, to_address, amount, subtract_fee, nowait)
+            .await
+    }
+
+    async fn send_coins(
+        &self,
+        from_address: &str,
+        to_address: &str,
+        amount: f64,
+        subtract_fee: bool,
+        nowait: bool,
+    ) -> Result<Value, RpcError> {
+        // Maximum inputs per transaction (~9000 would hit 1MB TX size limit;
+        // cap lower to leave headroom and prevent excessive memory use)
+        const MAX_TX_INPUTS: usize = 5000;
+
+        // Convert TIME to smallest unit (like satoshis)
+        let amount_units = (amount * 100_000_000.0) as u64;
 
         // On UTXO contention, exclude contested outpoints and re-select different UTXOs
         const MAX_RETRIES: u32 = 3;
@@ -2302,11 +2346,8 @@ impl RpcHandler {
                 );
             }
 
-            // Get UTXOs for this wallet using address index (fresh each attempt)
-            let wallet_utxos = self
-                .utxo_manager
-                .list_utxos_by_address(&wallet_address)
-                .await;
+            // Get UTXOs for the source address (fresh each attempt)
+            let wallet_utxos = self.utxo_manager.list_utxos_by_address(from_address).await;
 
             // Filter: unspent, not collateral, not in exclusion set
             let mut utxos: Vec<_> = wallet_utxos
@@ -2412,7 +2453,7 @@ impl RpcHandler {
 
                 let cons_outputs = vec![TxOutput {
                     value: consolidate_total - consolidate_fee,
-                    script_pubkey: wallet_address.as_bytes().to_vec(),
+                    script_pubkey: from_address.as_bytes().to_vec(),
                 }];
 
                 let mut cons_tx = Transaction {
@@ -2530,7 +2571,7 @@ impl RpcHandler {
             if change > 0 {
                 outputs.push(TxOutput {
                     value: change,
-                    script_pubkey: wallet_address.as_bytes().to_vec(),
+                    script_pubkey: from_address.as_bytes().to_vec(),
                 });
             }
 
