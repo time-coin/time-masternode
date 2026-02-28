@@ -94,8 +94,8 @@
 ### From Source
 
 ```bash
-git clone https://github.com/time-coin/timecoin.git
-cd timecoin
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
 cargo build --release
 ```
 
@@ -239,7 +239,7 @@ See **[docs/CLI_GUIDE.md](docs/CLI_GUIDE.md)** for complete command reference.
 ## 📁 Directory Structure
 
 ```
-timecoin/
+time-masternode/
 ├── src/
 │   ├── main.rs              # Entry point
 │   ├── lib.rs               # Library exports
@@ -572,7 +572,7 @@ This project is licensed under the Business Source License 1.1 - see the [LICENS
 ## 🔗 Links
 
 - Website: [https://time-coin.io](https://time-coin.io)
-- Documentation: [Docs](https://github.com/time-coin/timecoin/blob/main/docs/INDEX.md)
+- Documentation: [Docs](https://github.com/time-coin/time-masternode/blob/main/docs/INDEX.md)
 - Block Explorer: Coming Soon
 - Discord: Coming soon
 
@@ -595,8 +595,8 @@ This project is licensed under the Business Source License 1.1 - see the [LICENS
 
 ## 📞 Support
 
-- **GitHub Issues**: [Report bugs or request features](https://github.com/time-coin/timecoin/issues)
-- **Documentation**: [Complete docs](https://github.com/time-coin/timecoin/blob/main/docs/INDEX.md)
+- **GitHub Issues**: [Report bugs or request features](https://github.com/time-coin/time-masternode/issues)
+- **Documentation**: [Complete docs](https://github.com/time-coin/time-masternode/blob/main/docs/INDEX.md)
 - **Discord**: Coming soon
 - **Email**: support@time-coin.io
 

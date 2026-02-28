@@ -776,7 +776,7 @@ anomaly_detection = true      # Default: true
 ### References
 - [TIMECOIN_PROTOCOL.md](docs/TIMECOIN_PROTOCOL.md) - Protocol specification
 - [AI_SYSTEM.md](docs/AI_SYSTEM.md) - AI features documentation
-- [GitHub Repository](https://github.com/time-coin/timecoin)
+- [GitHub Repository](https://github.com/time-coin/time-masternode)
 
 ---
 
@@ -794,5 +794,5 @@ anomaly_detection = true      # Default: true
 
 ---
 
-[1.0.0]: https://github.com/time-coin/timecoin/releases/tag/v1.0.0
-[0.1.0]: https://github.com/time-coin/timecoin/releases/tag/v0.1.0
+[1.0.0]: https://github.com/time-coin/time-masternode/releases/tag/v1.0.0
+[0.1.0]: https://github.com/time-coin/time-masternode/releases/tag/v0.1.0

@@ -21,7 +21,7 @@ masternode=1
 
 2. Start/restart the daemon:
 ```bash
-bash timecoin/target/release/timed
+bash time-masternode/target/release/timed
 ```
 
 3. Verify:

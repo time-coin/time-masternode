@@ -50,7 +50,7 @@ After schema changes (specifically adding `time_attestations` field to Block), n
 
 Just update to latest code and restart:
 ```bash
-cd /path/to/timecoin
+cd /path/to/time-masternode
 git pull
 cargo build --release
 sudo systemctl restart timed.service
