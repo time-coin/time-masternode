@@ -1,4 +1,4 @@
-# TIME Coin Protocol Node
+# TIME Coin Protocol Masternode
 ## Next-Generation Cryptocurrency with Instant Finality
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
