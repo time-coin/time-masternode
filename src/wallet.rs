@@ -89,7 +89,7 @@ impl Wallet {
         let signing_key = SigningKey::from_bytes(&rand::random::<[u8; 32]>());
         let verifying_key = signing_key.verifying_key();
 
-        let address = Address::from_public_key(&verifying_key, network);
+        let address = Address::from_public_key(verifying_key.as_bytes(), network);
 
         let data = WalletData {
             version: 1,

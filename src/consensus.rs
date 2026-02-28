@@ -20,7 +20,7 @@ use crate::transaction_pool::TransactionPool;
 use crate::types::*;
 use crate::utxo_manager::UTXOStateManager;
 use dashmap::{DashMap, DashSet};
-use ed25519_dalek::{Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signer, VerifyingKey};
 use parking_lot::RwLock;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -2459,29 +2459,26 @@ impl ConsensusEngine {
 
         // Move CPU-intensive signature verification to blocking pool
         tokio::task::spawn_blocking(move || {
-            use ed25519_dalek::Signature;
+            use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
 
-            // script_sig = [32-byte pubkey || 64-byte signature]
-            if script_sig.len() != 96 {
+            // script_sig = [33-byte compressed pubkey || 64-byte ECDSA signature]
+            if script_sig.len() != 97 {
                 return Err(format!(
-                    "Invalid script_sig length: {} (expected 96: 32-byte pubkey + 64-byte signature)",
+                    "Invalid script_sig length: {} (expected 97: 33-byte pubkey + 64-byte signature)",
                     script_sig.len()
                 ));
             }
 
-            let pubkey_bytes: [u8; 32] = script_sig[..32]
-                .try_into()
-                .map_err(|_| "Failed to extract public key bytes")?;
-            let sig_bytes: [u8; 64] = script_sig[32..96]
+            let pubkey_bytes = &script_sig[..33];
+            let sig_bytes: [u8; 64] = script_sig[33..97]
                 .try_into()
                 .map_err(|_| "Failed to extract signature bytes")?;
 
-            // Parse public key
-            let public_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
+            // Parse compressed secp256k1 public key
+            let public_key = VerifyingKey::from_sec1_bytes(pubkey_bytes)
                 .map_err(|e| format!("Invalid public key: {}", e))?;
 
             // Verify public key matches UTXO's address
-            // script_pubkey stores the address string as UTF-8 bytes
             let addr_str = String::from_utf8(addr_bytes.clone())
                 .map_err(|_| "Invalid UTF-8 in UTXO script_pubkey")?;
             let network = if addr_str.starts_with("TIME0") {
@@ -2492,7 +2489,7 @@ impl ConsensusEngine {
                 return Err("Invalid address prefix in UTXO script_pubkey".to_string());
             };
             let derived_addr =
-                crate::address::Address::from_public_key(&public_key, network).to_string();
+                crate::address::Address::from_public_key(pubkey_bytes, network).to_string();
             if derived_addr.as_bytes() != addr_bytes.as_slice() {
                 return Err(format!(
                     "Public key doesn't match UTXO address: derived {} vs stored {}",
@@ -2500,8 +2497,9 @@ impl ConsensusEngine {
                 ));
             }
 
-            // Verify signature
-            let signature = Signature::from_bytes(&sig_bytes);
+            // Verify ECDSA signature
+            let signature = Signature::from_slice(&sig_bytes)
+                .map_err(|e| format!("Invalid signature format: {}", e))?;
             public_key.verify(&message, &signature).map_err(|_| {
                 format!(
                     "Signature verification FAILED for input {}: signature doesn't match message",
