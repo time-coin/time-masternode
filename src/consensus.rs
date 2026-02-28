@@ -2459,23 +2459,25 @@ impl ConsensusEngine {
 
         // Move CPU-intensive signature verification to blocking pool
         tokio::task::spawn_blocking(move || {
-            use k256::ecdsa::{signature::Verifier, Signature, VerifyingKey};
+            use ed25519_dalek::Signature;
 
-            // script_sig = [33-byte compressed pubkey || 64-byte ECDSA signature]
-            if script_sig.len() != 97 {
+            // script_sig = [32-byte Ed25519 pubkey || 64-byte signature]
+            if script_sig.len() != 96 {
                 return Err(format!(
-                    "Invalid script_sig length: {} (expected 97: 33-byte pubkey + 64-byte signature)",
+                    "Invalid script_sig length: {} (expected 96: 32-byte pubkey + 64-byte signature)",
                     script_sig.len()
                 ));
             }
 
-            let pubkey_bytes = &script_sig[..33];
-            let sig_bytes: [u8; 64] = script_sig[33..97]
+            let pubkey_bytes: [u8; 32] = script_sig[..32]
+                .try_into()
+                .map_err(|_| "Failed to extract public key bytes")?;
+            let sig_bytes: [u8; 64] = script_sig[32..96]
                 .try_into()
                 .map_err(|_| "Failed to extract signature bytes")?;
 
-            // Parse compressed secp256k1 public key
-            let public_key = VerifyingKey::from_sec1_bytes(pubkey_bytes)
+            // Parse Ed25519 public key
+            let public_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)
                 .map_err(|e| format!("Invalid public key: {}", e))?;
 
             // Verify public key matches UTXO's address
@@ -2489,7 +2491,8 @@ impl ConsensusEngine {
                 return Err("Invalid address prefix in UTXO script_pubkey".to_string());
             };
             let derived_addr =
-                crate::address::Address::from_public_key(pubkey_bytes, network).to_string();
+                crate::address::Address::from_public_key(pubkey_bytes.as_slice(), network)
+                    .to_string();
             if derived_addr.as_bytes() != addr_bytes.as_slice() {
                 return Err(format!(
                     "Public key doesn't match UTXO address: derived {} vs stored {}",
@@ -2497,10 +2500,9 @@ impl ConsensusEngine {
                 ));
             }
 
-            // Verify ECDSA signature
-            let signature = Signature::from_slice(&sig_bytes)
-                .map_err(|e| format!("Invalid signature format: {}", e))?;
-            public_key.verify(&message, &signature).map_err(|_| {
+            // Verify Ed25519 signature
+            let signature = Signature::from_bytes(&sig_bytes);
+            public_key.verify_strict(&message, &signature).map_err(|_| {
                 format!(
                     "Signature verification FAILED for input {}: signature doesn't match message",
                     input_idx
