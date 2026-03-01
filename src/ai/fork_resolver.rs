@@ -3,7 +3,7 @@
 //! Simple rules, strictly enforced:
 //! 1. Reject blocks with future timestamps (> 5s tolerance)
 //! 2. Longer chain always wins (longest chain rule)
-//! 3. Same height: stake weight tiebreaker, then deterministic hash tiebreaker
+//! 3. Same height: deterministic hash tiebreaker (lower hash wins)
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,7 +31,7 @@ pub struct ForkResolution {
     pub reasoning: Vec<String>,
 }
 
-/// Fork resolver — longest chain rule with stake tiebreaker
+/// Fork resolver — longest chain rule with deterministic hash tiebreaker
 pub struct ForkResolver;
 
 impl ForkResolver {
@@ -101,46 +101,10 @@ impl ForkResolver {
             };
         }
 
-        // Rule 3: Same height — stake weight tiebreaker
-        if params.peer_stake_weight > params.our_stake_weight {
-            reasoning.push(format!(
-                "ACCEPT: Same height {}, peer stake {} > ours {}",
-                params.peer_height, params.peer_stake_weight, params.our_stake_weight
-            ));
-            info!(
-                "✅ Fork: ACCEPT {} — higher stake at height {} (peer {} > ours {})",
-                params.peer_ip,
-                params.peer_height,
-                params.peer_stake_weight,
-                params.our_stake_weight
-            );
-            return ForkResolution {
-                accept_peer_chain: true,
-                stake_override: false,
-                reasoning,
-            };
-        }
-
-        if params.peer_stake_weight < params.our_stake_weight {
-            reasoning.push(format!(
-                "REJECT: Same height {}, our stake {} > peer {}",
-                params.our_height, params.our_stake_weight, params.peer_stake_weight
-            ));
-            info!(
-                "❌ Fork: REJECT {} — our stake wins at height {} (ours {} > peer {})",
-                params.peer_ip,
-                params.our_height,
-                params.our_stake_weight,
-                params.peer_stake_weight
-            );
-            return ForkResolution {
-                accept_peer_chain: false,
-                stake_override: false,
-                reasoning,
-            };
-        }
-
-        // Rule 3b: Same height, same stake — deterministic hash tiebreaker (lower wins)
+        // Rule 3: Same height — deterministic hash tiebreaker (lower wins)
+        // Stake weight from local peer counting is NOT used because it's
+        // subjective (each node sees different peers) and causes permanent
+        // forks where both sides think they have more support.
         if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
             if peer_hash == our_hash {
                 reasoning.push("No fork: identical chains".to_string());
@@ -152,8 +116,9 @@ impl ForkResolver {
             }
             let accept = peer_hash < our_hash;
             reasoning.push(format!(
-                "{}: Same height+stake, hash tiebreaker (peer {} {} ours {})",
+                "{}: Same height {}, hash tiebreaker (peer {} {} ours {})",
                 if accept { "ACCEPT" } else { "REJECT" },
+                params.peer_height,
                 hex::encode(&peer_hash[..8]),
                 if accept { "<" } else { ">" },
                 hex::encode(&our_hash[..8])
