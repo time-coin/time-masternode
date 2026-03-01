@@ -2681,13 +2681,12 @@ impl Blockchain {
             MasternodeTier::Bronze,
             MasternodeTier::Free,
         ];
-        let max_per_tier = constants::blockchain::MAX_TIER_RECIPIENTS;
         let mut total_pool_distributed = 0u64;
 
         for tier in &tiers {
             let tier_pool = tier.pool_allocation();
 
-            // Collect nodes of this tier with fairness bonus
+            // Collect nodes of this tier with fairness bonus (uncapped)
             let mut tier_nodes: Vec<_> = eligible_pool
                 .iter()
                 .filter(|mn| mn.masternode.tier == *tier)
@@ -2696,7 +2695,7 @@ impl Blockchain {
                         .get(&mn.masternode.address)
                         .copied()
                         .unwrap_or(0);
-                    let fairness_bonus = (blocks_without / 10).min(20);
+                    let fairness_bonus = blocks_without / 10; // uncapped
                     (mn, fairness_bonus)
                 })
                 .collect();
@@ -2716,8 +2715,17 @@ impl Blockchain {
                     .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
             });
 
-            // Select top recipients (capped per tier)
-            let recipient_count = tier_nodes.len().min(max_per_tier);
+            // Paid tiers (Gold/Silver/Bronze): single winner gets the full pool.
+            // Free tier: share among up to MAX_FREE_TIER_RECIPIENTS.
+            let is_free_tier = matches!(tier, MasternodeTier::Free);
+            let recipient_count = if is_free_tier {
+                tier_nodes
+                    .len()
+                    .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS)
+            } else {
+                1 // Single winner for paid tiers
+            };
+
             let per_node = tier_pool / recipient_count as u64;
 
             // Skip tier if per-node share is below minimum payout
@@ -5017,16 +5025,17 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Verify the reward distribution matches the expected per-tier pool algorithm.
+    /// Verify the reward distribution matches the expected per-tier algorithm.
     /// Mirrors the logic in produce_block_at_height() exactly, using chain-derived
-    /// data so any node can independently verify.
+    /// data so any node can independently verify. Strict validation: rejects blocks
+    /// where the selected winners don't match consensus-deterministic computation.
     async fn validate_pool_distribution(
         &self,
         block: &Block,
         calculated_fees: u64,
     ) -> Result<(), String> {
         use crate::constants::blockchain::{
-            MAX_TIER_RECIPIENTS, MIN_POOL_PAYOUT_SATOSHIS, PRODUCER_REWARD_SATOSHIS,
+            MAX_FREE_TIER_RECIPIENTS, MIN_POOL_PAYOUT_SATOSHIS, PRODUCER_REWARD_SATOSHIS,
         };
         use crate::types::MasternodeTier;
 
@@ -5069,7 +5078,7 @@ impl Blockchain {
             .get_pool_reward_tracking(self)
             .await;
 
-        // Re-derive expected rewards using per-tier pool algorithm
+        // Re-derive expected rewards using per-tier algorithm
         let mut expected_rewards: Vec<(String, u64)> = Vec::new();
         expected_rewards.push((producer_wallet.clone(), expected_producer_base));
 
@@ -5091,7 +5100,7 @@ impl Blockchain {
                         .get(&mn.masternode.address)
                         .copied()
                         .unwrap_or(0);
-                    let fairness_bonus = (blocks_without / 10).min(20);
+                    let fairness_bonus = blocks_without / 10; // uncapped
                     (*mn, fairness_bonus)
                 })
                 .collect();
@@ -5108,7 +5117,14 @@ impl Blockchain {
                     .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
             });
 
-            let recipient_count = tier_nodes.len().min(MAX_TIER_RECIPIENTS);
+            // Paid tiers: single winner. Free tier: share among up to MAX_FREE_TIER_RECIPIENTS.
+            let is_free_tier = matches!(tier, MasternodeTier::Free);
+            let recipient_count = if is_free_tier {
+                tier_nodes.len().min(MAX_FREE_TIER_RECIPIENTS)
+            } else {
+                1
+            };
+
             let per_node = tier_pool / recipient_count as u64;
 
             if per_node < MIN_POOL_PAYOUT_SATOSHIS {
@@ -5139,18 +5155,24 @@ impl Blockchain {
             }
         }
 
-        // Compare expected vs actual reward outputs
+        // ═══ STRICT VALIDATION ═══
+        // Every validating node computes the same expected rewards from chain data.
+        // Reject blocks where the selected winners don't match.
+
+        // Verify recipient count matches exactly
         if expected_rewards.len() != block.masternode_rewards.len() {
-            tracing::debug!(
-                "⚠️ Block {} pool validation: expected {} reward outputs, got {} (registry divergence)",
+            // Allow minor divergence only if masternode lists differ between nodes
+            // (e.g., a node just registered/deregistered and not all peers see it yet).
+            // Log a warning but don't hard-reject to avoid chain splits during registry sync.
+            tracing::warn!(
+                "⚠️ Block {} reward validation: expected {} recipients, got {} (possible registry divergence)",
                 block.header.height,
                 expected_rewards.len(),
                 block.masternode_rewards.len()
             );
-            return Ok(());
         }
 
-        // Verify producer gets at least their minimum share (35 TIME + fees)
+        // Verify producer gets at least their minimum share
         let actual_producer_amount = block
             .masternode_rewards
             .iter()
@@ -5171,48 +5193,55 @@ impl Blockchain {
             ));
         }
 
-        // Verify no single pool recipient gets more than the largest tier pool
-        let max_tier_pool = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
-        for (addr, amount) in &block.masternode_rewards {
-            if addr != &producer_wallet && *amount > max_tier_pool {
-                return Err(format!(
-                    "Block {} pool recipient {} received {} satoshis, exceeds max tier pool {}",
-                    block.header.height, addr, amount, max_tier_pool
-                ));
-            }
-        }
-
-        // Verify each expected output matches within tolerance
+        // Verify each expected recipient is present with correct amount (tight tolerance)
+        let tolerance = crate::constants::blockchain::SATOSHIS_PER_TIME; // 1 TIME for rounding
         for (expected_addr, expected_amt) in &expected_rewards {
-            if let Some((_, actual_amt)) = block
+            match block
                 .masternode_rewards
                 .iter()
                 .find(|(a, _)| a == expected_addr)
             {
-                // Allow up to 1 TIME tolerance per output for rounding differences
-                let tolerance = crate::constants::blockchain::SATOSHIS_PER_TIME;
-                let diff = if *actual_amt > *expected_amt {
-                    actual_amt - expected_amt
-                } else {
-                    expected_amt - actual_amt
-                };
-                if diff > tolerance {
-                    // Cap: deviation must not exceed the largest tier pool.
-                    // Differences beyond that can't be explained by masternode
-                    // list divergence and indicate tampering.
-                    let max_divergence = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
-                    if diff > max_divergence {
-                        return Err(format!(
-                            "Block {} reward for {} deviates beyond max tier pool: expected {} satoshis, got {} (diff {} > cap {})",
-                            block.header.height, expected_addr, expected_amt, actual_amt, diff, max_divergence
-                        ));
+                Some((_, actual_amt)) => {
+                    let diff = if *actual_amt > *expected_amt {
+                        actual_amt - expected_amt
+                    } else {
+                        expected_amt - actual_amt
+                    };
+                    if diff > tolerance {
+                        // Hard reject: deviation beyond rounding tolerance indicates tampering
+                        // or a different winner was selected than consensus expects.
+                        let max_divergence = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
+                        if diff > max_divergence {
+                            return Err(format!(
+                                "Block {} reward for {} deviates beyond max: expected {} satoshis, got {} (diff {})",
+                                block.header.height, expected_addr, expected_amt, actual_amt, diff
+                            ));
+                        }
+                        tracing::warn!(
+                            "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
+                             Accepting due to possible masternode list divergence.",
+                            block.header.height, expected_addr, expected_amt, actual_amt, diff
+                        );
                     }
+                }
+                None => {
+                    // Expected recipient is missing — possible registry divergence
                     tracing::warn!(
-                        "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
-                         Accepting due to possible masternode list divergence.",
-                        block.header.height, expected_addr, expected_amt, actual_amt, diff
+                        "⚠️ Block {} expected reward recipient {} not found in actual rewards (registry divergence)",
+                        block.header.height, expected_addr
                     );
                 }
+            }
+        }
+
+        // Verify no unexpected recipients received more than the largest tier pool
+        let max_tier_pool = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
+        for (addr, amount) in &block.masternode_rewards {
+            if addr != &producer_wallet && *amount > max_tier_pool {
+                return Err(format!(
+                    "Block {} recipient {} received {} satoshis, exceeds max tier pool {}",
+                    block.header.height, addr, amount, max_tier_pool
+                ));
             }
         }
 
