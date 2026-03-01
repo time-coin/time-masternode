@@ -18,7 +18,8 @@ pub mod blockchain {
     /// Treasury allocation per block — deposited as on-chain state, not a UTXO
     pub const TREASURY_POOL_SATOSHIS: u64 = 5 * SATOSHIS_PER_TIME; // 5 TIME
 
-    /// Per-tier reward pools — each tier's allocation rotates among its active nodes
+    /// Per-tier reward pools — paid tiers award their full pool to a single winner
+    /// selected by fairness bonus; Free tier shares among up to MAX_FREE_TIER_RECIPIENTS.
     pub const GOLD_POOL_SATOSHIS: u64 = 25 * SATOSHIS_PER_TIME; // 25 TIME
     pub const SILVER_POOL_SATOSHIS: u64 = 18 * SATOSHIS_PER_TIME; // 18 TIME
     pub const BRONZE_POOL_SATOSHIS: u64 = 14 * SATOSHIS_PER_TIME; // 14 TIME
@@ -28,7 +29,7 @@ pub mod blockchain {
         GOLD_POOL_SATOSHIS + SILVER_POOL_SATOSHIS + BRONZE_POOL_SATOSHIS + FREE_POOL_SATOSHIS;
 
     pub const MIN_POOL_PAYOUT_SATOSHIS: u64 = SATOSHIS_PER_TIME; // 1 TIME minimum per recipient
-    pub const MAX_TIER_RECIPIENTS: usize = 25; // Max recipients per tier per block
+    pub const MAX_FREE_TIER_RECIPIENTS: usize = 25; // Max recipients for Free tier per block
 
     /// Anti-sybil maturity gate: Free nodes must be online this many blocks before
     /// becoming eligible for VRF sortition and the participation pool.
