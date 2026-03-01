@@ -206,6 +206,9 @@ pub struct Blockchain {
     pub fork_state: Arc<RwLock<ForkResolutionState>>,
     /// Fork resolution mutex to prevent concurrent fork resolutions (race condition protection)
     fork_resolution_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Block processing mutex to prevent concurrent block additions from multiple peers.
+    /// Without this, overlapping sync batches cause UTXO double-processing and state corruption.
+    block_processing_lock: Arc<tokio::sync::Mutex<()>>,
     /// Consensus peers (majority chain) - reject blocks from non-consensus peers during fork resolution
     consensus_peers: Arc<RwLock<Vec<String>>>,
     /// Two-tier block cache for efficient memory usage (10-50x faster reads)
@@ -328,6 +331,7 @@ impl Blockchain {
             reorg_history: Arc::new(RwLock::new(Vec::new())),
             fork_state: Arc::new(RwLock::new(ForkResolutionState::None)),
             fork_resolution_lock: Arc::new(tokio::sync::Mutex::new(())),
+            block_processing_lock: Arc::new(tokio::sync::Mutex::new(())),
             consensus_peers: Arc::new(RwLock::new(Vec::new())),
             block_cache,
             consensus_health,
@@ -5876,6 +5880,13 @@ impl Blockchain {
             ));
         }
 
+        // CRITICAL: Serialize all block processing to prevent race conditions.
+        // Without this lock, multiple peers sending overlapping block ranges during sync
+        // causes TOCTOU races: multiple threads pass the "does block exist?" check,
+        // then ALL process the same block's UTXOs → duplicate UTXO indexing, AlreadySpent
+        // errors, height oscillation, and eventual node stall.
+        let _block_guard = self.block_processing_lock.lock().await;
+
         // CRITICAL: Reject blocks during active reorg to prevent concurrent fork resolutions
         // Multiple peers sending competing chains simultaneously causes chain corruption
         {
@@ -8923,6 +8934,7 @@ impl Clone for Blockchain {
             reorg_history: self.reorg_history.clone(),
             fork_state: self.fork_state.clone(),
             fork_resolution_lock: self.fork_resolution_lock.clone(),
+            block_processing_lock: self.block_processing_lock.clone(),
             consensus_peers: self.consensus_peers.clone(),
             block_cache: self.block_cache.clone(),
             consensus_health: self.consensus_health.clone(),
