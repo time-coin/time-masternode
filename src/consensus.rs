@@ -2764,6 +2764,26 @@ impl ConsensusEngine {
                         .update_state(&input.previous_output, new_state);
                 }
 
+                // Create new UTXOs from transaction outputs (change + recipient)
+                for (idx, output) in tx.outputs.iter().enumerate() {
+                    let outpoint = OutPoint {
+                        txid,
+                        vout: idx as u32,
+                    };
+                    let utxo = UTXO {
+                        outpoint: outpoint.clone(),
+                        value: output.value,
+                        script_pubkey: output.script_pubkey.clone(),
+                        address: String::from_utf8(output.script_pubkey.clone())
+                            .unwrap_or_default(),
+                    };
+                    if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                        tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                    }
+                    self.utxo_manager
+                        .update_state(&outpoint, UTXOState::Unspent);
+                }
+
                 // Broadcast finalization to all nodes so they also finalize it
                 // Include the transaction itself so nodes can add it if they don't have it
                 self.broadcast(NetworkMessage::TransactionFinalized {
@@ -2950,6 +2970,40 @@ impl ConsensusEngine {
                                 hex::encode(txid),
                                 weight
                             );
+
+                            // Transition input UTXOs from Locked → SpentFinalized
+                            // and create output UTXOs as Unspent
+                            if let Some(ref tx_data) = tx_for_broadcast {
+                                for input in &tx_data.inputs {
+                                    let new_state = UTXOState::SpentFinalized {
+                                        txid,
+                                        finalized_at: chrono::Utc::now().timestamp(),
+                                        votes: 0,
+                                    };
+                                    consensus_engine_clone
+                                        .utxo_manager
+                                        .update_state(&input.previous_output, new_state);
+                                }
+                                for (idx, output) in tx_data.outputs.iter().enumerate() {
+                                    let outpoint = OutPoint {
+                                        txid,
+                                        vout: idx as u32,
+                                    };
+                                    let utxo = UTXO {
+                                        outpoint: outpoint.clone(),
+                                        value: output.value,
+                                        script_pubkey: output.script_pubkey.clone(),
+                                        address: String::from_utf8(output.script_pubkey.clone())
+                                            .unwrap_or_default(),
+                                    };
+                                    if let Err(e) = consensus_engine_clone.utxo_manager.add_utxo(utxo).await {
+                                        tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                                    }
+                                    consensus_engine_clone
+                                        .utxo_manager
+                                        .update_state(&outpoint, UTXOState::Unspent);
+                                }
+                            }
 
                             // Try to assemble TimeProof from any votes that arrived
                             match consensus.assemble_timeproof(txid) {

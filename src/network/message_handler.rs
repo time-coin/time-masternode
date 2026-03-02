@@ -3951,8 +3951,38 @@ impl MessageHandler {
                         std::time::Instant::now(),
                     ));
 
+                    let tx_data = consensus.tx_pool.get_pending(&txid);
                     if consensus.tx_pool.finalize_transaction(txid) {
                         tracing::info!("✅ TX {} moved to finalized pool", hex::encode(txid));
+
+                        // Transition input UTXOs and create output UTXOs
+                        if let Some(ref tx) = tx_data {
+                            for input in &tx.inputs {
+                                let new_state = crate::types::UTXOState::SpentFinalized {
+                                    txid,
+                                    finalized_at: chrono::Utc::now().timestamp(),
+                                    votes: 0,
+                                };
+                                consensus.utxo_manager.update_state(&input.previous_output, new_state);
+                            }
+                            for (idx, output) in tx.outputs.iter().enumerate() {
+                                let outpoint = crate::types::OutPoint {
+                                    txid,
+                                    vout: idx as u32,
+                                };
+                                let utxo = crate::types::UTXO {
+                                    outpoint: outpoint.clone(),
+                                    value: output.value,
+                                    script_pubkey: output.script_pubkey.clone(),
+                                    address: String::from_utf8(output.script_pubkey.clone())
+                                        .unwrap_or_default(),
+                                };
+                                if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
+                                    tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                                }
+                                consensus.utxo_manager.update_state(&outpoint, crate::types::UTXOState::Unspent);
+                            }
+                        }
 
                         consensus
                             .timevote
