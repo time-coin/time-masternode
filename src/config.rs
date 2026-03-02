@@ -860,9 +860,27 @@ impl Config {
                 println!("  ✓ Loaded masternode config: alias={}", entry.alias);
             }
         } else {
-            // Always generate masternode.conf template so it's ready to edit
-            generate_default_masternode_conf(&mn_conf_path)?;
+            // Auto-populate masternode.conf with detected IP on first run
+            let ext_addr = if config.masternode.enabled {
+                Some(config.network.full_external_address(network_type))
+            } else {
+                None
+            };
+            generate_default_masternode_conf(&mn_conf_path, ext_addr.as_deref())?;
             println!("  ✓ Generated default {}", mn_conf_path.display());
+
+            // Re-read auto-populated entry for the address
+            if ext_addr.is_some() {
+                let entries = parse_masternode_conf(&mn_conf_path)?;
+                if let Some(entry) = entries.first() {
+                    config.masternode.enabled = true;
+                    if !entry.address.is_empty() {
+                        config.network.external_address = Some(entry.address.clone());
+                    }
+                    // Skip collateral — all-zeros is a free-tier placeholder
+                    println!("  ✓ Auto-populated masternode config: alias={}", entry.alias);
+                }
+            }
         }
 
         // Lock down non-configurable settings
@@ -1138,8 +1156,12 @@ pub fn generate_default_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::E
 
 /// Generate a default masternode.conf with instructions.
 #[allow(dead_code)]
-pub fn generate_default_masternode_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let contents = r#"# TIME Coin Masternode Configuration
+pub fn generate_default_masternode_conf(
+    path: &PathBuf,
+    external_address: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut contents = String::from(
+        r#"# TIME Coin Masternode Configuration
 #
 # Format (one entry per line):
 #   alias  IP:port  collateral_txid  collateral_vout
@@ -1171,7 +1193,16 @@ pub fn generate_default_masternode_conf(path: &PathBuf) -> Result<(), Box<dyn st
 #
 # Example:
 #   mn1  69.167.168.176:24100  fc5b049a39807958cf...  0
-"#;
+"#,
+    );
+
+    // Auto-populate a free-tier entry with detected IP on first run
+    if let Some(addr) = external_address {
+        if !addr.is_empty() {
+            let zero_txid = "0".repeat(64);
+            contents.push_str(&format!("\nmn1  {}  {}  0\n", addr, zero_txid));
+        }
+    }
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
@@ -1317,7 +1348,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("masternode.conf");
 
-        generate_default_masternode_conf(&path).unwrap();
+        generate_default_masternode_conf(&path, None).unwrap();
         assert!(path.exists());
 
         let contents = fs::read_to_string(&path).unwrap();
@@ -1327,6 +1358,17 @@ mod tests {
         // Should parse as empty (all lines are comments)
         let entries = parse_masternode_conf(&path).unwrap();
         assert!(entries.is_empty());
+
+        fs::remove_file(&path).ok();
+
+        // With external address — should auto-populate an entry
+        generate_default_masternode_conf(&path, Some("1.2.3.4:24100")).unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("mn1  1.2.3.4:24100"));
+        let entries = parse_masternode_conf(&path).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].alias, "mn1");
+        assert_eq!(entries[0].address, "1.2.3.4:24100");
 
         fs::remove_file(&path).ok();
         fs::remove_dir_all(&dir).ok();
