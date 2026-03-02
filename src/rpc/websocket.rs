@@ -6,8 +6,9 @@
 //! Protocol:
 //!   Client → Server: {"method":"subscribe","params":{"address":"TIME0..."}}
 //!   Client → Server: {"method":"unsubscribe","params":{"address":"TIME0..."}}
-//!   Server → Client: {"type":"tx_notification","data":{...}}   (mempool entry)
-//!   Server → Client: {"type":"utxo_finalized","data":{...}}    (consensus reached)
+//!   Server → Client: {"type":"tx_notification","data":{...}}   (mempool entry — pending)
+//!   Server → Client: {"type":"utxo_finalized","data":{...}}    (consensus reached — approved)
+//!   Server → Client: {"type":"tx_declined","data":{...}}       (rejected during finality)
 //!   Server → Client: {"type":"pong"}
 //!   Client → Server: {"method":"ping"}
 
@@ -19,16 +20,25 @@ use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Event emitted for transaction lifecycle (mempool entry or finalization)
+/// Transaction lifecycle status for WebSocket events
+#[derive(Clone, Debug)]
+pub enum TxEventStatus {
+    /// Transaction entered the mempool (pending confirmation)
+    Pending,
+    /// Transaction reached consensus finality (approved)
+    Finalized,
+    /// Transaction was declined during finality
+    Declined(String),
+}
+
+/// Event emitted for transaction lifecycle (mempool entry, finalization, or decline)
 #[derive(Clone, Debug, Serialize)]
 pub struct TransactionEvent {
     pub txid: String,
     pub outputs: Vec<TxOutputInfo>,
     pub timestamp: i64,
-    /// If true, this is a finality event (UTXO consensus reached).
-    /// If false, the transaction just entered the mempool.
     #[serde(skip)]
-    pub finalized: bool,
+    pub status: TxEventStatus,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -93,10 +103,10 @@ impl SubscriptionManager {
 
     /// Notify all subscribers for affected addresses
     pub fn notify_transaction(&self, event: &TransactionEvent) {
-        let msg_type = if event.finalized {
-            "utxo_finalized"
-        } else {
-            "tx_notification"
+        let msg_type = match &event.status {
+            TxEventStatus::Finalized => "utxo_finalized",
+            TxEventStatus::Pending => "tx_notification",
+            TxEventStatus::Declined(_) => "tx_declined",
         };
 
         let sub_count = self.total_subscriptions();
@@ -117,23 +127,36 @@ impl SubscriptionManager {
                 self.subscriptions.contains_key(&output.address),
             );
             if let Some(senders) = self.subscriptions.get(&output.address) {
-                let data = if event.finalized {
-                    serde_json::json!({
-                        "txid": event.txid,
-                        "address": output.address,
-                        "amount": output.amount,
-                        "output_index": output.index,
-                        "timestamp": event.timestamp,
-                    })
-                } else {
-                    serde_json::json!({
-                        "txid": event.txid,
-                        "address": output.address,
-                        "amount": output.amount,
-                        "output_index": output.index,
-                        "timestamp": event.timestamp,
-                        "confirmations": 0,
-                    })
+                let data = match &event.status {
+                    TxEventStatus::Finalized => {
+                        serde_json::json!({
+                            "txid": event.txid,
+                            "address": output.address,
+                            "amount": output.amount,
+                            "output_index": output.index,
+                            "timestamp": event.timestamp,
+                        })
+                    }
+                    TxEventStatus::Pending => {
+                        serde_json::json!({
+                            "txid": event.txid,
+                            "address": output.address,
+                            "amount": output.amount,
+                            "output_index": output.index,
+                            "timestamp": event.timestamp,
+                            "confirmations": 0,
+                        })
+                    }
+                    TxEventStatus::Declined(reason) => {
+                        serde_json::json!({
+                            "txid": event.txid,
+                            "address": output.address,
+                            "amount": output.amount,
+                            "output_index": output.index,
+                            "timestamp": event.timestamp,
+                            "reason": reason,
+                        })
+                    }
                 };
 
                 let notification = ServerNotification {
@@ -251,10 +274,15 @@ pub async fn start_ws_server(
                 result = event_rx.recv() => {
                     match result {
                         Ok(event) => {
+                            let status_str = match &event.status {
+                                TxEventStatus::Pending => "pending",
+                                TxEventStatus::Finalized => "finalized",
+                                TxEventStatus::Declined(_) => "declined",
+                            };
                             tracing::info!(
-                                "📡 WS dispatcher received event: txid={}..., finalized={}",
+                                "📡 WS dispatcher received event: txid={}..., status={}",
                                 &event.txid[..std::cmp::min(16, event.txid.len())],
-                                event.finalized,
+                                status_str,
                             );
                             event_mgr.notify_transaction(&event);
                         }

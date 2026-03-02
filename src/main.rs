@@ -3346,7 +3346,7 @@ async fn main() {
                                             txid: hex::encode(txid),
                                             outputs,
                                             timestamp: chrono::Utc::now().timestamp(),
-                                            finalized: true,
+                                            status: rpc::websocket::TxEventStatus::Finalized,
                                         };
                                         match finality_ws_sender.send(event) {
                                             Ok(n) => tracing::info!("📡 WS utxo_finalized sent to {} receiver(s)", n),
