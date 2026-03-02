@@ -5,7 +5,7 @@
 
 #![allow(dead_code)] // Attestation methods are scaffolding for future integration
 
-use crate::types::{Hash256, Transaction};
+use crate::types::{Hash256, Transaction, TransactionV1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -111,12 +111,12 @@ impl From<BlockHeaderV1> for BlockHeader {
 }
 
 /// Old block format from before active_masternodes_bitmap and liveness_recovery fields were added
-/// Used for deserializing legacy blocks from storage
+/// Uses TransactionV1 (without special_data) for deserializing legacy blocks from storage
 #[allow(deprecated)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockV1 {
     pub header: BlockHeaderV1,
-    pub transactions: Vec<Transaction>,
+    pub transactions: Vec<TransactionV1>,
     pub masternode_rewards: Vec<(String, u64)>,
     #[serde(default)]
     pub time_attestations: Vec<TimeAttestation>,
@@ -128,7 +128,7 @@ impl From<BlockV1> for Block {
     fn from(v1: BlockV1) -> Self {
         Block {
             header: v1.header.into(),
-            transactions: v1.transactions,
+            transactions: v1.transactions.into_iter().map(|t| t.into()).collect(),
             masternode_rewards: v1.masternode_rewards,
             time_attestations: vec![], // Always empty in new blocks
             consensus_participants_bitmap: vec![], // Not present in old blocks
@@ -160,6 +160,36 @@ pub struct Block {
     /// §7.6 Liveness Fallback: Flag indicating this block resolved stalled transactions
     #[serde(default)]
     pub liveness_recovery: Option<bool>,
+}
+
+/// Intermediate block format: current header (with active_masternodes_bitmap/liveness_recovery)
+/// but old TransactionV1 (without special_data). For blocks stored between header update
+/// and masternode registration feature.
+#[allow(deprecated)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BlockV2 {
+    pub header: BlockHeader,
+    pub transactions: Vec<TransactionV1>,
+    pub masternode_rewards: Vec<(String, u64)>,
+    #[serde(default)]
+    pub time_attestations: Vec<TimeAttestation>,
+    #[serde(default)]
+    pub consensus_participants_bitmap: Vec<u8>,
+    #[serde(default)]
+    pub liveness_recovery: Option<bool>,
+}
+
+impl From<BlockV2> for Block {
+    fn from(v2: BlockV2) -> Self {
+        Block {
+            header: v2.header,
+            transactions: v2.transactions.into_iter().map(|t| t.into()).collect(),
+            masternode_rewards: v2.masternode_rewards,
+            time_attestations: v2.time_attestations,
+            consensus_participants_bitmap: v2.consensus_participants_bitmap,
+            liveness_recovery: v2.liveness_recovery,
+        }
+    }
 }
 
 /// Masternode counts by tier at time of block production
