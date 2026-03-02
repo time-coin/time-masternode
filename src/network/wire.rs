@@ -1,13 +1,13 @@
 //! Length-prefixed bincode wire protocol for P2P communication.
 //!
 //! Frame format: [4-byte length (u32 big-endian)][bincode payload]
-//! Maximum frame size: 4MB (prevents memory exhaustion attacks)
+//! Maximum frame size: 8MB (prevents memory exhaustion attacks)
 
 use crate::network::message::NetworkMessage;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-/// Maximum allowed frame size (4MB)
-pub const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
+/// Maximum allowed frame size (8MB)
+pub const MAX_FRAME_SIZE: u32 = 8 * 1024 * 1024;
 
 /// Serialize a NetworkMessage and write it as a length-prefixed frame.
 pub async fn write_message<W: AsyncWrite + Unpin>(
