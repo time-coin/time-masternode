@@ -262,6 +262,11 @@ async fn main() {
                                 println!("  ✓ Loaded masternodeprivkey from time.conf");
                             }
                         }
+                        if let Some(addrs) = conf_values.get("reward_address") {
+                            if let Some(addr) = addrs.last() {
+                                cfg.masternode.reward_address = addr.clone();
+                            }
+                        }
                     }
                 }
                 cfg
@@ -330,6 +335,7 @@ async fn main() {
     println!();
 
     // Decode masternodeprivkey from time.conf if provided (used as consensus signing key)
+    // If not set, auto-generate one and append it to time.conf
     let masternode_signing_key: Option<ed25519_dalek::SigningKey> =
         if !config.masternode.masternodeprivkey.is_empty() {
             match masternode_certificate::decode_masternode_key(
@@ -348,6 +354,22 @@ async fn main() {
                     None
                 }
             }
+        } else if config.masternode.enabled {
+            // Auto-generate a masternodeprivkey and persist it to time.conf
+            let mut seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+            let encoded = masternode_certificate::encode_masternode_key(&seed);
+            let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+            println!("✓ Auto-generated masternodeprivkey");
+
+            // Append to time.conf so it persists across restarts
+            if let Err(e) = config::append_conf_key(&conf_path, "masternodeprivkey", &encoded) {
+                eprintln!("⚠️ Could not save masternodeprivkey to time.conf: {}", e);
+            } else {
+                println!("  └─ Saved to {}", conf_path.display());
+            }
+            config.masternode.masternodeprivkey = encoded;
+            Some(key)
         } else {
             None
         };
@@ -360,8 +382,16 @@ async fn main() {
 
     // Initialize masternode info for later registration
     let mut masternode_info: Option<types::Masternode> = if config.masternode.enabled {
-        // Always use the wallet's address (auto-generated per node)
-        let wallet_address = wallet.address().to_string();
+        // Use reward_address from config if set, otherwise fall back to auto-generated wallet address
+        let wallet_address = if !config.masternode.reward_address.is_empty() {
+            println!(
+                "✓ Using reward address from time.conf: {}",
+                config.masternode.reward_address
+            );
+            config.masternode.reward_address.clone()
+        } else {
+            wallet.address().to_string()
+        };
 
         // Get external address and extract IP only (no port) for consistent masternode identification
         let full_address = config.network.full_external_address(&network_type);
