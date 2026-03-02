@@ -19,15 +19,12 @@ pub struct ForkResolutionParams {
     pub peer_tip_timestamp: Option<i64>,
     pub our_tip_hash: Option<[u8; 32]>,
     pub peer_tip_hash: Option<[u8; 32]>,
-    pub our_stake_weight: u64,
-    pub peer_stake_weight: u64,
 }
 
 /// Fork resolution result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForkResolution {
     pub accept_peer_chain: bool,
-    pub stake_override: bool,
     pub reasoning: Vec<String>,
 }
 
@@ -60,7 +57,6 @@ impl ForkResolver {
                 );
                 return ForkResolution {
                     accept_peer_chain: false,
-                    stake_override: false,
                     reasoning,
                 };
             }
@@ -79,7 +75,6 @@ impl ForkResolver {
             );
             return ForkResolution {
                 accept_peer_chain: true,
-                stake_override: false,
                 reasoning,
             };
         }
@@ -96,21 +91,18 @@ impl ForkResolver {
             );
             return ForkResolution {
                 accept_peer_chain: false,
-                stake_override: false,
                 reasoning,
             };
         }
 
         // Rule 3: Same height — deterministic hash tiebreaker (lower wins)
-        // Stake weight from local peer counting is NOT used because it's
-        // subjective (each node sees different peers) and causes permanent
-        // forks where both sides think they have more support.
+        // This is globally consistent because all nodes see the same block hashes,
+        // unlike stake weight which is subjective (each node sees different peers).
         if let (Some(our_hash), Some(peer_hash)) = (params.our_tip_hash, params.peer_tip_hash) {
             if peer_hash == our_hash {
                 reasoning.push("No fork: identical chains".to_string());
                 return ForkResolution {
                     accept_peer_chain: false,
-                    stake_override: false,
                     reasoning,
                 };
             }
@@ -131,7 +123,6 @@ impl ForkResolver {
             );
             return ForkResolution {
                 accept_peer_chain: accept,
-                stake_override: false,
                 reasoning,
             };
         }
@@ -140,7 +131,6 @@ impl ForkResolver {
         reasoning.push("Same height, no distinguishing data — keeping our chain".to_string());
         ForkResolution {
             accept_peer_chain: false,
-            stake_override: false,
             reasoning,
         }
     }

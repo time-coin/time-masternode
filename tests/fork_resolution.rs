@@ -1,10 +1,11 @@
 //! Phase 5: Fork Resolution Testing
-//! Tests network partition recovery and fork resolution using VRF-based canonical chain selection
+//! Tests network partition recovery and fork resolution using longest chain rule
+//! with deterministic hash tiebreaker (lower hash wins at equal heights).
 //!
 //! Success Criteria:
 //! - Network partition creates fork
 //! - Each partition continues consensus independently
-//! - On reconnection, minority adopts majority chain
+//! - On reconnection, longer chain wins; at same height, lower hash wins
 //! - No spurious reorganizations
 
 #[cfg(test)]
@@ -43,12 +44,17 @@ mod tests {
             self.blocks.last().map(|s| s.as_str())
         }
 
-        fn compute_vrf_score(&self) -> u64 {
-            // Simplified: sum of block numbers as VRF scores
-            self.blocks
-                .iter()
-                .filter_map(|b| b.split("block").nth(1).and_then(|s| s.parse::<u64>().ok()))
-                .sum()
+        /// Compute a deterministic hash for this node's chain tip.
+        /// Uses a simple hash based on chain contents for testing.
+        fn chain_tip_hash(&self) -> u64 {
+            let mut hash: u64 = 0;
+            for block in &self.blocks {
+                // Simple deterministic hash combining block content
+                for byte in block.bytes() {
+                    hash = hash.wrapping_mul(31).wrapping_add(byte as u64);
+                }
+            }
+            hash
         }
     }
 
@@ -98,28 +104,33 @@ mod tests {
             }
         }
 
-        /// Group B produces blocks during partition
+        /// Group B produces blocks during partition (different block content)
         fn advance_group_b(&mut self) {
             for (_, node_arc) in &self.nodes {
                 let mut node = node_arc.lock().unwrap();
                 if node.partition_group == Some(1) {
                     let len = node.get_chain_length();
-                    node.add_block(format!("block{}", len + 1));
+                    node.add_block(format!("alt_block{}", len + 1));
                 }
             }
         }
 
-        /// Apply canonical chain rule: higher VRF score wins
+        /// Apply fork resolution: longest chain wins, hash tiebreaker at same height
         fn resolve_forks(&mut self) {
-            // Find chain with highest VRF score
+            // Group chains by length, then pick winner
             let mut best_chain: Option<Vec<String>> = None;
-            let mut best_score = 0u64;
+            let mut best_length = 0usize;
+            let mut best_hash = u64::MAX; // lower hash wins
 
             for (_, node_arc) in &self.nodes {
                 let node = node_arc.lock().unwrap();
-                let score = node.compute_vrf_score();
-                if score > best_score {
-                    best_score = score;
+                let length = node.get_chain_length();
+                let hash = node.chain_tip_hash();
+
+                // Longest chain wins; at same length, lower hash wins
+                if length > best_length || (length == best_length && hash < best_hash) {
+                    best_length = length;
+                    best_hash = hash;
                     best_chain = Some(node.blocks.clone());
                 }
             }
@@ -210,21 +221,38 @@ mod tests {
     }
 
     #[test]
-    fn test_vrf_score_determines_canonical_chain() {
-        let validators = vec![
-            ("node_a".to_string(), 100),
-            ("node_b".to_string(), 100),
-            ("node_c".to_string(), 100),
-        ];
-        let network = PartitionTestNetwork::new(validators);
+    fn test_hash_tiebreaker_at_equal_height() {
+        let validators = vec![("node_a".to_string(), 100), ("node_b".to_string(), 100)];
+        let mut network = PartitionTestNetwork::new(validators);
 
-        // Verify VRF score calculation
-        let mut node_a = network.nodes[0].1.lock().unwrap();
-        node_a.add_block("block1".to_string());
-        node_a.add_block("block2".to_string());
+        // Partition so each produces different blocks
+        network.partition(vec!["node_a".to_string()], vec!["node_b".to_string()]);
 
-        let score = node_a.compute_vrf_score();
-        assert_eq!(score, 3, "VRF score should be sum of block numbers (1+2)");
+        // Both produce same number of blocks but different content
+        network.advance_group_a();
+        network.advance_group_a();
+        network.advance_group_b();
+        network.advance_group_b();
+
+        // Verify equal length but different chains
+        let hash_a = network.nodes[0].1.lock().unwrap().chain_tip_hash();
+        let hash_b = network.nodes[1].1.lock().unwrap().chain_tip_hash();
+        assert_ne!(hash_a, hash_b, "Chains should have different hashes");
+
+        // Resolve: lower hash should win deterministically
+        network.reconnect();
+        network.resolve_forks();
+
+        let final_hash_a = network.nodes[0].1.lock().unwrap().chain_tip_hash();
+        let final_hash_b = network.nodes[1].1.lock().unwrap().chain_tip_hash();
+        assert_eq!(
+            final_hash_a, final_hash_b,
+            "All nodes should agree after resolution"
+        );
+
+        // Winner should be the chain with lower hash
+        let expected_hash = hash_a.min(hash_b);
+        assert_eq!(final_hash_a, expected_hash, "Lower hash chain should win");
     }
 
     #[test]
@@ -251,16 +279,19 @@ mod tests {
 
         // Save final state
         let final_chain_length = network.nodes[0].1.lock().unwrap().get_chain_length();
+        let final_hash = network.nodes[0].1.lock().unwrap().chain_tip_hash();
 
         // Try fork resolution again
         network.resolve_forks();
 
         // Chain should not change
         let post_reorg = network.nodes[0].1.lock().unwrap().get_chain_length();
+        let post_hash = network.nodes[0].1.lock().unwrap().chain_tip_hash();
         assert_eq!(
             final_chain_length, post_reorg,
             "No spurious reorganizations should occur"
         );
+        assert_eq!(final_hash, post_hash, "Hash should remain stable");
     }
 
     #[test]
@@ -292,7 +323,7 @@ mod tests {
 
         assert!(majority_len < minority_len);
 
-        // Reconnect and resolve
+        // Reconnect and resolve — longest chain wins (minority has 5)
         network.reconnect();
         network.resolve_forks();
 
@@ -303,6 +334,7 @@ mod tests {
 
         assert_eq!(node_a_final, node_b_final);
         assert_eq!(node_b_final, node_c_final);
+        assert_eq!(node_c_final, 5, "Longest chain (5 blocks) should win");
     }
 
     #[test]
@@ -330,7 +362,7 @@ mod tests {
         let len_b = network.nodes[1].1.lock().unwrap().get_chain_length();
         assert_eq!(len_a, len_b, "Forks should have equal length");
 
-        // Reconnect and resolve
+        // Reconnect and resolve — hash tiebreaker should pick one deterministically
         network.reconnect();
         network.resolve_forks();
 

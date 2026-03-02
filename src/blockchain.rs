@@ -3164,7 +3164,7 @@ impl Blockchain {
             if let Some((peer_height, peer_hash)) = peer_registry.get_peer_chain_tip(peer_ip).await
             {
                 // CRITICAL: Ignore peers with zero hash (corrupted/missing blocks)
-                // Same logic as compare_chain_with_peers() at line 5560
+                // Same logic as compare_chain_with_peers()
                 if peer_hash == [0u8; 32] {
                     peers_ignored += 1;
                     tracing::debug!(
@@ -6872,36 +6872,11 @@ impl Blockchain {
         }
 
         // Find the LONGEST chain (highest height)
-        // Use weighted stake as tiebreaker when heights are equal (Bronze=10, Free=1)
-        // Pre-compute weighted stake for each chain
-        let mut chain_weights: std::collections::HashMap<(u64, [u8; 32]), u64> =
-            std::collections::HashMap::new();
-        for ((height, hash), peers) in &chain_counts {
-            let mut weight = 0u64;
-            for peer_ip in peers {
-                weight += match self.masternode_registry.get(peer_ip).await {
-                    Some(info) => info.masternode.tier.sampling_weight(),
-                    None => crate::types::MasternodeTier::Free.sampling_weight(),
-                };
-            }
-            chain_weights.insert((*height, *hash), weight);
-        }
+        // Same-height tiebreaker: deterministic hash comparison (lower hash wins)
+        // This matches ForkResolver logic — no subjective stake weight tiebreaker
+        // which would cause permanent forks (each node sees different peers).
 
-        // Add our own stake weight to the chain we're on
-        if let Some(w) = chain_weights.get_mut(&(our_height, our_hash)) {
-            let our_weight =
-                if let Some(local_addr) = self.masternode_registry.get_local_address().await {
-                    match self.masternode_registry.get(&local_addr).await {
-                        Some(info) => info.masternode.tier.sampling_weight(),
-                        None => crate::types::MasternodeTier::Free.sampling_weight(),
-                    }
-                } else {
-                    crate::types::MasternodeTier::Free.sampling_weight()
-                };
-            *w += our_weight;
-        }
-
-        // Log stake weights when there are multiple chains (fork)
+        // Log peer counts when there are multiple chains (fork)
         if should_log && num_chains > 1 {
             let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
             let max_h = heights.iter().max().copied().unwrap_or(0);
@@ -6909,21 +6884,18 @@ impl Blockchain {
             let is_benign_lag = max_h - min_h <= 1;
 
             for ((height, hash), peers) in &chain_counts {
-                let w = chain_weights.get(&(*height, *hash)).copied().unwrap_or(0);
                 if is_benign_lag {
                     tracing::debug!(
-                        "   ⚖️  Chain @ height {}, hash {}: stake_weight={} ({} peers)",
+                        "   ⚖️  Chain @ height {}, hash {}: {} peers",
                         height,
                         hex::encode(&hash[..8]),
-                        w,
                         peers.len()
                     );
                 } else {
                     tracing::info!(
-                        "   ⚖️  Chain @ height {}, hash {}: stake_weight={} ({} peers)",
+                        "   ⚖️  Chain @ height {}, hash {}: {} peers",
                         height,
                         hex::encode(&hash[..8]),
-                        w,
                         peers.len()
                     );
                 }
@@ -6932,27 +6904,14 @@ impl Blockchain {
 
         let consensus_chain = chain_counts
             .iter()
-            .max_by(|((h1, hash1), peers1), ((h2, hash2), peers2)| {
-                let w1 = chain_weights.get(&(*h1, *hash1)).copied().unwrap_or(0);
-                let w2 = chain_weights.get(&(*h2, *hash2)).copied().unwrap_or(0);
-
+            .max_by(|((h1, hash1), _peers1), ((h2, hash2), _peers2)| {
                 // LONGEST CHAIN RULE: Height is always the primary criterion.
-                // Stake weight is only used as tiebreaker at equal heights.
                 let height_cmp = h1.cmp(h2);
                 if height_cmp != std::cmp::Ordering::Equal {
                     return height_cmp;
                 }
-                // Same height: higher weighted stake wins
-                let weight_cmp = w1.cmp(&w2);
-                if weight_cmp != std::cmp::Ordering::Equal {
-                    return weight_cmp;
-                }
-                // Tertiary: more peers wins
-                let peer_cmp = peers1.len().cmp(&peers2.len());
-                if peer_cmp != std::cmp::Ordering::Equal {
-                    return peer_cmp;
-                }
-                // Final: deterministic hash tiebreaker (lower hash wins)
+                // Same height: deterministic hash tiebreaker (lower hash wins)
+                // All nodes see the same hashes, so this is globally consistent.
                 hash2.cmp(hash1)
             })
             .map(|((height, hash), peers)| (*height, *hash, peers.clone()))?;
@@ -6990,10 +6949,9 @@ impl Blockchain {
         let height_advantage = consensus_height.saturating_sub(second_highest);
 
         if height_advantage == 0 {
-            // Same-height fork — the chain with more peers is canonical.
-            // Simple majority (>50%) is sufficient because the minority MUST switch
-            // to resolve the fork. Requiring a supermajority causes permanent forks when the split
-            // is close (e.g., 3 vs 2 = 60% never meets 67% threshold).
+            // Same-height fork — chain was selected by deterministic hash tiebreaker.
+            // Require simple majority (>50%) weighted support before acting, to avoid
+            // switching on incomplete information. The minority MUST switch eventually.
             let required_weight = total_responding_weight / 2 + 1; // strict majority
             if consensus_weight < required_weight {
                 tracing::warn!(
@@ -7739,71 +7697,10 @@ impl Blockchain {
                 }
 
                 info!(
-                    "🤖 [SIMPLIFIED] Evaluating fork: our={} peer={}, ancestor={}, depth={}",
+                    "🤖 Evaluating fork: our={} peer={}, ancestor={}, depth={}",
                     our_height, peer_tip_height, common_ancestor, fork_depth
                 );
 
-                // Use stake-weighted fork resolver
-                // Compute CUMULATIVE stake weights for fair comparison
-                // (both sides count all peers on their respective chains)
-                let peer_stake_weight = {
-                    let mut w = 0u64;
-                    // Add the forking peer's own weight
-                    w += match self.masternode_registry.get(&peer_addr).await {
-                        Some(info) => info.masternode.tier.sampling_weight(),
-                        None => crate::types::MasternodeTier::Free.sampling_weight(),
-                    };
-                    // Add weight of other peers on the peer's chain (same height/hash)
-                    if let Some(registry) = self.peer_registry.read().await.as_ref() {
-                        let peers = registry.get_compatible_peers().await;
-                        for pip in &peers {
-                            if pip == &peer_addr {
-                                continue; // already counted
-                            }
-                            if let Some((ph, phash)) = registry.get_peer_chain_tip(pip).await {
-                                if ph == peer_tip_height && phash == peer_tip_hash {
-                                    w += match self.masternode_registry.get(pip).await {
-                                        Some(info) => info.masternode.tier.sampling_weight(),
-                                        None => {
-                                            crate::types::MasternodeTier::Free.sampling_weight()
-                                        }
-                                    };
-                                }
-                            }
-                        }
-                    }
-                    w
-                };
-                // Our weight: sum of all peers on our chain + ourselves
-                let our_stake_weight = {
-                    let mut w = 0u64;
-                    // Add our own weight
-                    if let Some(local_addr) = self.masternode_registry.get_local_address().await {
-                        if let Some(info) = self.masternode_registry.get(&local_addr).await {
-                            w += info.masternode.tier.sampling_weight();
-                        }
-                    }
-                    // Add weight of peers on our chain (same height, same hash)
-                    if let Some(registry) = self.peer_registry.read().await.as_ref() {
-                        let peers = registry.get_compatible_peers().await;
-                        for pip in &peers {
-                            if pip == &peer_addr {
-                                continue; // don't count the forking peer
-                            }
-                            if let Some((ph, phash)) = registry.get_peer_chain_tip(pip).await {
-                                if ph == our_height && phash == our_tip_hash {
-                                    w += match self.masternode_registry.get(pip).await {
-                                        Some(info) => info.masternode.tier.sampling_weight(),
-                                        None => {
-                                            crate::types::MasternodeTier::Free.sampling_weight()
-                                        }
-                                    };
-                                }
-                            }
-                        }
-                    }
-                    w
-                };
                 let resolution = self
                     .fork_resolver
                     .resolve_fork(crate::ai::fork_resolver::ForkResolutionParams {
@@ -7813,15 +7710,13 @@ impl Blockchain {
                         peer_tip_timestamp: Some(peer_tip_timestamp),
                         our_tip_hash: Some(our_tip_hash),
                         peer_tip_hash: Some(peer_tip_hash),
-                        our_stake_weight,
-                        peer_stake_weight,
                     })
                     .await;
 
                 let reasoning_summary = resolution.reasoning.join("; ");
                 info!(
-                    "🤖 Fork resolution decision: accept={}, stake_override={}, reasoning: {}",
-                    resolution.accept_peer_chain, resolution.stake_override, reasoning_summary
+                    "🤖 Fork resolution decision: accept={}, reasoning: {}",
+                    resolution.accept_peer_chain, reasoning_summary
                 );
 
                 // Decision: accept only if fork resolver says so
