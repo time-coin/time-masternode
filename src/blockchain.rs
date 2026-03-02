@@ -3822,6 +3822,10 @@ impl Blockchain {
                             bincode::deserialize::<crate::block::types::BlockV2>(&data)
                         {
                             let block: Block = v2_block.into();
+                            // Persist migrated block to sled so this is a one-time conversion
+                            if let Ok(new_data) = bincode::serialize(&block) {
+                                let _ = self.storage.insert(key_new.as_bytes(), new_data);
+                            }
                             tracing::info!("✓ Migrated block {} from V2 format", height);
                             let block_arc = Arc::new(block);
                             self.block_cache.put(height, block_arc.clone());
@@ -3831,6 +3835,10 @@ impl Blockchain {
                         match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
                             Ok(v1_block) => {
                                 let block: Block = v1_block.into();
+                                // Persist migrated block to sled so this is a one-time conversion
+                                if let Ok(new_data) = bincode::serialize(&block) {
+                                    let _ = self.storage.insert(key_new.as_bytes(), new_data);
+                                }
                                 tracing::info!("✓ Migrated block {} from V1 format", height);
                                 let block_arc = Arc::new(block);
                                 self.block_cache.put(height, block_arc.clone());
@@ -3903,6 +3911,10 @@ impl Blockchain {
                             bincode::deserialize::<crate::block::types::BlockV2>(&data)
                         {
                             let block: Block = v2_block.into();
+                            // Persist migrated block to sled (old key) so this is a one-time conversion
+                            if let Ok(new_data) = bincode::serialize(&block) {
+                                let _ = self.storage.insert(key_old.as_bytes(), new_data);
+                            }
                             tracing::info!(
                                 "✓ Migrated block {} from V2 format (old key)",
                                 height
@@ -3915,6 +3927,10 @@ impl Blockchain {
                         match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
                             Ok(v1_block) => {
                                 let block: Block = v1_block.into();
+                                // Persist migrated block to sled (old key) so this is a one-time conversion
+                                if let Ok(new_data) = bincode::serialize(&block) {
+                                    let _ = self.storage.insert(key_old.as_bytes(), new_data);
+                                }
                                 tracing::info!(
                                     "✓ Migrated block {} from V1 format (old key)",
                                     height

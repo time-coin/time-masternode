@@ -155,15 +155,40 @@ pub struct Transaction {
     pub lock_time: u32,
     pub timestamp: i64,
     /// Optional special transaction payload for masternode operations.
-    /// `None` for regular transactions (backward-compatible).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// `None` for regular transactions.
+    /// NOTE: Do NOT use `skip_serializing_if` here — bincode is positional and
+    /// skipping the field makes serialize/deserialize asymmetric, causing an
+    /// infinite migration loop (serialized Block is identical to BlockV2).
+    #[serde(default)]
     pub special_data: Option<SpecialTransactionData>,
 }
 
 impl Transaction {
     pub fn txid(&self) -> Hash256 {
-        // Use JSON serialization for canonical, network-compatible hashing
-        let json = serde_json::to_string(self).expect("JSON serialization should succeed");
+        // Use JSON serialization for canonical, network-compatible hashing.
+        // When special_data is None, exclude it from JSON to match the legacy
+        // Transaction format (before special_data was added). This keeps txid
+        // hashes — and therefore merkle roots — identical for old blocks.
+        let json = if self.special_data.is_none() {
+            #[derive(Serialize)]
+            struct TxHashCompat<'a> {
+                version: u32,
+                inputs: &'a Vec<TxInput>,
+                outputs: &'a Vec<TxOutput>,
+                lock_time: u32,
+                timestamp: i64,
+            }
+            serde_json::to_string(&TxHashCompat {
+                version: self.version,
+                inputs: &self.inputs,
+                outputs: &self.outputs,
+                lock_time: self.lock_time,
+                timestamp: self.timestamp,
+            })
+            .expect("JSON serialization should succeed")
+        } else {
+            serde_json::to_string(self).expect("JSON serialization should succeed")
+        };
         Sha256::digest(json.as_bytes()).into()
     }
 
