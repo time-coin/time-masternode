@@ -230,6 +230,12 @@ pub struct MasternodeConfig {
     /// Base58check-encoded Ed25519 private key (generate with `time-cli masternodegenkey`)
     #[serde(default)]
     pub masternodeprivkey: String,
+    /// Optional reward/payout address override.
+    /// If set, masternode rewards are sent to this address instead of the
+    /// node's auto-generated wallet address. Use this to receive rewards
+    /// directly in your GUI wallet.
+    #[serde(default)]
+    pub reward_address: String,
 }
 
 /// A parsed entry from masternode.conf (collateral info only; key is in time.conf)
@@ -569,6 +575,7 @@ impl Config {
                 collateral_vout: 0,
                 tier: "free".to_string(),
                 masternodeprivkey: String::new(),
+                reward_address: String::new(),
             },
             security: SecurityConfig {
                 enable_rate_limiting: true,
@@ -819,6 +826,11 @@ impl Config {
                     config.masternode.masternodeprivkey = key.clone();
                 }
             }
+            if let Some(v) = entries.get("reward_address") {
+                if let Some(addr) = v.last() {
+                    config.masternode.reward_address = addr.clone();
+                }
+            }
 
             println!("  ✓ Loaded configuration from {}", conf_path.display());
         } else {
@@ -1043,7 +1055,13 @@ server=1
 masternode=1
 
 # Masternode private key (generate with: time-cli masternode genkey)
+# If not set, one will be auto-generated on first startup.
 #masternodeprivkey=
+
+# Reward address override — send masternode rewards to this address
+# instead of the node's auto-generated wallet. Use your GUI wallet
+# receive address here to collect rewards directly.
+#reward_address=
 
 # ─── Peers ───────────────────────────────────────────────────
 # Add seed nodes (one per line, can repeat)
@@ -1071,6 +1089,47 @@ txindex=1
     Ok(())
 }
 
+/// Append a key=value line to a Dash-style conf file.
+///
+/// If the key already exists (even commented out), un-comments and replaces its value.
+/// Otherwise appends the line at the end.
+pub fn append_conf_key(
+    path: &PathBuf,
+    key: &str,
+    value: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = if path.exists() {
+        fs::read_to_string(path)?
+    } else {
+        String::new()
+    };
+
+    let pattern = format!("#{}=", key);
+    let active_pattern = format!("{}=", key);
+    let mut replaced = false;
+    let mut lines: Vec<String> = contents
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if !replaced
+                && (trimmed.starts_with(&pattern) || trimmed.starts_with(&active_pattern))
+            {
+                replaced = true;
+                format!("{}={}", key, value)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+
+    if !replaced {
+        lines.push(format!("{}={}", key, value));
+    }
+
+    fs::write(path, lines.join("\n") + "\n")?;
+    Ok(())
+}
+
 /// Generate a default time.conf (mainnet defaults).
 #[allow(dead_code)]
 pub fn generate_default_conf(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
@@ -1091,14 +1150,18 @@ pub fn generate_default_masternode_conf(path: &PathBuf) -> Result<(), Box<dyn st
 #   collateral_txid  - Transaction ID of your collateral deposit
 #   collateral_vout  - Output index of your collateral (usually 0)
 #
-# Your masternode private key goes in time.conf:
+# Your masternode private key is auto-generated on first startup and
+# saved to time.conf. You can also set it manually:
 #   masternodeprivkey=<key from `time-cli masternodegenkey`>
 #
+# To send rewards to your GUI wallet instead of this node's wallet,
+# add this line to time.conf:
+#   reward_address=TIME0...your_wallet_address...
+#
 # Steps to set up a masternode:
-#   1. Generate a masternode private key:
-#      time-cli masternodegenkey
-#   2. Add masternodeprivkey=<key> to your time.conf
-#   3. Send collateral to yourself:
+#   1. Start the node — masternodeprivkey is auto-generated
+#   2. (Optional) Set reward_address in time.conf to your GUI wallet address
+#   3. For staked tiers, send collateral to yourself:
 #      time-cli sendtoaddress <your_address> 1000    (Bronze = 1,000 TIME)
 #      time-cli sendtoaddress <your_address> 10000   (Silver = 10,000 TIME)
 #      time-cli sendtoaddress <your_address> 100000  (Gold   = 100,000 TIME)
