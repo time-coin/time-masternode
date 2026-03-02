@@ -541,6 +541,7 @@ mod tests {
             }],
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
+            special_data: None,
         }
     }
 

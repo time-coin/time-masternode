@@ -93,6 +93,36 @@ pub struct TxOutput {
     pub script_pubkey: Vec<u8>,
 }
 
+/// On-chain masternode registration or update payload.
+/// Carried in `Transaction::special_data` for masternode lifecycle operations.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum SpecialTransactionData {
+    /// Register a new masternode (Dash-like ProRegTx).
+    /// The collateral UTXO is *referenced* (not spent) and locked while the masternode is active.
+    MasternodeReg {
+        /// Collateral outpoint in "txid_hex:vout" format
+        collateral_outpoint: String,
+        masternode_ip: String,
+        masternode_port: u16,
+        /// Wallet address to receive block rewards
+        payout_address: String,
+        /// Hex-encoded Ed25519 public key of the collateral owner
+        owner_pubkey: String,
+        /// Ed25519 signature over the registration fields, proving collateral ownership
+        signature: String,
+    },
+    /// Update the payout address of an existing masternode.
+    MasternodePayoutUpdate {
+        /// The masternode's node address (from original registration)
+        masternode_id: String,
+        new_payout_address: String,
+        /// Hex-encoded Ed25519 public key (must match original registration)
+        owner_pubkey: String,
+        /// Ed25519 signature over (masternode_id, new_payout_address)
+        signature: String,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub version: u32,
@@ -100,6 +130,10 @@ pub struct Transaction {
     pub outputs: Vec<TxOutput>,
     pub lock_time: u32,
     pub timestamp: i64,
+    /// Optional special transaction payload for masternode operations.
+    /// `None` for regular transactions (backward-compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub special_data: Option<SpecialTransactionData>,
 }
 
 impl Transaction {
@@ -115,6 +149,21 @@ impl Transaction {
         // In a real implementation, this would be:
         // fee = input_total - output_total
         0
+    }
+
+    /// Returns `true` if this is a masternode registration transaction
+    pub fn is_masternode_reg(&self) -> bool {
+        matches!(self.special_data, Some(SpecialTransactionData::MasternodeReg { .. }))
+    }
+
+    /// Returns `true` if this is a masternode payout update transaction
+    pub fn is_masternode_update(&self) -> bool {
+        matches!(self.special_data, Some(SpecialTransactionData::MasternodePayoutUpdate { .. }))
+    }
+
+    /// Returns `true` if this carries any special transaction data
+    pub fn is_special(&self) -> bool {
+        self.special_data.is_some()
     }
 }
 
@@ -1033,6 +1082,7 @@ mod tests {
             }],
             lock_time: 0,
             timestamp: 1234567890,
+            special_data: None,
         }
     }
 

@@ -320,6 +320,7 @@ mod tests {
             }],
             lock_time: 0,
             timestamp: seed as i64 * 1000,
+            special_data: None,
         }
     }
 

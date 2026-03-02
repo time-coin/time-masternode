@@ -2810,6 +2810,7 @@ impl Blockchain {
             }],
             lock_time: 0,
             timestamp: aligned_timestamp,
+            special_data: None,
         };
 
         // Reward distribution transaction spends coinbase and distributes to masternodes
@@ -2832,6 +2833,7 @@ impl Blockchain {
                 .collect(),
             lock_time: 0,
             timestamp: aligned_timestamp,
+            special_data: None,
         };
 
         // Count masternodes by tier
@@ -3564,6 +3566,11 @@ impl Blockchain {
 
         // Process UTXOs and create undo log
         let undo_log = self.process_block_utxos(&block).await?;
+
+        // Process special transactions (on-chain masternode registration/updates)
+        if !is_genesis {
+            self.process_special_transactions(&block).await;
+        }
 
         // Deposit treasury allocation for this block (5 TIME per block)
         if !is_genesis {
@@ -4766,6 +4773,131 @@ impl Blockchain {
         }
 
         Ok(undo_log)
+    }
+
+    /// Scan a block for special transactions (masternode registration/updates)
+    /// and apply them to the masternode registry.
+    async fn process_special_transactions(&self, block: &Block) {
+        use crate::types::SpecialTransactionData;
+
+        for tx in &block.transactions {
+            let special = match &tx.special_data {
+                Some(data) => data,
+                None => continue,
+            };
+
+            let txid_hex = hex::encode(tx.txid());
+
+            match special {
+                SpecialTransactionData::MasternodeReg {
+                    collateral_outpoint,
+                    masternode_ip,
+                    masternode_port,
+                    payout_address,
+                    owner_pubkey,
+                    signature,
+                } => {
+                    // Validate the registration
+                    match self
+                        .masternode_registry
+                        .validate_masternode_reg(
+                            collateral_outpoint,
+                            masternode_ip,
+                            *masternode_port,
+                            payout_address,
+                            owner_pubkey,
+                            signature,
+                            &self.utxo_manager,
+                        )
+                        .await
+                    {
+                        Ok((outpoint, tier)) => {
+                            // Apply the registration
+                            if let Err(e) = self
+                                .masternode_registry
+                                .apply_masternode_reg(
+                                    outpoint,
+                                    masternode_ip,
+                                    *masternode_port,
+                                    payout_address,
+                                    owner_pubkey,
+                                    tier,
+                                    &self.utxo_manager,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "⚠️ Failed to apply MasternodeReg tx {}: {}",
+                                    &txid_hex[..16],
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ MasternodeReg applied: {}:{} -> {} (tx {})",
+                                    masternode_ip,
+                                    masternode_port,
+                                    payout_address,
+                                    &txid_hex[..16]
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Invalid MasternodeReg tx {}: {}",
+                                &txid_hex[..16],
+                                e
+                            );
+                        }
+                    }
+                }
+
+                SpecialTransactionData::MasternodePayoutUpdate {
+                    masternode_id,
+                    new_payout_address,
+                    owner_pubkey,
+                    signature,
+                } => {
+                    match self
+                        .masternode_registry
+                        .validate_masternode_update(
+                            masternode_id,
+                            new_payout_address,
+                            owner_pubkey,
+                            signature,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            if let Err(e) = self
+                                .masternode_registry
+                                .apply_masternode_update(masternode_id, new_payout_address)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "⚠️ Failed to apply MasternodePayoutUpdate tx {}: {}",
+                                    &txid_hex[..16],
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ MasternodePayoutUpdate applied: {} -> {} (tx {})",
+                                    masternode_id,
+                                    new_payout_address,
+                                    &txid_hex[..16]
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Invalid MasternodePayoutUpdate tx {}: {}",
+                                &txid_hex[..16],
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
