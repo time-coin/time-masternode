@@ -1921,7 +1921,7 @@ impl MessageHandler {
                             txid: hex::encode(&txid),
                             outputs,
                             timestamp: chrono::Utc::now().timestamp(),
-                            finalized: false,
+                            status: crate::rpc::websocket::TxEventStatus::Pending,
                         };
                         let _ = tx_sender.send(event);
                     }

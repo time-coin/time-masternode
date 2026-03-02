@@ -795,7 +795,7 @@ impl RpcHandler {
                 txid: txid_hex.clone(),
                 outputs,
                 timestamp: chrono::Utc::now().timestamp(),
-                finalized: false,
+                status: crate::rpc::websocket::TxEventStatus::Pending,
             };
 
             match tx_sender.send(event) {
@@ -2593,9 +2593,42 @@ impl RpcHandler {
 
             let txid = tx.txid();
 
+            // Build WS output info before tx is consumed by submit
+            let ws_outputs: Vec<crate::rpc::websocket::TxOutputInfo> = tx
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(i, out)| {
+                    let address = String::from_utf8(out.script_pubkey.clone())
+                        .unwrap_or_else(|_| hex::encode(&out.script_pubkey));
+                    crate::rpc::websocket::TxOutputInfo {
+                        address,
+                        amount: out.value as f64 / 100_000_000.0,
+                        index: i as u32,
+                    }
+                })
+                .collect();
+
             match self.consensus.submit_transaction(tx).await {
                 Ok(_) => {
                     let txid_hex = hex::encode(txid);
+
+                    // Emit pending WS notification immediately so wallets see "Pending"
+                    if let Some(ref tx_sender) = self.tx_event_sender {
+                        let event = crate::rpc::websocket::TransactionEvent {
+                            txid: txid_hex.clone(),
+                            outputs: ws_outputs.clone(),
+                            timestamp: chrono::Utc::now().timestamp(),
+                            status: crate::rpc::websocket::TxEventStatus::Pending,
+                        };
+                        match tx_sender.send(event) {
+                            Ok(n) => tracing::info!(
+                                "📡 WS tx_notification (pending) sent to {} receiver(s)",
+                                n
+                            ),
+                            Err(e) => tracing::warn!("📡 WS tx_notification send failed: {}", e),
+                        }
+                    }
 
                     if attempt > 0 {
                         tracing::info!(
@@ -2623,6 +2656,20 @@ impl RpcHandler {
 
                         if let Some(reason) = self.consensus.tx_pool.get_rejection_reason(&txid) {
                             tracing::warn!("❌ Transaction {} rejected: {}", txid_hex, reason);
+
+                            // Emit declined WS notification so wallets see "Declined"
+                            if let Some(ref tx_sender) = self.tx_event_sender {
+                                let event = crate::rpc::websocket::TransactionEvent {
+                                    txid: txid_hex.clone(),
+                                    outputs: ws_outputs.clone(),
+                                    timestamp: chrono::Utc::now().timestamp(),
+                                    status: crate::rpc::websocket::TxEventStatus::Declined(
+                                        reason.clone(),
+                                    ),
+                                };
+                                let _ = tx_sender.send(event);
+                            }
+
                             return Err(RpcError {
                                 code: -26,
                                 message: format!(

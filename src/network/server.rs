@@ -893,7 +893,7 @@ async fn handle_peer(
                                                     txid: hex::encode(txid),
                                                     outputs,
                                                     timestamp: chrono::Utc::now().timestamp(),
-                                                    finalized: false,
+                                                    status: crate::rpc::websocket::TxEventStatus::Pending,
                                                 };
                                                 match tx_sender.send(event) {
                                                     Ok(n) => tracing::info!("📡 WS tx_notification (server.rs) sent to {} receiver(s)", n),
