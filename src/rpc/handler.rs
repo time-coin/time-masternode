@@ -120,6 +120,8 @@ impl RpcHandler {
             "listunspentmulti" => self.list_unspent_multi(&params_array).await,
             "masternodegenkey" => self.masternode_genkey().await,
             "getfeeschedule" => self.get_fee_schedule().await,
+            "masternodereginfo" => self.masternode_reg_info().await,
+            "masternoderegstatus" => self.masternode_reg_status(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -932,6 +934,7 @@ impl RpcHandler {
                 .unwrap()
                 .as_secs() as i64,
             lock_time: 0,
+            special_data: None,
         };
 
         // Serialize and return hex
@@ -1940,6 +1943,79 @@ impl RpcHandler {
         }))
     }
 
+    /// Returns collateral requirements per masternode tier.
+    async fn masternode_reg_info(&self) -> Result<Value, RpcError> {
+        use crate::types::MasternodeTier;
+        Ok(json!({
+            "tiers": {
+                "Bronze": {
+                    "collateral": MasternodeTier::Bronze.collateral(),
+                    "collateral_time": MasternodeTier::Bronze.collateral() / 100_000_000,
+                },
+                "Silver": {
+                    "collateral": MasternodeTier::Silver.collateral(),
+                    "collateral_time": MasternodeTier::Silver.collateral() / 100_000_000,
+                },
+                "Gold": {
+                    "collateral": MasternodeTier::Gold.collateral(),
+                    "collateral_time": MasternodeTier::Gold.collateral() / 100_000_000,
+                },
+            },
+            "note": "Free tier masternodes register via handshake (no collateral required)"
+        }))
+    }
+
+    /// Check registration status for a masternode registration transaction.
+    async fn masternode_reg_status(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_hex = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected txid".to_string(),
+            })?;
+
+        let txid_bytes = hex::decode(txid_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid txid hex".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "txid must be 32 bytes".to_string(),
+            });
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+
+        // Check if the transaction exists in the block index
+        if let Some(ref tx_index) = self.blockchain.tx_index {
+            if let Some(loc) = tx_index.get_location(&txid) {
+                return Ok(json!({
+                    "txid": txid_hex,
+                    "status": "confirmed",
+                    "block_height": loc.block_height,
+                    "tx_index": loc.tx_index,
+                }));
+            }
+        }
+
+        // Check mempool
+        if self.consensus.tx_pool.get_transaction(&txid).is_some() {
+            return Ok(json!({
+                "txid": txid_hex,
+                "status": "pending",
+                "message": "Transaction is in the mempool, awaiting block inclusion"
+            }));
+        }
+
+        Ok(json!({
+            "txid": txid_hex,
+            "status": "not_found",
+            "message": "Transaction not found in blocks or mempool"
+        }))
+    }
+
     async fn validate_address(&self, params: &[Value]) -> Result<Value, RpcError> {
         let address = params
             .first()
@@ -2462,6 +2538,7 @@ impl RpcHandler {
                     outputs: cons_outputs,
                     lock_time: 0,
                     timestamp: chrono::Utc::now().timestamp(),
+                    special_data: None,
                 };
 
                 self.consensus
@@ -2581,6 +2658,7 @@ impl RpcHandler {
                 outputs,
                 lock_time: 0,
                 timestamp: chrono::Utc::now().timestamp(),
+                special_data: None,
             };
 
             // Sign all inputs with wallet key
@@ -2832,6 +2910,7 @@ impl RpcHandler {
             outputs,
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
+            special_data: None,
         };
 
         // Sign all inputs with wallet key

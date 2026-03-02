@@ -57,8 +57,22 @@ pub enum RegistryError {
     InsufficientConfirmations(u64, u64),
     #[error("Collateral has been spent")]
     CollateralSpent,
+    #[error("Owner public key does not match collateral address")]
+    OwnerMismatch,
+    #[error("Invalid signature")]
+    InvalidSignature,
     #[error("Storage error: {0}")]
     Storage(String),
+}
+
+/// How a masternode was registered (handshake-based or on-chain transaction)
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum RegistrationSource {
+    /// Registered via peer handshake (legacy, Free tier)
+    #[default]
+    Handshake,
+    /// Registered via on-chain special transaction at the given block height
+    OnChain(u64),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -81,6 +95,10 @@ pub struct MasternodeInfo {
     /// FREE_MATURITY_BLOCKS before becoming eligible for rewards.
     #[serde(default)]
     pub registration_height: u64,
+
+    /// How this masternode was registered. On-chain takes precedence over handshake.
+    #[serde(default)]
+    pub registration_source: RegistrationSource,
 
     /// Gossip-based status tracking (not serialized to disk)
     /// Maps peer_address -> last_seen_timestamp
@@ -398,6 +416,7 @@ impl MasternodeRegistry {
             last_reward_height: 0,
             blocks_without_reward: 0,
             registration_height: current_h, // Anti-sybil: track when node first appeared
+            registration_source: RegistrationSource::Handshake,
             peer_reports: Arc::new(DashMap::new()),
         };
 
@@ -1771,6 +1790,264 @@ impl MasternodeRegistry {
             .filter(|info| !info.is_active)
             .map(|info| info.masternode.address.clone())
             .collect()
+    }
+
+    // ========================================================================
+    // On-chain masternode registration validation (Phase 1B)
+    // ========================================================================
+
+    /// Validate a MasternodeReg special transaction.
+    ///
+    /// Checks:
+    /// 1. Collateral outpoint exists as an unspent UTXO
+    /// 2. Collateral amount meets the tier requirement
+    /// 3. Owner pubkey matches the collateral UTXO's address
+    /// 4. Signature is valid over the registration fields
+    /// 5. Collateral is not already used by another active masternode
+    #[allow(clippy::too_many_arguments)]
+    pub async fn validate_masternode_reg(
+        &self,
+        collateral_outpoint_str: &str,
+        masternode_ip: &str,
+        masternode_port: u16,
+        payout_address: &str,
+        owner_pubkey_hex: &str,
+        signature_hex: &str,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
+    ) -> Result<(OutPoint, MasternodeTier), RegistryError> {
+        // Parse collateral outpoint "txid_hex:vout"
+        let outpoint = Self::parse_outpoint(collateral_outpoint_str)?;
+
+        // 1. Verify collateral UTXO exists and is unspent
+        let utxo = utxo_manager
+            .get_utxo(&outpoint)
+            .await
+            .map_err(|_| RegistryError::CollateralNotFound)?;
+
+        // 2. Determine tier from collateral value
+        let tier = MasternodeTier::from_collateral_value(utxo.value)
+            .ok_or(RegistryError::InvalidCollateral)?;
+
+        // 3. Verify owner pubkey
+        let owner_pubkey = Self::parse_pubkey(owner_pubkey_hex)?;
+        let expected_address =
+            crate::address::Address::from_public_key(owner_pubkey.as_bytes(), self.network)
+                .as_string();
+        if utxo.address != expected_address {
+            return Err(RegistryError::OwnerMismatch);
+        }
+
+        // 4. Verify signature over registration fields
+        let message = Self::reg_signing_message(
+            collateral_outpoint_str,
+            masternode_ip,
+            masternode_port,
+            payout_address,
+        );
+        Self::verify_signature(&owner_pubkey, &message, signature_hex)?;
+
+        // 5. Check collateral not already used by another active masternode
+        let nodes = self.masternodes.read().await;
+        for info in nodes.values() {
+            if let Some(ref existing_outpoint) = info.masternode.collateral_outpoint {
+                if existing_outpoint.txid == outpoint.txid
+                    && existing_outpoint.vout == outpoint.vout
+                {
+                    return Err(RegistryError::DuplicateCollateral);
+                }
+            }
+        }
+
+        Ok((outpoint, tier))
+    }
+
+    /// Validate a MasternodePayoutUpdate special transaction.
+    ///
+    /// Checks:
+    /// 1. Masternode exists and is registered
+    /// 2. Owner pubkey matches the original registration
+    /// 3. Signature is valid over (masternode_id, new_payout_address)
+    pub async fn validate_masternode_update(
+        &self,
+        masternode_id: &str,
+        new_payout_address: &str,
+        owner_pubkey_hex: &str,
+        signature_hex: &str,
+    ) -> Result<(), RegistryError> {
+        // 1. Verify masternode exists
+        let nodes = self.masternodes.read().await;
+        let info = nodes.get(masternode_id).ok_or(RegistryError::NotFound)?;
+
+        // 2. Verify owner pubkey matches original registration
+        let owner_pubkey = Self::parse_pubkey(owner_pubkey_hex)?;
+        if info.masternode.public_key != owner_pubkey {
+            return Err(RegistryError::OwnerMismatch);
+        }
+
+        // 3. Verify signature
+        let message = Self::update_signing_message(masternode_id, new_payout_address);
+        Self::verify_signature(&owner_pubkey, &message, signature_hex)?;
+
+        Ok(())
+    }
+
+    /// Apply a validated MasternodeReg: register the masternode with on-chain data.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_masternode_reg(
+        &self,
+        outpoint: OutPoint,
+        masternode_ip: &str,
+        masternode_port: u16,
+        payout_address: &str,
+        owner_pubkey_hex: &str,
+        tier: MasternodeTier,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
+    ) -> Result<(), RegistryError> {
+        let owner_pubkey = Self::parse_pubkey(owner_pubkey_hex)?;
+        let address = format!("{}:{}", masternode_ip, masternode_port);
+
+        let masternode = Masternode::new_with_collateral(
+            address.clone(),
+            payout_address.to_string(),
+            tier.collateral(),
+            outpoint.clone(),
+            owner_pubkey,
+            tier,
+            Self::now(),
+        );
+
+        // Lock the collateral UTXO
+        let height = self
+            .current_height
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let _ = utxo_manager.lock_collateral(
+            outpoint,
+            address.clone(),
+            height,
+            tier.collateral(),
+        );
+
+        // Register in the registry
+        self.register(masternode, payout_address.to_string()).await?;
+
+        // Mark as on-chain registration
+        let ip_only = masternode_ip.to_string();
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(&ip_only) {
+            info.registration_source = RegistrationSource::OnChain(height);
+            self.store_masternode(&ip_only, info)?;
+        }
+
+        Ok(())
+    }
+
+    /// Apply a validated MasternodePayoutUpdate: change the payout address.
+    pub async fn apply_masternode_update(
+        &self,
+        masternode_id: &str,
+        new_payout_address: &str,
+    ) -> Result<(), RegistryError> {
+        let mut nodes = self.masternodes.write().await;
+        let info = nodes.get_mut(masternode_id).ok_or(RegistryError::NotFound)?;
+
+        info.reward_address = new_payout_address.to_string();
+        info.masternode.wallet_address = new_payout_address.to_string();
+
+        // Persist to disk
+        self.store_masternode(masternode_id, info)?;
+
+        info!(
+            "📝 Masternode {} payout address updated to {}",
+            masternode_id, new_payout_address
+        );
+
+        Ok(())
+    }
+
+    // --- Helpers for on-chain registration ---
+
+    /// Parse "txid_hex:vout" into an OutPoint
+    fn parse_outpoint(s: &str) -> Result<OutPoint, RegistryError> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 2 {
+            return Err(RegistryError::Storage(format!(
+                "Invalid outpoint format: {}",
+                s
+            )));
+        }
+        let txid_bytes =
+            hex::decode(parts[0]).map_err(|e| RegistryError::Storage(e.to_string()))?;
+        if txid_bytes.len() != 32 {
+            return Err(RegistryError::Storage("txid must be 32 bytes".to_string()));
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+        let vout: u32 = parts[1]
+            .parse()
+            .map_err(|e: std::num::ParseIntError| RegistryError::Storage(e.to_string()))?;
+        Ok(OutPoint { txid, vout })
+    }
+
+    /// Parse hex-encoded Ed25519 public key
+    fn parse_pubkey(
+        hex_str: &str,
+    ) -> Result<ed25519_dalek::VerifyingKey, RegistryError> {
+        let bytes =
+            hex::decode(hex_str).map_err(|e| RegistryError::Storage(e.to_string()))?;
+        if bytes.len() != 32 {
+            return Err(RegistryError::Storage(
+                "Public key must be 32 bytes".to_string(),
+            ));
+        }
+        let mut key_bytes = [0u8; 32];
+        key_bytes.copy_from_slice(&bytes);
+        ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|e| RegistryError::Storage(format!("Invalid public key: {}", e)))
+    }
+
+    /// Construct the canonical message for MasternodeReg signing
+    fn reg_signing_message(
+        collateral_outpoint: &str,
+        masternode_ip: &str,
+        masternode_port: u16,
+        payout_address: &str,
+    ) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let msg = format!(
+            "MN_REG:{}:{}:{}:{}",
+            collateral_outpoint, masternode_ip, masternode_port, payout_address
+        );
+        Sha256::digest(msg.as_bytes()).to_vec()
+    }
+
+    /// Construct the canonical message for MasternodePayoutUpdate signing
+    fn update_signing_message(masternode_id: &str, new_payout_address: &str) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let msg = format!("MN_UPDATE:{}:{}", masternode_id, new_payout_address);
+        Sha256::digest(msg.as_bytes()).to_vec()
+    }
+
+    /// Verify an Ed25519 signature over a message
+    fn verify_signature(
+        pubkey: &ed25519_dalek::VerifyingKey,
+        message: &[u8],
+        signature_hex: &str,
+    ) -> Result<(), RegistryError> {
+        use ed25519_dalek::Verifier;
+        let sig_bytes =
+            hex::decode(signature_hex).map_err(|e| RegistryError::Storage(e.to_string()))?;
+        if sig_bytes.len() != 64 {
+            return Err(RegistryError::InvalidSignature);
+        }
+        let signature = ed25519_dalek::Signature::from_bytes(
+            sig_bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| RegistryError::InvalidSignature)?,
+        );
+        pubkey
+            .verify(message, &signature)
+            .map_err(|_| RegistryError::InvalidSignature)
     }
 }
 
