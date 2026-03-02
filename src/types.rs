@@ -123,6 +123,30 @@ pub enum SpecialTransactionData {
     },
 }
 
+/// Old transaction format without `special_data` field.
+/// Used for deserializing blocks stored before masternode registration was added.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransactionV1 {
+    pub version: u32,
+    pub inputs: Vec<TxInput>,
+    pub outputs: Vec<TxOutput>,
+    pub lock_time: u32,
+    pub timestamp: i64,
+}
+
+impl From<TransactionV1> for Transaction {
+    fn from(v1: TransactionV1) -> Self {
+        Transaction {
+            version: v1.version,
+            inputs: v1.inputs,
+            outputs: v1.outputs,
+            lock_time: v1.lock_time,
+            timestamp: v1.timestamp,
+            special_data: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub version: u32,

@@ -743,7 +743,7 @@ impl Blockchain {
     /// Migrate old-schema blocks to new schema
     /// This fixes blocks that were serialized before time_attestations changes
     pub async fn migrate_old_schema_blocks(&self) -> Result<u64, String> {
-        use crate::block::types::BlockV1;
+        use crate::block::types::{BlockV1, BlockV2};
 
         tracing::info!("🔄 Checking for old-schema blocks that need migration...");
 
@@ -760,35 +760,37 @@ impl Blockchain {
             if let Ok(Some(data)) = self.storage.get(key.as_bytes()) {
                 // Try to deserialize with current schema
                 if bincode::deserialize::<Block>(&data).is_err() {
-                    // Current schema failed, try old BlockV1 format
-                    match bincode::deserialize::<BlockV1>(&data) {
-                        Ok(v1_block) => {
-                            // Convert to new format
-                            let migrated_block: Block = v1_block.into();
+                    // Current schema failed, try BlockV2 (new header, old Transaction)
+                    let migrated_block: Option<Block> =
+                        if let Ok(v2_block) = bincode::deserialize::<BlockV2>(&data) {
+                            Some(v2_block.into())
+                        } else if let Ok(v1_block) = bincode::deserialize::<BlockV1>(&data) {
+                            Some(v1_block.into())
+                        } else {
+                            None
+                        };
 
-                            // Re-serialize with new schema
-                            let new_data = bincode::serialize(&migrated_block).map_err(|e| {
-                                format!(
-                                    "Failed to serialize migrated block {}: {}",
-                                    block_height, e
-                                )
-                            })?;
+                    if let Some(block) = migrated_block {
+                        // Re-serialize with new schema
+                        let new_data = bincode::serialize(&block).map_err(|e| {
+                            format!(
+                                "Failed to serialize migrated block {}: {}",
+                                block_height, e
+                            )
+                        })?;
 
-                            // Store the migrated block
-                            self.storage.insert(key.as_bytes(), new_data).map_err(|e| {
-                                format!("Failed to store migrated block {}: {}", block_height, e)
-                            })?;
+                        // Store the migrated block
+                        self.storage.insert(key.as_bytes(), new_data).map_err(|e| {
+                            format!("Failed to store migrated block {}: {}", block_height, e)
+                        })?;
 
-                            tracing::info!("✅ Migrated block {} from old schema", block_height);
-                            migrated_count += 1;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "⚠️ Block {} failed both deserializations, may need manual recovery: {}",
-                                block_height,
-                                e
-                            );
-                        }
+                        tracing::info!("✅ Migrated block {} from old schema", block_height);
+                        migrated_count += 1;
+                    } else {
+                        tracing::warn!(
+                            "⚠️ Block {} failed all deserializations, may need manual recovery",
+                            block_height,
+                        );
                     }
                 }
             }
@@ -3815,7 +3817,17 @@ impl Blockchain {
                         return Ok((*block_arc).clone());
                     }
                     Err(e1) => {
-                        // Try old BlockV1 format (without liveness_recovery field)
+                        // Try BlockV2 (new header, old Transaction without special_data)
+                        if let Ok(v2_block) =
+                            bincode::deserialize::<crate::block::types::BlockV2>(&data)
+                        {
+                            let block: Block = v2_block.into();
+                            tracing::info!("✓ Migrated block {} from V2 format", height);
+                            let block_arc = Arc::new(block);
+                            self.block_cache.put(height, block_arc.clone());
+                            return Ok((*block_arc).clone());
+                        }
+                        // Try old BlockV1 format (old header + old Transaction)
                         match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
                             Ok(v1_block) => {
                                 let block: Block = v1_block.into();
@@ -3886,6 +3898,19 @@ impl Blockchain {
                         return Ok((*block_arc).clone());
                     }
                     Err(e1) => {
+                        // Try BlockV2 (new header, old Transaction without special_data)
+                        if let Ok(v2_block) =
+                            bincode::deserialize::<crate::block::types::BlockV2>(&data)
+                        {
+                            let block: Block = v2_block.into();
+                            tracing::info!(
+                                "✓ Migrated block {} from V2 format (old key)",
+                                height
+                            );
+                            let block_arc = Arc::new(block);
+                            self.block_cache.put(height, block_arc.clone());
+                            return Ok((*block_arc).clone());
+                        }
                         // Try old BlockV1 format
                         match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
                             Ok(v1_block) => {

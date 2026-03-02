@@ -1,4 +1,4 @@
-use timed::block::types::{Block, BlockV1};
+use timed::block::types::{Block, BlockV1, BlockV2};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
@@ -57,6 +57,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(b) => b,
             Err(e) => {
                 println!("  ✗ Failed to deserialize as BlockV1: {}", e);
+
+                // Try as BlockV2 (new header, old Transaction)
+                if let Ok(v2_block) = bincode::deserialize::<BlockV2>(&data) {
+                    println!("  ✓ Deserializes as BlockV2 format");
+                    let block: Block = v2_block.into();
+                    let new_data = bincode::serialize(&block)?;
+                    db.insert(new_key.as_bytes(), new_data)?;
+                    println!("  ✓ Migrated to new key: {}", new_key);
+                    migrated += 1;
+                    continue;
+                }
 
                 // Try as current Block format
                 match bincode::deserialize::<Block>(&data) {
