@@ -176,7 +176,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        match config::generate_default_masternode_conf(&gen_mn) {
+        match config::generate_default_masternode_conf(&gen_mn, None) {
             Ok(_) => println!("✅ Generated {}", gen_mn.display()),
             Err(e) => {
                 eprintln!("❌ Failed to generate masternode.conf: {}", e);
@@ -230,7 +230,7 @@ async fn main() {
                     }
                 }
                 if !new_mn.exists() {
-                    if let Err(e) = config::generate_default_masternode_conf(&new_mn) {
+                    if let Err(e) = config::generate_default_masternode_conf(&new_mn, None) {
                         eprintln!("  ⚠️ Could not generate masternode.conf: {}", e);
                     } else {
                         println!("  ✓ Generated {}", new_mn.display());
