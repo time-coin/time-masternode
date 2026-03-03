@@ -783,13 +783,17 @@ impl Config {
                     if addr.contains(':') {
                         config.rpc.listen_address = addr.clone();
                     } else {
-                        let port = config
-                            .rpc
-                            .listen_address
-                            .split(':')
-                            .next_back()
-                            .unwrap_or("24001")
-                            .to_string();
+                        let port = if config.rpc.listen_address.contains(':') {
+                            config
+                                .rpc
+                                .listen_address
+                                .split(':')
+                                .next_back()
+                                .unwrap_or("24001")
+                                .to_string()
+                        } else {
+                            config.node.network_type().default_rpc_port().to_string()
+                        };
                         config.rpc.listen_address = format!("{}:{}", addr, port);
                     }
                 }
