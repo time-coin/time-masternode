@@ -138,6 +138,7 @@ check_dependencies() {
         "cmake"
         "clang"
         "libclang-dev"
+        "ccze"
     )
     
     for pkg in "${required_packages[@]}"; do
@@ -168,6 +169,7 @@ install_dependencies() {
         cmake \
         clang \
         libclang-dev \
+        ccze \
         ca-certificates \
         gnupg \
         lsb-release
