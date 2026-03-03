@@ -384,11 +384,48 @@ async fn main() {
     let mut masternode_info: Option<types::Masternode> = if config.masternode.enabled {
         // Use reward_address from config if set, otherwise fall back to auto-generated wallet address
         let wallet_address = if !config.masternode.reward_address.is_empty() {
-            println!(
-                "✓ Using reward address from time.conf: {}",
-                config.masternode.reward_address
-            );
-            config.masternode.reward_address.clone()
+            // Validate the reward address
+            match crate::address::Address::from_string(&config.masternode.reward_address) {
+                Ok(addr) => {
+                    if addr.network() != network_type {
+                        let expected = match network_type {
+                            NetworkType::Testnet => "TIME0",
+                            NetworkType::Mainnet => "TIME1",
+                        };
+                        let got = match addr.network() {
+                            NetworkType::Testnet => "testnet (TIME0...)",
+                            NetworkType::Mainnet => "mainnet (TIME1...)",
+                        };
+                        eprintln!(
+                            "⚠️ reward_address is a {} address, but this node is running on {}.",
+                            got,
+                            if network_type == NetworkType::Testnet {
+                                "testnet"
+                            } else {
+                                "mainnet"
+                            }
+                        );
+                        eprintln!(
+                            "   Expected an address starting with {}. Falling back to local wallet address.",
+                            expected
+                        );
+                        wallet.address().to_string()
+                    } else {
+                        println!(
+                            "✓ Using reward address from time.conf: {}",
+                            config.masternode.reward_address
+                        );
+                        config.masternode.reward_address.clone()
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "⚠️ Invalid reward_address in time.conf: {} — falling back to local wallet address.",
+                        e
+                    );
+                    wallet.address().to_string()
+                }
+            }
         } else {
             wallet.address().to_string()
         };
@@ -402,7 +439,8 @@ async fn main() {
             .to_string();
 
         // Parse collateral outpoint if provided (for staked tiers)
-        let has_collateral = !config.masternode.collateral_txid.is_empty();
+        let has_collateral = !config.masternode.collateral_txid.is_empty()
+            && config.masternode.collateral_txid != "0".repeat(64);
 
         // Determine tier: auto-detect from collateral UTXO, or use explicit config
         let tier = match config.masternode.tier.to_lowercase().as_str() {

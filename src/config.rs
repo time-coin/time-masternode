@@ -546,7 +546,7 @@ impl Config {
             },
             rpc: RpcConfig {
                 enabled: true,
-                listen_address: "0.0.0.0".to_string(),
+                listen_address: "127.0.0.1".to_string(),
                 allow_origins: vec!["*".to_string()],
             },
             storage: StorageConfig {
@@ -882,7 +882,10 @@ impl Config {
                         config.network.external_address = Some(entry.address.clone());
                     }
                     // Skip collateral — all-zeros is a free-tier placeholder
-                    println!("  ✓ Auto-populated masternode config: alias={}", entry.alias);
+                    println!(
+                        "  ✓ Auto-populated masternode config: alias={}",
+                        entry.alias
+                    );
                 }
             }
         }
@@ -1133,8 +1136,7 @@ pub fn append_conf_key(
         .lines()
         .map(|line| {
             let trimmed = line.trim();
-            if !replaced
-                && (trimmed.starts_with(&pattern) || trimmed.starts_with(&active_pattern))
+            if !replaced && (trimmed.starts_with(&pattern) || trimmed.starts_with(&active_pattern))
             {
                 replaced = true;
                 format!("{}={}", key, value)
@@ -1203,8 +1205,12 @@ pub fn generate_default_masternode_conf(
     // Auto-populate a free-tier entry with detected IP on first run
     if let Some(addr) = external_address {
         if !addr.is_empty() {
-            let zero_txid = "0".repeat(64);
-            contents.push_str(&format!("\nmn1  {}  {}  0\n", addr, zero_txid));
+            contents.push_str(&format!(
+                "\n# Free tier — no collateral entry needed.\n\
+                 # To upgrade, add a line with your collateral info:\n\
+                 #   mn1  {}  <collateral_txid>  <collateral_vout>\n",
+                addr
+            ));
         }
     }
 
@@ -1365,14 +1371,13 @@ mod tests {
 
         fs::remove_file(&path).ok();
 
-        // With external address — should auto-populate an entry
+        // With external address — should include IP in commented upgrade hint
         generate_default_masternode_conf(&path, Some("1.2.3.4:24100")).unwrap();
         let contents = fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("mn1  1.2.3.4:24100"));
+        assert!(contents.contains("1.2.3.4:24100"));
+        // Free tier: no active entry, only commented hints
         let entries = parse_masternode_conf(&path).unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].alias, "mn1");
-        assert_eq!(entries[0].address, "1.2.3.4:24100");
+        assert!(entries.is_empty());
 
         fs::remove_file(&path).ok();
         fs::remove_dir_all(&dir).ok();
