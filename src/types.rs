@@ -152,12 +152,18 @@ impl Transaction {
 
     /// Returns `true` if this is a masternode registration transaction
     pub fn is_masternode_reg(&self) -> bool {
-        matches!(self.special_data, Some(SpecialTransactionData::MasternodeReg { .. }))
+        matches!(
+            self.special_data,
+            Some(SpecialTransactionData::MasternodeReg { .. })
+        )
     }
 
     /// Returns `true` if this is a masternode payout update transaction
     pub fn is_masternode_update(&self) -> bool {
-        matches!(self.special_data, Some(SpecialTransactionData::MasternodePayoutUpdate { .. }))
+        matches!(
+            self.special_data,
+            Some(SpecialTransactionData::MasternodePayoutUpdate { .. })
+        )
     }
 
     /// Returns `true` if this carries any special transaction data

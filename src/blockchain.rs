@@ -579,11 +579,7 @@ impl Blockchain {
         // Helper: check if a block exists
         let block_key_exists = |h: u64| -> bool {
             let key = format!("block_{}", h);
-            self.storage
-                .get(key.as_bytes())
-                .ok()
-                .flatten()
-                .is_some()
+            self.storage.get(key.as_bytes()).ok().flatten().is_some()
         };
 
         // First, find the highest contiguous chain from genesis
@@ -3710,11 +3706,7 @@ impl Blockchain {
                 Ok((*block_arc).clone())
             }
             Err(e) => {
-                tracing::error!(
-                    "⚠️ Block {} failed deserialization: {}",
-                    height,
-                    e
-                );
+                tracing::error!("⚠️ Block {} failed deserialization: {}", height, e);
 
                 // Delete corrupted block for re-fetch from peers
                 tracing::warn!(
@@ -3856,12 +3848,7 @@ impl Blockchain {
         for height in start..=end {
             let key = format!("block_{}", height);
 
-            let exists = self
-                .storage
-                .get(key.as_bytes())
-                .ok()
-                .flatten()
-                .is_some();
+            let exists = self.storage.get(key.as_bytes()).ok().flatten().is_some();
 
             if !exists {
                 tracing::warn!("  Block {}: MISSING", height);
@@ -6757,8 +6744,7 @@ impl Blockchain {
                     .filter(|((h, _), _)| max_h.saturating_sub(*h) > 5)
                     .flat_map(|(_, peers)| peers.clone())
                     .collect();
-                let is_benign = tip_chains.len() <= 1
-                    || (max_h - min_h <= 1);
+                let is_benign = tip_chains.len() <= 1 || (max_h - min_h <= 1);
 
                 if is_benign {
                     if !syncing_peers.is_empty() {
@@ -6786,7 +6772,11 @@ impl Blockchain {
                 if num_chains == 1 || is_syncing_peer {
                     tracing::debug!(
                         "   📊 {} @ height {}, hash {}: {} peers {:?}",
-                        if is_syncing_peer { "Syncing peer" } else { "Chain" },
+                        if is_syncing_peer {
+                            "Syncing peer"
+                        } else {
+                            "Chain"
+                        },
                         height,
                         hex::encode(&hash[..8]),
                         peers.len(),

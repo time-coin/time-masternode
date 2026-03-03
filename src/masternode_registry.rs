@@ -1928,15 +1928,11 @@ impl MasternodeRegistry {
         let height = self
             .current_height
             .load(std::sync::atomic::Ordering::Relaxed);
-        let _ = utxo_manager.lock_collateral(
-            outpoint,
-            address.clone(),
-            height,
-            tier.collateral(),
-        );
+        let _ = utxo_manager.lock_collateral(outpoint, address.clone(), height, tier.collateral());
 
         // Register in the registry
-        self.register(masternode, payout_address.to_string()).await?;
+        self.register(masternode, payout_address.to_string())
+            .await?;
 
         // Mark as on-chain registration
         let ip_only = masternode_ip.to_string();
@@ -1956,7 +1952,9 @@ impl MasternodeRegistry {
         new_payout_address: &str,
     ) -> Result<(), RegistryError> {
         let mut nodes = self.masternodes.write().await;
-        let info = nodes.get_mut(masternode_id).ok_or(RegistryError::NotFound)?;
+        let info = nodes
+            .get_mut(masternode_id)
+            .ok_or(RegistryError::NotFound)?;
 
         info.reward_address = new_payout_address.to_string();
         info.masternode.wallet_address = new_payout_address.to_string();
@@ -1997,11 +1995,8 @@ impl MasternodeRegistry {
     }
 
     /// Parse hex-encoded Ed25519 public key
-    fn parse_pubkey(
-        hex_str: &str,
-    ) -> Result<ed25519_dalek::VerifyingKey, RegistryError> {
-        let bytes =
-            hex::decode(hex_str).map_err(|e| RegistryError::Storage(e.to_string()))?;
+    fn parse_pubkey(hex_str: &str) -> Result<ed25519_dalek::VerifyingKey, RegistryError> {
+        let bytes = hex::decode(hex_str).map_err(|e| RegistryError::Storage(e.to_string()))?;
         if bytes.len() != 32 {
             return Err(RegistryError::Storage(
                 "Public key must be 32 bytes".to_string(),
