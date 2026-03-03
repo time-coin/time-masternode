@@ -2791,7 +2791,7 @@ impl MessageHandler {
                     if our_chain_count >= 3 && our_chain_count > behind_count {
                         fork_alert_rate_limit().insert(self.peer_ip.clone(), now);
                         info!(
-                            "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending fork alert.",
+                            "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending sync alert.",
                             self.direction, self.peer_ip, height_diff, peer_height,
                             our_chain_count, our_height
                         );

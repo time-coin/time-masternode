@@ -6992,38 +6992,62 @@ impl Blockchain {
             if num_chains == 1 {
                 tracing::debug!("🔍 [CHAIN ANALYSIS] Network consensus: 1 chain detected");
             } else {
-                // Check if this is just a 1-block propagation lag (benign, not a real fork)
+                // Classify peers: "at-tip" vs "syncing" (far behind consensus)
                 let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
                 let max_h = heights.iter().max().copied().unwrap_or(0);
                 let min_h = heights.iter().min().copied().unwrap_or(0);
-                let is_benign_lag = max_h - min_h <= 1;
+                // Count chains that are actually near the tip (within 5 blocks)
+                let tip_chains: Vec<_> = chain_counts
+                    .keys()
+                    .filter(|(h, _)| max_h.saturating_sub(*h) <= 5)
+                    .collect();
+                let syncing_peers: Vec<_> = chain_counts
+                    .iter()
+                    .filter(|((h, _), _)| max_h.saturating_sub(*h) > 5)
+                    .flat_map(|(_, peers)| peers.clone())
+                    .collect();
+                let is_benign = tip_chains.len() <= 1
+                    || (max_h - min_h <= 1);
 
-                if is_benign_lag {
-                    tracing::debug!(
-                        "🔍 [CHAIN ANALYSIS] {} chains detected (height diff ≤ 1, normal propagation delay)",
-                        num_chains
-                    );
+                if is_benign {
+                    if !syncing_peers.is_empty() {
+                        tracing::debug!(
+                            "🔍 [CHAIN ANALYSIS] 1 chain at tip, {} peer(s) still syncing: {:?}",
+                            syncing_peers.len(),
+                            syncing_peers
+                        );
+                    } else {
+                        tracing::debug!(
+                            "🔍 [CHAIN ANALYSIS] {} chains detected (height diff ≤ 1, normal propagation delay)",
+                            num_chains
+                        );
+                    }
                 } else {
                     tracing::info!(
-                        "🔍 [CHAIN ANALYSIS] Detected {} different chains:",
-                        num_chains
+                        "🔍 [CHAIN ANALYSIS] Detected {} different chains at tip:",
+                        tip_chains.len()
                     );
                 }
             }
             for ((height, hash), peers) in &chain_counts {
-                if num_chains == 1 {
+                let max_h = chain_counts.keys().map(|(h, _)| *h).max().unwrap_or(0);
+                let is_syncing_peer = max_h.saturating_sub(*height) > 5;
+                if num_chains == 1 || is_syncing_peer {
                     tracing::debug!(
-                        "   📊 Chain @ height {}, hash {}: {} peers {:?}",
+                        "   📊 {} @ height {}, hash {}: {} peers {:?}",
+                        if is_syncing_peer { "Syncing peer" } else { "Chain" },
                         height,
                         hex::encode(&hash[..8]),
                         peers.len(),
                         peers
                     );
                 } else {
-                    let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
-                    let max_h = heights.iter().max().copied().unwrap_or(0);
-                    let min_h = heights.iter().min().copied().unwrap_or(0);
-                    if max_h - min_h <= 1 {
+                    // Only count tip-level chains with different hashes as benign
+                    let tip_chains: usize = chain_counts
+                        .keys()
+                        .filter(|(h, _)| max_h.saturating_sub(*h) <= 5)
+                        .count();
+                    if tip_chains <= 1 || max_h.saturating_sub(*height) <= 1 {
                         tracing::debug!(
                             "   📊 Chain @ height {}, hash {}: {} peers {:?}",
                             height,
@@ -7049,22 +7073,16 @@ impl Blockchain {
         // This matches ForkResolver logic — no subjective stake weight tiebreaker
         // which would cause permanent forks (each node sees different peers).
 
-        // Log peer counts when there are multiple chains (fork)
+        // Log peer counts when there are multiple chains at tip (actual fork)
         if should_log && num_chains > 1 {
-            let heights: Vec<u64> = chain_counts.keys().map(|(h, _)| *h).collect();
-            let max_h = heights.iter().max().copied().unwrap_or(0);
-            let min_h = heights.iter().min().copied().unwrap_or(0);
-            let is_benign_lag = max_h - min_h <= 1;
-
-            for ((height, hash), peers) in &chain_counts {
-                if is_benign_lag {
-                    tracing::debug!(
-                        "   ⚖️  Chain @ height {}, hash {}: {} peers",
-                        height,
-                        hex::encode(&hash[..8]),
-                        peers.len()
-                    );
-                } else {
+            let max_h = chain_counts.keys().map(|(h, _)| *h).max().unwrap_or(0);
+            let tip_chains: Vec<_> = chain_counts
+                .iter()
+                .filter(|((h, _), _)| max_h.saturating_sub(*h) <= 5)
+                .collect();
+            // Only log fork weights if there are actually multiple chains at tip
+            if tip_chains.len() > 1 {
+                for ((height, hash), peers) in &tip_chains {
                     tracing::info!(
                         "   ⚖️  Chain @ height {}, hash {}: {} peers",
                         height,
@@ -7190,7 +7208,12 @@ impl Blockchain {
             .sqrt();
 
         let peer_agreement_ratio = consensus_peers.len() as f64 / peer_tips.len() as f64;
-        let fork_count = chain_counts.len() as u32;
+        // Only count chains near the tip as forks — syncing peers (far behind) are not forks
+        let max_h = chain_counts.keys().map(|(h, _)| *h).max().unwrap_or(0);
+        let fork_count = chain_counts
+            .keys()
+            .filter(|(h, _)| max_h.saturating_sub(*h) <= 5)
+            .count() as u32;
         let response_rate = peer_tips.len() as f64 / connected_peers.len() as f64;
 
         let metrics = ConsensusMetrics {
