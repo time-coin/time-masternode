@@ -214,6 +214,12 @@ install_rust() {
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
     
+    # Ensure cargo is in PATH for future shell sessions
+    if ! grep -q 'cargo/env' "$HOME/.bashrc" 2>/dev/null; then
+        echo 'source "$HOME/.cargo/env"' >> "$HOME/.bashrc"
+        print_info "Added cargo to PATH in ~/.bashrc"
+    fi
+    
     print_success "Rust installed"
 }
 
