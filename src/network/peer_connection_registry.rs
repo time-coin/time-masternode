@@ -1065,7 +1065,15 @@ impl PeerConnectionRegistry {
         let writers = self.peer_writers.read().await;
 
         if writers.is_empty() {
-            warn!("📡 Broadcast: no peers connected!");
+            // Rate-limit this warning to avoid log spam during bootstrap
+            static LAST_NO_PEERS_BCAST: std::sync::atomic::AtomicI64 =
+                std::sync::atomic::AtomicI64::new(0);
+            let now_secs = chrono::Utc::now().timestamp();
+            let last = LAST_NO_PEERS_BCAST.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs - last >= 60 {
+                LAST_NO_PEERS_BCAST.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                warn!("📡 Broadcast: no peers connected!");
+            }
             return;
         }
 
