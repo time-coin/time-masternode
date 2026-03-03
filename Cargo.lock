@@ -2566,6 +2566,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "hex",
+ "hmac",
  "hostname",
  "k256",
  "lru",

@@ -3339,6 +3339,11 @@ async fn main() {
             let rpc_tx_sender = tx_event_sender.clone();
             let rpc_user = config.rpc.rpcuser.clone();
             let rpc_pass = config.rpc.rpcpassword.clone();
+            let rpc_auth_entries = config.rpc.rpcauth.clone();
+            let rpc_tls_enabled = config.rpc.rpctls;
+            let rpc_tls_cert = config.rpc.rpctlscert.clone();
+            let rpc_tls_key = config.rpc.rpctlskey.clone();
+            let rpc_data_dir = config.storage.data_dir.clone();
 
             let rpc_handle = tokio::spawn(async move {
                 match RpcServer::new(
@@ -3352,10 +3357,53 @@ async fn main() {
                     Some(rpc_tx_sender),
                     rpc_user,
                     rpc_pass,
+                    rpc_auth_entries,
                 )
                 .await
                 {
                     Ok(mut server) => {
+                        // Set up TLS if configured
+                        if rpc_tls_enabled {
+                            use crate::network::tls::TlsConfig;
+                            let tls_result = if !rpc_tls_cert.is_empty() && !rpc_tls_key.is_empty()
+                            {
+                                TlsConfig::from_pem_files(
+                                    std::path::Path::new(&rpc_tls_cert),
+                                    std::path::Path::new(&rpc_tls_key),
+                                )
+                            } else {
+                                println!(
+                                    "  🔐 No TLS cert/key specified, generating self-signed certificate"
+                                );
+                                // Save self-signed cert to data dir for CLI to trust
+                                let result = TlsConfig::new_self_signed();
+                                if result.is_ok() {
+                                    let notice_path =
+                                        std::path::Path::new(&rpc_data_dir).join("rpc_tls.txt");
+                                    let _ = std::fs::write(
+                                        &notice_path,
+                                        "RPC TLS is enabled with a self-signed certificate.\n\
+                                         Use --no-tls-verify with time-cli, or provide your own cert:\n\
+                                         rpctlscert=/path/to/cert.pem\n\
+                                         rpctlskey=/path/to/key.pem\n",
+                                    );
+                                }
+                                result
+                            };
+                            match tls_result {
+                                Ok(tls_config) => {
+                                    server.set_tls(tls_config.acceptor());
+                                    println!("  🔒 RPC TLS enabled");
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "  ⚠️  Failed to initialize RPC TLS: {}. Falling back to plain HTTP.",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+
                         tokio::select! {
                             _ = rpc_shutdown_token.cancelled() => {
                                 tracing::debug!("🛑 RPC server shutting down gracefully");

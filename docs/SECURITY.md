@@ -52,6 +52,8 @@ TimeCoin implements several security measures:
 2. **RPC Security**
    - Binds to `127.0.0.1` by default (localhost only)
    - HTTP Basic Auth with auto-generated credentials
+   - `rpcauth` hashed credentials (Bitcoin Core-compatible HMAC-SHA256)
+   - Optional TLS encryption (`rpctls=1` in time.conf)
    - Per-IP rate limiting (100 req/s)
    - `.cookie` file for CLI tool authentication
 
@@ -103,6 +105,8 @@ TimeCoin implements several security measures:
 2. **Node Configuration**
    - Never change `rpcbind` from `127.0.0.1` unless behind a VPN
    - Do not disable RPC authentication
+   - Use `rpcauth` hashed credentials instead of plaintext where possible
+   - Enable `rpctls=1` if RPC may traverse a network
    - Keep auto-generated `rpcuser`/`rpcpassword` in `time.conf`
    - Enable logging and monitor for anomalies
    - Protect `time.conf` and `.wallet_password` file permissions

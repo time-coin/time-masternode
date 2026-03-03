@@ -162,6 +162,18 @@ pub struct RpcConfig {
     pub rpcuser: String,
     #[serde(default)]
     pub rpcpassword: String,
+    /// Hashed credentials: "user:salt$hash" (Bitcoin-style rpcauth)
+    #[serde(default)]
+    pub rpcauth: Vec<String>,
+    /// Enable TLS for RPC (rpctls=1 in time.conf)
+    #[serde(default)]
+    pub rpctls: bool,
+    /// Path to TLS certificate PEM file
+    #[serde(default)]
+    pub rpctlscert: String,
+    /// Path to TLS private key PEM file
+    #[serde(default)]
+    pub rpctlskey: String,
 }
 
 impl RpcConfig {
@@ -558,6 +570,10 @@ impl Config {
                 ],
                 rpcuser: String::new(),
                 rpcpassword: String::new(),
+                rpcauth: Vec::new(),
+                rpctls: false,
+                rpctlscert: String::new(),
+                rpctlskey: String::new(),
             },
             storage: StorageConfig {
                 backend: "sled".to_string(),
@@ -819,6 +835,22 @@ impl Config {
             if let Some(v) = entries.get("rpcpassword") {
                 if let Some(pass) = v.last() {
                     config.rpc.rpcpassword = pass.clone();
+                }
+            }
+            if let Some(v) = entries.get("rpcauth") {
+                config.rpc.rpcauth = v.clone();
+            }
+            if let Some(v) = entries.get("rpctls") {
+                config.rpc.rpctls = v.last().is_some_and(|s| s == "1");
+            }
+            if let Some(v) = entries.get("rpctlscert") {
+                if let Some(path) = v.last() {
+                    config.rpc.rpctlscert = path.clone();
+                }
+            }
+            if let Some(v) = entries.get("rpctlskey") {
+                if let Some(path) = v.last() {
+                    config.rpc.rpctlskey = path.clone();
                 }
             }
             if let Some(v) = entries.get("masternode") {
