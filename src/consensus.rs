@@ -2996,8 +2996,14 @@ impl ConsensusEngine {
                                         address: String::from_utf8(output.script_pubkey.clone())
                                             .unwrap_or_default(),
                                     };
-                                    if let Err(e) = consensus_engine_clone.utxo_manager.add_utxo(utxo).await {
-                                        tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                                    if let Err(e) =
+                                        consensus_engine_clone.utxo_manager.add_utxo(utxo).await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to add output UTXO vout={}: {}",
+                                            idx,
+                                            e
+                                        );
                                     }
                                     consensus_engine_clone
                                         .utxo_manager

@@ -3963,7 +3963,9 @@ impl MessageHandler {
                                     finalized_at: chrono::Utc::now().timestamp(),
                                     votes: 0,
                                 };
-                                consensus.utxo_manager.update_state(&input.previous_output, new_state);
+                                consensus
+                                    .utxo_manager
+                                    .update_state(&input.previous_output, new_state);
                             }
                             for (idx, output) in tx.outputs.iter().enumerate() {
                                 let outpoint = crate::types::OutPoint {
@@ -3980,7 +3982,9 @@ impl MessageHandler {
                                 if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
                                     tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
                                 }
-                                consensus.utxo_manager.update_state(&outpoint, crate::types::UTXOState::Unspent);
+                                consensus
+                                    .utxo_manager
+                                    .update_state(&outpoint, crate::types::UTXOState::Unspent);
                             }
                         }
 
