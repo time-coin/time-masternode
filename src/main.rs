@@ -1964,11 +1964,19 @@ async fn main() {
 
             let eligible = if is_bootstrap {
                 let all_nodes = block_registry.get_all_for_bootstrap().await;
-                tracing::info!(
-                    "🌱 Bootstrap mode (height {}): using ALL {} registered masternodes (including inactive, no bitmap yet)",
-                    current_height,
-                    all_nodes.len()
-                );
+                // Rate-limit bootstrap log to avoid spam when stuck at height 0
+                static LAST_BOOTSTRAP_LOG: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(0);
+                let now_secs = chrono::Utc::now().timestamp();
+                let last = LAST_BOOTSTRAP_LOG.load(Ordering::Relaxed);
+                if now_secs - last >= 30 {
+                    LAST_BOOTSTRAP_LOG.store(now_secs, Ordering::Relaxed);
+                    tracing::info!(
+                        "🌱 Bootstrap mode (height {}): using ALL {} registered masternodes (including inactive, no bitmap yet)",
+                        current_height,
+                        all_nodes.len()
+                    );
+                }
                 // At height 0 (producing block 1), use ALL registered masternodes
                 // After block 1, the bitmap from block 1 will be used for block 2
                 all_nodes
@@ -2052,16 +2060,27 @@ async fn main() {
                             masternodes.len()
                         );
                     }
+                    // Back off to avoid spinning every second
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                     continue;
                 }
             }
 
             // Double-check we have enough masternodes after fallback logic
             if masternodes.len() < 3 {
-                tracing::warn!(
-                    "⚠️ Insufficient masternodes ({}) for block production - skipping",
-                    masternodes.len()
-                );
+                // Rate-limit this warning (once per 60s)
+                static LAST_INSUF_WARN: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(0);
+                let now_secs = chrono::Utc::now().timestamp();
+                let last = LAST_INSUF_WARN.load(Ordering::Relaxed);
+                if now_secs - last >= 60 {
+                    LAST_INSUF_WARN.store(now_secs, Ordering::Relaxed);
+                    tracing::warn!(
+                        "⚠️ Insufficient masternodes ({}) for block production - skipping",
+                        masternodes.len()
+                    );
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
             }
 
@@ -2070,6 +2089,7 @@ async fn main() {
                 tracing::error!(
                     "🛡️ FORK PREVENTION: Empty masternode set - refusing block production"
                 );
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
             }
 
@@ -2116,6 +2136,7 @@ async fn main() {
                         expected_height
                     );
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
             }
 
@@ -2133,6 +2154,7 @@ async fn main() {
                         current_height, expected_height, blocks_behind
                     );
                 }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 continue;
             }
 
@@ -3443,7 +3465,15 @@ async fn main() {
                                     let _ = bootstrap_peer_registry.send_to_peer(peer_ip, msg).await;
                                 }
                             } else {
-                                tracing::warn!("⚠️ Bootstrap discovery: No connected peers found");
+                                // Rate-limit this warning (once per 60s)
+                                static LAST_NO_PEERS_WARN: std::sync::atomic::AtomicI64 =
+                                    std::sync::atomic::AtomicI64::new(0);
+                                let now_secs = chrono::Utc::now().timestamp();
+                                let last = LAST_NO_PEERS_WARN.load(std::sync::atomic::Ordering::Relaxed);
+                                if now_secs - last >= 60 {
+                                    LAST_NO_PEERS_WARN.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                                    tracing::warn!("⚠️ Bootstrap discovery: No connected peers found");
+                                }
                             }
                         }
                     }

@@ -708,10 +708,18 @@ impl MasternodeRegistry {
         // - Block 2+: Use bitmap from previous block (normal participation-based selection)
         if current_height == 0 {
             let all_masternodes: Vec<MasternodeInfo> = self.list_all().await;
-            tracing::info!(
-                "💰 Block 1 (first block after genesis): using {} registered masternodes for bootstrap (including inactive, no bitmap yet)",
-                all_masternodes.len()
-            );
+            // Rate-limit this log to avoid spam when stuck at height 0
+            static LAST_BLOCK1_LOG: std::sync::atomic::AtomicI64 =
+                std::sync::atomic::AtomicI64::new(0);
+            let now_secs = chrono::Utc::now().timestamp();
+            let last = LAST_BLOCK1_LOG.load(std::sync::atomic::Ordering::Relaxed);
+            if now_secs - last >= 30 {
+                LAST_BLOCK1_LOG.store(now_secs, std::sync::atomic::Ordering::Relaxed);
+                tracing::info!(
+                    "💰 Block 1 (first block after genesis): using {} registered masternodes for bootstrap (including inactive, no bitmap yet)",
+                    all_masternodes.len()
+                );
+            }
             return all_masternodes;
         }
 
