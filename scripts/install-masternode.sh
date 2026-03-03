@@ -54,6 +54,7 @@ LOG_DIR="$DATA_DIR/logs"
 
 # Version info
 VERSION="1.2.0"
+REWARD_ADDRESS=""
 
 #------------------------------------------------------------------------------
 # Helper Functions
@@ -266,6 +267,73 @@ create_directories() {
     print_success "Directories created"
 }
 
+validate_address() {
+    local addr="$1"
+    local expected_prefix
+
+    if [[ "$NETWORK" == "testnet" ]]; then
+        expected_prefix="TIME0"
+    else
+        expected_prefix="TIME1"
+    fi
+
+    # Check length (35-45 chars per address.rs)
+    local len=${#addr}
+    if (( len < 35 || len > 45 )); then
+        print_error "Invalid address length ($len chars). Expected 35-45."
+        return 1
+    fi
+
+    # Check prefix matches network
+    if [[ "$addr" == "TIME0"* && "$NETWORK" == "mainnet" ]]; then
+        print_error "That is a testnet address (TIME0...). This is a mainnet installation — use a TIME1... address."
+        return 1
+    elif [[ "$addr" == "TIME1"* && "$NETWORK" == "testnet" ]]; then
+        print_error "That is a mainnet address (TIME1...). This is a testnet installation — use a TIME0... address."
+        return 1
+    elif [[ "$addr" != "${expected_prefix}"* ]]; then
+        print_error "Address must start with ${expected_prefix} for ${NETWORK}"
+        return 1
+    fi
+
+    # Check remaining characters are valid base58
+    local payload="${addr:5}"
+    if [[ "$payload" =~ [^123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz] ]]; then
+        print_error "Address contains invalid characters (must be base58)"
+        return 1
+    fi
+
+    return 0
+}
+
+prompt_reward_address() {
+    echo ""
+    print_step "Reward address configuration"
+    echo ""
+    echo "  You can specify a TIME Coin address to receive masternode rewards."
+    echo "  Press Enter to use the default wallet address (created automatically)."
+    echo ""
+
+    while true; do
+        read -rp "Reward address (or Enter for default): " REWARD_ADDRESS
+
+        # Empty = use default
+        if [[ -z "$REWARD_ADDRESS" ]]; then
+            print_info "Using default wallet address for rewards"
+            return
+        fi
+
+        if validate_address "$REWARD_ADDRESS"; then
+            print_success "Reward address accepted: $REWARD_ADDRESS"
+            return
+        fi
+
+        echo ""
+        print_warn "Please try again or press Enter to use the default."
+        echo ""
+    done
+}
+
 reset_blockchain_data() {
     local DB_DIR="$DATA_DIR/db"
     
@@ -410,9 +478,9 @@ server=1
 # RPC port (mainnet=24001, testnet=24101)
 #rpcport=${RPC_PORT}
 
-# Allow RPC connections from any IP (needed for remote time-cli)
-rpcbind=0.0.0.0
-rpcallowip=0.0.0.0/0
+# Allow RPC connections from localhost only (secure default)
+rpcbind=127.0.0.1
+#rpcallowip=127.0.0.1
 
 # ─── Masternode ──────────────────────────────────────────────
 # Enable masternode mode (0=off, 1=on)
@@ -423,7 +491,7 @@ masternode=1
 #masternodeprivkey=
 
 # Reward payout address (defaults to the masternode wallet address)
-#reward_address=
+REWARD_ADDRESS_PLACEHOLDER
 
 # ─── Peers ───────────────────────────────────────────────────
 # Add seed nodes (one per line, can repeat)
@@ -441,6 +509,13 @@ txindex=1
 # Custom data directory (leave commented for default)
 #datadir=
 EOF
+        # Set reward_address based on user input
+        if [[ -n "$REWARD_ADDRESS" ]]; then
+            sed -i "s/^REWARD_ADDRESS_PLACEHOLDER$/reward_address=${REWARD_ADDRESS}/" "$TIME_CONF"
+        else
+            sed -i 's/^REWARD_ADDRESS_PLACEHOLDER$/#reward_address=/' "$TIME_CONF"
+        fi
+
         chown root:root "$TIME_CONF"
         chmod 640 "$TIME_CONF"
         print_success "Created $TIME_CONF"
@@ -596,6 +671,9 @@ print_summary() {
     echo -e "${BLUE}Network: ${NETWORK^^}${NC}"
     echo "  • P2P Port: $P2P_PORT"
     echo "  • RPC Port: $RPC_PORT (localhost only)"
+    if [[ -n "$REWARD_ADDRESS" ]]; then
+        echo "  • Reward Address: $REWARD_ADDRESS"
+    fi
     echo ""
     echo -e "${BLUE}Installed Components:${NC}"
     echo "  • Binaries: $BIN_DIR/timed, $BIN_DIR/time-cli"
@@ -623,8 +701,10 @@ print_summary() {
     echo "  • time-cli getpeerinfo           # Connected peers"
     echo ""
     echo -e "${YELLOW}Next Steps:${NC}"
-    echo "  1. (Optional) Set a reward address: nano $CONFIG_DIR/time.conf"
-    echo "     → Set reward_address=<your_payout_address>"
+    if [[ -z "$REWARD_ADDRESS" ]]; then
+        echo "  1. (Optional) Set a reward address: nano $CONFIG_DIR/time.conf"
+        echo "     → Set reward_address=<your_payout_address>"
+    fi
     echo "  2. (Staked tiers) Send collateral and update masternode.conf"
     echo "  3. Restart the service:         systemctl restart ${SERVICE_NAME}"
     echo "  4. Check logs:                  journalctl -u ${SERVICE_NAME} -f"
@@ -666,6 +746,9 @@ main() {
     # Build and install
     build_binaries
     install_binaries
+    
+    # Prompt for reward address before writing config
+    prompt_reward_address
     
     # Configuration (time.conf + masternode.conf)
     create_config

@@ -131,9 +131,12 @@ masternode=1
 
 # Optional: dedicated masternode private key
 #masternodeprivkey=<key from time-cli masternode genkey>
+
+# Optional: send rewards to a specific address (defaults to wallet address)
+#reward_address=<TIME address>
 ```
 
-Collateral goes in `masternode.conf` (same directory):
+Collateral goes in`masternode.conf` (same directory):
 ```
 # Format: alias IP:port collateral_txid collateral_vout
 mn1 <your_ip>:24000 <txid> 0
