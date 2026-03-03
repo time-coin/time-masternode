@@ -1,220 +1,85 @@
-# Quick Start Guide - TIME Coin Testnet Deployment
+# Quick Start Guide — Developer Reference
 
-**Last Updated:** January 2, 2026  
+**Last Updated:** March 3, 2026  
 **Status:** ✅ Production Ready
+
+> **Deploying to a server?** See
+> **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** for the full
+> step-by-step production installation guide.
+
+This document is for **developers** who want to build, test, and run TIME Coin
+nodes locally.
 
 ---
 
 ## 📥 Prerequisites
 
-- Rust 1.70+
-- 2GB RAM minimum
-- 10GB disk space
-- Network connectivity (P2P port 24100 for testnet)
+- Rust 1.75+
+- 2 GB RAM minimum
+- 10 GB disk space
 
 ---
 
-## 🚀 Quick Build & Run
+## 🚀 Build & Run
 
-### 1. Build from Source
+### 1. Build from source
 
 ```bash
-# Clone repository
 git clone https://github.com/time-coin/time-masternode.git
 cd time-masternode
-
-# Build release binary
 cargo build --release
-
-# Verify build
-ls -lh target/release/timed
 ```
 
-**Expected Output:**
-```
--rwxr-xr-x 1 user group 25M Dec 23 03:00 timed
-```
-
-### 2. Configuration
-
-Configuration files are automatically created on first run in:
-- **Linux/Mac:** `~/.timecoin/time.conf` (testnet: `~/.timecoin/testnet/time.conf`)
-- **Windows:** `%APPDATA%\timecoin\time.conf` (testnet: `%APPDATA%\timecoin\testnet\time.conf`)
-
-You can also specify a custom config file with the `--conf` flag.
-
-**Basic testnet `time.conf`:**
-
-```ini
-# Network
-testnet=1
-
-# Accept connections
-listen=1
-server=1
-
-# Masternode mode (0=off, 1=on)
-masternode=1
-
-# Masternode private key (optional, wallet key used if omitted)
-#masternodeprivkey=<key from time-cli masternode genkey>
-
-# Reward payout address (defaults to wallet address)
-#reward_address=<TIME address>
-
-# Peers (add seed nodes if available)
-#addnode=seed1.time-coin.io
-
-# Logging: trace, debug, info, warn, error
-debug=info
-
-# Storage
-txindex=1
-```
-
-Collateral for staked tiers goes in `masternode.conf` (same directory):
-```
-# alias IP:port collateral_txid collateral_vout
-mn1 <your_ip>:24100 <txid> 0
-```
-
-### 3. Run Node
+### 2. Run a node
 
 ```bash
-# Using default config location (~/.timecoin/testnet/time.conf)
+# Testnet (default if time.conf has testnet=1 or no config exists)
 ./target/release/timed
 
-# Or specify custom config
-./target/release/timed --conf time.conf
-
-# Expected output
-Jan 02 01:00:00 timed[12345]:  INFO 🚀 Starting TIME Coin Node v1.0.0
-Jan 02 01:00:00 timed[12345]:  INFO 📁 Data directory: /home/user/.timecoin/testnet
-Jan 02 01:00:00 timed[12345]:  INFO 🌐 Network: testnet (P2P: 0.0.0.0:24100, RPC: 127.0.0.1:24101)
-Jan 02 01:00:00 timed[12345]:  INFO 🔌 Network server started
-Jan 02 01:00:00 timed[12345]:  INFO ⚡ Consensus engine initialized
+# Specify a config file
+./target/release/timed --conf path/to/time.conf
 ```
 
-### 4. Verify Node is Running
+### 3. Verify the node
 
 ```bash
-# In another terminal, check RPC
+# CLI
+./target/release/time-cli getblockchaininfo
+./target/release/time-cli getbalance
+./target/release/time-cli masternodelist
+
+# Raw RPC
 curl http://localhost:24101/rpc \
-  -X POST \
-  -H "Content-Type: application/json" \
+  -X POST -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}'
-
-# Expected response
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "network": "testnet",
-    "blocks": 0,
-    "difficulty": 0,
-    "headers": 0,
-    "mediantime": 1703299200,
-    "verificationprogress": 0.0
-  },
-  "id": 1
-}
 ```
 
 ---
 
-## 🖥️ Masternode Setup
-
-### 1. Generate Masternode Key
+## 🧪 Testing
 
 ```bash
-time-cli masternode genkey
-# Output: 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+cargo test               # unit tests
+cargo test -- --nocapture # with stdout
+cargo test --test edge_cases  # specific integration test
+./scripts/test.sh        # full integration suite
+cargo bench              # benchmarks
 ```
 
-### 2. Configure Masternode
-
-Edit `time.conf` (in `~/.timecoin/` or `~/.timecoin/testnet/`):
-
-```
-masternode=1
-masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
-```
-
-For free tier, omit `masternodeprivkey` (auto-generated from wallet).
-
-**Tier Requirements:**
-- **free**: No collateral, can receive rewards, cannot vote
-- **bronze**: 1,000 TIME collateral (exact), voting enabled
-- **silver**: 10,000 TIME collateral (exact), voting enabled  
-- **gold**: 100,000 TIME collateral (exact), voting enabled
-
-### 3. For Staked Tiers (Bronze/Silver/Gold)
+### Linting
 
 ```bash
-# Create collateral UTXO
-time-cli sendtoaddress <your_address> 1000.0  # Bronze example
-
-# Wait for confirmations, then note the txid and vout
-time-cli listunspent
-
-# Add collateral to masternode.conf:
-# mn1 <ip>:24100 <txid> <vout>
-```
-
-### 4. Run as Masternode
-
-```bash
-./target/release/timed
-
-# Expected output
-Feb 12 01:00:00 timed[12345]:  INFO 🎯 Masternode enabled: free tier
-Feb 12 01:00:00 timed[12345]:  INFO 📡 Broadcasting masternode announcement
-Feb 12 01:00:00 timed[12345]:  INFO ✅ Registered as active masternode
-```
-
-To deregister: set `masternode=0` in time.conf and restart.
-
----
-
-## 📊 Monitoring & Diagnostics
-
-### Check Node Status
-
-```bash
-curl http://localhost:24101/rpc \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}'
-```
-
-### Check Peer Connections
-
-```bash
-curl http://localhost:24101/rpc \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"getpeercount","params":[],"id":1}'
-```
-
-### View Logs
-
-Logs are written to the location specified in config or stdout by default:
-
-```bash
-# If output = "file" in config
-tail -f ./logs/testnet-node.log
-
-# Filter for errors/warnings
-grep "ERROR\|WARN" ./logs/testnet-node.log
-
-# View in real-time with journalctl (systemd service)
-journalctl -u timed -f
+cargo fmt                # format code
+cargo fmt -- --check     # check only
+cargo clippy             # lint
+cargo clippy -- -D warnings  # strict
 ```
 
 ---
 
-## 🔗 Multi-Node Network Setup
+## 🖥️ Local Multi-Node Network
 
-### Node 1 (Seed Node)
+### Node 1 (seed)
 
 Create `node1/time.conf`:
 ```ini
@@ -227,12 +92,11 @@ debug=info
 txindex=1
 ```
 
-Run:
 ```bash
 ./target/release/timed --conf node1/time.conf
 ```
 
-### Node 2-N (Regular Nodes)
+### Node 2–N
 
 Create `node2/time.conf`:
 ```ini
@@ -245,185 +109,58 @@ debug=info
 txindex=1
 ```
 
-Run:
 ```bash
 ./target/release/timed --conf node2/time.conf
 ```
 
-### Verify Network
+### Verify connectivity
 
 ```bash
-# On each node (adjust port for each node: 24101, 24103, etc.)
-curl http://localhost:24101/rpc -X POST \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"getnetworkinfo","params":[],"id":1}' | \
-  jq '.result.peer_count'
+./target/release/time-cli --testnet getpeerinfo
 ```
 
 ---
 
-## 🧪 Testing & Validation
+## 📊 Monitoring
 
-### Run Unit Tests
-
-```bash
-cargo test --all
-```
-
-### Run Integration Tests
+### Dashboard
 
 ```bash
-./test.sh
+./target/release/time-dashboard            # auto-detect network
+./target/release/time-dashboard --testnet  # force testnet
 ```
 
-### Validate Configuration
+### Logs
 
 ```bash
-cargo check
-```
+# If running as systemd service
+journalctl -u timed -f
 
-### Lint Code
-
-```bash
-cargo clippy
-```
-
-### Format Code
-
-```bash
-cargo fmt
-```
-
----
-
-## 🚨 Troubleshooting
-
-### Node Won't Connect to Peers
-
-**Cause:** Firewall blocking P2P port
-
-**Solution:**
-```bash
-# On Linux, open firewall
-sudo ufw allow 24100/tcp
-
-# On macOS
-sudo /usr/libexec/ApplicationFirewall/socketfilterfw \
-  --setglobalstate off
-```
-
-### RPC Not Responding
-
-**Cause:** Node not fully initialized
-
-**Solution:** Wait 10-15 seconds and retry
-
-```bash
-sleep 15
-curl http://localhost:24101/rpc ...
-```
-
-### High CPU/Memory Usage
-
-**Cause:** Node catching up with blockchain
-
-**Solution:** Let it sync (may take 1-2 hours for initial sync)
-
-```bash
-# Monitor progress
-watch -n 5 'curl -s http://localhost:24101/rpc \
-  -X POST \
-  -H "Content-Type: application/json" \
-  -d "{\"jsonrpc\":\"2.0\",\"method\":\"getblockcount\",\"params\":[],\"id\":1}" | \
-  jq .result.blocks'
-```
-
-### Connection Refused Errors
-
-**Cause:** Another instance running on same port
-
-**Solution:**
-```bash
-# Find process
-lsof -i :24100
-
-# Kill process
-kill -9 <PID>
-
-# Or use different port
-[network]
-p2p_bind = "0.0.0.0:24300"
-```
-
----
-
-## 📈 Performance Tuning
-
-### Increase Peer Connections
-
-```toml
-[network]
-max_peers = 100  # Default: 50
-```
-
-### Increase Block Buffer
-
-```toml
-[block]
-max_block_size_kb = 2048  # Default: 1024
-```
-
-### Reduce Log Verbosity
-
-```toml
-[logging]
-level = "warn"  # Options: trace, debug, info, warn, error
+# Filter for warnings/errors
+journalctl -u timed -p warning --no-pager -n 50
 ```
 
 ---
 
 ## 🔐 Security Checklist
 
-- [ ] Firewall configured (only allow necessary ports)
+- [ ] Firewall configured (P2P port only)
 - [ ] RPC bound to localhost (not 0.0.0.0)
-- [ ] Masternode wallet address is secure
-- [ ] No sensitive data in logs
-- [ ] TLS enabled for P2P communication
+- [ ] Wallet backed up (`time-wallet.dat`)
+- [ ] No secrets in version control
 - [ ] Message signing enabled
 - [ ] Rate limiting enabled
 
 ---
 
-## 📚 Additional Resources
+## 📚 Further Reading
 
-- **Protocol Docs**: [docs/TIMECOIN_PROTOCOL_V5.md](docs/TIMECOIN_PROTOCOL_V5.md)
-- **Network Architecture**: [docs/NETWORK_ARCHITECTURE.md](docs/NETWORK_ARCHITECTURE.md)
-- **Build Status**: [COMPILATION_COMPLETE.md](COMPILATION_COMPLETE.md)
-- **Changelog**: [CHANGELOG.md](CHANGELOG.md)
-
----
-
-## 🆘 Getting Help
-
-- **GitHub Issues**: Report bugs and feature requests
-- **Discord**: Join community (link in README)
-- **Email**: support@time-coin.io
-- **Documentation**: See docs/ directory
+- **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** — Production deployment guide
+- **[MASTERNODE_GUIDE.md](MASTERNODE_GUIDE.md)** — Masternode operations
+- **[CLI_GUIDE.md](CLI_GUIDE.md)** — Full command reference
+- **[TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)** — Protocol specification
+- **[NETWORK_CONFIG.md](NETWORK_CONFIG.md)** — Advanced configuration
 
 ---
 
-## 🎯 Next Steps
-
-1. ✅ Build and run node
-2. ✅ Verify it connects to network
-3. ✅ Check peer connections
-4. ⏳ (Optional) Register as masternode
-5. ⏳ Monitor node performance
-6. ⏳ Join testnet discord for updates
-
----
-
-**Ready to launch! Happy validating! 🚀**
-
-*Generated: January 2, 2026*  
-*For latest updates, see [CHANGELOG.md](CHANGELOG.md)*
+*Last Updated: March 3, 2026*

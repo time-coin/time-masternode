@@ -4,75 +4,26 @@
 
 TIME Coin supports tiered masternodes with locked collateral (Dash-style). Configuration uses two files: `time.conf` (daemon settings and private key) and `masternode.conf` (collateral info). The daemon handles registration on startup.
 
+> **First time?** See **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** for
+> the step-by-step installation and setup guide. This document covers
+> masternode **operations** — tiers, collateral, rewards, and management.
+
 ---
 
 ## 🚀 Quick Start
 
 ### Free Tier (No Collateral)
 
-1. In the [linux] root/.timecoin or .timecoin/testnet/ directory or
-[windows]
-%APPDATA%\timecoin\ or %APPDATA%\timecoin\testnet
+Set `masternode=1` in `time.conf` and start the daemon — that's it. The node
+begins earning rewards immediately.
 
- Edit `time.conf`:
-```
-masternode=1
-```
-
-2. Start/restart the daemon:
-```bash
-bash time-masternode/target/release/timed
-```
-
-3. Verify:
-```bash
-time-cli masternode list
-```
+See **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** for full installation
+steps.
 
 ### Staked Tier (Bronze/Silver/Gold)
 
-1. Generate a masternode private key:
-```bash
-time-cli masternode genkey
-# Output: 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
-```
-
-2. Add the key to `time.conf`:
-```
-masternode=1
-masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
-```
-
-3. Send exact collateral to yourself:
-```bash
-time-cli sendtoaddress <your_address> 1000.0
-# Note the TXID from the output
-```
-
-4. Wait for 3 confirmations (~30 minutes):
-```bash
-time-cli listunspent
-# Check confirmations >= 3, note the txid and vout
-```
-
-5. Add collateral info to `masternode.conf`:
-```
-mn1 <your_public_ip>:24100 <collateral_txid> <collateral_vout>
-```
-
-6. Restart the daemon:
-```bash
-sudo systemctl restart timed
-```
-
-7. Verify:
-```bash
-time-cli getbalance          # Should show locked collateral
-time-cli masternode list     # Should show your masternode with 🔒 Locked
-time-cli listlockedcollaterals
-```
-
-**Done!** Your masternode is now active and earning rewards.
+See **[LINUX_INSTALLATION.md §5.3](LINUX_INSTALLATION.md#53-staked-tiers-bronze--silver--gold)**
+for the step-by-step collateral setup process.
 
 ---
 
@@ -193,98 +144,19 @@ mn1 69.167.168.176:24100 abc123def4567890123456789012345678901234567890123456789
 
 ## Setup Guide (Staked Tiers)
 
-### Step 1: Generate Masternode Key
+For detailed step-by-step instructions including key generation, collateral
+creation, and configuration, see
+**[LINUX_INSTALLATION.md §5.3](LINUX_INSTALLATION.md#53-staked-tiers-bronze--silver--gold)**.
 
-```bash
-time-cli masternode genkey
-```
+After registration, the daemon automatically:
+1. Parses the collateral UTXO from config
+2. Verifies the UTXO exists and has the correct amount
+3. Auto-detects the tier from the collateral amount
+4. Locks the collateral
+5. Registers the masternode on the network
+6. Begins participating in consensus
 
-Save this key — you'll add it to `time.conf`.
-
-### Step 2: Check Your Balance
-
-```bash
-time-cli getbalance
-```
-
-**Output:**
-```
-Wallet Balance:
-  Total:         1500.00000000 TIME
-  Locked:           0.00000000 TIME (collateral)
-  Available:     1500.00000000 TIME (spendable)
-```
-
-### Step 3: Create Collateral UTXO
-
-Send the exact collateral amount to yourself. A 0.1% network fee applies, so your wallet needs slightly more than the collateral amount:
-
-| Tier | Collateral | Fee (0.1%) | Total Needed |
-|------|-----------|------------|--------------|
-| Bronze | 1,000 TIME | 1.0 TIME | 1,001.0 TIME |
-| Silver | 10,000 TIME | 10.0 TIME | 10,010.0 TIME |
-| Gold | 100,000 TIME | 100.0 TIME | 100,100.0 TIME |
-
-```bash
-# Get your address
-time-cli getnewaddress
-
-# Send collateral to yourself (fee is added on top)
-time-cli sendtoaddress <your_address> 1000.0
-```
-
-> ⚠️ **Do NOT use `--subtract-fee`** when creating collateral UTXOs. The collateral amount must be exactly 1,000 / 10,000 / 100,000 TIME. The fee must be paid on top.
-
-**Why send to yourself?**
-- Creates a distinct UTXO of exactly the required collateral amount
-- Easier to track and manage
-- Standard practice (Dash-style)
-
-### Step 4: Wait for Confirmations
-
-The UTXO needs 3 confirmations (~30 minutes):
-```bash
-# Check your UTXOs
-time-cli listunspent
-
-# Example output:
-# txid: abc123def456...
-# vout: 0
-# amount: 1000.00000000
-# confirmations: 3  ← Must be 3+
-```
-
-**Note the txid and vout** — you'll need these for `masternode.conf`.
-
-### Step 5: Configure Files
-
-In `time.conf`:
-```
-masternode=1
-masternodeprivkey=<key from Step 1>
-```
-
-In `masternode.conf`:
-```
-mn1 <your_ip>:24100 <txid_from_step_3> <vout>
-```
-
-### Step 6: Restart the Daemon
-
-```bash
-sudo systemctl restart timed
-# Or: ./target/release/timed
-```
-
-The daemon will automatically:
-1. Parse the collateral UTXO from config
-2. Verify the UTXO exists and has the correct amount
-3. Auto-detect the tier from the collateral amount
-4. Lock the collateral
-5. Register the masternode on the network
-6. Begin participating in consensus
-
-### Step 7: Verify Registration
+### Verify Registration
 
 ```bash
 # Check your balance (should show locked collateral)

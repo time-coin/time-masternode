@@ -1,199 +1,188 @@
-# TIME Coin - Linux Installation Guide
+# TIME Coin — Linux Installation Guide
 
-**Version**: 0.2.0  
-**Last Updated**: 2026-01-02
+**Version**: 1.2.0  
+**Last Updated**: 2026-03-03
+
+This guide walks you through installing and running a TIME Coin masternode on a
+fresh Linux server. Follow it from top to bottom for a production-ready node.
 
 ---
 
 ## Table of Contents
 
-1. [System Requirements](#system-requirements)
-2. [Quick Start](#quick-start)
-3. [Installation Methods](#installation-methods)
-4. [Post-Installation](#post-installation)
-5. [Network Configuration](#network-configuration)
-6. [Troubleshooting](#troubleshooting)
+1. [Prerequisites](#1-prerequisites)
+2. [Automated Installation (Recommended)](#2-automated-installation-recommended)
+3. [Manual Installation](#3-manual-installation)
+4. [Verify Your Node](#4-verify-your-node)
+5. [Masternode Configuration](#5-masternode-configuration)
+6. [Security Hardening](#6-security-hardening)
+7. [Upgrading](#7-upgrading)
+8. [Uninstalling](#8-uninstalling)
+9. [Directory Layout](#9-directory-layout)
+10. [Configuration Reference](#10-configuration-reference)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
-## System Requirements
+## 1. Prerequisites
 
-### Minimum Requirements
-- **OS**: Ubuntu 20.04+, Debian 10+, or compatible Linux distribution
-- **CPU**: 2 cores
-- **RAM**: 2GB
-- **Storage**: 10GB free disk space
-- **Network**: Stable internet connection
+### Hardware
 
-### Recommended for Masternode
-- **OS**: Ubuntu 22.04 LTS (recommended)
-- **CPU**: 4+ cores
-- **RAM**: 4GB+
-- **Storage**: 50GB+ SSD
-- **Network**: Static IP or domain name
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| OS          | Ubuntu 20.04+, Debian 10+ | Ubuntu 22.04 LTS |
+| CPU         | 2 cores | 4+ cores |
+| RAM         | 2 GB    | 4 GB+ |
+| Disk        | 10 GB   | 50 GB+ SSD |
+| Network     | Stable internet | Static IP |
+
+### Software
+
+- `git`, `curl`
+- Rust 1.75+ (the install script handles this automatically)
+
+### Network Ports
+
+| Network | P2P Port | RPC Port |
+|---------|----------|----------|
+| Mainnet | 24000    | 24001    |
+| Testnet | 24100    | 24101    |
+
+> **RPC is bound to 127.0.0.1 by default.** Only the P2P port needs to be
+> open to the internet.
 
 ---
 
-## Quick Start
+## 2. Automated Installation (Recommended)
 
-### For Mainnet (Production)
+The install script handles everything: dependencies, Rust toolchain, building
+from source, configuration files, systemd service, and firewall rules.
+
+### Step 1 — Download the source
 
 ```bash
-# Clone the repository
 git clone https://github.com/time-coin/time-masternode.git
 cd time-masternode
-
-# Run the installer
-chmod +x scripts/install-masternode.sh
-sudo ./scripts/install-masternode.sh mainnet
-
-# Check status
-systemctl status timed
 ```
 
-### For Testnet (Development/Testing)
+### Step 2 — Run the installer
 
 ```bash
-# Clone the repository
-git clone https://github.com/time-coin/time-masternode.git
-cd time-masternode
-
-# Run the installer
-chmod +x scripts/install-masternode.sh
+# Testnet (recommended for first-time setup)
 sudo ./scripts/install-masternode.sh testnet
 
-# Check status
-systemctl status timed
+# — or —
+
+# Mainnet (production)
+sudo ./scripts/install-masternode.sh mainnet
 ```
 
----
+### Step 3 — Follow the prompts
 
-## Installation Methods
+The installer will ask two questions:
 
-### Method 1: Automated Installation (Recommended)
+1. **Reward payout address** — Enter a TIME address to receive masternode
+   rewards, or press **Enter** to use the node's built-in wallet address.
+   - Testnet addresses start with `TIME0`
+   - Mainnet addresses start with `TIME1`
+   - The installer validates the address format and network match before
+     proceeding.
 
-The automated installation script handles everything for you:
-- Installs all dependencies
-- Installs Rust toolchain
-- Builds binaries from source
-- Creates system user and directories
-- Configures systemd service
-- Sets up firewall rules
+2. **Start the service now?** — Answer `y` to start immediately.
 
-**Steps**:
+### Step 4 — Verify
 
-1. **Download the project**:
-   ```bash
-   git clone https://github.com/time-coin/time-masternode.git
-   cd time-masternode
-   ```
+```bash
+systemctl status timed
+journalctl -u timed -f          # watch logs (Ctrl+C to stop)
+time-cli getblockchaininfo       # query the node
+```
 
-2. **Run the installer**:
-   ```bash
-   # For mainnet
-   sudo ./scripts/install-masternode.sh mainnet
-   
-   # For testnet
-   sudo ./scripts/install-masternode.sh testnet
-   ```
+### What gets installed
 
-3. **Follow the prompts**:
-   - Installer will ask for a reward payout address (press Enter to use the default wallet address)
-   - If you provide an address, it must match the network (`TIME1...` for mainnet, `TIME0...` for testnet)
-   - Installer will ask to start the service — answer `y` to start immediately
+| Component | Location |
+|-----------|----------|
+| Binaries  | `/usr/local/bin/timed`, `/usr/local/bin/time-cli` |
+| Config    | `~/.timecoin/time.conf` (mainnet) or `~/.timecoin/testnet/time.conf` (testnet) |
+| Collateral conf | Same directory as `time.conf` → `masternode.conf` |
+| Blockchain data | `~/.timecoin/` or `~/.timecoin/testnet/` |
+| Systemd service | `/etc/systemd/system/timed.service` |
 
-**What gets installed**:
-- Binaries: `/usr/local/bin/timed`, `/usr/local/bin/time-cli`
-- Config: `/root/.timecoin/time.conf` + `masternode.conf` (mainnet) or `/root/.timecoin/testnet/time.conf` + `masternode.conf` (testnet)
-- Data: `/root/.timecoin/` (mainnet) or `/root/.timecoin/testnet/` (testnet)
-- Service: `/etc/systemd/system/timed.service`
+That's it — your masternode is running. By default it starts as a **Free tier**
+node (no collateral required) and begins earning rewards immediately.
+
+For staked tiers (Bronze/Silver/Gold) with higher rewards, see
+[§5 — Masternode Configuration](#5-masternode-configuration).
 
 ---
 
-### Method 2: Manual Installation
+## 3. Manual Installation
 
-For users who want more control over the installation process.
+For users who prefer full control over the process.
 
-#### Step 1: Install Dependencies
+### 3.1 Install system dependencies
 
-**Ubuntu/Debian**:
+**Ubuntu / Debian:**
 ```bash
 sudo apt update
 sudo apt install -y curl git build-essential libssl-dev pkg-config nasm
 ```
 
-**Fedora/RHEL**:
+**Fedora / RHEL:**
 ```bash
 sudo dnf install -y curl git gcc openssl-devel pkgconfig nasm
 ```
 
-#### Step 2: Install Rust
+### 3.2 Install Rust
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-rustc --version
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+rustc --version    # should print 1.75+
 ```
 
-#### Step 3: Build TIME Coin
+### 3.3 Build from source
 
 ```bash
-# Clone repository
 git clone https://github.com/time-coin/time-masternode.git
 cd time-masternode
-
-# Build release binaries
 cargo build --release
-
-# Binaries will be in target/release/
-ls -lh target/release/timed target/release/time-cli
 ```
 
-#### Step 4: Install Binaries
+Build takes roughly one minute. Binaries land in `target/release/`.
+
+### 3.4 Install binaries
 
 ```bash
-# Copy binaries to system path
 sudo cp target/release/timed /usr/local/bin/
 sudo cp target/release/time-cli /usr/local/bin/
-
-# Set permissions
-sudo chmod +x /usr/local/bin/timed
-sudo chmod +x /usr/local/bin/time-cli
-
-# Verify installation
-timed --version
-time-cli --version
+sudo chmod +x /usr/local/bin/timed /usr/local/bin/time-cli
 ```
 
-#### Step 5: Create Configuration
+### 3.5 Create configuration
 
-**For Mainnet**:
 ```bash
-# Create data directory
+# Mainnet
 mkdir -p ~/.timecoin
-
-# Deploy default config
 ./scripts/deploy-config.sh mainnet
 
-# Edit configuration
-nano ~/.timecoin/time.conf
-```
+# — or —
 
-**For Testnet**:
-```bash
-# Create data directory
+# Testnet
 mkdir -p ~/.timecoin/testnet
-
-# Deploy default config
 ./scripts/deploy-config.sh testnet
-
-# Edit configuration
-nano ~/.timecoin/testnet/time.conf
 ```
 
-#### Step 6: Create Systemd Service (Optional)
+This generates `time.conf` and `masternode.conf` with sensible defaults. Edit
+as needed:
 
-**For Mainnet**:
+```bash
+nano ~/.timecoin/time.conf          # mainnet
+nano ~/.timecoin/testnet/time.conf  # testnet
+```
+
+### 3.6 Create a systemd service
+
 ```bash
 sudo tee /etc/systemd/system/timed.service > /dev/null <<EOF
 [Unit]
@@ -203,7 +192,6 @@ After=network.target
 [Service]
 Type=simple
 User=$USER
-WorkingDirectory=/home/$USER/.timecoin
 ExecStart=/usr/local/bin/timed --conf /home/$USER/.timecoin/time.conf
 Restart=always
 RestartSec=10
@@ -213,86 +201,87 @@ WantedBy=multi-user.target
 EOF
 ```
 
-**For Testnet**:
-```bash
-sudo tee /etc/systemd/system/timed.service > /dev/null <<EOF
-[Unit]
-Description=TIME Coin Daemon (Testnet)
-After=network.target
+> For testnet, change the `--conf` path to
+> `/home/$USER/.timecoin/testnet/time.conf`.
 
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=/home/$USER/.timecoin/testnet
-ExecStart=/usr/local/bin/timed --conf /home/$USER/.timecoin/testnet/time.conf
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-```
-
-**Enable and start service**:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable timed
 sudo systemctl start timed
-sudo systemctl status timed
+```
+
+### 3.7 Open the P2P port
+
+```bash
+# UFW (Ubuntu)
+sudo ufw allow 24000/tcp comment 'TIME Coin P2P'   # mainnet
+sudo ufw allow 24100/tcp comment 'TIME Coin P2P'   # testnet
+
+# firewalld (Fedora / RHEL)
+sudo firewall-cmd --permanent --add-port=24000/tcp && sudo firewall-cmd --reload
+```
+
+> **Do NOT open the RPC port** (24001 / 24101). It is bound to localhost and
+> should stay that way.
+
+---
+
+## 4. Verify Your Node
+
+```bash
+# Service running?
+systemctl status timed
+
+# Blockchain info
+time-cli getblockchaininfo
+
+# Connected peers
+time-cli getpeerinfo
+
+# Wallet balance
+time-cli getbalance
+
+# Masternode status
+time-cli masternodelist
+```
+
+**Watch logs:**
+```bash
+journalctl -u timed -f              # live stream
+journalctl -u timed -n 100 --no-pager  # last 100 lines
+```
+
+You should see lines like:
+```
+INFO 🚀 Starting TIME Coin Node v1.2.0
+INFO 📁 Data directory: /root/.timecoin/testnet
+INFO 🌐 Network: testnet (P2P: 0.0.0.0:24100, RPC: 127.0.0.1:24101)
+INFO ✅ Registered as active masternode
 ```
 
 ---
 
-## Post-Installation
+## 5. Masternode Configuration
 
-### 1. Verify Installation
+### 5.1 Free Tier (default — no collateral)
 
-```bash
-# Check if service is running
-systemctl status timed
+The installer sets `masternode=1` in `time.conf` automatically. Your node
+starts as a Free tier masternode and earns rewards to its built-in wallet
+address (or your configured `reward_address`). No further action required.
 
-# View logs
-journalctl -u timed -f
+### 5.2 Changing the reward address
 
-# Check node info
-time-cli node info
-```
-
-### 2. Create Wallet
+By default, rewards go to the node's auto-generated wallet. To send rewards
+to a different address (e.g., your GUI wallet):
 
 ```bash
-# Create new wallet
-time-cli wallet create
-
-# Save the output securely!
-# It will display your address and private key
+nano ~/.timecoin/time.conf   # or testnet/time.conf
 ```
 
-**⚠️ IMPORTANT**: Save your private key securely! You cannot recover it later.
-
-### 3. Check Wallet Balance
-
-```bash
-time-cli wallet balance <your-address>
-```
-
-### 4. Configure Masternode (Optional)
-
-Edit your config files:
-```bash
-# Mainnet
-sudo nano /root/.timecoin/time.conf
-sudo nano /root/.timecoin/masternode.conf
-
-# Testnet
-sudo nano /root/.timecoin/testnet/time.conf
-sudo nano /root/.timecoin/testnet/masternode.conf
-```
-
-Ensure `masternode=1` in time.conf, and add collateral in masternode.conf:
-```
-# Format: alias IP:port collateral_txid collateral_vout
-mn1 <your_ip>:24000 <txid> 0
+Add or edit:
+```ini
+reward_address=TIME0abc123...   # testnet
+reward_address=TIME1xyz789...   # mainnet
 ```
 
 Restart the service:
@@ -300,420 +289,336 @@ Restart the service:
 sudo systemctl restart timed
 ```
 
+The daemon validates the address on startup. If it is malformed or on the
+wrong network, it logs a warning and falls back to the local wallet address.
+
+### 5.3 Staked Tiers (Bronze / Silver / Gold)
+
+Staked tiers earn higher rewards and gain governance voting rights.
+
+| Tier   | Exact Collateral | Sampling Weight | Governance Votes |
+|--------|-----------------|-----------------|------------------|
+| Free   | 0 TIME          | 1×              | None             |
+| Bronze | 1,000 TIME      | 10×             | 1                |
+| Silver | 10,000 TIME     | 100×            | 10               |
+| Gold   | 100,000 TIME    | 1,000×          | 100              |
+
+**To upgrade to a staked tier:**
+
+1. **Generate a masternode key** (optional — auto-generated if omitted):
+   ```bash
+   time-cli masternode genkey
+   ```
+
+2. **Send the exact collateral amount to yourself:**
+   ```bash
+   time-cli sendtoaddress <your_address> 1000.0   # Bronze example
+   ```
+
+3. **Wait for 3 confirmations** (~30 minutes):
+   ```bash
+   time-cli listunspent
+   # Note the txid and vout of the 1000.0 UTXO
+   ```
+
+4. **Add collateral info** to `masternode.conf` (same directory as `time.conf`):
+   ```
+   mn1 <your_public_ip>:24100 <txid> <vout>
+   ```
+
+5. **Add the key to `time.conf`** (if you generated one):
+   ```ini
+   masternodeprivkey=<key from step 1>
+   ```
+
+6. **Restart:**
+   ```bash
+   sudo systemctl restart timed
+   ```
+
+7. **Verify:**
+   ```bash
+   time-cli getbalance            # shows locked collateral
+   time-cli masternodelist        # shows 🔒 Locked
+   time-cli listlockedcollaterals
+   ```
+
+The daemon auto-detects the tier from the collateral amount.
+
+### 5.4 Deregistering a masternode
+
+Set `masternode=0` in `time.conf` and restart. Collateral is automatically
+unlocked and becomes spendable.
+
+### 5.5 Changing tiers
+
+1. Deregister (`masternode=0`, restart)
+2. Create a new collateral UTXO for the target tier amount
+3. Update `masternode.conf` with the new txid/vout
+4. Set `masternode=1` and restart
+
+See **[MASTERNODE_GUIDE.md](MASTERNODE_GUIDE.md)** for full operational
+details (reward distribution, collateral validation, rotation, FAQ).
+
 ---
 
-## Network Configuration
+## 6. Security Hardening
 
-### Port Configuration
+### Essential
 
-TIME Coin uses different ports for mainnet and testnet:
+- **RPC is localhost-only** — The daemon binds RPC to `127.0.0.1` by default.
+  Never change this to `0.0.0.0` unless you understand the risk (anyone with
+  RPC access can drain the wallet).
+- **Firewall** — Only open the P2P port. Block everything else inbound.
+- **Keep the OS updated:**
+  ```bash
+  sudo apt update && sudo apt upgrade -y
+  ```
+- **Enable automatic security updates:**
+  ```bash
+  sudo apt install -y unattended-upgrades
+  sudo dpkg-reconfigure -plow unattended-upgrades
+  ```
 
-| Network | P2P Port | RPC Port | Purpose |
-|---------|----------|----------|---------|
-| Mainnet | 24000    | 24001    | Production network |
-| Testnet | 24100    | 24101    | Development/testing |
+### Recommended
 
-### Firewall Configuration
+- **SSH hardening** — Disable password auth, use key-based login, change the
+  default port.
+- **Dedicated user** — For manual installs, run the daemon as a non-root
+  service account.
+- **Wallet backup** — Copy `time-wallet.dat` to a secure offline location.
+- **Monitor logs** — Watch for `WARN` and `ERROR` entries:
+  ```bash
+  journalctl -u timed -p warning --no-pager -n 50
+  ```
 
-**Using UFW (Ubuntu)**:
+### Add swap (low-memory servers)
 
-```bash
-# For mainnet
-sudo ufw allow 24000/tcp comment 'TIME Coin P2P (mainnet)'
-
-# For testnet
-sudo ufw allow 24100/tcp comment 'TIME Coin P2P (testnet)'
-
-# Enable firewall
-sudo ufw enable
-sudo ufw status
-```
-
-**Using firewalld (RHEL/CentOS)**:
-
-```bash
-# For mainnet
-sudo firewall-cmd --permanent --add-port=24000/tcp
-sudo firewall-cmd --reload
-
-# For testnet
-sudo firewall-cmd --permanent --add-port=24100/tcp
-sudo firewall-cmd --reload
-```
-
-**Manual iptables**:
-
-```bash
-# For mainnet
-sudo iptables -A INPUT -p tcp --dport 24000 -j ACCEPT
-
-# For testnet
-sudo iptables -A INPUT -p tcp --dport 24100 -j ACCEPT
-
-# Save rules
-sudo iptables-save | sudo tee /etc/iptables/rules.v4
-```
-
-### External Address Configuration
-
-If you're running a masternode, configure your external address:
-
-```toml
-[network]
-external_address = "your-public-ip:24000"  # Or your domain
-```
-
-To find your public IP:
-```bash
-curl ifconfig.me
-```
-
----
-
-## Troubleshooting
-
-### Service Won't Start
-
-**Check logs**:
-```bash
-journalctl -u timed -n 50 --no-pager
-```
-
-**Common issues**:
-
-1. **Port already in use**:
-   ```bash
-   # Check what's using the port
-   sudo lsof -i :24000
-   
-   # Kill the process if needed
-   sudo kill -9 <PID>
-   ```
-
-2. **Permission issues**:
-   ```bash
-   # Check ownership
-   ls -la /root/.timecoin/
-   
-   # Fix ownership
-   sudo chown -R timecoin:timecoin /root/.timecoin/
-   ```
-
-3. **Missing dependencies**:
-   ```bash
-   # Reinstall dependencies
-   sudo apt install -y libssl-dev pkg-config
-   ```
-
-### Build Failures
-
-**Error: "linker `cc` not found"**:
-```bash
-sudo apt install build-essential
-```
-
-**Error: "failed to run custom build command for `openssl-sys`"**:
-```bash
-sudo apt install libssl-dev pkg-config
-```
-
-**Error: "NASM not found"**:
-```bash
-sudo apt install nasm
-```
-
-### Network Issues
-
-**No peers connected**:
-
-1. Check firewall:
-   ```bash
-   sudo ufw status
-   ```
-
-2. Check if port is open:
-   ```bash
-   nc -zv your-ip 24000
-   ```
-
-3. Check external address:
-   ```toml
-   [network]
-   external_address = "your-public-ip:24000"
-   ```
-
-4. Check bootstrap peers in config:
-   ```toml
-   [network]
-   bootstrap_peers = [
-       "seed1.time-coin.io:24000",
-       "seed2.time-coin.io:24000",
-   ]
-   ```
-
-### Database Issues
-
-**Corrupted database**:
-```bash
-# Stop service
-sudo systemctl stop timed
-
-# Backup data
-cp -r ~/.timecoin/blockchain ~/.timecoin/blockchain.backup
-
-# Remove corrupted database
-rm -rf ~/.timecoin/blockchain/*
-
-# Start service (will resync)
-sudo systemctl start timed
-```
-
-### High Memory Usage
-
-**Check memory usage**:
-```bash
-free -h
-htop
-```
-
-**Add swap if needed**:
 ```bash
 sudo fallocate -l 2G /swapfile
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
-
-# Make permanent
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
-### Service Management
-
-**View logs in real-time**:
-```bash
-journalctl -u timed -f
-```
-
-**View last 100 lines**:
-```bash
-journalctl -u timed -n 100 --no-pager
-```
-
-**Restart service**:
-```bash
-sudo systemctl restart timed
-```
-
-**Stop service**:
-```bash
-sudo systemctl stop timed
-```
-
-**Check service status**:
-```bash
-systemctl status timed
-```
-
 ---
 
-## Upgrading
+## 7. Upgrading
 
-### Upgrading with Installation Script
+### With the install script
 
 ```bash
 cd time-masternode
 git pull origin main
-sudo ./scripts/install-masternode.sh mainnet
+sudo ./scripts/install-masternode.sh mainnet   # or testnet
 ```
 
-The script will detect existing installation and upgrade.
+The script detects an existing installation and upgrades in place.
 
-### Manual Upgrade
+### Manual upgrade
 
 ```bash
-# Stop service
 sudo systemctl stop timed
 
-# Backup wallet
+# Back up wallet first!
 cp ~/.timecoin/time-wallet.dat ~/time-wallet-backup.dat
 
-# Pull latest code
 cd time-masternode
 git pull origin main
-
-# Rebuild
 cargo build --release
 
-# Install new binaries
 sudo cp target/release/timed /usr/local/bin/
 sudo cp target/release/time-cli /usr/local/bin/
 
-# Start service
 sudo systemctl start timed
-
-# Check status
 systemctl status timed
 ```
 
 ---
 
-## Uninstalling
+## 8. Uninstalling
 
-### Using Uninstall Script
+### With the uninstall script
 
 ```bash
 cd time-masternode
-sudo ./scripts/uninstall-masternode.sh mainnet
+sudo ./scripts/uninstall-masternode.sh mainnet   # or testnet
 ```
 
-### Manual Uninstall
+### Manual uninstall
 
 ```bash
-# Stop and disable service
 sudo systemctl stop timed
 sudo systemctl disable timed
-
-# Remove binaries
-sudo rm /usr/local/bin/timed
-sudo rm /usr/local/bin/time-cli
-
-# Remove service file
 sudo rm /etc/systemd/system/timed.service
 sudo systemctl daemon-reload
 
-# Remove data (CAUTION: This deletes your wallet!)
-# Make sure you have backup of your private key!
-rm -rf ~/.timecoin/
+sudo rm /usr/local/bin/timed /usr/local/bin/time-cli
 
-# Remove user
-sudo userdel timecoin
+# ⚠️ DANGER — this deletes your wallet and all blockchain data
+# Back up time-wallet.dat FIRST!
+rm -rf ~/.timecoin/
 ```
 
 ---
 
-## Directory Structure
+## 9. Directory Layout
 
-After installation, your files will be organized as:
+### Mainnet (`~/.timecoin/`)
 
-### Mainnet
 ```
-/usr/local/bin/
-├── timed              # Daemon
-└── time-cli           # CLI tool
-
-/root/.timecoin/       # Data directory
+~/.timecoin/
 ├── time.conf          # Daemon configuration
 ├── masternode.conf    # Collateral configuration
-├── time-wallet.dat    # Wallet
+├── time-wallet.dat    # Wallet (BACK THIS UP)
 ├── blockchain/        # Blockchain database
 ├── blocks/            # Block storage
 ├── peers/             # Peer cache
 └── registry/          # Masternode registry
 ```
 
-### Testnet
+### Testnet (`~/.timecoin/testnet/`)
+
+Same structure, nested under the `testnet/` subdirectory.
+
+### Binaries
+
 ```
-/root/.timecoin/testnet/
-├── time.conf          # Testnet config
-├── masternode.conf    # Testnet collateral config
-├── time-wallet.dat    # Testnet wallet
-├── blockchain/        # Testnet blockchain
-├── blocks/            # Testnet blocks
-├── peers/             # Testnet peer cache
-└── registry/          # Testnet registry
+/usr/local/bin/timed       # Daemon
+/usr/local/bin/time-cli    # CLI tool
 ```
 
 ---
 
-## Configuration Reference
+## 10. Configuration Reference
 
-### Essential Configuration Options
+### `time.conf` (key=value format)
 
-**`time.conf`** (key=value format):
 ```ini
-# Network (uncomment for testnet)
+# ─── Network ─────────────────────────────────────────────────
+# Uncomment for testnet
 #testnet=1
 
-# Accept connections
+# Accept incoming connections
 listen=1
 server=1
 
-# Masternode mode (0=off, 1=on)
+# RPC bind address (keep as 127.0.0.1 for security)
+rpcbind=127.0.0.1
+
+# ─── Masternode ──────────────────────────────────────────────
+# Enable masternode mode (0=off, 1=on)
 masternode=1
 
-# Masternode private key (optional)
-#masternodeprivkey=<key>
+# Masternode private key (optional, auto-generated from wallet if omitted)
+#masternodeprivkey=<key from: time-cli masternode genkey>
 
-# Reward payout address (defaults to wallet address)
+# Reward payout address (optional, defaults to wallet address)
 #reward_address=<TIME address>
 
 # Public IP (auto-detected if omitted)
 #externalip=1.2.3.4
 
-# Logging: trace, debug, info, warn, error
+# ─── Peers ───────────────────────────────────────────────────
+#addnode=seed1.time-coin.io
+#addnode=seed2.time-coin.io
+
+# ─── Logging ─────────────────────────────────────────────────
+# Options: trace, debug, info, warn, error
 debug=info
 
-# Storage
+# ─── Storage ─────────────────────────────────────────────────
 txindex=1
 ```
 
-**`masternode.conf`** (collateral entries):
+### `masternode.conf` (collateral entries)
+
 ```
-# alias IP:port collateral_txid collateral_vout
+# alias  IP:port  collateral_txid  collateral_vout
 mn1 1.2.3.4:24000 abc123...def456 0
 ```
 
-See [Network Configuration Guide](./NETWORK_CONFIG.md) for full reference.
+Only needed for staked tiers (Bronze/Silver/Gold). Free tier nodes do not
+need a `masternode.conf` entry.
+
+See **[NETWORK_CONFIG.md](NETWORK_CONFIG.md)** for the full configuration
+reference.
 
 ---
 
-## Security Best Practices
+## 11. Troubleshooting
 
-1. **Never expose RPC port to the internet**
-   - Keep `rpc.listen_address = "127.0.0.1"`
+### Service won't start
 
-2. **Secure your private key**
-   - Store in encrypted file
-   - Never commit to version control
-   - Keep offline backup
+```bash
+journalctl -u timed -n 50 --no-pager
+```
 
-3. **Keep system updated**
-   ```bash
-   sudo apt update && sudo apt upgrade -y
+| Symptom | Fix |
+|---------|-----|
+| Port already in use | `sudo lsof -i :24000` → kill the process |
+| Permission denied | `sudo chown -R $USER:$USER ~/.timecoin/` |
+| Missing `libssl` | `sudo apt install -y libssl-dev` |
+
+### Build failures
+
+| Error | Fix |
+|-------|-----|
+| `linker 'cc' not found` | `sudo apt install build-essential` |
+| `openssl-sys` build failed | `sudo apt install libssl-dev pkg-config` |
+| `NASM not found` | `sudo apt install nasm` |
+
+### No peers connecting
+
+1. Check firewall: `sudo ufw status`
+2. Test port externally: `nc -zv <your_ip> 24000`
+3. Add seed nodes to `time.conf`:
+   ```ini
+   addnode=seed1.time-coin.io
+   addnode=seed2.time-coin.io
    ```
+4. Restart: `sudo systemctl restart timed`
 
-4. **Use firewall**
-   - Only open necessary ports (P2P only)
-   - Block RPC port from external access
+### RPC not responding
 
-5. **Run as non-root user** (for manual installations)
-   - Create dedicated user for the service
-   - Don't run as root unless necessary
+Wait 10–15 seconds after startup for initialization, then:
+```bash
+curl -s http://localhost:24101/rpc \
+  -X POST -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"getblockchaininfo","params":[],"id":1}'
+```
 
-6. **Enable automatic security updates**
-   ```bash
-   sudo apt install unattended-upgrades
-   sudo dpkg-reconfigure unattended-upgrades
-   ```
+### Corrupted database
+
+```bash
+sudo systemctl stop timed
+cp -r ~/.timecoin/blockchain ~/.timecoin/blockchain.backup
+rm -rf ~/.timecoin/blockchain/*
+sudo systemctl start timed    # re-syncs from peers
+```
+
+### Service management quick reference
+
+```bash
+systemctl status timed           # check status
+sudo systemctl start timed       # start
+sudo systemctl stop timed        # stop
+sudo systemctl restart timed     # restart
+journalctl -u timed -f           # live logs
+journalctl -u timed -n 100 --no-pager  # last 100 lines
+```
 
 ---
 
-## Support
+## Further Reading
 
-- **Documentation**: [https://github.com/time-coin/time-masternode/tree/main/docs](../README.md)
-- **Issues**: [GitHub Issues](https://github.com/time-coin/time-masternode/issues)
-- **Community**: [time-coin.io](https://time-coin.io)
-
----
-
-## Additional Resources
-
-- [Installation Scripts README](../scripts/README.md)
-- [CLI Guide](../CLI_GUIDE.md)
-- [Wallet Commands](../WALLET_COMMANDS.md)
-- [Contributing Guide](../CONTRIBUTING.md)
+- **[MASTERNODE_GUIDE.md](MASTERNODE_GUIDE.md)** — Tiers, collateral, rewards, deregistration, FAQ
+- **[CLI_GUIDE.md](CLI_GUIDE.md)** — Full command reference
+- **[NETWORK_CONFIG.md](NETWORK_CONFIG.md)** — Advanced network configuration
+- **[COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md)** — Security analysis
 
 ---
 
-**Last Updated**: 2025-12-11  
-**Version**: 0.1.0
+**Version**: 1.2.0  
+**Last Updated**: 2026-03-03
