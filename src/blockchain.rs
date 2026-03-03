@@ -576,26 +576,18 @@ impl Blockchain {
             stored_height
         );
 
-        // Helper: check if a block exists under either key format
+        // Helper: check if a block exists
         let block_key_exists = |h: u64| -> bool {
-            let key_new = format!("block_{}", h);
-            let key_old = format!("block:{}", h);
+            let key = format!("block_{}", h);
             self.storage
-                .get(key_new.as_bytes())
+                .get(key.as_bytes())
                 .ok()
                 .flatten()
                 .is_some()
-                || self
-                    .storage
-                    .get(key_old.as_bytes())
-                    .ok()
-                    .flatten()
-                    .is_some()
         };
 
         // First, find the highest contiguous chain from genesis
         // This handles gaps in the middle of the chain
-        // CRITICAL: Use get_block() which checks BOTH key formats (block_ and block:)
         let mut highest_contiguous = 0u64;
         let mut gap_heights: Vec<u64> = Vec::new();
         for h in 0..=stored_height {
@@ -702,8 +694,6 @@ impl Blockchain {
                     // Block exists but is corrupted — safe to delete
                     let block_key = format!("block_{}", h);
                     let _ = self.storage.remove(block_key.as_bytes());
-                    let block_key_old = format!("block:{}", h);
-                    let _ = self.storage.remove(block_key_old.as_bytes());
                     corrupted_deleted += 1;
                     tracing::warn!(
                         "🧹 Deleted corrupted block {} (will re-fetch from peers)",
@@ -738,77 +728,6 @@ impl Blockchain {
             stored_height
         );
         Ok(false) // No fix needed
-    }
-
-    /// Migrate old-schema blocks to new schema
-    /// This fixes blocks that were serialized before time_attestations changes
-    pub async fn migrate_old_schema_blocks(&self) -> Result<u64, String> {
-        use crate::block::types::{BlockV1, BlockV2};
-
-        tracing::info!("🔄 Checking for old-schema blocks that need migration...");
-
-        let mut migrated_count = 0u64;
-        let height = match self.load_chain_height() {
-            Ok(h) => h,
-            Err(_) => return Ok(0), // No blocks to migrate
-        };
-
-        // Check blocks 0 through current height
-        for block_height in 0..=height {
-            let key = format!("block_{}", block_height);
-
-            if let Ok(Some(data)) = self.storage.get(key.as_bytes()) {
-                // Try to deserialize with current schema
-                if bincode::deserialize::<Block>(&data).is_err() {
-                    // Current schema failed, try BlockV2 (new header, old Transaction)
-                    let migrated_block: Option<Block> =
-                        if let Ok(v2_block) = bincode::deserialize::<BlockV2>(&data) {
-                            Some(v2_block.into())
-                        } else if let Ok(v1_block) = bincode::deserialize::<BlockV1>(&data) {
-                            Some(v1_block.into())
-                        } else {
-                            None
-                        };
-
-                    if let Some(block) = migrated_block {
-                        // Re-serialize with new schema
-                        let new_data = bincode::serialize(&block).map_err(|e| {
-                            format!(
-                                "Failed to serialize migrated block {}: {}",
-                                block_height, e
-                            )
-                        })?;
-
-                        // Store the migrated block
-                        self.storage.insert(key.as_bytes(), new_data).map_err(|e| {
-                            format!("Failed to store migrated block {}: {}", block_height, e)
-                        })?;
-
-                        tracing::info!("✅ Migrated block {} from old schema", block_height);
-                        migrated_count += 1;
-                    } else {
-                        tracing::warn!(
-                            "⚠️ Block {} failed all deserializations, may need manual recovery",
-                            block_height,
-                        );
-                    }
-                }
-            }
-        }
-
-        if migrated_count > 0 {
-            self.storage
-                .flush()
-                .map_err(|e| format!("Failed to flush after migration: {}", e))?;
-            tracing::info!(
-                "✅ Schema migration complete: {} blocks migrated",
-                migrated_count
-            );
-        } else {
-            tracing::info!("✅ No blocks needed migration - schema is up to date");
-        }
-
-        Ok(migrated_count)
     }
 
     /// Initialize blockchain - verify local chain or generate genesis dynamically
@@ -3771,202 +3690,47 @@ impl Blockchain {
             return Ok((*cached_block).clone());
         }
 
-        // Cache miss - try both storage key formats for backward compatibility
-        // Try new format first (block_HEIGHT)
-        let key_new = format!("block_{}", height);
-        let has_new_key = self
+        let key = format!("block_{}", height);
+        let data = self
             .storage
-            .get(key_new.as_bytes())
-            .ok()
-            .flatten()
-            .is_some();
+            .get(key.as_bytes())
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Block {} not found in storage", height))?;
 
-        // Try old format (block:HEIGHT)
-        let key_old = format!("block:{}", height);
-        let has_old_key = self
-            .storage
-            .get(key_old.as_bytes())
-            .ok()
-            .flatten()
-            .is_some();
+        // Decompress if necessary (handles both compressed and uncompressed)
+        let data = crate::storage::decompress_block(&data).map_err(|e| {
+            tracing::error!("Failed to decompress block {}: {}", height, e);
+            format!("Block {} decompression failed: {}", height, e)
+        })?;
 
-        if !has_new_key && !has_old_key {
-            // Block truly doesn't exist
-            return Err(format!(
-                "Block {} not found in storage (checked both key formats)",
-                height
-            ));
-        }
+        match bincode::deserialize::<Block>(&data) {
+            Ok(block) => {
+                let block_arc = Arc::new(block);
+                self.block_cache.put(height, block_arc.clone());
+                Ok((*block_arc).clone())
+            }
+            Err(e) => {
+                tracing::error!(
+                    "⚠️ Block {} failed deserialization: {}",
+                    height,
+                    e
+                );
 
-        // Try deserializing with new key format
-        if has_new_key {
-            if let Ok(Some(v)) = self.storage.get(key_new.as_bytes()) {
-                // Decompress if necessary (handles both compressed and uncompressed)
-                let data = match crate::storage::decompress_block(&v) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::error!("Failed to decompress block {}: {}", height, e);
-                        return Err(format!("Block {} decompression failed: {}", height, e));
-                    }
-                };
-                // Try current Block format
-                match bincode::deserialize::<Block>(&data) {
-                    Ok(block) => {
-                        let block_arc = Arc::new(block);
-                        self.block_cache.put(height, block_arc.clone());
-                        return Ok((*block_arc).clone());
-                    }
-                    Err(e1) => {
-                        // Try BlockV2 (new header, old Transaction without special_data)
-                        if let Ok(v2_block) =
-                            bincode::deserialize::<crate::block::types::BlockV2>(&data)
-                        {
-                            let block: Block = v2_block.into();
-                            // Persist migrated block to sled so this is a one-time conversion
-                            if let Ok(new_data) = bincode::serialize(&block) {
-                                let _ = self.storage.insert(key_new.as_bytes(), new_data);
-                            }
-                            tracing::info!("✓ Migrated block {} from V2 format", height);
-                            let block_arc = Arc::new(block);
-                            self.block_cache.put(height, block_arc.clone());
-                            return Ok((*block_arc).clone());
-                        }
-                        // Try old BlockV1 format (old header + old Transaction)
-                        match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
-                            Ok(v1_block) => {
-                                let block: Block = v1_block.into();
-                                // Persist migrated block to sled so this is a one-time conversion
-                                if let Ok(new_data) = bincode::serialize(&block) {
-                                    let _ = self.storage.insert(key_new.as_bytes(), new_data);
-                                }
-                                tracing::info!("✓ Migrated block {} from V1 format", height);
-                                let block_arc = Arc::new(block);
-                                self.block_cache.put(height, block_arc.clone());
-                                return Ok((*block_arc).clone());
-                            }
-                            Err(e2) => {
-                                tracing::error!(
-                                    "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
-                                    height, key_new, e1, e2
-                                );
+                // Delete corrupted block for re-fetch from peers
+                tracing::warn!(
+                    "🔄 CORRUPTED BLOCK RECOVERY: Deleting corrupted block {} for re-fetch from peers",
+                    height
+                );
+                let _ = self.storage.remove(key.as_bytes());
+                self.block_cache.invalidate(height);
+                let _ = self.storage.flush();
 
-                                // SMART RECOVERY: Delete corrupted block and trigger re-sync from peers
-                                // This is safe because:
-                                // 1. We delete ONLY the corrupted block (not chain height)
-                                // 2. Chain height stays at current value, allowing re-fetch
-                                // 3. Sync coordinator will notice gap and request from peers
-                                // 4. Multiple peers validate received blocks against consensus
-                                // 5. If all peers have corrupted block, we'll detect consensus corruption
-
-                                tracing::warn!("🔄 CORRUPTED BLOCK RECOVERY: Deleting corrupted block {} for re-fetch from peers", height);
-
-                                // Delete corrupted block
-                                let _ = self.storage.remove(key_new.as_bytes());
-                                self.block_cache.invalidate(height);
-
-                                // Also try to delete old format if it exists
-                                let _ = self.storage.remove(key_old.as_bytes());
-
-                                // Flush to ensure deletion persists
-                                let _ = self.storage.flush();
-
-                                tracing::warn!(
-                                    "✅ Corrupted block {} deleted, will be re-fetched from peers",
-                                    height
-                                );
-
-                                // Return error to trigger recovery flow
-                                return Err(format!(
-                                    "Block {} was corrupted and has been deleted for re-fetch from peers",
-                                    height
-                                ));
-                            }
-                        }
-                    }
-                }
+                Err(format!(
+                    "Block {} was corrupted and has been deleted for re-fetch from peers",
+                    height
+                ))
             }
         }
-
-        // Try deserializing with old key format
-        if has_old_key {
-            if let Ok(Some(v)) = self.storage.get(key_old.as_bytes()) {
-                // Decompress if necessary (handles both compressed and uncompressed)
-                let data = match crate::storage::decompress_block(&v) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::error!("Failed to decompress block {}: {}", height, e);
-                        return Err(format!("Block {} decompression failed: {}", height, e));
-                    }
-                };
-                // Try current Block format
-                match bincode::deserialize::<Block>(&data) {
-                    Ok(block) => {
-                        let block_arc = Arc::new(block);
-                        self.block_cache.put(height, block_arc.clone());
-                        return Ok((*block_arc).clone());
-                    }
-                    Err(e1) => {
-                        // Try BlockV2 (new header, old Transaction without special_data)
-                        if let Ok(v2_block) =
-                            bincode::deserialize::<crate::block::types::BlockV2>(&data)
-                        {
-                            let block: Block = v2_block.into();
-                            // Persist migrated block to sled (old key) so this is a one-time conversion
-                            if let Ok(new_data) = bincode::serialize(&block) {
-                                let _ = self.storage.insert(key_old.as_bytes(), new_data);
-                            }
-                            tracing::info!(
-                                "✓ Migrated block {} from V2 format (old key)",
-                                height
-                            );
-                            let block_arc = Arc::new(block);
-                            self.block_cache.put(height, block_arc.clone());
-                            return Ok((*block_arc).clone());
-                        }
-                        // Try old BlockV1 format
-                        match bincode::deserialize::<crate::block::types::BlockV1>(&data) {
-                            Ok(v1_block) => {
-                                let block: Block = v1_block.into();
-                                // Persist migrated block to sled (old key) so this is a one-time conversion
-                                if let Ok(new_data) = bincode::serialize(&block) {
-                                    let _ = self.storage.insert(key_old.as_bytes(), new_data);
-                                }
-                                tracing::info!(
-                                    "✓ Migrated block {} from V1 format (old key)",
-                                    height
-                                );
-                                let block_arc = Arc::new(block);
-                                self.block_cache.put(height, block_arc.clone());
-                                return Ok((*block_arc).clone());
-                            }
-                            Err(e2) => {
-                                tracing::error!(
-                                    "⚠️ Block {} exists at key '{}' but failed both deserializations: Current={}, V1={}",
-                                    height, key_old, e1, e2
-                                );
-                                // Delete the corrupt local copy so it can be re-fetched from peers.
-                                // Chain height is NOT modified - the block will be re-downloaded
-                                // by the integrity check or sync coordinator.
-                                tracing::warn!(
-                                    "🔧 Deleting corrupted block {} (old key) for re-fetch from peers",
-                                    height
-                                );
-                                let _ = self.storage.remove(key_old.as_bytes());
-                                self.block_cache.invalidate(height);
-                                let _ = self.storage.flush();
-
-                                return Err(format!(
-                                    "Block {} was corrupted and deleted - will be re-fetched from peers",
-                                    height
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(format!("Block {} not found", height))
     }
 
     /// Get block hash at a height
@@ -4086,36 +3850,23 @@ impl Blockchain {
     }
 
     /// Diagnose storage issues for a range of blocks
-    /// Checks both key formats and deserialization
     pub fn diagnose_missing_blocks(&self, start: u64, end: u64) {
         tracing::info!("🔬 Diagnosing blocks {} to {}", start, end);
 
         for height in start..=end {
-            let key_old = format!("block:{}", height);
-            let key_new = format!("block_{}", height);
+            let key = format!("block_{}", height);
 
-            let old_exists = self
+            let exists = self
                 .storage
-                .get(key_old.as_bytes())
-                .ok()
-                .flatten()
-                .is_some();
-            let new_exists = self
-                .storage
-                .get(key_new.as_bytes())
+                .get(key.as_bytes())
                 .ok()
                 .flatten()
                 .is_some();
 
-            if !old_exists && !new_exists {
-                tracing::warn!("  Block {}: MISSING (neither key format exists)", height);
+            if !exists {
+                tracing::warn!("  Block {}: MISSING", height);
             } else {
-                tracing::debug!(
-                    "  Block {}: old_key={} new_key={}",
-                    height,
-                    old_exists,
-                    new_exists
-                );
+                tracing::debug!("  Block {}: exists", height);
 
                 match self.get_block(height) {
                     Ok(_) => tracing::debug!("    ✓ Deserializes OK"),
@@ -8886,12 +8637,10 @@ impl Blockchain {
             corrupt_heights
         );
 
-        // Step 1: Delete the corrupt local copies (both key formats)
+        // Step 1: Delete the corrupt local copies
         for &height in corrupt_heights {
-            let key_new = format!("block_{}", height);
-            let key_old = format!("block:{}", height);
-            let _ = self.storage.remove(key_new.as_bytes());
-            let _ = self.storage.remove(key_old.as_bytes());
+            let key = format!("block_{}", height);
+            let _ = self.storage.remove(key.as_bytes());
             self.block_cache.invalidate(height);
             tracing::info!("🗑️  Deleted corrupt local copy of block {}", height);
         }

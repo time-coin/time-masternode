@@ -123,30 +123,6 @@ pub enum SpecialTransactionData {
     },
 }
 
-/// Old transaction format without `special_data` field.
-/// Used for deserializing blocks stored before masternode registration was added.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TransactionV1 {
-    pub version: u32,
-    pub inputs: Vec<TxInput>,
-    pub outputs: Vec<TxOutput>,
-    pub lock_time: u32,
-    pub timestamp: i64,
-}
-
-impl From<TransactionV1> for Transaction {
-    fn from(v1: TransactionV1) -> Self {
-        Transaction {
-            version: v1.version,
-            inputs: v1.inputs,
-            outputs: v1.outputs,
-            lock_time: v1.lock_time,
-            timestamp: v1.timestamp,
-            special_data: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Transaction {
     pub version: u32,
@@ -156,39 +132,13 @@ pub struct Transaction {
     pub timestamp: i64,
     /// Optional special transaction payload for masternode operations.
     /// `None` for regular transactions.
-    /// NOTE: Do NOT use `skip_serializing_if` here — bincode is positional and
-    /// skipping the field makes serialize/deserialize asymmetric, causing an
-    /// infinite migration loop (serialized Block is identical to BlockV2).
     #[serde(default)]
     pub special_data: Option<SpecialTransactionData>,
 }
 
 impl Transaction {
     pub fn txid(&self) -> Hash256 {
-        // Use JSON serialization for canonical, network-compatible hashing.
-        // When special_data is None, exclude it from JSON to match the legacy
-        // Transaction format (before special_data was added). This keeps txid
-        // hashes — and therefore merkle roots — identical for old blocks.
-        let json = if self.special_data.is_none() {
-            #[derive(Serialize)]
-            struct TxHashCompat<'a> {
-                version: u32,
-                inputs: &'a Vec<TxInput>,
-                outputs: &'a Vec<TxOutput>,
-                lock_time: u32,
-                timestamp: i64,
-            }
-            serde_json::to_string(&TxHashCompat {
-                version: self.version,
-                inputs: &self.inputs,
-                outputs: &self.outputs,
-                lock_time: self.lock_time,
-                timestamp: self.timestamp,
-            })
-            .expect("JSON serialization should succeed")
-        } else {
-            serde_json::to_string(self).expect("JSON serialization should succeed")
-        };
+        let json = serde_json::to_string(self).expect("JSON serialization should succeed");
         Sha256::digest(json.as_bytes()).into()
     }
 
