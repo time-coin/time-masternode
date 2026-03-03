@@ -214,7 +214,7 @@ impl MessageHandler {
     }
 
     /// Verify a vote signature (PREPARE or PRECOMMIT)
-    /// Returns Ok(true) if valid, Ok(false) if invalid/rejected, Err on missing signature with backward compat
+    /// Returns Ok(true) if valid, Ok(false) if invalid/rejected
     async fn verify_vote_signature(
         &self,
         registry: &MasternodeRegistry,
@@ -224,21 +224,23 @@ impl MessageHandler {
         signature: &[u8],
     ) -> Result<bool, ()> {
         if signature.is_empty() {
-            debug!(
-                "[{}] Accepting unsigned {} vote from {} (backward compatibility)",
+            warn!(
+                "❌ [{}] Rejecting unsigned {} vote from {} (signatures required)",
                 self.direction,
                 String::from_utf8_lossy(vote_type),
                 voter_id
             );
-            return Ok(true); // Accept unsigned for backward compatibility
+            return Ok(false);
         }
 
         let Some(info) = registry.get(voter_id).await else {
-            debug!(
-                "[{}] Cannot verify signature for unknown voter {}",
-                self.direction, voter_id
+            warn!(
+                "❌ [{}] Rejecting {} vote from unknown/unregistered voter {}",
+                self.direction,
+                String::from_utf8_lossy(vote_type),
+                voter_id
             );
-            return Ok(true); // Accept if we don't know the voter
+            return Ok(false);
         };
 
         use ed25519_dalek::{Signature, Verifier};

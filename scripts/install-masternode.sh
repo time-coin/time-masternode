@@ -447,7 +447,28 @@ create_config() {
     # ── time.conf ────────────────────────────────────────────────
     if [ -f "$TIME_CONF" ]; then
         print_info "time.conf already exists, not overwriting"
+
+        # Ensure RPC credentials exist in existing config (upgrade path)
+        if ! grep -q '^rpcuser=' "$TIME_CONF" || ! grep -q '^rpcpassword=' "$TIME_CONF"; then
+            local RPC_USER
+            RPC_USER=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
+            local RPC_PASSWORD
+            RPC_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+            {
+                echo ""
+                echo "# RPC authentication (auto-generated during upgrade)"
+                grep -q '^rpcuser=' "$TIME_CONF" || echo "rpcuser=${RPC_USER}"
+                grep -q '^rpcpassword=' "$TIME_CONF" || echo "rpcpassword=${RPC_PASSWORD}"
+            } >> "$TIME_CONF"
+            print_info "RPC credentials auto-generated and appended to time.conf"
+        fi
     else
+        # Generate random RPC credentials
+        local RPC_USER
+        RPC_USER=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)
+        local RPC_PASSWORD
+        RPC_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)
+
         cat > "$TIME_CONF" <<EOF
 # TIME Coin Configuration File
 # https://time-coin.io
@@ -481,6 +502,10 @@ server=1
 # Allow RPC connections from localhost only (secure default)
 rpcbind=127.0.0.1
 #rpcallowip=127.0.0.1
+
+# RPC authentication (auto-generated — change if desired)
+rpcuser=${RPC_USER}
+rpcpassword=${RPC_PASSWORD}
 
 # ─── Masternode ──────────────────────────────────────────────
 # Enable masternode mode (0=off, 1=on)
@@ -670,10 +695,15 @@ print_summary() {
     echo ""
     echo -e "${BLUE}Network: ${NETWORK^^}${NC}"
     echo "  • P2P Port: $P2P_PORT"
-    echo "  • RPC Port: $RPC_PORT (localhost only)"
+    echo "  • RPC Port: $RPC_PORT (localhost only, auth enabled)"
     if [[ -n "$REWARD_ADDRESS" ]]; then
         echo "  • Reward Address: $REWARD_ADDRESS"
     fi
+    echo ""
+    echo -e "${BLUE}RPC Credentials (auto-generated):${NC}"
+    echo "  • Stored in: $CONFIG_DIR/time.conf"
+    echo "  • Cookie:    $DATA_DIR/.cookie"
+    echo "  • time-cli reads credentials automatically"
     echo ""
     echo -e "${BLUE}Installed Components:${NC}"
     echo "  • Binaries: $BIN_DIR/timed, $BIN_DIR/time-cli"

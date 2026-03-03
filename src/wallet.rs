@@ -21,6 +21,8 @@ use std::fs;
 use std::path::Path;
 use zeroize::Zeroize;
 
+const LEGACY_PASSWORD: &str = "timecoin";
+
 #[derive(Debug, thiserror::Error)]
 pub enum WalletError {
     #[error("Failed to create wallet: {0}")]
@@ -325,18 +327,92 @@ impl WalletManager {
         format!("{}/time-wallet.dat", self.data_dir)
     }
 
-    /// Create or load wallet
-    /// NOTE: Uses default password "timecoin" for development.
-    /// TODO: In production, prompt user for password
+    /// Get the wallet password file path
+    fn password_file_path(&self) -> String {
+        format!("{}/.wallet_password", self.data_dir)
+    }
+
+    /// Read or generate the wallet password.
+    ///
+    /// New wallets get a random 32-char password stored in `.wallet_password`.
+    /// Existing wallets without a password file are assumed to use the legacy
+    /// password; once loaded they are re-encrypted with a new random password.
+    fn resolve_password(&self) -> Result<String, WalletError> {
+        let pw_path = self.password_file_path();
+        if Path::new(&pw_path).exists() {
+            fs::read_to_string(&pw_path)
+                .map(|s| s.trim().to_string())
+                .map_err(|e| WalletError::LoadFailed(format!("Cannot read password file: {}", e)))
+        } else {
+            // Generate a new random password
+            use rand::Rng;
+            const CHARSET: &[u8] =
+                b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            let mut rng = rand::thread_rng();
+            let password: String = (0..32)
+                .map(|_| {
+                    let idx = rng.gen_range(0..CHARSET.len());
+                    CHARSET[idx] as char
+                })
+                .collect();
+            self.save_password_file(&password)?;
+            Ok(password)
+        }
+    }
+
+    /// Persist the wallet password to disk with restricted permissions.
+    fn save_password_file(&self, password: &str) -> Result<(), WalletError> {
+        let pw_path = self.password_file_path();
+        fs::write(&pw_path, password)
+            .map_err(|e| WalletError::SaveFailed(format!("Cannot write password file: {}", e)))?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&pw_path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    /// Create or load wallet with auto-generated password.
+    ///
+    /// - New wallets: generates a random password, saves it, encrypts wallet.
+    /// - Existing wallets with password file: loads using stored password.
+    /// - Existing wallets WITHOUT password file (legacy): tries legacy password,
+    ///   then re-encrypts with a new random password for future security.
     pub fn get_or_create_wallet(&self, network: NetworkType) -> Result<Wallet, WalletError> {
         let path = self.default_wallet_path();
-        const DEFAULT_PASSWORD: &str = "timecoin";
 
         if Path::new(&path).exists() {
-            Wallet::load(&path, DEFAULT_PASSWORD)
+            let password = if Path::new(&self.password_file_path()).exists() {
+                self.resolve_password()?
+            } else {
+                // Legacy wallet — try default password, then migrate
+                match Wallet::load(&path, LEGACY_PASSWORD) {
+                    Ok(wallet) => {
+                        // Re-encrypt with a new secure password
+                        let new_password = self.resolve_password()?;
+                        wallet.save(&path, &new_password)?;
+                        tracing::info!(
+                            "🔐 Wallet re-encrypted with secure password (stored in {})",
+                            self.password_file_path()
+                        );
+                        return Ok(wallet);
+                    }
+                    Err(_) => {
+                        return Err(WalletError::LoadFailed(
+                            "Wallet exists but no password file found and legacy password failed. \
+                             Place your password in .wallet_password in the data directory."
+                                .to_string(),
+                        ));
+                    }
+                }
+            };
+            Wallet::load(&path, &password)
         } else {
+            let password = self.resolve_password()?;
             let wallet = Wallet::new(network, Some("Default Wallet".to_string()))?;
-            wallet.save(&path, DEFAULT_PASSWORD)?;
+            wallet.save(&path, &password)?;
             Ok(wallet)
         }
     }

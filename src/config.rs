@@ -16,6 +16,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use crate::network_type::NetworkType;
+use rand::Rng;
 
 /// Get the platform-specific data directory for TIME Coin
 #[allow(dead_code)]
@@ -157,6 +158,10 @@ pub struct RpcConfig {
     pub enabled: bool,
     pub listen_address: String,
     pub allow_origins: Vec<String>,
+    #[serde(default)]
+    pub rpcuser: String,
+    #[serde(default)]
+    pub rpcpassword: String,
 }
 
 impl RpcConfig {
@@ -547,7 +552,12 @@ impl Config {
             rpc: RpcConfig {
                 enabled: true,
                 listen_address: "127.0.0.1".to_string(),
-                allow_origins: vec!["*".to_string()],
+                allow_origins: vec![
+                    "http://localhost".to_string(),
+                    "http://127.0.0.1".to_string(),
+                ],
+                rpcuser: String::new(),
+                rpcpassword: String::new(),
             },
             storage: StorageConfig {
                 backend: "sled".to_string(),
@@ -801,6 +811,16 @@ impl Config {
             if let Some(v) = entries.get("rpcallowip") {
                 config.rpc.allow_origins = v.iter().map(|ip| format!("http://{}", ip)).collect();
             }
+            if let Some(v) = entries.get("rpcuser") {
+                if let Some(user) = v.last() {
+                    config.rpc.rpcuser = user.clone();
+                }
+            }
+            if let Some(v) = entries.get("rpcpassword") {
+                if let Some(pass) = v.last() {
+                    config.rpc.rpcpassword = pass.clone();
+                }
+            }
             if let Some(v) = entries.get("masternode") {
                 config.masternode.enabled = v.last().is_some_and(|s| s == "1");
             }
@@ -837,10 +857,49 @@ impl Config {
             }
 
             println!("  ✓ Loaded configuration from {}", conf_path.display());
+
+            // Auto-generate RPC credentials for existing configs that lack them
+            if config.rpc.rpcuser.is_empty() || config.rpc.rpcpassword.is_empty() {
+                let user = generate_random_string(16);
+                let password = generate_random_string(32);
+                append_conf_key(conf_path, "rpcuser", &user)?;
+                append_conf_key(conf_path, "rpcpassword", &password)?;
+                config.rpc.rpcuser = user;
+                config.rpc.rpcpassword = password;
+                println!(
+                    "  ⚠ RPC credentials were missing — auto-generated and saved to {}",
+                    conf_path.display()
+                );
+            }
         } else {
             // Generate default time.conf on first run
             generate_default_conf_for_network(conf_path, network_type)?;
             println!("  ✓ Generated default {}", conf_path.display());
+
+            // Re-read the just-generated credentials into config
+            if let Ok(entries) = parse_conf_file(conf_path) {
+                if let Some(v) = entries.get("rpcuser") {
+                    if let Some(user) = v.last() {
+                        config.rpc.rpcuser = user.clone();
+                    }
+                }
+                if let Some(v) = entries.get("rpcpassword") {
+                    if let Some(pass) = v.last() {
+                        config.rpc.rpcpassword = pass.clone();
+                    }
+                }
+            }
+        }
+
+        // Write .cookie file for CLI tools
+        let data_dir = get_network_data_dir(network_type);
+        if !config.rpc.rpcuser.is_empty() && !config.rpc.rpcpassword.is_empty() {
+            let data_dir_str = data_dir.to_string_lossy();
+            if let Err(e) =
+                write_rpc_cookie(&data_dir_str, &config.rpc.rpcuser, &config.rpc.rpcpassword)
+            {
+                eprintln!("  ⚠ Failed to write RPC cookie file: {}", e);
+            }
         }
 
         // Load masternode.conf if it exists
@@ -1041,6 +1100,8 @@ pub fn generate_default_conf_for_network(
         NetworkType::Testnet => "testnet=1",
         NetworkType::Mainnet => "#testnet=0",
     };
+    let rpc_user = generate_random_string(16);
+    let rpc_password = generate_random_string(32);
     let contents = format!(
         r#"# TIME Coin Configuration File
 # https://time-coin.io
@@ -1070,6 +1131,10 @@ server=1
 
 # RPC port (mainnet=24001, testnet=24101)
 #rpcport=24101
+
+# RPC authentication (auto-generated — change if desired)
+rpcuser={}
+rpcpassword={}
 
 # IP addresses allowed to connect to RPC
 #rpcallowip=127.0.0.1
@@ -1104,13 +1169,48 @@ txindex=1
 # Custom data directory (leave commented for default)
 #datadir=
 "#,
-        testnet_line
+        testnet_line, rpc_user, rpc_password
     );
 
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     fs::write(path, contents)?;
+    Ok(())
+}
+
+/// Generate a random alphanumeric string of the given length for RPC credentials.
+fn generate_random_string(len: usize) -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut rng = rand::thread_rng();
+    (0..len)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+/// Generate RPC credentials and write a `.cookie` file for CLI access.
+///
+/// The cookie file contains `rpcuser:rpcpassword` and is readable only by
+/// the file owner, following the same pattern as Bitcoin Core.
+pub fn write_rpc_cookie(
+    data_dir: &str,
+    user: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cookie_path = PathBuf::from(data_dir).join(".cookie");
+    let cookie_content = format!("{}:{}", user, password);
+    fs::write(&cookie_path, &cookie_content)?;
+
+    // Restrict permissions on Unix (owner-read-only)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&cookie_path, fs::Permissions::from_mode(0o600))?;
+    }
+
     Ok(())
 }
 
@@ -1345,8 +1445,18 @@ mod tests {
         generate_default_conf_for_network(&path, &NetworkType::Testnet).unwrap();
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("testnet=1"));
+        assert!(contents.contains("rpcuser="));
+        assert!(contents.contains("rpcpassword="));
         let entries = parse_conf_file(&path).unwrap();
         assert_eq!(entries.get("testnet").unwrap(), &vec!["1".to_string()]);
+        // Verify auto-generated credentials are non-empty
+        let rpc_user = entries.get("rpcuser").unwrap().last().unwrap();
+        let rpc_pass = entries.get("rpcpassword").unwrap().last().unwrap();
+        assert!(rpc_user.len() >= 16, "rpcuser should be at least 16 chars");
+        assert!(
+            rpc_pass.len() >= 32,
+            "rpcpassword should be at least 32 chars"
+        );
 
         fs::remove_file(&path).ok();
         fs::remove_dir_all(&dir).ok();
