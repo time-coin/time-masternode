@@ -2554,6 +2554,7 @@ dependencies = [
  "arc-swap",
  "argon2",
  "async-trait",
+ "base64",
  "bincode",
  "bytes",
  "chrono",

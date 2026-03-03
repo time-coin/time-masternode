@@ -4,8 +4,9 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.2.x   | :white_check_mark: |
-| 0.1.x   | :x:                |
+| 1.2.x   | :white_check_mark: |
+| 1.1.x   | :white_check_mark: |
+| < 1.1   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -42,39 +43,51 @@ When reporting a vulnerability, please include:
 TimeCoin implements several security measures:
 
 1. **Cryptographic Security**
-   - Ed25519 signatures for transactions
-   - SHA-256 hashing for blocks
-   - Secure random number generation
+   - Ed25519 signatures for transactions and consensus votes (RFC 8032)
+   - BLAKE3 hashing for blocks and Merkle trees
+   - ECVRF (RFC 9381) for deterministic block producer sortition
+   - AES-256-GCM wallet encryption with Argon2 key derivation
+   - Secure random number generation (OsRng)
 
-2. **Network Security**
+2. **RPC Security**
+   - Binds to `127.0.0.1` by default (localhost only)
+   - HTTP Basic Auth with auto-generated credentials
+   - Per-IP rate limiting (100 req/s)
+   - `.cookie` file for CLI tool authentication
+
+3. **Network Security**
    - IP blacklisting for malicious peers
-   - Rate limiting to prevent DoS
-   - Peer reputation system
+   - Per-peer, per-message-type rate limiting
+   - Peer reputation scoring
    - Whitelist for trusted nodes
+   - Message timestamp validation (5-minute window)
 
-3. **Consensus Security**
-   - Proof-of-Time validation
-   - Fork resolution with AI scoring
-   - Chain reorganization protection
-   - Block timestamp validation
+4. **Consensus Security**
+   - TimeVote 51% stake-weighted finality
+   - Ed25519 vote signature verification (unsigned votes rejected)
+   - VRF-based deterministic block producer selection
+   - Fork resolution via longest-chain rule
+   - Chain reorganization depth limits
 
-4. **Input Validation**
+5. **Wallet Security**
+   - Auto-generated random wallet password (32 chars)
+   - Password stored in `.wallet_password` (owner-read-only permissions)
+   - Legacy wallets auto-migrated to secure passwords on first load
+   - AES-256-GCM encryption with Argon2 KDF
+
+6. **Input Validation**
    - Transaction signature verification
    - Block header validation
    - Merkle tree verification
    - Amount overflow checks
-
-5. **Operational Security**
-   - Secure key storage recommendations
-   - Audit logging
-   - Error handling without information leakage
+   - Reward address network validation (prevents testnet/mainnet mismatch)
 
 ### Planned Security Enhancements
 
-- TLS encryption for all P2P connections (v0.3.0)
+- TLS encryption for all P2P connections
 - Hardware wallet support
 - Multi-signature transactions
-- Smart contract auditing tools
+- `walletpassphrase` / `encryptwallet` RPC commands
 - Formal verification of critical code paths
 
 ## Security Best Practices
@@ -83,15 +96,16 @@ TimeCoin implements several security measures:
 
 1. **System Security**
    - Keep operating system updated
-   - Use firewall to restrict access
+   - Use firewall to restrict access (allow only P2P port)
    - Enable automatic security updates
    - Use strong SSH keys (if remote access)
 
 2. **Node Configuration**
-   - Don't expose RPC to public internet
-   - Use strong passwords/keys
-   - Enable logging
-   - Monitor resource usage
+   - Never change `rpcbind` from `127.0.0.1` unless behind a VPN
+   - Do not disable RPC authentication
+   - Keep auto-generated `rpcuser`/`rpcpassword` in `time.conf`
+   - Enable logging and monitor for anomalies
+   - Protect `time.conf` and `.wallet_password` file permissions
 
 3. **Network Security**
    - Use trusted peers when possible
@@ -100,9 +114,9 @@ TimeCoin implements several security measures:
    - Use VPN for sensitive deployments
 
 4. **Key Management**
-   - Never share private keys
+   - Never share private keys or wallet password files
    - Use hardware wallets for large amounts
-   - Back up keys securely (offline)
+   - Back up wallet file (`time-wallet.dat`) and password file securely
    - Use different keys for different purposes
 
 ### For Developers
@@ -110,29 +124,29 @@ TimeCoin implements several security measures:
 1. **Code Security**
    - Follow secure coding practices
    - Run `cargo clippy` regularly
-   - Use `cargo audit` to check dependencies
+   - Run `scripts/security-check.sh` before releases
    - Review code for common vulnerabilities
 
 2. **Testing**
    - Write tests for edge cases
    - Test error conditions
-   - Fuzz test critical functions
+   - Security-focused integration tests in `tests/security_audit.rs`
    - Use sanitizers during development
 
 3. **Dependencies**
    - Keep dependencies updated
-   - Audit third-party crates
+   - Run `cargo audit` regularly
+   - Use `deny.toml` policy for license and advisory checks
    - Minimize dependency count
-   - Pin critical dependency versions
 
 ## Known Security Considerations
 
 ### Current Limitations
 
-1. **P2P Encryption**: Not yet implemented (planned for v0.3.0)
-2. **Eclipse Attacks**: Partial mitigation through peer diversity
-3. **Sybil Attacks**: Mitigated by masternode system and whitelisting
-4. **67% Attacks**: BFT-safe finality threshold requires 67% stake to attack (tolerates up to 33% Byzantine)
+1. **P2P Encryption**: TLS code exists but is not yet integrated into the wire protocol
+2. **Eclipse Attacks**: Partial mitigation through peer diversity and reputation
+3. **Sybil Attacks**: Mitigated by masternode collateral requirements and whitelisting
+4. **51% Attacks**: TimeVote finality requires 51% stake threshold
 
 ### Attack Vectors Being Monitored
 
@@ -140,7 +154,7 @@ TimeCoin implements several security measures:
 - Time manipulation attacks
 - Network partition attacks
 - Double-spend attempts
-- Fork bombing
+- VRF grinding attacks
 
 ## Vulnerability Disclosure
 
@@ -156,7 +170,8 @@ We follow responsible disclosure practices:
 ## Security Audits
 
 - Internal code reviews: Ongoing
-- External security audit: Planned for v1.0.0
+- Comprehensive security analysis: See `docs/COMPREHENSIVE_SECURITY_AUDIT.md`
+- Automated scanning: `scripts/security-check.sh` (cargo-audit + cargo-deny + clippy)
 - Bug bounty program: Under consideration
 
 ## Contact
@@ -171,4 +186,4 @@ We appreciate the security research community and will acknowledge researchers w
 
 ---
 
-*This security policy is subject to updates. Last updated: January 2026*
+*This security policy is subject to updates. Last updated: March 2026*

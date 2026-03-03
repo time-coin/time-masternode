@@ -16,9 +16,11 @@ use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -46,9 +48,55 @@ pub struct RpcError {
     pub message: String,
 }
 
+use base64::Engine;
+
+/// Per-IP RPC rate limiter. Allows `max_per_second` requests per IP per second.
+struct RpcRateLimiter {
+    /// Map of IP → (window_start, request_count)
+    counters: DashMap<std::net::IpAddr, (Instant, u32)>,
+    max_per_second: u32,
+}
+
+impl RpcRateLimiter {
+    fn new(max_per_second: u32) -> Self {
+        Self {
+            counters: DashMap::new(),
+            max_per_second,
+        }
+    }
+
+    /// Returns true if the request is allowed, false if rate-limited.
+    fn check(&self, addr: std::net::IpAddr) -> bool {
+        let now = Instant::now();
+        let mut entry = self.counters.entry(addr).or_insert((now, 0));
+        let (window_start, count) = entry.value_mut();
+
+        if now.duration_since(*window_start).as_secs() >= 1 {
+            // New window
+            *window_start = now;
+            *count = 1;
+            true
+        } else if *count < self.max_per_second {
+            *count += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Periodic cleanup of stale entries (call every ~60s)
+    fn cleanup(&self) {
+        let cutoff = Instant::now() - std::time::Duration::from_secs(60);
+        self.counters.retain(|_, (t, _)| *t > cutoff);
+    }
+}
+
 pub struct RpcServer {
     listener: TcpListener,
     handler: Arc<RpcHandler>,
+    /// Base64-encoded "user:password" for HTTP Basic Auth. Empty = no auth required.
+    auth_token: String,
+    rate_limiter: Arc<RpcRateLimiter>,
 }
 
 impl RpcServer {
@@ -62,6 +110,8 @@ impl RpcServer {
         blockchain: Arc<crate::blockchain::Blockchain>,
         blacklist: Arc<tokio::sync::RwLock<crate::network::blacklist::IPBlacklist>>,
         tx_event_sender: Option<tokio::sync::broadcast::Sender<super::websocket::TransactionEvent>>,
+        rpcuser: String,
+        rpcpassword: String,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
         let mut handler = RpcHandler::new(
@@ -76,33 +126,96 @@ impl RpcServer {
             handler.set_tx_event_sender(sender);
         }
 
+        let auth_token = if !rpcuser.is_empty() && !rpcpassword.is_empty() {
+            base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", rpcuser, rpcpassword))
+        } else {
+            String::new()
+        };
+
         Ok(Self {
             listener,
             handler: Arc::new(handler),
+            auth_token,
+            rate_limiter: Arc::new(RpcRateLimiter::new(100)),
         })
     }
 
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
         println!(
-            "  ✅ RPC server listening on {}",
-            self.listener.local_addr()?
+            "  ✅ RPC server listening on {} (auth: {})",
+            self.listener.local_addr()?,
+            if self.auth_token.is_empty() {
+                "disabled"
+            } else {
+                "enabled"
+            }
         );
 
+        // Spawn periodic rate limiter cleanup
+        let cleanup_limiter = self.rate_limiter.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                cleanup_limiter.cleanup();
+            }
+        });
+
         loop {
-            let (socket, _addr) = self.listener.accept().await?;
+            let (socket, addr) = self.listener.accept().await?;
+
+            // Rate limit check
+            if !self.rate_limiter.check(addr.ip()) {
+                let _ =
+                    Self::send_error(socket, "Rate limit exceeded. Try again later.", -32005).await;
+                continue;
+            }
+
             let handler = self.handler.clone();
+            let auth_token = self.auth_token.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(socket, handler).await {
+                if let Err(e) = Self::handle_connection(socket, handler, &auth_token).await {
                     eprintln!("RPC error: {}", e);
                 }
             });
         }
     }
 
+    /// Send a JSON-RPC error response and close the connection.
+    async fn send_error(
+        mut socket: tokio::net::TcpStream,
+        message: &str,
+        code: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let response = RpcResponse {
+            jsonrpc: "2.0".to_string(),
+            id: "rate-limited".to_string(),
+            result: None,
+            error: Some(RpcError {
+                code,
+                message: message.to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&response)?;
+        let http = format!(
+            "HTTP/1.1 429 Too Many Requests\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {}",
+            json.len(),
+            json
+        );
+        socket.write_all(http.as_bytes()).await?;
+        socket.flush().await?;
+        Ok(())
+    }
+
     async fn handle_connection(
         mut socket: tokio::net::TcpStream,
         handler: Arc<RpcHandler>,
+        auth_token: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = vec![0u8; 8192];
         let bytes_read = socket.read(&mut buffer).await?;
@@ -112,6 +225,52 @@ impl RpcServer {
         }
 
         let http_request = String::from_utf8_lossy(&buffer[..bytes_read]);
+
+        // Check HTTP Basic Auth if credentials are configured
+        if !auth_token.is_empty() {
+            let authorized = http_request
+                .lines()
+                .find(|line| {
+                    let lower = line.to_lowercase();
+                    lower.starts_with("authorization:")
+                })
+                .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()))
+                .map(|value| {
+                    if let Some(token) = value.strip_prefix("Basic ") {
+                        token.trim() == auth_token
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+
+            if !authorized {
+                let error_response = RpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: "unauthorized".to_string(),
+                    result: None,
+                    error: Some(RpcError {
+                        code: -32600,
+                        message: "Unauthorized: invalid or missing RPC credentials".to_string(),
+                    }),
+                };
+                let error_json = serde_json::to_string(&error_response)?;
+                let http_response = format!(
+                    "HTTP/1.1 401 Unauthorized\r\n\
+                     WWW-Authenticate: Basic realm=\"TIME Coin RPC\"\r\n\
+                     Content-Type: application/json\r\n\
+                     Content-Length: {}\r\n\
+                     Connection: close\r\n\
+                     \r\n\
+                     {}",
+                    error_json.len(),
+                    error_json
+                );
+                socket.write_all(http_response.as_bytes()).await?;
+                socket.flush().await?;
+                return Ok(());
+            }
+        }
 
         // Extract JSON body from HTTP POST request
         let body = if let Some(body_start) = http_request.find("\r\n\r\n") {

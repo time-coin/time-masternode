@@ -71,6 +71,14 @@ struct Args {
     #[arg(long)]
     testnet: bool,
 
+    /// RPC username (reads from .cookie file if not provided)
+    #[arg(long)]
+    rpcuser: Option<String>,
+
+    /// RPC password (reads from .cookie file if not provided)
+    #[arg(long)]
+    rpcpassword: Option<String>,
+
     /// Output compact JSON (single line)
     #[arg(long)]
     compact: bool,
@@ -431,9 +439,47 @@ async fn main() {
     }
 }
 
-async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
+/// Read RPC credentials from the .cookie file in the data directory.
+fn read_cookie_file(testnet: bool) -> Option<(String, String)> {
+    let data_dir = if testnet {
+        dirs::home_dir()?.join(".timecoin").join("testnet")
+    } else {
+        dirs::home_dir()?.join(".timecoin")
+    };
+    let cookie_path = data_dir.join(".cookie");
+    let contents = std::fs::read_to_string(&cookie_path).ok()?;
+    let (user, pass) = contents.trim().split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
 
+/// Read RPC credentials from time.conf as a fallback.
+fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
+    let data_dir = if testnet {
+        dirs::home_dir()?.join(".timecoin").join("testnet")
+    } else {
+        dirs::home_dir()?.join(".timecoin")
+    };
+    let conf_path = data_dir.join("time.conf");
+    let contents = std::fs::read_to_string(&conf_path).ok()?;
+    let mut user = None;
+    let mut pass = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            match key.trim() {
+                "rpcuser" => user = Some(value.trim().to_string()),
+                "rpcpassword" => pass = Some(value.trim().to_string()),
+                _ => {}
+            }
+        }
+    }
+    Some((user?, pass?))
+}
+
+async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let rpc_url = args.rpc_url.unwrap_or_else(|| {
         if args.testnet {
             "http://127.0.0.1:24101".to_string()
@@ -441,6 +487,16 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             "http://127.0.0.1:24001".to_string()
         }
     });
+
+    // Resolve RPC credentials: CLI flags > .cookie file > time.conf
+    let (rpc_user, rpc_pass) = match (&args.rpcuser, &args.rpcpassword) {
+        (Some(u), Some(p)) => (u.clone(), p.clone()),
+        _ => read_cookie_file(args.testnet)
+            .or_else(|| read_conf_credentials(args.testnet))
+            .unwrap_or_default(),
+    };
+
+    let client = Client::new();
 
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
@@ -532,7 +588,15 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         params,
     };
 
-    let response = client.post(&rpc_url).json(&request).send().await?;
+    let mut req = client.post(&rpc_url).json(&request);
+    if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+        req = req.basic_auth(&rpc_user, Some(&rpc_pass));
+    }
+    let response = req.send().await?;
+
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        return Err("RPC authentication failed. Check rpcuser/rpcpassword in time.conf or use --rpcuser/--rpcpassword flags.".into());
+    }
 
     if !response.status().is_success() {
         return Err(format!("HTTP error: {}", response.status()).into());

@@ -3337,6 +3337,8 @@ async fn main() {
             let rpc_shutdown_token = shutdown_token.clone();
             let rpc_blacklist = server.blacklist.clone();
             let rpc_tx_sender = tx_event_sender.clone();
+            let rpc_user = config.rpc.rpcuser.clone();
+            let rpc_pass = config.rpc.rpcpassword.clone();
 
             let rpc_handle = tokio::spawn(async move {
                 match RpcServer::new(
@@ -3348,6 +3350,8 @@ async fn main() {
                     rpc_blockchain,
                     rpc_blacklist,
                     Some(rpc_tx_sender),
+                    rpc_user,
+                    rpc_pass,
                 )
                 .await
                 {

@@ -742,6 +742,109 @@ pub struct BlockHeader {
 
 ---
 
+## 11. RPC API ATTACKS
+
+*Added: March 2026 — covers the RPC attack surface not addressed in the original audit.*
+
+### 11.1 ✅ FIXED — RPC Exposed to Public Internet
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** RPC server was bound to `0.0.0.0`, allowing any internet host to execute wallet-draining commands (`sendtoaddress`, `sendfrom`, `sendrawtransaction`).
+
+**Fix Applied:**
+- ✅ **Default bind changed to `127.0.0.1`** in both code (`config.rs`) and install script
+- ✅ **Install script no longer sets `rpcallowip=0.0.0.0/0`**
+
+**Code References:**
+- `src/config.rs` — `RpcConfig` default `listen_address`
+- `scripts/install-masternode.sh` — config generation
+
+### 11.2 ✅ FIXED — No RPC Authentication
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** RPC server accepted all requests without any authentication. Any local process could drain the wallet.
+
+**Fix Applied:**
+- ✅ **HTTP Basic Auth** with `rpcuser`/`rpcpassword` in `time.conf`
+- ✅ **Auto-generated credentials** on first run (16-char user, 32-char password)
+- ✅ **`.cookie` file** written for CLI tool authentication (owner-read-only)
+- ✅ **`time-cli` reads `.cookie`** automatically (also accepts `--rpcuser`/`--rpcpassword`)
+- ✅ **Existing configs auto-upgraded** with generated credentials
+
+**Code References:**
+- `src/rpc/server.rs` — Basic Auth checking in `handle_connection()`
+- `src/config.rs` — `RpcConfig.rpcuser`/`rpcpassword`, `write_rpc_cookie()`
+- `src/bin/time-cli.rs` — `read_cookie_file()`, `read_conf_credentials()`
+
+### 11.3 ✅ FIXED — No RPC Rate Limiting
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** No rate limiting on RPC allowed resource exhaustion via rapid-fire requests.
+
+**Fix Applied:**
+- ✅ **Per-IP rate limiter** (100 requests/second) in RPC server
+- ✅ **429 Too Many Requests** response when exceeded
+- ✅ **Automatic cleanup** of stale entries every 60 seconds
+
+**Code References:**
+- `src/rpc/server.rs` — `RpcRateLimiter` struct
+
+### 11.4 ✅ FIXED — CORS Allows All Origins
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** Default `allow_origins: ["*"]` could enable cross-origin attacks if RPC were exposed.
+
+**Fix Applied:**
+- ✅ **Default restricted** to `["http://localhost", "http://127.0.0.1"]`
+
+**Code References:**
+- `src/config.rs` — `RpcConfig` default `allow_origins`
+
+---
+
+## 12. WALLET SECURITY
+
+*Added: March 2026*
+
+### 12.1 ✅ FIXED — Hardcoded Default Wallet Password
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** Wallet encrypted with AES-256-GCM (strong) but default password was hardcoded as `"timecoin"` — trivially guessable.
+
+**Fix Applied:**
+- ✅ **Auto-generated 32-char random password** on first wallet creation
+- ✅ **Password stored in `.wallet_password`** (owner-read-only permissions)
+- ✅ **Legacy wallet migration**: existing wallets re-encrypted with new password on first load
+- ✅ **Hardcoded password removed** from production path
+
+**Code References:**
+- `src/wallet.rs` — `WalletManager::resolve_password()`, `save_password_file()`
+
+---
+
+## 13. MESSAGE SIGNING ENFORCEMENT
+
+*Added: March 2026*
+
+### 13.1 ✅ FIXED — Unsigned Vote Acceptance
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** TimeVote messages accepted empty signatures for "backward compatibility" and also accepted votes from unknown/unregistered masternodes, allowing vote forgery.
+
+**Fix Applied:**
+- ✅ **Empty signatures rejected** with warning log
+- ✅ **Unknown voter votes rejected** (must be registered masternode)
+
+**Remaining Work:**
+- ⚠️ General network messages (Ping, BlockAnnouncement, TransactionBroadcast, etc.) still unsigned — `SignedMessage` wrapper exists but is not used in the wire protocol
+- **Recommendation:** Introduce a protocol version bump that requires `SignedMessage` wrapping for all message types
+
+**Code References:**
+- `src/network/message_handler.rs` — `verify_vote_signature()`
+- `src/network/signed_message.rs` — `SignedMessage` struct (available but unused for non-vote messages)
+
+---
+
 ## SUMMARY TABLE: ATTACK SURFACE ANALYSIS
 
 | Attack Vector | Mitigation Status | Risk Level | Notes |
@@ -778,6 +881,13 @@ pub struct BlockHeader {
 | **Integer Overflow** | ✅ Protected | 🟢 Low | Rust overflow checks |
 | **AI Health Manipulation** | ✅ Monitored | 🟢 Low | Multi-factor scoring |
 | **Dependency Vulnerabilities** | ⚠️ Requires Audit | 🟡 Medium | Need regular cargo audit |
+| **RPC Public Exposure** | ✅ Fixed | 🟢 Low | Bound to 127.0.0.1 (v1.2.0) |
+| **RPC Authentication** | ✅ Fixed | 🟢 Low | HTTP Basic Auth auto-generated (v1.2.0) |
+| **RPC Rate Limiting** | ✅ Fixed | 🟢 Low | Per-IP 100 req/s (v1.2.0) |
+| **CORS Policy** | ✅ Fixed | 🟢 Low | Restricted to localhost (v1.2.0) |
+| **Wallet Default Password** | ✅ Fixed | 🟢 Low | Auto-generated 32-char password (v1.2.0) |
+| **Unsigned Vote Acceptance** | ✅ Fixed | 🟢 Low | Empty signatures rejected (v1.2.0) |
+| **General Message Signing** | ⚠️ Not Enforced | 🟡 Medium | SignedMessage exists but unused for non-votes |
 
 ---
 
