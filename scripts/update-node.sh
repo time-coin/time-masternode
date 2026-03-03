@@ -245,6 +245,21 @@ main() {
         echo
     fi
     
+    # Offer to reset blockchain data (needed after breaking changes)
+    local data_dir="/root/.timecoin"
+    for dir in "$data_dir/testnet/db" "$data_dir/db"; do
+        if [ -d "$dir" ]; then
+            print_warn "Existing blockchain data found at $dir"
+            read -p "Delete blockchain data and sync fresh? Needed if block format changed. (y/n) " -n 1 -r
+            echo
+            if [[ $REPLY =~ ^[Yy]$ ]]; then
+                rm -rf "$dir"
+                print_success "Blockchain data deleted — node will sync from scratch"
+            fi
+        fi
+    done
+    echo
+    
     # Update from git
     update_repo "$repo_dir"
     echo
