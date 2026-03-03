@@ -121,52 +121,19 @@ For complete deployment guide, see **[docs/QUICKSTART.md](docs/QUICKSTART.md)**
 
 ### Run as a Masternode
 
-#### Configuration
-
-Edit `time.conf` (mainnet: `~/.timecoin/time.conf`, testnet: `~/.timecoin/testnet/time.conf`):
-
-```ini
-# Enable masternode mode
-masternode=1
-
-# Optional: dedicated masternode private key
-#masternodeprivkey=<key from time-cli masternode genkey>
-
-# Optional: send rewards to a specific address (defaults to wallet address)
-#reward_address=<TIME address>
-```
-
-Collateral goes in`masternode.conf` (same directory):
-```
-# Format: alias IP:port collateral_txid collateral_vout
-mn1 <your_ip>:24000 <txid> 0
-```
-
-#### Setting Up a Staked Masternode (Bronze/Silver/Gold)
+The automated install script handles configuration, systemd, and firewall setup:
 
 ```bash
-# 1. Create collateral UTXO (send exact amount to yourself)
-time-cli sendtoaddress <your_address> 1000.0  # For Bronze
-
-# 2. Wait for confirmations (30 minutes)
-time-cli listunspent  # Note the txid and vout
-
-# 3. Update masternode.conf with collateral info
-#    mn1 <your_ip>:24000 <txid from step 2> 0
-
-# 4. Restart the daemon
-sudo systemctl restart timed
-
-# 5. Verify
-time-cli getbalance       # Shows locked collateral
-time-cli masternodelist   # Shows 🔒 Locked
+sudo ./scripts/install-masternode.sh testnet   # or mainnet
 ```
 
-#### Deregistering a Masternode
+By default the node starts as a **Free tier** masternode (no collateral) and
+earns rewards immediately. Staked tiers (Bronze/Silver/Gold) are available for
+higher rewards and governance voting.
 
-Set `masternode=0` in `time.conf` and restart the daemon. Collateral is automatically unlocked.
-
-See **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)** for complete setup guide.
+See **[docs/LINUX_INSTALLATION.md](docs/LINUX_INSTALLATION.md)** for the
+complete step-by-step guide, or **[docs/MASTERNODE_GUIDE.md](docs/MASTERNODE_GUIDE.md)**
+for operational details (tiers, collateral, rewards, deregistration).
 
 ## 💻 CLI Usage
 
@@ -458,32 +425,14 @@ cargo clippy
 
 ## 📝 Configuration
 
-Configuration uses two files in your data directory (`~/.timecoin/` for mainnet, `~/.timecoin/testnet/` for testnet):
+Configuration files live in `~/.timecoin/` (mainnet) or `~/.timecoin/testnet/` (testnet):
 
-**`time.conf`** — Daemon settings (key=value format):
-```ini
-# Network (uncomment for testnet)
-#testnet=1
+- **`time.conf`** — Daemon settings (network, masternode, logging)
+- **`masternode.conf`** — Collateral entries for staked tiers
 
-listen=1
-server=1
-masternode=1
-
-# Masternode private key (optional, wallet key used if omitted)
-#masternodeprivkey=<key from time-cli masternode genkey>
-
-# Peers
-#addnode=seed1.time-coin.io
-
-debug=info
-txindex=1
-```
-
-**`masternode.conf`** — Collateral (one line per masternode):
-```
-# alias IP:port collateral_txid collateral_vout
-mn1 1.2.3.4:24000 abc123...def456 0
-```
+The install script generates both files with sensible defaults. See
+**[docs/LINUX_INSTALLATION.md](docs/LINUX_INSTALLATION.md#10-configuration-reference)**
+for the full configuration reference.
 
 ## 🛣️ Development Status
 
