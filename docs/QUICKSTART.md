@@ -59,6 +59,9 @@ masternode=1
 # Masternode private key (optional, wallet key used if omitted)
 #masternodeprivkey=<key from time-cli masternode genkey>
 
+# Reward payout address (defaults to wallet address)
+#reward_address=<TIME address>
+
 # Peers (add seed nodes if available)
 #addnode=seed1.time-coin.io
 

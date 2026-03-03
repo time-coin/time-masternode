@@ -153,6 +153,9 @@ Masternode configuration uses two files:
 ```
 masternode=1
 masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+
+# Optional: send rewards to a specific address (defaults to wallet address)
+#reward_address=TIME1...
 ```
 
 Generate a key with `time-cli masternode genkey`. If omitted, the node uses its wallet's auto-generated key.
@@ -534,6 +537,7 @@ time-cli getbalance
 ```
 masternode=1
 masternodeprivkey=<base58check_key>
+#reward_address=<TIME address>
 ```
 
 **masternode.conf:**

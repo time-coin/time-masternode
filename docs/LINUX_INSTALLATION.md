@@ -98,8 +98,9 @@ The automated installation script handles everything for you:
    ```
 
 3. **Follow the prompts**:
-   - Installer will ask to start the service
-   - Answer `y` to start immediately
+   - Installer will ask for a reward payout address (press Enter to use the default wallet address)
+   - If you provide an address, it must match the network (`TIME1...` for mainnet, `TIME0...` for testnet)
+   - Installer will ask to start the service — answer `y` to start immediately
 
 **What gets installed**:
 - Binaries: `/usr/local/bin/timed`, `/usr/local/bin/time-cli`
@@ -642,6 +643,9 @@ masternode=1
 
 # Masternode private key (optional)
 #masternodeprivkey=<key>
+
+# Reward payout address (defaults to wallet address)
+#reward_address=<TIME address>
 
 # Public IP (auto-detected if omitted)
 #externalip=1.2.3.4
