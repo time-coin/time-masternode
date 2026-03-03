@@ -49,6 +49,103 @@ pub struct RpcError {
 }
 
 use base64::Engine;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// Parsed rpcauth entry: user:salt$hash
+#[derive(Clone)]
+struct RpcAuthEntry {
+    user: String,
+    salt: String,
+    hash: String,
+}
+
+/// RPC authenticator supporting plaintext and hashed (rpcauth) credentials.
+#[derive(Clone)]
+struct RpcAuthenticator {
+    /// Base64-encoded "user:password" for plaintext auth. Empty = disabled.
+    plaintext_token: String,
+    /// Hashed credential entries (Bitcoin-style rpcauth=user:salt$hash)
+    hashed_entries: Vec<RpcAuthEntry>,
+}
+
+impl RpcAuthenticator {
+    fn new(rpcuser: &str, rpcpassword: &str, rpcauth_lines: &[String]) -> Self {
+        let plaintext_token = if !rpcuser.is_empty() && !rpcpassword.is_empty() {
+            base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", rpcuser, rpcpassword))
+        } else {
+            String::new()
+        };
+
+        let hashed_entries: Vec<RpcAuthEntry> = rpcauth_lines
+            .iter()
+            .filter_map(|line| {
+                // Format: user:salt$hash
+                let (user, rest) = line.split_once(':')?;
+                let (salt, hash) = rest.split_once('$')?;
+                Some(RpcAuthEntry {
+                    user: user.to_string(),
+                    salt: salt.to_string(),
+                    hash: hash.to_string(),
+                })
+            })
+            .collect();
+
+        Self {
+            plaintext_token,
+            hashed_entries,
+        }
+    }
+
+    fn is_enabled(&self) -> bool {
+        !self.plaintext_token.is_empty() || !self.hashed_entries.is_empty()
+    }
+
+    /// Check if the provided Basic Auth credentials are valid.
+    fn check(&self, auth_header: &str) -> bool {
+        let token = match auth_header.strip_prefix("Basic ") {
+            Some(t) => t.trim(),
+            None => return false,
+        };
+
+        // Check plaintext credentials first
+        if !self.plaintext_token.is_empty() && token == self.plaintext_token {
+            return true;
+        }
+
+        // Decode base64 to get "user:password"
+        let decoded = match base64::engine::general_purpose::STANDARD.decode(token) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        let credentials = match String::from_utf8(decoded) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let (user, password) = match credentials.split_once(':') {
+            Some(pair) => pair,
+            None => return false,
+        };
+
+        // Check against hashed entries
+        for entry in &self.hashed_entries {
+            if entry.user == user {
+                // HMAC-SHA256(key=salt, message=password)
+                if let Ok(mut mac) = HmacSha256::new_from_slice(entry.salt.as_bytes()) {
+                    mac.update(password.as_bytes());
+                    let result = hex::encode(mac.finalize().into_bytes());
+                    if result == entry.hash {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+}
 
 /// Per-IP RPC rate limiter. Allows `max_per_second` requests per IP per second.
 struct RpcRateLimiter {
@@ -94,9 +191,9 @@ impl RpcRateLimiter {
 pub struct RpcServer {
     listener: TcpListener,
     handler: Arc<RpcHandler>,
-    /// Base64-encoded "user:password" for HTTP Basic Auth. Empty = no auth required.
-    auth_token: String,
+    auth: Arc<RpcAuthenticator>,
     rate_limiter: Arc<RpcRateLimiter>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 }
 
 impl RpcServer {
@@ -112,6 +209,7 @@ impl RpcServer {
         tx_event_sender: Option<tokio::sync::broadcast::Sender<super::websocket::TransactionEvent>>,
         rpcuser: String,
         rpcpassword: String,
+        rpcauth: Vec<String>,
     ) -> Result<Self, std::io::Error> {
         let listener = TcpListener::bind(addr).await?;
         let mut handler = RpcHandler::new(
@@ -126,29 +224,40 @@ impl RpcServer {
             handler.set_tx_event_sender(sender);
         }
 
-        let auth_token = if !rpcuser.is_empty() && !rpcpassword.is_empty() {
-            base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", rpcuser, rpcpassword))
-        } else {
-            String::new()
-        };
+        let auth = RpcAuthenticator::new(&rpcuser, &rpcpassword, &rpcauth);
 
         Ok(Self {
             listener,
             handler: Arc::new(handler),
-            auth_token,
+            auth: Arc::new(auth),
             rate_limiter: Arc::new(RpcRateLimiter::new(100)),
+            tls_acceptor: None,
         })
     }
 
+    /// Enable TLS for the RPC server with the given acceptor.
+    pub fn set_tls(&mut self, acceptor: tokio_rustls::TlsAcceptor) {
+        self.tls_acceptor = Some(acceptor);
+    }
+
     pub async fn run(&mut self) -> Result<(), std::io::Error> {
+        let auth_mode = if !self.auth.is_enabled() {
+            "disabled"
+        } else if !self.auth.hashed_entries.is_empty() {
+            "enabled (rpcauth)"
+        } else {
+            "enabled"
+        };
+        let tls_mode = if self.tls_acceptor.is_some() {
+            "TLS"
+        } else {
+            "plain"
+        };
         println!(
-            "  ✅ RPC server listening on {} (auth: {})",
+            "  ✅ RPC server listening on {} (auth: {}, transport: {})",
             self.listener.local_addr()?,
-            if self.auth_token.is_empty() {
-                "disabled"
-            } else {
-                "enabled"
-            }
+            auth_mode,
+            tls_mode,
         );
 
         // Spawn periodic rate limiter cleanup
@@ -163,26 +272,45 @@ impl RpcServer {
         loop {
             let (socket, addr) = self.listener.accept().await?;
 
-            // Rate limit check
+            // Rate limit check (before TLS handshake to save resources)
             if !self.rate_limiter.check(addr.ip()) {
-                let _ =
-                    Self::send_error(socket, "Rate limit exceeded. Try again later.", -32005).await;
+                if self.tls_acceptor.is_none() {
+                    let _ = Self::send_error_tcp(
+                        socket,
+                        "Rate limit exceeded. Try again later.",
+                        -32005,
+                    )
+                    .await;
+                }
+                // For TLS, just drop — can't send HTTP before handshake
                 continue;
             }
 
             let handler = self.handler.clone();
-            let auth_token = self.auth_token.clone();
+            let auth = self.auth.clone();
+            let tls = self.tls_acceptor.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = Self::handle_connection(socket, handler, &auth_token).await {
+                if let Some(acceptor) = tls {
+                    match acceptor.accept(socket).await {
+                        Ok(tls_stream) => {
+                            if let Err(e) =
+                                Self::handle_connection(tls_stream, handler, &auth).await
+                            {
+                                eprintln!("RPC TLS error: {}", e);
+                            }
+                        }
+                        Err(e) => eprintln!("RPC TLS handshake failed from {}: {}", addr, e),
+                    }
+                } else if let Err(e) = Self::handle_connection(socket, handler, &auth).await {
                     eprintln!("RPC error: {}", e);
                 }
             });
         }
     }
 
-    /// Send a JSON-RPC error response and close the connection.
-    async fn send_error(
+    /// Send a JSON-RPC error response over a plain TCP connection.
+    async fn send_error_tcp(
         mut socket: tokio::net::TcpStream,
         message: &str,
         code: i32,
@@ -212,10 +340,10 @@ impl RpcServer {
         Ok(())
     }
 
-    async fn handle_connection(
-        mut socket: tokio::net::TcpStream,
+    async fn handle_connection<S: AsyncReadExt + AsyncWriteExt + Unpin>(
+        mut socket: S,
         handler: Arc<RpcHandler>,
-        auth_token: &str,
+        auth: &RpcAuthenticator,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut buffer = vec![0u8; 8192];
         let bytes_read = socket.read(&mut buffer).await?;
@@ -227,7 +355,7 @@ impl RpcServer {
         let http_request = String::from_utf8_lossy(&buffer[..bytes_read]);
 
         // Check HTTP Basic Auth if credentials are configured
-        if !auth_token.is_empty() {
+        if auth.is_enabled() {
             let authorized = http_request
                 .lines()
                 .find(|line| {
@@ -235,13 +363,7 @@ impl RpcServer {
                     lower.starts_with("authorization:")
                 })
                 .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()))
-                .map(|value| {
-                    if let Some(token) = value.strip_prefix("Basic ") {
-                        token.trim() == auth_token
-                    } else {
-                        false
-                    }
-                })
+                .map(|value| auth.check(&value))
                 .unwrap_or(false);
 
             if !authorized {

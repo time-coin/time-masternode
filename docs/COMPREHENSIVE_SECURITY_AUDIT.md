@@ -800,6 +800,40 @@ pub struct BlockHeader {
 **Code References:**
 - `src/config.rs` — `RpcConfig` default `allow_origins`
 
+### 11.5 ✅ FIXED — RPC Credentials Stored in Plaintext
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** `rpcuser`/`rpcpassword` stored in cleartext in `time.conf` could be read by any process with file access.
+
+**Fix Applied:**
+- ✅ **`rpcauth` hashed credentials** — Bitcoin Core-compatible format `rpcauth=user:salt$hash`
+- ✅ **HMAC-SHA256** verification (password never stored, only hash)
+- ✅ **Multiple `rpcauth` entries** supported for multi-user setups
+- ✅ **Generator script** at `scripts/rpcauth.py` for creating hashed credentials
+- ✅ **Backward compatible** — plaintext `rpcuser`/`rpcpassword` still works for simplicity
+
+**Code References:**
+- `src/rpc/server.rs` — `RpcAuthenticator` with `RpcAuthEntry` hashed credential support
+- `src/config.rs` — `RpcConfig.rpcauth` field, parsed from `time.conf`
+- `scripts/rpcauth.py` — HMAC-SHA256 credential generator
+
+### 11.6 ✅ FIXED — No TLS for RPC
+**Status:** **FIXED in v1.2.0**
+
+**Risk:** RPC over plain HTTP exposes credentials and wallet commands to interception on the local machine or network.
+
+**Fix Applied:**
+- ✅ **Optional TLS** via `rpctls=1` in `time.conf`
+- ✅ **Auto-generated self-signed certificate** when no cert/key files specified
+- ✅ **Custom certificate support** via `rpctlscert`/`rpctlskey` config options
+- ✅ **Reuses existing TLS infrastructure** from `src/network/tls.rs` (rustls)
+- ✅ **Graceful fallback** — if TLS init fails, server falls back to plain HTTP with warning
+
+**Code References:**
+- `src/rpc/server.rs` — `set_tls()`, TLS accept in `run()` loop
+- `src/main.rs` — TLS config loading and `TlsConfig` integration
+- `src/config.rs` — `rpctls`, `rpctlscert`, `rpctlskey` fields
+
 ---
 
 ## 12. WALLET SECURITY
@@ -882,7 +916,7 @@ pub struct BlockHeader {
 | **AI Health Manipulation** | ✅ Monitored | 🟢 Low | Multi-factor scoring |
 | **Dependency Vulnerabilities** | ⚠️ Requires Audit | 🟡 Medium | Need regular cargo audit |
 | **RPC Public Exposure** | ✅ Fixed | 🟢 Low | Bound to 127.0.0.1 (v1.2.0) |
-| **RPC Authentication** | ✅ Fixed | 🟢 Low | HTTP Basic Auth auto-generated (v1.2.0) |
+| **RPC Authentication** | ✅ Fixed | 🟢 Low | HTTP Basic Auth + rpcauth hashed credentials (v1.2.0) |
 | **RPC Rate Limiting** | ✅ Fixed | 🟢 Low | Per-IP 100 req/s (v1.2.0) |
 | **CORS Policy** | ✅ Fixed | 🟢 Low | Restricted to localhost (v1.2.0) |
 | **Wallet Default Password** | ✅ Fixed | 🟢 Low | Auto-generated 32-char password (v1.2.0) |
