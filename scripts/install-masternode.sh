@@ -258,6 +258,22 @@ create_directories() {
     print_success "Directories created"
 }
 
+reset_blockchain_data() {
+    local DB_DIR="$DATA_DIR/db"
+    
+    if [ -d "$DB_DIR" ]; then
+        print_step "Existing blockchain data found at $DB_DIR"
+        read -p "Delete blockchain data and sync fresh? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            rm -rf "$DB_DIR"
+            print_success "Blockchain data deleted — node will sync from scratch"
+        else
+            print_info "Keeping existing blockchain data"
+        fi
+    fi
+}
+
 build_binaries() {
     print_step "Building TIME Coin binaries..."
     
@@ -395,8 +411,11 @@ rpcallowip=0.0.0.0/0
 # Collateral settings go in masternode.conf
 masternode=1
 
-# Masternode private key (generate with: time-cli masternode genkey)
+# Masternode private key (auto-generated on first start if omitted)
 #masternodeprivkey=
+
+# Reward payout address (defaults to the masternode wallet address)
+#reward_address=
 
 # ─── Peers ───────────────────────────────────────────────────
 # Add seed nodes (one per line, can repeat)
@@ -596,12 +615,11 @@ print_summary() {
     echo "  • time-cli getpeerinfo           # Connected peers"
     echo ""
     echo -e "${YELLOW}Next Steps:${NC}"
-    echo "  1. Generate a masternode key:   time-cli masternode genkey"
-    echo "  2. Add key to config:           nano $CONFIG_DIR/time.conf"
-    echo "     → Set masternodeprivkey=<key from step 1>"
-    echo "  3. (Staked tiers) Send collateral and update masternode.conf"
-    echo "  4. Restart the service:         systemctl restart ${SERVICE_NAME}"
-    echo "  5. Check logs:                  journalctl -u ${SERVICE_NAME} -f"
+    echo "  1. (Optional) Set a reward address: nano $CONFIG_DIR/time.conf"
+    echo "     → Set reward_address=<your_payout_address>"
+    echo "  2. (Staked tiers) Send collateral and update masternode.conf"
+    echo "  3. Restart the service:         systemctl restart ${SERVICE_NAME}"
+    echo "  4. Check logs:                  journalctl -u ${SERVICE_NAME} -f"
     echo ""
 }
 
@@ -633,6 +651,9 @@ main() {
     
     # Create directories (service runs as root)
     create_directories
+    
+    # Check for existing blockchain data that may be incompatible
+    reset_blockchain_data
     
     # Build and install
     build_binaries
