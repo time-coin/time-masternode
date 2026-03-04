@@ -1416,7 +1416,7 @@ impl RpcHandler {
         // Scan blocks from newest to oldest, collecting wallet-related TXs
         let scan_start = chain_height;
         for height in (0..=scan_start).rev() {
-            if transactions.len() >= count {
+            if count > 0 && transactions.len() >= count {
                 break;
             }
 
@@ -1522,8 +1522,10 @@ impl RpcHandler {
             }
         }
 
-        // Truncate to requested count
-        transactions.truncate(count);
+        // Truncate to requested count (0 = unlimited)
+        if count > 0 {
+            transactions.truncate(count);
+        }
 
         // Include finalized-but-not-yet-in-block transactions from consensus pool
         let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
@@ -1660,7 +1662,7 @@ impl RpcHandler {
         let mut transactions: Vec<Value> = Vec::new();
 
         for height in (0..=chain_height).rev() {
-            if transactions.len() >= count {
+            if count > 0 && transactions.len() >= count {
                 break;
             }
 
@@ -1773,7 +1775,9 @@ impl RpcHandler {
             }
         }
 
-        transactions.truncate(count);
+        if count > 0 {
+            transactions.truncate(count);
+        }
 
         // Include finalized-but-not-yet-in-block transactions from consensus pool
         let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
