@@ -1,15 +1,11 @@
-//! Alternative RPC server implementation using raw TCP.
+//! TCP-based JSON-RPC server for masternode communication.
 //!
-//! Note: This module is currently unused - the application uses an axum-based
-//! HTTP RPC server implemented directly in main.rs. This implementation is kept
-//! as an alternative option for scenarios where a simpler TCP-based JSON-RPC
-//! server might be preferred over HTTP.
+//! This is the primary RPC server used by the masternode. It listens on a
+//! configurable address (default `0.0.0.0:{rpc_port}`) and serves JSON-RPC
+//! 2.0 requests over TCP with HTTP framing.
 //!
-//! To use this instead of the axum server:
-//! 1. Create RpcServer with dependencies
-//! 2. Call server.run() instead of the axum router
-
-#![allow(dead_code)]
+//! Public (read-only) methods are accessible without authentication.
+//! State-modifying methods require HTTP Basic Auth credentials.
 
 use super::handler::RpcHandler;
 use crate::consensus::ConsensusEngine;

@@ -563,7 +563,7 @@ impl Config {
             },
             rpc: RpcConfig {
                 enabled: true,
-                listen_address: "127.0.0.1".to_string(),
+                listen_address: "0.0.0.0".to_string(),
                 allow_origins: vec![
                     "http://localhost".to_string(),
                     "http://127.0.0.1".to_string(),
