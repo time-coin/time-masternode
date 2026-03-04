@@ -1380,7 +1380,7 @@ impl RpcHandler {
         // params: [address, count] or [count] (legacy)
         let (local_address, count) = match params.first() {
             Some(Value::String(addr)) => {
-                let count = params.get(1).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+                let count = params.get(1).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
                 (addr.clone(), count)
             }
             Some(Value::Number(n)) => {
