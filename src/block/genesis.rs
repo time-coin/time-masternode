@@ -182,6 +182,7 @@ mod tests {
                 vrf_output: [0u8; 32],
                 vrf_proof: vec![],
                 vrf_score: 0,
+                producer_signature: vec![],
             },
             transactions: vec![],
             masternode_rewards: vec![],

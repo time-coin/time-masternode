@@ -428,11 +428,7 @@ impl RpcServer {
                 .windows(4)
                 .position(|w| w == b"\r\n\r\n")
                 .map(|p| p + 4)
-                .or_else(|| {
-                    data.windows(2)
-                        .position(|w| w == b"\n\n")
-                        .map(|p| p + 2)
-                });
+                .or_else(|| data.windows(2).position(|w| w == b"\n\n").map(|p| p + 2));
 
             if let Some(body_offset) = header_end {
                 let headers = String::from_utf8_lossy(&data[..body_offset]);
