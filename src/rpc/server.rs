@@ -405,9 +405,9 @@ impl RpcServer {
     ) -> Result<(), Box<dyn std::error::Error>> {
         // Read the full HTTP request, handling TCP fragmentation.
         // We parse Content-Length from headers to know how many body bytes to expect.
-        const MAX_REQUEST_SIZE: usize = 1_048_576; // 1 MB safety limit
-        let mut data = Vec::with_capacity(8192);
-        let mut tmp = [0u8; 8192];
+        const MAX_REQUEST_SIZE: usize = 16_777_216; // 16 MB — large txs consolidate many UTXOs
+        let mut data = Vec::with_capacity(65536);
+        let mut tmp = [0u8; 65536];
 
         loop {
             let n = socket.read(&mut tmp).await?;
