@@ -188,6 +188,68 @@ impl RpcRateLimiter {
     }
 }
 
+/// Read-only RPC methods that do not require authentication.
+///
+/// These methods only query blockchain state and never modify it, so they are
+/// safe to expose to unauthenticated callers (e.g. light wallets).
+const PUBLIC_METHODS: &[&str] = &[
+    // Blockchain queries
+    "getblockchaininfo",
+    "getblockcount",
+    "getblock",
+    "getbestblockhash",
+    "getblockhash",
+    "getnetworkinfo",
+    "getpeerinfo",
+    "gettxoutsetinfo",
+    "getinfo",
+    "uptime",
+    // Transaction queries
+    "getrawtransaction",
+    "gettransaction",
+    "gettransactions",
+    "decoderawtransaction",
+    "gettransactionfinality",
+    "waittransactionfinality",
+    // Transaction submission (signature is the authentication)
+    "sendrawtransaction",
+    // Wallet / balance queries
+    "getbalance",
+    "getbalances",
+    "listunspent",
+    "listunspentmulti",
+    "listtransactions",
+    "listtransactionsmulti",
+    "listreceivedbyaddress",
+    "getwalletinfo",
+    "validateaddress",
+    // UTXO / mempool queries
+    "getmempoolinfo",
+    "getrawmempool",
+    "getmempoolverbose",
+    "gettxindexstatus",
+    "listlockedutxos",
+    "listlockedcollaterals",
+    // Masternode queries
+    "masternodelist",
+    "masternodestatus",
+    "masternodereginfo",
+    "masternoderegstatus",
+    // Consensus / network queries
+    "getconsensusinfo",
+    "gettimevotestatus",
+    "getwhitelist",
+    "getblacklist",
+    "gettreasurybalance",
+    "getfeeschedule",
+];
+
+/// Returns `true` if the given RPC method is in the public (read-only) whitelist
+/// and may be called without authentication.
+fn is_public_method(method: &str) -> bool {
+    PUBLIC_METHODS.contains(&method)
+}
+
 pub struct RpcServer {
     listener: TcpListener,
     handler: Arc<RpcHandler>,
@@ -354,46 +416,6 @@ impl RpcServer {
 
         let http_request = String::from_utf8_lossy(&buffer[..bytes_read]);
 
-        // Check HTTP Basic Auth if credentials are configured
-        if auth.is_enabled() {
-            let authorized = http_request
-                .lines()
-                .find(|line| {
-                    let lower = line.to_lowercase();
-                    lower.starts_with("authorization:")
-                })
-                .and_then(|line| line.split_once(':').map(|(_, v)| v.trim().to_string()))
-                .map(|value| auth.check(&value))
-                .unwrap_or(false);
-
-            if !authorized {
-                let error_response = RpcResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: "unauthorized".to_string(),
-                    result: None,
-                    error: Some(RpcError {
-                        code: -32600,
-                        message: "Unauthorized: invalid or missing RPC credentials".to_string(),
-                    }),
-                };
-                let error_json = serde_json::to_string(&error_response)?;
-                let http_response = format!(
-                    "HTTP/1.1 401 Unauthorized\r\n\
-                     WWW-Authenticate: Basic realm=\"TIME Coin RPC\"\r\n\
-                     Content-Type: application/json\r\n\
-                     Content-Length: {}\r\n\
-                     Connection: close\r\n\
-                     \r\n\
-                     {}",
-                    error_json.len(),
-                    error_json
-                );
-                socket.write_all(http_response.as_bytes()).await?;
-                socket.flush().await?;
-                return Ok(());
-            }
-        }
-
         // Extract JSON body from HTTP POST request
         let body = if let Some(body_start) = http_request.find("\r\n\r\n") {
             &http_request[body_start + 4..]
@@ -415,9 +437,53 @@ impl RpcServer {
                 }),
             }
         } else {
-            // Parse and handle request
             match serde_json::from_str::<RpcRequest>(body.trim_end_matches('\0')) {
-                Ok(request) => handler.handle_request(request).await,
+                Ok(request) => {
+                    // Only require auth for non-public (state-modifying) methods
+                    if auth.is_enabled() && !is_public_method(&request.method) {
+                        let authorized = http_request
+                            .lines()
+                            .find(|line| {
+                                let lower = line.to_lowercase();
+                                lower.starts_with("authorization:")
+                            })
+                            .and_then(|line| {
+                                line.split_once(':').map(|(_, v)| v.trim().to_string())
+                            })
+                            .map(|value| auth.check(&value))
+                            .unwrap_or(false);
+
+                        if !authorized {
+                            let error_response = RpcResponse {
+                                jsonrpc: "2.0".to_string(),
+                                id: request.id,
+                                result: None,
+                                error: Some(RpcError {
+                                    code: -32600,
+                                    message: "Unauthorized: invalid or missing RPC credentials"
+                                        .to_string(),
+                                }),
+                            };
+                            let error_json = serde_json::to_string(&error_response)?;
+                            let http_response = format!(
+                                "HTTP/1.1 401 Unauthorized\r\n\
+                                 WWW-Authenticate: Basic realm=\"TIME Coin RPC\"\r\n\
+                                 Content-Type: application/json\r\n\
+                                 Content-Length: {}\r\n\
+                                 Connection: close\r\n\
+                                 \r\n\
+                                 {}",
+                                error_json.len(),
+                                error_json
+                            );
+                            socket.write_all(http_response.as_bytes()).await?;
+                            socket.flush().await?;
+                            return Ok(());
+                        }
+                    }
+
+                    handler.handle_request(request).await
+                }
                 Err(e) => RpcResponse {
                     jsonrpc: "2.0".to_string(),
                     id: "unknown".to_string(),
