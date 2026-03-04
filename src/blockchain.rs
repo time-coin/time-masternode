@@ -2420,21 +2420,30 @@ impl Blockchain {
             ));
         }
 
-        // Use wall-clock time so blocks reflect when they were actually produced.
-        // During catch-up, deterministic schedule timestamps would be in the future.
-        let now = chrono::Utc::now().timestamp();
+        // Calculate deterministic timestamp based on block schedule
+        let deterministic_timestamp =
+            self.genesis_timestamp() + (next_height as i64 * BLOCK_TIME_SECONDS);
+
+        // Check if we're catching up (used for relaxed masternode selection)
+        let _blocks_behind = self
+            .calculate_expected_height()
+            .saturating_sub(current_height);
+
+        // CRITICAL: Always use deterministic timestamp, but ensure it's > previous block
+        // This maintains proper block schedule (genesis + height*600) while preventing duplicates
+        let mut aligned_timestamp = deterministic_timestamp;
 
         // Ensure timestamp is strictly greater than previous block
-        let mut aligned_timestamp = now;
         if current_height > 0 {
             if let Ok(prev_block) = self.get_block_by_height(current_height).await {
                 if aligned_timestamp <= prev_block.header.timestamp {
+                    // Use whichever is greater: deterministic schedule or prev+1
                     aligned_timestamp = prev_block.header.timestamp + 1;
                     tracing::debug!(
-                        "📅 Block {} timestamp adjusted to {} to maintain strict ordering (now: {}, prev: {})",
+                        "📅 Block {} timestamp adjusted to {} to maintain strict ordering (scheduled: {}, prev: {})",
                         next_height,
                         aligned_timestamp,
-                        now,
+                        deterministic_timestamp,
                         prev_block.header.timestamp
                     );
                 }
