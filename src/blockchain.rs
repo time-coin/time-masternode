@@ -236,6 +236,9 @@ pub struct Blockchain {
     /// Tracks reward-distribution violations per block producer address.
     /// After REWARD_VIOLATION_THRESHOLD strikes the producer's proposals are rejected.
     reward_violations: Arc<DashMap<String, u64>>,
+    /// Set when peers have a different genesis block than ours.
+    /// Suppresses repeated fork resolution attempts to avoid infinite loop.
+    genesis_mismatch_detected: Arc<AtomicBool>,
     /// On-chain treasury balance in satoshis. Funded by slashed collateral,
     /// disbursed via governance-approved coinbase outputs. Not a UTXO — pure state.
     treasury_balance: Arc<AtomicU64>,
@@ -343,6 +346,7 @@ impl Blockchain {
             block_added_signal: Arc::new(tokio::sync::Notify::new()),
             last_consensus_log: Arc::new(RwLock::new(None)),
             reward_violations: Arc::new(DashMap::new()),
+            genesis_mismatch_detected: Arc::new(AtomicBool::new(false)),
             treasury_balance: Arc::new(AtomicU64::new(loaded_treasury)),
         }
     }
@@ -738,7 +742,9 @@ impl Blockchain {
             // Verify the genesis block structure
             if let Ok(genesis) = self.get_block_by_height(0).await {
                 tracing::info!("🔍 Found genesis block, verifying structure...");
-                if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+                if let Err(e) = GenesisBlock::verify_structure(&genesis)
+                    .and_then(|_| GenesisBlock::verify_checkpoint(&genesis, self.network_type))
+                {
                     tracing::error!(
                         "❌ Local genesis block is invalid: {} - will regenerate dynamically",
                         e
@@ -770,7 +776,9 @@ impl Blockchain {
             .map_err(|e| e.to_string())?
         {
             if let Ok(genesis) = self.get_block_by_height(0).await {
-                if let Err(e) = GenesisBlock::verify_structure(&genesis) {
+                if let Err(e) = GenesisBlock::verify_structure(&genesis)
+                    .and_then(|_| GenesisBlock::verify_checkpoint(&genesis, self.network_type))
+                {
                     tracing::error!(
                         "❌ Local genesis is invalid: {} - will regenerate dynamically",
                         e
@@ -938,6 +946,10 @@ impl Blockchain {
             genesis_timestamp,
             registered.len()
         );
+
+        // Verify genesis matches hardcoded checkpoint
+        use crate::block::genesis::GenesisBlock;
+        GenesisBlock::verify_checkpoint(&genesis, self.network_type)?;
 
         // Store genesis block
         let genesis_bytes = bincode::serialize(&genesis)
@@ -2617,8 +2629,9 @@ impl Blockchain {
                 })
                 .collect();
 
-            if tier_nodes.is_empty() {
-                // No nodes in this tier — remainder goes to producer
+            // Free tier and empty tiers: full pool goes to block producer
+            let is_free_tier = matches!(tier, MasternodeTier::Free);
+            if tier_nodes.is_empty() || is_free_tier {
                 if let Some(entry) = rewards.first_mut() {
                     entry.1 += tier_pool;
                 }
@@ -2632,16 +2645,8 @@ impl Blockchain {
                     .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
             });
 
-            // Paid tiers (Gold/Silver/Bronze): single winner gets the full pool.
-            // Free tier: share among up to MAX_FREE_TIER_RECIPIENTS.
-            let is_free_tier = matches!(tier, MasternodeTier::Free);
-            let recipient_count = if is_free_tier {
-                tier_nodes
-                    .len()
-                    .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS)
-            } else {
-                1 // Single winner for paid tiers
-            };
+            // Paid tiers (Gold/Silver/Bronze): single winner gets the full pool
+            let recipient_count = 1;
 
             let per_node = tier_pool / recipient_count as u64;
 
@@ -3419,6 +3424,9 @@ impl Blockchain {
             // This ensures all nodes use the same genesis and don't fork at genesis level
             use crate::block::genesis::GenesisBlock;
             GenesisBlock::verify_timestamp(&block, self.network_type)?;
+
+            // Validate genesis hash matches hardcoded checkpoint
+            GenesisBlock::verify_checkpoint(&block, self.network_type)?;
         } else if block.header.height != current + 1 {
             return Err(format!(
                 "Block height mismatch: expected {}, got {}",
@@ -7386,6 +7394,12 @@ impl Blockchain {
             return Err("No blocks provided for fork resolution".to_string());
         }
 
+        // Skip fork resolution if genesis mismatch was already detected.
+        // Operator must manually delete the chain and restart to resolve.
+        if self.genesis_mismatch_detected.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         let fork_height = blocks[0].header.height;
         let our_height = self.get_height();
 
@@ -7862,6 +7876,22 @@ impl Blockchain {
                     let our_ancestor_hash = self.get_block_hash(common_ancestor)?;
                     let first_block = &sorted_reorg_blocks[0];
                     if first_block.header.previous_hash != our_ancestor_hash {
+                        // Genesis mismatch: peer's chain is built on a different genesis block.
+                        // Set flag to suppress future fork resolution attempts and avoid infinite loop.
+                        if common_ancestor == 0 {
+                            warn!(
+                                "🚨 GENESIS MISMATCH: Our genesis hash {} does not match peer {}'s \
+                                expected genesis {}. Fork resolution suppressed. \
+                                To resolve: stop node, delete chain data, and restart.",
+                                hex::encode(&our_ancestor_hash[..8]),
+                                peer_addr,
+                                hex::encode(&first_block.header.previous_hash[..8])
+                            );
+                            self.genesis_mismatch_detected
+                                .store(true, Ordering::Relaxed);
+                            *self.fork_state.write().await = ForkResolutionState::None;
+                            return Ok(());
+                        }
                         return Err(format!(
                             "Chain validation failed: first block {} expects previous_hash {:x?}, \
                             but common ancestor {} has hash {:x?}",
@@ -8805,6 +8835,7 @@ impl Clone for Blockchain {
             block_added_signal: self.block_added_signal.clone(),
             last_consensus_log: self.last_consensus_log.clone(),
             reward_violations: self.reward_violations.clone(),
+            genesis_mismatch_detected: self.genesis_mismatch_detected.clone(),
             treasury_balance: self.treasury_balance.clone(),
         }
     }

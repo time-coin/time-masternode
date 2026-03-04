@@ -3,6 +3,17 @@
 //! Centralizes all magic numbers and configuration constants to improve
 //! code maintainability and readability.
 
+/// Genesis block checkpoints — hardcoded hashes like Bitcoin's checkpoints.
+/// Nodes reject any genesis block whose hash doesn't match these values.
+pub mod genesis {
+    /// Testnet genesis block hash (established 2026-03-04)
+    pub const TESTNET_GENESIS_HASH: &str =
+        "4170cd5ebb98b42feff212529b8f5ccc19fa090dd1f8b515cc27a763a748f645";
+
+    /// Mainnet genesis block hash (set before mainnet launch)
+    pub const MAINNET_GENESIS_HASH: Option<&str> = None;
+}
+
 /// Blockchain protocol constants
 pub mod blockchain {
     /// Target block time in seconds (10 minutes)
