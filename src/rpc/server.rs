@@ -403,14 +403,58 @@ impl RpcServer {
         handler: Arc<RpcHandler>,
         auth: &RpcAuthenticator,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut buffer = vec![0u8; 8192];
-        let bytes_read = socket.read(&mut buffer).await?;
+        // Read the full HTTP request, handling TCP fragmentation.
+        // We parse Content-Length from headers to know how many body bytes to expect.
+        const MAX_REQUEST_SIZE: usize = 1_048_576; // 1 MB safety limit
+        let mut data = Vec::with_capacity(8192);
+        let mut tmp = [0u8; 8192];
 
-        if bytes_read == 0 {
+        loop {
+            let n = socket.read(&mut tmp).await?;
+            if n == 0 {
+                break;
+            }
+            data.extend_from_slice(&tmp[..n]);
+
+            if data.len() > MAX_REQUEST_SIZE {
+                break;
+            }
+
+            // Check if we have the full request:
+            // 1. Find the header/body boundary
+            // 2. Parse Content-Length
+            // 3. Check if we've received enough body bytes
+            let header_end = data
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .map(|p| p + 4)
+                .or_else(|| {
+                    data.windows(2)
+                        .position(|w| w == b"\n\n")
+                        .map(|p| p + 2)
+                });
+
+            if let Some(body_offset) = header_end {
+                let headers = String::from_utf8_lossy(&data[..body_offset]);
+                let content_length = headers
+                    .lines()
+                    .find(|l| l.to_lowercase().starts_with("content-length:"))
+                    .and_then(|l| l.split_once(':'))
+                    .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+
+                let body_received = data.len() - body_offset;
+                if body_received >= content_length {
+                    break; // We have the full request
+                }
+            }
+        }
+
+        if data.is_empty() {
             return Ok(());
         }
 
-        let http_request = String::from_utf8_lossy(&buffer[..bytes_read]);
+        let http_request = String::from_utf8_lossy(&data);
 
         // Extract JSON body from HTTP POST request
         let body = if let Some(body_start) = http_request.find("\r\n\r\n") {
