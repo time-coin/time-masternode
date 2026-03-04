@@ -500,7 +500,7 @@ server=1
 #rpcport=${RPC_PORT}
 
 # Allow RPC connections from localhost only (secure default)
-rpcbind=127.0.0.1
+rpcbind=0.0.0.0
 #rpcallowip=127.0.0.1
 
 # RPC authentication (auto-generated — change if desired)
