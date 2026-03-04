@@ -119,7 +119,7 @@ impl GenesisBlock {
     /// Returns Ok(()) if the hash matches or no checkpoint is set (mainnet pre-launch).
     pub fn verify_checkpoint(block: &Block, network: NetworkType) -> Result<(), String> {
         let expected_hex = match network {
-            NetworkType::Testnet => Some(crate::constants::genesis::TESTNET_GENESIS_HASH),
+            NetworkType::Testnet => crate::constants::genesis::TESTNET_GENESIS_HASH,
             NetworkType::Mainnet => crate::constants::genesis::MAINNET_GENESIS_HASH,
         };
 
