@@ -1097,7 +1097,7 @@ impl RpcHandler {
 
         let min_conf = params.get(1).and_then(|v| v.as_u64()).unwrap_or(0);
         let max_conf = params.get(2).and_then(|v| v.as_u64()).unwrap_or(9999999);
-        let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+        let limit = params.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
         let current_height = self.blockchain.get_height();
         let mut result: Vec<Value> = Vec::new();
@@ -1111,7 +1111,7 @@ impl RpcHandler {
             let utxos = self.utxo_manager.list_utxos_by_address(addr).await;
 
             for u in &utxos {
-                if result.len() >= limit {
+                if limit > 0 && result.len() >= limit {
                     break;
                 }
 
@@ -1157,7 +1157,7 @@ impl RpcHandler {
                 }
             }
 
-            if result.len() >= limit {
+            if limit > 0 && result.len() >= limit {
                 break;
             }
         }
