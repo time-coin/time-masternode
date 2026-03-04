@@ -115,6 +115,29 @@ impl GenesisBlock {
         rewards
     }
 
+    /// Verify genesis block hash matches the hardcoded checkpoint for the network.
+    /// Returns Ok(()) if the hash matches or no checkpoint is set (mainnet pre-launch).
+    pub fn verify_checkpoint(block: &Block, network: NetworkType) -> Result<(), String> {
+        let expected_hex = match network {
+            NetworkType::Testnet => Some(crate::constants::genesis::TESTNET_GENESIS_HASH),
+            NetworkType::Mainnet => crate::constants::genesis::MAINNET_GENESIS_HASH,
+        };
+
+        if let Some(expected) = expected_hex {
+            let actual = hex::encode(block.hash());
+            if actual != expected {
+                return Err(format!(
+                    "Genesis checkpoint mismatch: expected {}, got {}. \
+                    This node generated a different genesis block than the network. \
+                    Delete chain data and restart to sync the correct chain.",
+                    &expected[..16],
+                    &actual[..16]
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Verify reward distribution is correct
     pub fn verify_rewards(block: &Block) -> Result<(), String> {
         // Genesis block has no masternode rewards (initial supply distribution only)
