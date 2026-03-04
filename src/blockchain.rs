@@ -927,6 +927,7 @@ impl Blockchain {
             vrf_output: [0u8; 32],
             vrf_proof: vec![],
             vrf_score: 0,
+            producer_signature: vec![], // Genesis has no producer signature
         };
 
         // Create genesis block
@@ -2951,6 +2952,13 @@ impl Blockchain {
                     hex::encode(&block.header.vrf_output[..4])
                 );
             }
+
+            // Sign the block hash with the producer's Ed25519 key
+            if let Err(e) = block.sign(&signing_key) {
+                tracing::warn!("⚠️ Failed to sign block {}: {}", next_height, e);
+            } else {
+                tracing::debug!("🔏 Block {} signed by producer", next_height);
+            }
         } else {
             tracing::debug!(
                 "⚠️ Block {} produced without VRF (no signing key available)",
@@ -3443,6 +3451,15 @@ impl Blockchain {
         // Skip for genesis block
         if !is_genesis {
             self.validate_block_rewards(&block).await?;
+
+            // Verify producer signature (skip genesis — it has no producer)
+            if !block.header.producer_signature.is_empty() {
+                if let Some(proposer_info) =
+                    self.masternode_registry.get(&block.header.leader).await
+                {
+                    block.verify_signature(&proposer_info.masternode.public_key)?;
+                }
+            }
         }
 
         // Additional timestamp validation: check if too far in past

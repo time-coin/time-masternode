@@ -3588,6 +3588,14 @@ impl MessageHandler {
                 "🎲 [{}] Block {} VRF verified: proposer={}, score={}",
                 self.direction, block.header.height, proposer, block.header.vrf_score
             );
+
+            // 6. Verify producer signature over block hash
+            if let Err(e) = block.verify_signature(&proposer_info.masternode.public_key) {
+                return Err(format!(
+                    "Block {} producer signature invalid: {}",
+                    block.header.height, e
+                ));
+            }
         }
 
         // 7. Get consensus engine for transaction validation

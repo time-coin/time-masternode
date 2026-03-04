@@ -137,6 +137,11 @@ pub struct BlockHeader {
     /// Wrapped in Option for backward compatibility with pre-v6.2 blocks
     #[serde(default)]
     pub liveness_recovery: Option<bool>,
+    /// Ed25519 signature of the block hash by the block producer.
+    /// Proves the producer created this exact block (covers all header fields).
+    /// Without this, a valid VRF proof could be paired with tampered content.
+    #[serde(default)]
+    pub producer_signature: Vec<u8>,
 }
 
 impl Block {
@@ -209,6 +214,43 @@ impl Block {
             &self.header.vrf_proof,
             &self.header.vrf_output,
         )
+    }
+
+    /// Sign the block hash with the producer's Ed25519 key.
+    /// Must be called AFTER add_vrf() since VRF fields affect the hash.
+    pub fn sign(&mut self, signing_key: &ed25519_dalek::SigningKey) -> Result<(), String> {
+        use ed25519_dalek::Signer;
+        let block_hash = self.hash();
+        let signature = signing_key.sign(&block_hash);
+        self.header.producer_signature = signature.to_bytes().to_vec();
+        Ok(())
+    }
+
+    /// Verify the producer's Ed25519 signature over the block hash.
+    /// Returns Ok(()) if valid, or if signature is empty (pre-signature blocks).
+    pub fn verify_signature(
+        &self,
+        verifying_key: &ed25519_dalek::VerifyingKey,
+    ) -> Result<(), String> {
+        if self.header.producer_signature.is_empty() {
+            return Ok(()); // Backward compatibility: unsigned blocks accepted
+        }
+        let sig_bytes: [u8; 64] = self
+            .header
+            .producer_signature
+            .as_slice()
+            .try_into()
+            .map_err(|_| {
+                format!(
+                    "Invalid producer signature length: {} (expected 64)",
+                    self.header.producer_signature.len()
+                )
+            })?;
+        let signature = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        let block_hash = self.hash();
+        verifying_key
+            .verify_strict(&block_hash, &signature)
+            .map_err(|e| format!("Block producer signature verification failed: {}", e))
     }
 
     /// Get count of masternodes with valid attestations in this block
