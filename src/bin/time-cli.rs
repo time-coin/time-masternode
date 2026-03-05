@@ -480,19 +480,57 @@ fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
 }
 
 async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    let rpc_url = args.rpc_url.unwrap_or_else(|| {
-        if args.testnet {
-            "http://127.0.0.1:24101".to_string()
-        } else {
-            "http://127.0.0.1:24001".to_string()
+    let (rpc_url, is_testnet) = if let Some(url) = &args.rpc_url {
+        let testnet = args.testnet || url.contains("24101");
+        (url.clone(), testnet)
+    } else {
+        // Auto-detect: try both ports with credentials
+        let mut detected = None;
+        let client = Client::new();
+        for (url, testnet) in &[
+            ("http://127.0.0.1:24101", true),
+            ("http://127.0.0.1:24001", false),
+        ] {
+            let (user, pass) = read_cookie_file(*testnet)
+                .or_else(|| read_conf_credentials(*testnet))
+                .unwrap_or_default();
+            let mut req = client
+                .post(*url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getblockchaininfo",
+                    "params": []
+                }))
+                .timeout(std::time::Duration::from_secs(2));
+            if !user.is_empty() && !pass.is_empty() {
+                req = req.basic_auth(&user, Some(&pass));
+            }
+            if let Ok(response) = req.send().await {
+                if response.status().is_success() {
+                    if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
+                        if rpc_response.get("result").is_some() {
+                            detected = Some((url.to_string(), *testnet));
+                            break;
+                        }
+                    }
+                }
+            }
         }
-    });
+        detected.unwrap_or_else(|| {
+            if args.testnet {
+                ("http://127.0.0.1:24101".to_string(), true)
+            } else {
+                ("http://127.0.0.1:24001".to_string(), false)
+            }
+        })
+    };
 
     // Resolve RPC credentials: CLI flags > .cookie file > time.conf
     let (rpc_user, rpc_pass) = match (&args.rpcuser, &args.rpcpassword) {
         (Some(u), Some(p)) => (u.clone(), p.clone()),
-        _ => read_cookie_file(args.testnet)
-            .or_else(|| read_conf_credentials(args.testnet))
+        _ => read_cookie_file(is_testnet)
+            .or_else(|| read_conf_credentials(is_testnet))
             .unwrap_or_default(),
     };
 

@@ -21,6 +21,53 @@ use std::{
 };
 
 const DASHBOARD_VERSION: &str = "1.0.0";
+
+/// Read RPC credentials from the .cookie file in the data directory.
+fn read_cookie_file(testnet: bool) -> Option<(String, String)> {
+    let data_dir = if testnet {
+        dirs::home_dir()?.join(".timecoin").join("testnet")
+    } else {
+        dirs::home_dir()?.join(".timecoin")
+    };
+    let cookie_path = data_dir.join(".cookie");
+    let contents = std::fs::read_to_string(&cookie_path).ok()?;
+    let (user, pass) = contents.trim().split_once(':')?;
+    Some((user.to_string(), pass.to_string()))
+}
+
+/// Read RPC credentials from time.conf as a fallback.
+fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
+    let data_dir = if testnet {
+        dirs::home_dir()?.join(".timecoin").join("testnet")
+    } else {
+        dirs::home_dir()?.join(".timecoin")
+    };
+    let conf_path = data_dir.join("time.conf");
+    let contents = std::fs::read_to_string(&conf_path).ok()?;
+    let mut user = None;
+    let mut pass = None;
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            match key.trim() {
+                "rpcuser" => user = Some(value.trim().to_string()),
+                "rpcpassword" => pass = Some(value.trim().to_string()),
+                _ => {}
+            }
+        }
+    }
+    Some((user?, pass?))
+}
+
+/// Resolve RPC credentials: try .cookie file first, then time.conf.
+fn resolve_credentials(testnet: bool) -> (String, String) {
+    read_cookie_file(testnet)
+        .or_else(|| read_conf_credentials(testnet))
+        .unwrap_or_default()
+}
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct BlockchainInfo {
@@ -162,6 +209,8 @@ impl Default for DashboardData {
 struct App {
     data: DashboardData,
     rpc_url: String,
+    rpc_user: String,
+    rpc_pass: String,
     client: Client,
     current_tab: usize,
     should_quit: bool,
@@ -171,11 +220,16 @@ struct App {
 }
 
 impl App {
-    fn new(rpc_url: String) -> Self {
+    fn new(rpc_url: String, rpc_user: String, rpc_pass: String) -> Self {
         Self {
             data: DashboardData::default(),
             rpc_url,
-            client: Client::new(),
+            rpc_user,
+            rpc_pass,
+            client: Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap_or_default(),
             current_tab: 0,
             should_quit: false,
             error_message: None,
@@ -274,12 +328,11 @@ impl App {
             params,
         };
 
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
-            .await?;
+        let mut req = self.client.post(&self.rpc_url).json(&request);
+        if !self.rpc_user.is_empty() && !self.rpc_pass.is_empty() {
+            req = req.basic_auth(&self.rpc_user, Some(&self.rpc_pass));
+        }
+        let response = req.send().await?;
 
         // Get raw response text first for debugging
         let response_text = response.text().await?;
@@ -967,24 +1020,18 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(footer, area);
 }
 
-async fn detect_network(prefer_testnet: bool) -> String {
+async fn detect_network() -> (String, bool) {
     let client = Client::new();
 
-    // Try preferred network first
-    let ports: Vec<(&str, &str)> = if prefer_testnet {
-        vec![
-            ("http://127.0.0.1:24101", "testnet"),
-            ("http://127.0.0.1:24001", "mainnet"),
-        ]
-    } else {
-        vec![
-            ("http://127.0.0.1:24001", "mainnet"),
-            ("http://127.0.0.1:24101", "testnet"),
-        ]
-    };
+    // Try both networks; return which one responds
+    let ports: Vec<(&str, bool)> = vec![
+        ("http://127.0.0.1:24101", true),  // testnet
+        ("http://127.0.0.1:24001", false), // mainnet
+    ];
 
-    for (url, expected_network) in ports {
-        if let Ok(response) = client
+    for (url, is_testnet) in ports {
+        let (user, pass) = resolve_credentials(is_testnet);
+        let mut req = client
             .post(url)
             .json(&serde_json::json!({
                 "jsonrpc": "2.0",
@@ -992,46 +1039,39 @@ async fn detect_network(prefer_testnet: bool) -> String {
                 "method": "getblockchaininfo",
                 "params": []
             }))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        {
+            .timeout(Duration::from_secs(2));
+        if !user.is_empty() && !pass.is_empty() {
+            req = req.basic_auth(&user, Some(&pass));
+        }
+        if let Ok(response) = req.send().await {
             if response.status().is_success() {
                 if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
-                    if let Some(result) = rpc_response.get("result") {
-                        if let Some(chain) = result.get("chain").and_then(|c| c.as_str()) {
-                            if chain.to_lowercase() == expected_network {
-                                return url.to_string();
-                            }
-                        } else {
-                            return url.to_string();
-                        }
+                    if rpc_response.get("result").is_some() {
+                        return (url.to_string(), is_testnet);
                     }
                 }
             }
         }
     }
 
-    // Default based on preference
-    if prefer_testnet {
-        "http://127.0.0.1:24101".to_string()
-    } else {
-        "http://127.0.0.1:24001".to_string()
-    }
+    // Default to testnet
+    ("http://127.0.0.1:24101".to_string(), true)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let testnet = args.iter().any(|a| a == "--testnet");
 
     // Parse command line arguments or auto-detect network
-    let rpc_url = if let Some(url) = args.iter().find(|a| a.starts_with("http")) {
-        url.clone()
+    let (rpc_url, is_testnet) = if let Some(url) = args.iter().find(|a| a.starts_with("http")) {
+        let testnet = args.iter().any(|a| a == "--testnet") || url.contains("24101");
+        (url.clone(), testnet)
     } else {
-        // Auto-detect: try mainnet first unless --testnet flag is set
-        detect_network(testnet).await
+        // Auto-detect: try testnet first, then mainnet
+        detect_network().await
     };
+
+    let (rpc_user, rpc_pass) = resolve_credentials(is_testnet);
 
     // Setup terminal
     enable_raw_mode()?;
@@ -1041,7 +1081,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app
-    let mut app = App::new(rpc_url);
+    let mut app = App::new(rpc_url, rpc_user, rpc_pass);
 
     // Initial data fetch
     app.update_data().await;
@@ -1076,12 +1116,19 @@ async fn run_app<B: ratatui::backend::Backend>(
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') => {
+                        KeyCode::Char('q') | KeyCode::Char('Q') => {
                             if app.mempool_detail.is_some() {
                                 app.mempool_detail = None;
                             } else {
                                 app.should_quit = true;
                             }
+                        }
+                        KeyCode::Char('c')
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
+                            app.should_quit = true;
                         }
                         KeyCode::Char('r') => {
                             app.update_data().await;
