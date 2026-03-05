@@ -2630,9 +2630,8 @@ impl Blockchain {
                 })
                 .collect();
 
-            // Free tier and empty tiers: full pool goes to block producer
-            let is_free_tier = matches!(tier, MasternodeTier::Free);
-            if tier_nodes.is_empty() || is_free_tier {
+            // Empty tiers: full pool goes to block producer
+            if tier_nodes.is_empty() {
                 if let Some(entry) = rewards.first_mut() {
                     entry.1 += tier_pool;
                 }
@@ -2646,8 +2645,15 @@ impl Blockchain {
                     .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
             });
 
-            // Paid tiers (Gold/Silver/Bronze): single winner gets the full pool
-            let recipient_count = 1;
+            // Paid tiers: single winner. Free tier: share among up to MAX_FREE_TIER_RECIPIENTS.
+            let is_free_tier = matches!(tier, MasternodeTier::Free);
+            let recipient_count = if is_free_tier {
+                tier_nodes
+                    .len()
+                    .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS)
+            } else {
+                1
+            };
 
             let per_node = tier_pool / recipient_count as u64;
 
