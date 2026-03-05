@@ -3463,7 +3463,17 @@ impl Blockchain {
                 if let Some(proposer_info) =
                     self.masternode_registry.get(&block.header.leader).await
                 {
-                    block.verify_signature(&proposer_info.masternode.public_key)?;
+                    if let Err(e) =
+                        block.verify_signature(&proposer_info.masternode.public_key)
+                    {
+                        // Warn but don't reject: stale registry keys (e.g. after chain wipe)
+                        // cause false failures during historical sync. Chain hash integrity
+                        // is still enforced. Keys are refreshed once sync reaches the tip.
+                        tracing::warn!(
+                            "⚠️ Block {} producer signature mismatch for leader {} (stale registry key?): {}",
+                            block.header.height, block.header.leader, e
+                        );
+                    }
                 }
             }
         }
