@@ -2026,34 +2026,73 @@ async fn main() {
                     .await
                     .ok();
 
-                if let Some(prev_block) = prev_block {
-                    // All currently-active masternodes are the pool for VRF sortition.
-                    // Using the bitmap as a hard gate unfairly excludes high-latency nodes
-                    // whose votes arrive after advance_vote_height clears the accumulator
-                    // (especially during catch-up when blocks are produced rapidly).
-                    // The bitmap still gates pool rewards via consensus_participants_bitmap.
-                    let all_active = block_registry.get_eligible_for_rewards().await;
+                if prev_block.is_some() {
+                    // VRF eligibility: rolling 3-block participation window.
+                    //
+                    // A node is eligible if it appeared in the bitmap (or was the block
+                    // producer) of ANY of the last 3 blocks.  This means:
+                    //   - High-latency nodes whose vote arrived late for block N but was
+                    //     present in block N-1 are still eligible (not unfairly penalised).
+                    //   - Nodes that just joined and haven't voted in any recent block are
+                    //     excluded (preserving the participation incentive).
+                    //   - A node must miss 3 consecutive rounds before losing VRF eligibility.
+                    const VRF_WINDOW: u64 = 3;
+                    let mut participant_union: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
 
-                    // Extract bitmap members for logging/debug only
-                    let bitmap_infos = block_registry
-                        .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
-                        .await;
-
-                    if bitmap_infos.len() < all_active.len() {
-                        tracing::debug!(
-                            "📊 Bitmap has {}/{} active nodes - using all {} active masternodes for VRF fairness",
-                            bitmap_infos.len(),
-                            all_active.len(),
-                            all_active.len()
-                        );
-                    } else {
-                        tracing::debug!(
-                            "📊 Using {} active masternodes for VRF sortition",
-                            all_active.len()
-                        );
+                    for lookback in 0..VRF_WINDOW {
+                        if current_height < lookback {
+                            break;
+                        }
+                        let check_height = current_height - lookback;
+                        if let Ok(blk) =
+                            block_blockchain.get_block_by_height(check_height).await
+                        {
+                            // Block producer always participated
+                            if !blk.header.leader.is_empty() {
+                                participant_union.insert(blk.header.leader.clone());
+                            }
+                            // All bitmap voters
+                            let voters = block_registry
+                                .get_active_from_bitmap(
+                                    &blk.header.active_masternodes_bitmap,
+                                )
+                                .await;
+                            for v in voters {
+                                participant_union.insert(v.masternode.address.clone());
+                            }
+                        }
                     }
 
-                    all_active
+                    let all_active = block_registry.get_eligible_for_rewards().await;
+
+                    if participant_union.is_empty() {
+                        // No participation data yet — fall through to all-active
+                        tracing::warn!(
+                            "⚠️  Rolling bitmap window empty at height {} - using all active masternodes",
+                            current_height
+                        );
+                        all_active
+                    } else {
+                        let filtered: Vec<_> = all_active
+                            .into_iter()
+                            .filter(|(mn, _)| participant_union.contains(&mn.address))
+                            .collect();
+
+                        tracing::debug!(
+                            "📊 VRF pool: {}/{} active masternodes participated in last {} blocks",
+                            filtered.len(),
+                            participant_union.len(),
+                            VRF_WINDOW
+                        );
+
+                        if filtered.is_empty() {
+                            // Safety: avoid deadlock if bitmap data is inconsistent
+                            block_registry.get_eligible_for_rewards().await
+                        } else {
+                            filtered
+                        }
+                    }
                 } else {
                     // Can't get previous block - fallback to all active
                     tracing::warn!(
