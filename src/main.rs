@@ -2027,28 +2027,33 @@ async fn main() {
                     .ok();
 
                 if let Some(prev_block) = prev_block {
-                    // Extract active masternodes using previous block's bitmap
-                    let active_infos = block_registry
+                    // All currently-active masternodes are the pool for VRF sortition.
+                    // Using the bitmap as a hard gate unfairly excludes high-latency nodes
+                    // whose votes arrive after advance_vote_height clears the accumulator
+                    // (especially during catch-up when blocks are produced rapidly).
+                    // The bitmap still gates pool rewards via consensus_participants_bitmap.
+                    let all_active = block_registry.get_eligible_for_rewards().await;
+
+                    // Extract bitmap members for logging/debug only
+                    let bitmap_infos = block_registry
                         .get_active_from_bitmap(&prev_block.header.active_masternodes_bitmap)
                         .await;
 
-                    // Fallback: If bitmap is empty (legacy blocks or no voters), use all active masternodes
-                    if active_infos.is_empty() {
-                        tracing::warn!(
-                            "⚠️  Previous block has empty bitmap (legacy block or no voters) - falling back to all active masternodes"
+                    if bitmap_infos.len() < all_active.len() {
+                        tracing::debug!(
+                            "📊 Bitmap has {}/{} active nodes - using all {} active masternodes for VRF fairness",
+                            bitmap_infos.len(),
+                            all_active.len(),
+                            all_active.len()
                         );
-                        block_registry.get_eligible_for_rewards().await
                     } else {
                         tracing::debug!(
-                            "📊 Using {} active masternodes from previous block's bitmap",
-                            active_infos.len()
+                            "📊 Using {} active masternodes for VRF sortition",
+                            all_active.len()
                         );
-
-                        active_infos
-                            .into_iter()
-                            .map(|info| (info.masternode, info.reward_address))
-                            .collect()
                     }
+
+                    all_active
                 } else {
                     // Can't get previous block - fallback to all active
                     tracing::warn!(

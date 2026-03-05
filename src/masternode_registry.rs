@@ -375,6 +375,8 @@ impl MasternodeRegistry {
                 existing.masternode.collateral = masternode.collateral;
                 existing.masternode.collateral_outpoint = new_outpoint;
                 existing.masternode.public_key = masternode.public_key;
+                // Sync wallet_address (used by block reward logic) with reward_address from config
+                existing.masternode.wallet_address = masternode.wallet_address.clone();
                 existing.reward_address = reward_address.clone();
             }
 
