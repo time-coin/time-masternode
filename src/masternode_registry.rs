@@ -487,33 +487,67 @@ impl MasternodeRegistry {
         let now = Self::now();
         let mut masternodes = self.masternodes.write().await;
 
-        if let Some(info) = masternodes.get_mut(address) {
-            if info.is_active {
-                info.is_active = false;
-                if info.uptime_start > 0 {
-                    info.total_uptime += now - info.uptime_start;
-                }
-                warn!(
-                    "⚠️  Masternode {} marked inactive (connection lost) - broadcasting to network",
-                    address
-                );
+        // Read properties before mutating to avoid borrow conflicts.
+        let (is_handshake, is_active) = {
+            let info = masternodes.get(address).ok_or(RegistryError::NotFound)?;
+            (
+                info.registration_source == RegistrationSource::Handshake,
+                info.is_active,
+            )
+        };
 
-                // Broadcast inactive status to all peers for consensus
-                if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-                    let msg = crate::network::message::NetworkMessage::MasternodeInactive {
-                        address: address.to_string(),
-                        timestamp: now,
-                    };
-                    let _ = tx.send(msg); // Ignore errors if no receivers
-                }
+        if is_handshake {
+            // Handshake-registered (Free-tier) nodes have no collateral stake and are
+            // considered transient visitors. Remove them entirely from the registry on
+            // disconnect so they cannot inflate the quorum weight denominator while absent.
+            masternodes.remove(address);
+            drop(masternodes);
 
-                // Persist to disk
-                self.store_masternode(address, info)?;
+            warn!(
+                "🔌 Masternode {} removed on disconnect (transient Free-tier node)",
+                address
+            );
+
+            // Broadcast removal so peers update their active sets immediately.
+            if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
+                let _ = tx.send(crate::network::message::NetworkMessage::MasternodeInactive {
+                    address: address.to_string(),
+                    timestamp: now,
+                });
             }
-            Ok(())
-        } else {
-            Err(RegistryError::NotFound)
+
+            // Remove from disk.
+            let key = format!("masternode:{}", address);
+            self.db
+                .remove(key.as_bytes())
+                .map_err(|e| RegistryError::Storage(e.to_string()))?;
+        } else if is_active {
+            // On-chain registered nodes (Bronze+) paid collateral and may reconnect.
+            // Mark inactive so they are excluded from vote weight until they return.
+            let info = masternodes.get_mut(address).expect("checked above");
+            info.is_active = false;
+            if info.uptime_start > 0 {
+                info.total_uptime += now - info.uptime_start;
+            }
+
+            warn!(
+                "⚠️  Masternode {} marked inactive (connection lost) - broadcasting to network",
+                address
+            );
+
+            // Broadcast inactive status to all peers for consensus.
+            if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
+                let _ = tx.send(crate::network::message::NetworkMessage::MasternodeInactive {
+                    address: address.to_string(),
+                    timestamp: now,
+                });
+            }
+
+            // Persist to disk.
+            self.store_masternode(address, info)?;
         }
+
+        Ok(())
     }
 
     #[allow(dead_code)]
