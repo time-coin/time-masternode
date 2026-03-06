@@ -1920,7 +1920,7 @@ impl MessageHandler {
                             .collect();
 
                         let event = crate::rpc::websocket::TransactionEvent {
-                            txid: hex::encode(&txid),
+                            txid: hex::encode(txid),
                             outputs,
                             timestamp: chrono::Utc::now().timestamp(),
                             status: crate::rpc::websocket::TxEventStatus::Pending,

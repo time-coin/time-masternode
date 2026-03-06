@@ -111,6 +111,8 @@ masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
 
 Generate a key with `time-cli masternode genkey`. If omitted, the node uses its wallet's auto-generated key.
 
+> **Note on `reward_address` changes:** If you update `reward_address` in `time.conf` and restart, the daemon overwrites the stored `wallet_address` on re-registration so block rewards route to the new address immediately. (Prior to v1.3.0 the stale address persisted until a full re-collateralization.)
+
 ### masternode.conf Format
 
 ```
