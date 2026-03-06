@@ -631,6 +631,81 @@ rm -rf ~/.timecoin/blockchain/*
 sudo systemctl start timed    # re-syncs from peers
 ```
 
+### Database Reset
+
+#### Automatic Schema Migration
+
+As of commit `09d5619`, nodes **automatically migrate old-schema blocks** on
+startup. In most cases a database reset is no longer necessary:
+
+- ✅ Nodes sync genesis from peers running old code
+- ✅ Schema-mismatch `io error:` crashes no longer occur on startup
+- ✅ Migration runs before any blockchain operations
+
+You will see log output similar to:
+```
+🔄 Checking for old-schema blocks that need migration...
+✅ Migrated block 0 from old schema
+✅ Schema migration complete: 2 blocks migrated
+```
+
+#### When to Still Reset
+
+| Situation | Action |
+|-----------|--------|
+| Migration fails repeatedly | Reset — indicates severe corruption |
+| Blocks have invalid data | Reset — migration cannot fix logical errors |
+| Want a clean sync | Reset is faster than migrating thousands of blocks |
+| Testing / debugging | Reset to a known-good state |
+
+#### Option 1 — Let Automatic Migration Handle It (Recommended)
+
+```bash
+cd /path/to/time-masternode
+git pull
+cargo build --release
+sudo systemctl restart timed.service
+journalctl -u timed.service -f | grep -i migrat   # verify migration
+```
+
+#### Option 2 — Manual Database Reset
+
+**Testnet:**
+```bash
+sudo systemctl stop timed.service
+rm -rf /root/.timecoin/testnet/db/blocks
+# Optional full reset: rm -rf /root/.timecoin/testnet/db/*
+sudo systemctl start timed.service
+journalctl -u timed.service -f
+```
+
+**Mainnet:**
+```bash
+sudo systemctl stop timed.service
+rm -rf /root/.timecoin/mainnet/db/blocks
+sudo systemctl start timed.service
+journalctl -u timed.service -f
+```
+
+#### What Happens After a Reset
+
+1. Node starts with an empty database.
+2. **Genesis sync** — waits 10 s for peer connections, then requests block 0
+   from peers.
+3. **Genesis generation (fallback)** — if no network genesis exists, waits 45 s,
+   elects the masternode with the lowest address as leader, and the leader
+   generates and broadcasts a dynamic genesis block.
+4. **Block sync** — requests missing blocks from peers and begins participating
+   in block production.
+
+#### Post-Reset Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `io error:` still occurring | Verify deletion: `ls -la /root/.timecoin/testnet/db/` · Check disk space: `df -h` · Try `rm -rf /root/.timecoin/testnet/db/*` |
+| Nodes stuck at height 0 | Restart one leader node first; let it generate genesis; then restart others |
+| Genesis hash mismatch | Incompatible blockchains — all nodes must reset together, or one node keeps its DB and others sync from it |
+
 ### Service management quick reference
 
 ```bash
