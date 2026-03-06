@@ -252,15 +252,176 @@ Each block distributes 100 TIME + transaction fees:
 - **35 TIME + fees** → Block producer (VRF-selected leader bonus)
 - **65 TIME** → Four per-tier pools (Gold=25, Silver=18, Bronze=14, Free=8)
 
-Within each tier's pool, rewards are divided equally among selected recipients. The block producer also receives their tier's pool share.
+Within each tier's pool, rewards are divided equally among selected recipients. The block producer also receives their tier's pool share. If a tier has no active nodes, its pool goes to the block producer instead.
 
-### Per-Tier Rotation
+### Fairness Rotation
 
-If a tier has more than 25 active nodes:
-- Fairness bonus selects the 25 longest-waiting nodes
-- Selected nodes split their tier's pool equally
-- Remaining nodes rotate in on subsequent blocks
-- All nodes in a tier get paid within `ceil(tier_count / 25)` blocks
+When a tier has more active nodes than the per-block cap of 25, a fairness bonus ensures every node eventually gets paid — no starvation, no dust outputs:
+
+1. **Fairness bonus** per node: `min(blocks_since_last_paid / 10, 20)` — computed on-chain by scanning `masternode_rewards` in recent blocks (up to 1,000 blocks back); deterministic across all validators
+2. **Sort** eligible nodes by fairness bonus (descending), then address (ascending) as a deterministic tiebreaker
+3. **Select** top 25 nodes; distribute `tier_pool / recipient_count` equally
+4. **Minimum payout guard**: if `tier_pool / recipients < 1 TIME`, the pool goes to the block producer to prevent dust outputs
+
+All nodes in a tier receive payment within `ceil(tier_count / 25)` blocks.
+
+#### Free Tier Maturity Gate
+
+On mainnet, Free-tier nodes must be registered for ≥ 72 blocks (~12 hours) before becoming eligible for pool rewards. Paid tiers (Bronze/Silver/Gold) are always eligible — their collateral acts as sybil resistance.
+
+### Example Scenarios
+
+#### Small Network (1 Gold, 2 Silver, 3 Bronze, 4 Free)
+
+```
+Block producer: Silver node A (won VRF)
+- Leader bonus: 35 TIME + fees
+
+Gold pool (25 TIME ÷ 1):    Gold A = 25 TIME
+Silver pool (18 TIME ÷ 2):  Silver A = 9 TIME (merged with leader = 44 TIME)
+                             Silver B = 9 TIME
+Bronze pool (14 TIME ÷ 3):  Bronze A = 4.67, B = 4.67, C = 4.66 TIME
+Free pool (8 TIME ÷ 4):     Free A = 2, B = 2, C = 2, D = 2 TIME
+
+Every node is paid every block.
+```
+
+#### Large Network (5 Gold, 20 Silver, 75 Bronze, 400 Free)
+
+```
+Gold pool (25 ÷ 5):     5 TIME each   — all paid every block
+Silver pool (18 ÷ 20):  0.9 TIME each — all paid every block
+Bronze pool (14 ÷ 25):  0.56 TIME each — top 25 of 75 by fairness
+                          All 75 rotate through in 3 blocks
+Free pool (8 ÷ 8):      1 TIME each   — top 8 of 400 by fairness
+                          All 400 rotate through in 50 blocks (~8.3 hours)
+```
+
+#### Extreme Scale (10,000 Free nodes)
+
+```
+Free pool: 8 TIME ÷ 8 = 1 TIME each  (max 8 recipients — enforced by 1 TIME minimum)
+Rotation:  Each node paid every ~1,250 blocks (~8.7 days)
+Per payment: 1 TIME (meaningful, not dust)
+```
+
+### Consensus Safety
+
+Block reward distribution is validated **before voting** in `validate_block_before_vote()`. Proposed rewards that deviate beyond `GOLD_POOL_SATOSHIS` (25 TIME) per recipient cause the node to refuse to vote; the block fails to reach consensus and TimeGuard fallback selects the next VRF producer.
+
+During `add_block()`, per-recipient deviations up to 25 TIME are tolerated with a warning to handle minor masternode list divergence. Deviations beyond the cap are hard-rejected. The total block reward is always strictly validated.
+
+Each node tracks reward-distribution violations per block producer address (lifetime counter). After **3 violations** (`REWARD_VIOLATION_THRESHOLD`), the producer is marked **misbehaving** and all future proposals from that address are rejected without voting.
+
+```
+⚠️ Producer X reward violation (1/3 strikes)
+⚠️ Producer X reward violation (2/3 strikes)
+🚨 Producer X has 3 reward violation(s) — now MISBEHAVING, future proposals will be rejected
+```
+
+### Reward Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `PRODUCER_REWARD_SATOSHIS` | 35 × 10⁸ | Leader bonus (35 TIME) |
+| `GOLD_POOL_SATOSHIS` | 25 × 10⁸ | Gold tier pool (25 TIME) |
+| `SILVER_POOL_SATOSHIS` | 18 × 10⁸ | Silver tier pool (18 TIME) |
+| `BRONZE_POOL_SATOSHIS` | 14 × 10⁸ | Bronze tier pool (14 TIME) |
+| `FREE_POOL_SATOSHIS` | 8 × 10⁸ | Free tier pool (8 TIME) |
+| `MIN_POOL_PAYOUT_SATOSHIS` | 10⁸ | Minimum 1 TIME per recipient |
+| `MAX_TIER_RECIPIENTS` | 25 | Max recipients per tier per block |
+| `FREE_MATURITY_BLOCKS` | 72 | Free tier maturity gate (mainnet) |
+| `REWARD_VIOLATION_THRESHOLD` | 3 | Strikes before producer is marked misbehaving |
+
+**Key implementation files:** `src/constants.rs` (all reward constants), `src/types.rs` (`MasternodeTier::pool_allocation()` and `reward_weight()`), `src/blockchain.rs` (`produce_block_at_height()` and `validate_pool_distribution()`), `src/masternode_registry.rs` (`get_eligible_pool_nodes()` and `get_pool_reward_tracking()`).
+
+---
+
+## Block Producer Selection
+
+TIME Coin selects block producers using **weighted VRF sortition** — each masternode's probability of being chosen as leader is proportional to its tier weight. Higher tiers produce more blocks and earn proportionally more leader bonuses over time, with no participant lists stored in blocks.
+
+### Selection Algorithm
+
+```
+1. Collect all active masternodes, sorted deterministically by address
+2. Build a cumulative weight array using each node's tier.reward_weight()
+3. Derive a deterministic random value:
+   Hash(prev_block_hash || block_height || attempt_number)
+4. Select the masternode where the random value falls in the cumulative array
+5. Higher tier weight → higher selection probability
+```
+
+On timeout the `attempt` counter increments, rotating to a different producer deterministically. Block hash provides all entropy — no external randomness source required.
+
+### Tier Selection Weights
+
+| Tier | Weight | Relative to Bronze |
+|------|--------|--------------------|
+| Free | 100 | 0.1x |
+| Bronze | 1,000 | 1x (baseline) |
+| Silver | 10,000 | 10x |
+| Gold | 100,000 | 100x |
+
+### Selection Probability
+
+```
+Probability(node) = node.tier.reward_weight() / total_network_weight
+```
+
+**Example — 5 Free + 1 Bronze (total weight: 1,500):**
+- Each Free node: 100 / 1,500 = **6.67%**
+- Bronze node: 1,000 / 1,500 = **66.67%**
+
+### Expected Leader Earnings (144 blocks/day at 10-min blocks)
+
+The leader bonus is 35 TIME + transaction fees per block produced. Higher-tier nodes produce proportionally more blocks:
+
+#### Balanced Network (10 nodes per tier, total weight: 1,111,000)
+
+| Tier | Blocks/Month (each) | Approx. Monthly Leader Earnings |
+|------|---------------------|--------------------------------|
+| Free | 3.9 | ~194 TIME |
+| Bronze | 38.9 | ~1,944 TIME |
+| Silver | 388.8 | ~19,440 TIME |
+| Gold | 3,888 | ~194,400 TIME |
+
+#### Mature Network (1,000 Free / 100 Bronze / 10 Silver / 1 Gold, total weight: 400,000)
+
+Each tier contributes equal total weight, so each tier collectively earns the same from leader bonuses:
+
+| Tier | Monthly Earnings (each) | Tier Total |
+|------|------------------------|------------|
+| Free | ~1.08 TIME | 1,080 TIME |
+| Bronze | ~10.8 TIME | 1,080 TIME |
+| Silver | ~108 TIME | 1,080 TIME |
+| Gold | ~1,080 TIME | 1,080 TIME |
+
+#### Gold Whale (1 Gold + 10 Bronze + 100 Free, total weight: 120,000)
+
+| Tier | Network Share | Monthly Earnings |
+|------|---------------|-----------------|
+| 100 Free (total) | 8.3% | ~1,800 TIME |
+| 10 Bronze (total) | 8.3% | ~1,800 TIME |
+| 1 Gold | **83.3%** | ~180,000 TIME |
+
+A Gold whale dominates block production until more high-tier nodes join — creating a strong economic incentive to increase collateral.
+
+### Key Properties
+
+- **No blockchain bloat**: Only the producer address is stored per block (already required in `header.leader`) — no participant lists, scales to millions of masternodes
+- **Deterministic**: All nodes independently compute the same leader from the same inputs
+- **Manipulation-resistant**: Uses block hash as entropy; no external randomness source required
+- **Clear tier incentive**: Gold nodes earn ~100× more leader bonuses than Free nodes
+
+### Future Considerations
+
+- **Weight caps**: If one Gold whale dominates, per-node weight caps (e.g., max 10% of total network weight) could be introduced
+- **Progressive weight decay** for very large holders
+- **Fee distribution**: Currently all transaction fees go to the producer; a future enhancement could split fees among recent participants or include a developer fund allocation
+- **Tier expansion**: Platinum/Diamond tiers or dynamic collateral thresholds as the network matures
+
+**Implementation:** `src/main.rs` (cumulative weight array + deterministic selection), `src/masternode_registry.rs`, `src/types.rs` (`MasternodeTier::reward_weight()`), `src/constants.rs` (weight constants).
 
 ---
 

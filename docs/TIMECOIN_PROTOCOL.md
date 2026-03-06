@@ -1751,3 +1751,581 @@ test_vectors:
 
 ---
 
+
+---
+
+## Appendix A: Fee Collection Mechanism
+
+Transaction fees ARE being collected and added to block rewards. This appendix explains how the fee collection system works end-to-end.
+
+### Fee Flow: Step-by-Step
+
+#### 1. Transaction Submission
+
+**Location:** `src/consensus.rs:1343-1437` (validate_transaction)
+
+When a user submits a transaction:
+```rust
+// Fee calculation
+let input_sum: u64 = sum of all input UTXOs
+let output_sum: u64 = sum of all outputs
+let fee = input_sum - output_sum
+
+// Fee validation
+if fee < MIN_TX_FEE (1,000 satoshis) {
+    reject
+}
+if fee < output_sum / 1000 (0.1% proportional) {
+    reject
+}
+```
+
+**Example Transaction:**
+- Input: 1,000,000 satoshis (0.01 TIME)
+- Output: 998,000 satoshis
+- **Fee: 2,000 satoshis** (0.2% - meets both minimums)
+
+---
+
+#### 2. Transaction Pool Storage
+
+**Location:** `src/transaction_pool.rs:100-136` (add_transaction)
+
+Transaction entry includes fee:
+```rust
+pub struct TransactionEntry {
+    pub tx: Transaction,
+    pub fee: u64,              // ← Fee stored here
+    pub size: usize,
+    pub added_at: Instant,
+    pub submitter: Option<String>,
+}
+```
+
+Stored in mempool:
+- **Pending pool**: Transactions awaiting finalization
+- **Finalized pool**: Transactions ready for block inclusion
+
+---
+
+#### 3. Fee Accumulation
+
+**Location:** `src/transaction_pool.rs:236-238` (get_total_fees)
+
+When block is produced, total fees calculated:
+```rust
+pub fn get_total_fees(&self) -> u64 {
+    self.finalized
+        .iter()
+        .map(|e| e.value().fee)
+        .sum()
+}
+```
+
+This sums ALL fees from finalized transactions ready for the block.
+
+---
+
+#### 4. Block Reward Calculation
+
+**Location:** `src/blockchain.rs:1526-1532` (produce_block)
+
+```rust
+// Get finalized transactions
+let finalized_txs = self.consensus.get_finalized_transactions_for_block();
+
+// Calculate total fees from all finalized transactions
+let total_fees = self.consensus.tx_pool.get_total_fees();
+
+// Add fees to base block reward
+let base_reward = BLOCK_REWARD_SATOSHIS; // 100 TIME = 10,000,000,000 satoshis
+let total_reward = base_reward + total_fees;
+
+// Distribute to masternodes
+let rewards = self.calculate_rewards_with_amount(&masternodes, total_reward);
+```
+
+**Example Block Reward:**
+- Base reward: 10,000,000,000 satoshis (100 TIME)
+- Collected fees: 50,000 satoshis (0.0005 TIME from user transactions)
+- **Total reward: 10,000,050,000 satoshis (100.0005 TIME)**
+
+---
+
+#### 5. Coinbase Transaction Creation
+
+**Location:** `src/blockchain.rs:1555-1565`
+
+```rust
+let coinbase = Transaction {
+    version: 1,
+    inputs: vec![],  // No inputs - creates new coins
+    outputs: vec![TxOutput {
+        value: total_reward,  // ← Base reward + ALL fees
+        script_pubkey: script,
+    }],
+};
+```
+
+The coinbase creates **base_reward + total_fees** worth of new TIME.
+
+---
+
+#### 6. Reward Distribution
+
+**Location:** `src/blockchain.rs:1297-1342` (calculate_rewards_with_amount)
+
+```rust
+// For each masternode, calculate proportional share
+for (i, mn) in masternodes.iter().enumerate() {
+    let gross_share = if i == masternodes.len() - 1 {
+        // Last masternode gets remainder (prevents rounding errors)
+        total_reward - distributed
+    } else {
+        (total_reward * mn.masternode.tier.reward_weight()) / total_weight
+    };
+
+    // Deduct 0.1% fee from masternode reward
+    let fee = gross_share / 1000; // 0.1% = 1/1000
+    let net_share = gross_share.saturating_sub(fee);
+
+    rewards.push((mn.masternode.address.clone(), net_share));
+}
+```
+
+**Example with 6 masternodes (all Bronze tier):**
+- Total reward: 10,000,050,000 satoshis (100.0005 TIME)
+- Per masternode (gross): 1,666,675,000 satoshis (16.666675 TIME)
+- 0.1% fee deducted: 1,666,675 satoshis (0.0166667 TIME)
+- Per masternode (net): 1,665,008,325 satoshis (16.650083 TIME)
+
+**Fee destination:** The 0.1% fee from each masternode reward is NOT distributed — it is effectively burned, creating slight deflation.
+
+---
+
+#### 7. Reward Distribution Transaction
+
+**Location:** `src/blockchain.rs:1567-1600`
+
+```rust
+let reward_distribution = Transaction {
+    version: 1,
+    inputs: vec![TransactionInput {
+        previous_output: OutPoint {
+            txid: coinbase.txid(),  // Spends coinbase
+            vout: 0,
+        },
+        script_sig: vec![],
+        sequence: 0xFFFFFFFF,
+    }],
+    outputs: rewards  // One output per masternode
+        .iter()
+        .map(|(address, amount)| TxOutput {
+            value: *amount,
+            script_pubkey: address.as_bytes().to_vec(),
+        })
+        .collect(),
+};
+```
+
+This transaction:
+- **Spends** the coinbase output (total_reward)
+- **Distributes** to masternodes after 0.1% fee deduction
+- **Difference** between input and outputs = burned fee
+
+---
+
+#### 8. Block Structure
+
+**Location:** `src/blockchain.rs:1645-1650`
+
+```rust
+Block {
+    header: BlockHeader {
+        height: next_height,
+        block_reward: total_reward,  // ← Includes fees
+        // ...
+    },
+    transactions: vec![
+        coinbase,              // Creates total_reward (base + fees)
+        reward_distribution,   // Distributes ~99.9% to masternodes
+        ...finalized_txs       // User transactions (already paid fees)
+    ],
+    masternode_rewards: rewards,  // Metadata for validation
+}
+```
+
+---
+
+#### 9. Fee Cleanup After Block
+
+**Location:** `src/blockchain.rs:1791-1792`
+
+```rust
+// After block is added to chain
+self.consensus.clear_finalized_transactions();
+```
+
+This clears the finalized pool, removing transactions that were included in the block. Their fees have been collected and distributed.
+
+---
+
+### Fee Validation
+
+**Location:** `src/blockchain.rs:2400-2425`
+
+```rust
+// Verify distributed amount is ~99.9% of block_reward
+let total_distributed: u64 = reward_dist.outputs.iter().map(|o| o.value).sum();
+let expected_total = block.header.block_reward;
+
+// Calculate expected fee (0.1% of block reward)
+let expected_fee = expected_total / 1000;
+let expected_distributed = expected_total.saturating_sub(expected_fee);
+
+// Allow tolerance for rounding
+let tolerance = expected_fee / 100;
+let lower_bound = expected_distributed.saturating_sub(tolerance);
+let upper_bound = expected_total;
+
+if total_distributed < lower_bound || total_distributed > upper_bound {
+    return Err("Invalid reward distribution");
+}
+```
+
+This ensures:
+- Fees are being collected (total > base_reward if there are transactions)
+- Distribution matches expected ~99.9% after masternode fee deduction
+- No inflation attacks (can't claim more than block_reward)
+
+---
+
+### Fee Economics
+
+#### Per Transaction
+- **Minimum absolute:** 1,000 satoshis (0.00001 TIME)
+- **Minimum proportional:** 0.1% of transaction amount
+- **Actual fee:** Higher of the two minimums
+
+#### Per Block
+- **Base reward:** 100 TIME (10,000,000,000 satoshis)
+- **Transaction fees:** Sum of all finalized transaction fees
+- **Total reward:** Base + fees
+- **Masternode fee:** 0.1% of gross share per masternode
+- **Net distribution:** ~99.9% of total reward
+- **Burned:** ~0.1% of total reward (masternode fees)
+
+#### Example Block with 100 Transactions
+
+**Assumptions:**
+- 100 user transactions included
+- Average transaction: 0.01 TIME with 0.1% fee = 1,000 satoshis fee
+- Total transaction fees: 100,000 satoshis (0.001 TIME)
+- 6 masternodes (all Bronze tier)
+
+**Calculations:**
+1. **Base reward:** 10,000,000,000 satoshis (100 TIME)
+2. **Collected fees:** 100,000 satoshis (0.001 TIME)
+3. **Total reward:** 10,000,100,000 satoshis (100.001 TIME)
+4. **Per masternode (gross):** 1,666,683,333 satoshis (16.6668333 TIME)
+5. **Masternode fee (0.1%):** 1,666,683 satoshis (0.0166668 TIME)
+6. **Per masternode (net):** 1,665,016,650 satoshis (16.6501665 TIME)
+7. **Total distributed:** 9,990,099,900 satoshis (99.900999 TIME)
+8. **Burned in masternode fees:** 10,000,100 satoshis (0.100001 TIME)
+
+**Result:**
+- Users paid 0.001 TIME in transaction fees
+- Masternodes received 100.001 TIME gross, 99.9 TIME net
+- 0.1% of block reward burned (0.100001 TIME)
+
+---
+
+### Fee Collection Summary
+
+✅ **Transaction fees ARE collected and added to block rewards**
+
+**Flow:**
+1. Users pay fees (input_sum - output_sum)
+2. Fees tracked in transaction pool entries
+3. When block produced, all finalized transaction fees summed
+4. Total reward = base_reward + collected_fees
+5. Coinbase creates total_reward
+6. Reward distribution transaction distributes ~99.9% to masternodes
+7. 0.1% burned as masternode fee (slight deflation)
+8. Finalized pool cleared after block inclusion
+
+**Security:**
+- Validation ensures distributed amount matches block_reward ±tolerance
+- Cannot inflate supply beyond base_reward + actual_fees
+- Double-counting prevented by validation
+
+---
+
+*Appendix A Version: 1.0 — Last Updated: January 19, 2026*
+
+---
+
+## Appendix B: Cryptography Rationale
+
+TIME Coin uses three cryptographic algorithms (BLAKE3, Ed25519, ECVRF) because each solves a fundamentally different problem. Ed25519 alone is insufficient.
+
+---
+
+### The Three Algorithms and Their Roles
+
+#### 1. Ed25519 (Signature Scheme)
+
+```
+Use case: Sign and verify messages
+Problem solved: Authentication & non-repudiation
+```
+
+**What it does:**
+- Signs transactions, heartbeats, and finality votes
+- Proves a message came from a specific private key
+- Example: `FinalityVote.signature = Ed25519_Sign(voter_privkey, vote_data)`
+
+**Why it alone is not enough:**
+- Ed25519 does not produce a **unique, deterministic hash** of data
+- You need a hash to create transaction IDs, block hashes, etc.
+- Signatures are not content-addressable identifiers
+
+**Example of why this matters:**
+```
+Two ways to represent the same transaction:
+  TX(format_A) → different bytes → Ed25519 signs different messages → different sigs
+  TX(format_B) → different bytes → but it's the same transaction!
+
+Without a canonical hash:
+  - Users can't agree on a transaction ID
+  - Network gets confused about what was finalized
+```
+
+---
+
+#### 2. BLAKE3 (Hash Function)
+
+```
+Use case: Compute deterministic, content-addressable hashes
+Problem solved: Transaction IDs, block hashes, merkle roots
+```
+
+**What it does:**
+- Computes `txid = BLAKE3(canonical_tx_bytes)`
+- Creates immutable content addresses
+- Fast, secure, modern alternative to SHA-256
+
+**Why BLAKE3 over SHA-256d?**
+- Faster (parallel hashing)
+- Simpler (not double-hash)
+- Same security level (256-bit output)
+- Modern standard
+
+---
+
+#### 3. ECVRF (Verifiable Random Function)
+
+```
+Use case: Deterministic but unpredictable sortition for TimeLock block production
+Problem solved: Fair, verifiable block leader selection
+```
+
+**What it does:**
+- Each masternode computes: `score = VRF(privkey, prev_block_hash || slot_time || chain_id)`
+- Score is deterministic (same input → same output)
+- But unpredictable (only privkey holder can compute it first)
+- Verifiable (anyone with pubkey can check the proof)
+
+**Example:**
+```
+Masternode A with privkey_A:
+  score_A = VRF(privkey_A, input) = 0x123abc...
+
+Masternode B with privkey_B:
+  score_B = VRF(privkey_B, input) = 0x456def...
+
+Canonical leader = min(score_A, score_B) = Masternode B
+(lowest score wins)
+```
+
+**Why you need VRF (not just Ed25519 or BLAKE3):**
+
+| Requirement | Ed25519 | BLAKE3 | VRF |
+|---|---|---|---|
+| Deterministic? | ✗ | ✓ | ✓ |
+| Unpredictable (before reveal)? | ✗ | ✗ | ✓ |
+| Verifiable by anyone? | ✓ | ✗ | ✓ |
+| Creates sortition ranking? | ✗ | Cannot | ✓ |
+
+**Why BLAKE3 alone does not work for TimeLock:**
+```
+If block leader = lowest_hash(privkey || input):
+  • Everyone can compute hash(input) → predictable!
+  • Adversary can forge a privkey with low hash
+  • No security
+
+VRF fixes this:
+  • Binds output to a private key
+  • Unpredictable until the holder reveals it
+  • Cryptographically proven (VRF proof)
+```
+
+**Why Ed25519 does not replace VRF:**
+```
+Ed25519 signatures are not sortition-ready:
+  • Not designed for deterministic output comparison
+  • Signatures don't create a numeric ordering
+  • No proof of "lowest score"
+
+VRF is purpose-built for:
+  • Deterministic output
+  • Numeric ordering
+  • Verifiable randomness
+```
+
+---
+
+### Real-World Example: What Breaks If You Use Only Ed25519?
+
+#### TimeLock Block Production with Only Ed25519
+
+```rust
+// WRONG: Using Ed25519 to elect block producers
+fn elect_leader(nodes: &[Masternode], slot: u64) {
+    let input = format!("{}", slot);
+    for node in nodes {
+        let signature = node.ed25519_sign(&input);
+        println!("Node {} signature: {:?}", node.id, signature);
+    }
+    // Problem: How do you compare signatures to pick the leader?
+    // Signatures are bytes, but they're not deterministic numbers for sorting!
+}
+```
+
+**Issues:**
+1. **Signature size varies:** Ed25519 signatures are 64 bytes — hard to compare numerically
+2. **Not designed for ranking:** Ed25519 assumes binary (valid/invalid), not "lower is better"
+3. **Every signer produces different data:** Can't create a fair ordering
+4. **Adversarial manipulation:** A node might create many privkeys until one produces a favorable signature
+
+#### Correct Approach with VRF
+
+```rust
+// CORRECT: Using VRF to elect block producers
+fn elect_leader(nodes: &[Masternode], slot: u64) {
+    let input = format!("{}", slot);
+    let mut scores = vec![];
+
+    for node in nodes {
+        let (vrf_output, vrf_proof) = node.vrf_prove(&input);
+        assert!(node.pubkey.vrf_verify(&input, &vrf_output, &vrf_proof));
+        scores.push((node.id, vrf_output));
+    }
+
+    scores.sort_by_key(|(_id, output)| output);
+    let leader = scores[0].0;
+    println!("Block leader: {} (score: {})", leader, scores[0].1);
+}
+```
+
+**Advantages:**
+1. **Deterministic:** Same node, same slot → same score
+2. **Unpredictable:** Cannot compute score before privkey holder reveals it
+3. **Verifiable:** Anyone can check the proof
+4. **Rankable:** Numeric output allows sorting (lowest wins)
+5. **Sybil-resistant:** Cannot game the system by creating many identities
+
+---
+
+### Why Not Use One Algorithm for All Three Roles?
+
+| Use Case | Why Not… | Why Needed |
+|----------|-----------|-----------|
+| **Sign votes** | Can't use BLAKE3 (not a sig scheme) or VRF (not designed for sigs) | **Ed25519** |
+| **Hash transactions** | Can't use Ed25519 (not a hash func) or VRF (outputs are large, meant for ranking) | **BLAKE3** |
+| **Elect block leaders** | Can't use Ed25519 (not sortition-ready) or BLAKE3 (predictable/anyone can compute) | **ECVRF** |
+
+---
+
+### Comparison with Bitcoin / Ethereum
+
+#### Bitcoin Stack
+```
+Hash:      SHA-256d (SHA-256 twice)
+Signature: ECDSA (secp256k1)
+Random:    Proof-of-Work (compute-hard hashing)
+```
+
+TIME Coin uses **stake-weighted consensus** (not PoW), requires **VRF for fair leader sortition**, and adopts **modern BLAKE3** instead of SHA-256d.
+
+#### Ethereum Stack
+```
+Hash:      Keccak-256 (not standard SHA-3)
+Signature: ECDSA (secp256k1)
+Random:    Beacon chain VRF (RANDAO + BLS)
+```
+
+Ethereum also recognizes that signatures, hashing, and randomness are three separate concerns. TIME Coin's stack is simpler and more standard (RFC 9381 ECVRF).
+
+---
+
+### Implementation Structure
+
+#### Cryptography Dependency Chart
+
+```
+Transaction Flow:
+  1. Create TX → BLAKE3_hash(tx_bytes) → txid
+  2. Sign TX → Ed25519_sign(tx, privkey) → signature
+  3. Include in TimeProof → Ed25519_verify(voter_pubkey, signature)
+
+Block Production Flow:
+  1. Compute slot → VRF(privkey, input) → (score, proof)
+  2. Verify score → VRF_verify(pubkey, input, score, proof)
+  3. Compare scores → min(all_scores) → select leader
+```
+
+#### Code Organization
+
+```rust
+mod hash {
+    use blake3;
+    pub fn tx_hash(tx: &Transaction) -> Hash256 { ... }
+}
+
+mod sign {
+    use ed25519_dalek;
+    pub fn sign_vote(vote: &FinalityVote, sk: &SecretKey) -> Signature { ... }
+}
+
+mod vrf {
+    use ecvrf;  // RFC 9381
+    pub fn prove_vrf(sk: &VrfSecretKey, input: &[u8]) -> (Output, Proof) { ... }
+}
+```
+
+---
+
+### Could We Simplify to Two Algorithms?
+
+**Remove BLAKE3, use Ed25519 for hashing?** No — Ed25519 is a signature scheme, not a hash function. It produces 64-byte signatures, not content addresses.
+
+**Remove VRF, use BLAKE3 for leader election?** No — BLAKE3 is deterministic but not private. Anyone can compute `BLAKE3(pubkey || slot)` before the slot, so there is no security advantage to having a private key.
+
+**Remove Ed25519, use BLAKE3 + HMAC for signatures?** No — BLAKE3+HMAC has no asymmetric cryptography, cannot prove the sender publicly, and requires shared secrets that are hard to manage at scale.
+
+---
+
+### Summary Table
+
+| Algorithm | Role | Why Needed | Alternative |
+|-----------|------|-----------|-------------|
+| **BLAKE3** | Hash (txid, blocks, commitments) | Content-addressable identifiers | SHA-256d (slower, less modern) |
+| **Ed25519** | Sign messages (votes, txs, heartbeats) | Asymmetric authentication | ECDSA secp256k1 (larger keys) |
+| **ECVRF** | Deterministic randomness for block election | Stake-weighted fair leader sortition | None (VRF is purpose-built) |
+
+Each algorithm is irreplaceable. Combining them would either weaken security, increase complexity, or degrade performance.
+
+---
+
+*Appendix B Version: 1.0 — Last Updated: January 19, 2026*

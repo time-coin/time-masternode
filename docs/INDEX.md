@@ -1,6 +1,6 @@
 # 📚 TIME Coin Documentation Index
 
-**Last Updated:** March 3, 2026  
+**Last Updated:** March 6, 2026  
 **Status:** ✅ Production Ready (v1.2.0)
 
 ---
@@ -22,7 +22,7 @@
 | Use the CLI                      | [CLI_GUIDE.md](CLI_GUIDE.md)                               |
 | Understand the protocol          | [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)               |
 | Review security                  | [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) |
-| Configure networking             | [NETWORK_CONFIG.md](NETWORK_CONFIG.md)                     |
+| Configure networking             | [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md)         |
 | Contribute code                  | [CONTRIBUTING.md](CONTRIBUTING.md)                         |
 
 ---
@@ -33,37 +33,32 @@
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| [LINUX_INSTALLATION.md](LINUX_INSTALLATION.md) | Step-by-step Linux installation, configuration, security hardening, upgrading, troubleshooting | Node Operators |
-| [MASTERNODE_GUIDE.md](MASTERNODE_GUIDE.md) | Masternode tiers, collateral, rewards, deregistration, FAQ | Masternode Operators |
+| [LINUX_INSTALLATION.md](LINUX_INSTALLATION.md) | Step-by-step Linux installation, configuration, security hardening, upgrading, troubleshooting, database reset | Node Operators |
+| [MASTERNODE_GUIDE.md](MASTERNODE_GUIDE.md) | Masternode tiers, collateral, rewards, reward rotation, block producer selection, deregistration, FAQ | Masternode Operators |
 | [QUICKSTART.md](QUICKSTART.md) | Build, test, and run nodes locally; multi-node setup | Developers |
-| [CLI_GUIDE.md](CLI_GUIDE.md) | Full command reference for `time-cli` | All Users |
-| [WALLET_COMMANDS.md](WALLET_COMMANDS.md) | Wallet operations | All Users |
+| [CLI_GUIDE.md](CLI_GUIDE.md) | Full command reference for `time-cli`, wallet operations | All Users |
 
 ### Protocol & Architecture
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) | Complete protocol specification (§1–§27) | Developers, Researchers |
-| [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) | System architecture overview | All Developers |
-| [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) | P2P network layer design | Network Developers |
-| [CRYPTOGRAPHY_RATIONALE.md](CRYPTOGRAPHY_RATIONALE.md) | Cryptographic algorithm choices | Researchers |
-| [MASTERNODE_REWARD_ROTATION.md](MASTERNODE_REWARD_ROTATION.md) | Reward rotation system | Masternode Operators |
+| [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) | Complete protocol specification (§1–§27) + appendices: fee collection mechanism, cryptography rationale | Developers, Researchers |
+| [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) | System architecture, complete transaction/consensus flow, TimeProof conflict detection | All Developers |
+| [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md) | P2P network layer design, network configuration reference, integration guide | Network Developers |
 
 ### Security
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
 | [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) | Full attack-vector analysis (30+ vectors) | Security Reviewers |
-| [SECURITY.md](SECURITY.md) | Vulnerability reporting policy | Security Researchers |
-| [SECURITY_ANALYSIS.md](SECURITY_ANALYSIS.md) | UTXO creation attack analysis | Developers |
+| [SECURITY.md](SECURITY.md) | Vulnerability reporting policy, threat analysis, UTXO attack vectors | Security Researchers |
 
-### Configuration & Reference
+### Reference
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| [NETWORK_CONFIG.md](NETWORK_CONFIG.md) | Network configuration reference | Operators |
 | [QUICK_REFERENCE.md](QUICK_REFERENCE.md) | One-page parameter lookup | All Users |
-| [INTEGRATION_QUICKSTART.md](INTEGRATION_QUICKSTART.md) | Integration guide for third parties | Integrators |
+| [PRE_MAINNET_CHECKLIST.md](PRE_MAINNET_CHECKLIST.md) | Implementation status checklist | Developers |
 
 ### Project Management
 
@@ -84,14 +79,14 @@
 
 ### For Developers
 1. [QUICKSTART.md](QUICKSTART.md) — Build, test, run locally
-2. [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) — System design
+2. [ARCHITECTURE_OVERVIEW.md](ARCHITECTURE_OVERVIEW.md) — System design and flows
 3. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) — Protocol specification
 4. [CONTRIBUTING.md](CONTRIBUTING.md) — How to contribute
 
 ### For Security Reviewers
 1. [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) — Attack analysis
-2. [CRYPTOGRAPHY_RATIONALE.md](CRYPTOGRAPHY_RATIONALE.md) — Algorithm choices
-3. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) — Protocol details
+2. [SECURITY.md](SECURITY.md) — Threat analysis and policy
+3. [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md) — Protocol details and cryptography rationale (Appendix B)
 
 ---
 
@@ -119,4 +114,4 @@
 
 ---
 
-*Last Updated: March 3, 2026*
+*Last Updated: March 6, 2026*

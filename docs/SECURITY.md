@@ -160,6 +160,83 @@ TimeCoin implements several security measures:
 - Double-spend attempts
 - VRF grinding attacks
 
+## Threat Analysis
+
+### UTXO Creation Attack Vectors
+
+**Attack Scenario:** Can a malicious node add itself to the network and present
+invalid UTXOs to "create coins"?
+
+#### Protections Against Invalid Transactions
+
+Transaction validation in `consensus.rs` enforces:
+
+- **Input existence** — All inputs must reference existing, unspent UTXOs
+- **Ownership proof** — Every input must carry a valid Ed25519 signature from the
+  UTXO owner; signatures bind `txid + input_index + outputs_hash` to prevent
+  tampering
+- **No inflation** — Input sum must be ≥ output sum
+- **Dust prevention** — Outputs below the dust threshold are rejected
+- **Minimum fees** — Both absolute (`MIN_TX_FEE`) and proportional (0.1%) fees
+  are required
+
+A malicious node **cannot** spend UTXOs it does not own or reference
+non-existent inputs — the signature check fails unconditionally.
+
+#### Triple-Layer Block Reward Validation
+
+Block reward manipulation is prevented by three sequential checks in
+`blockchain.rs`:
+
+1. **Fee calculation from previous block** — Each transaction's input sum is
+   traced back through the UTXO set; fees are computed as `inputs − outputs`.
+2. **Reward verification** — `expected_reward = BASE_REWARD (100 TIME) + fees`.
+   The block is rejected if its claimed reward differs by even one satoshi.
+3. **Distribution verification** — `total_distributed` across all reward outputs
+   must equal `block_reward` (within rounding tolerance).
+
+Example: an attacker claims 1,000 TIME reward when actual fees total 2 TIME.
+Nodes calculate `100 + 2 = 102 TIME` expected and reject the block.
+
+#### Additional Attack Vectors Ruled Out
+
+| Vector | Status |
+|--------|--------|
+| Create UTXOs from nothing | ❌ Impossible — all UTXOs originate from coinbase or existing UTXOs |
+| Steal coins | ❌ Impossible — Ed25519 signature covers the entire transaction |
+| Inflate supply | ❌ Impossible — transaction validation enforces `input_sum ≥ output_sum` |
+| Double-spend | ❌ Impossible — UTXOs are marked spent on first use; subsequent attempts fail |
+
+### Vote-Before-Validate Gap (Open Vulnerability)
+
+**Location:** `network/message_handler.rs` — `handle_tsdc_block_proposal`
+
+**Severity:** HIGH — consensus-level issue that can cause network splits or DoS.
+
+When a node receives a block proposal it currently:
+1. Checks the block height ✅
+2. Caches the block ✅
+3. **Votes on it immediately** — before validating transactions or UTXOs ❌
+
+A malicious masternode can propose a block containing invalid transactions
+(non-existent inputs, forged signatures, inflated rewards). Honest nodes vote
+before validation; if the block accumulates >50% votes it enters the
+finalization path. `blockchain.add_block()` then rejects it, but the network
+has already consumed voting bandwidth and may have diverged.
+
+**Impact:**
+- Network splits if subsets of nodes add or reject the invalid block
+- Consensus failures when a finalized block cannot be appended to the chain
+- DoS amplification — one invalid proposal triggers voting across all nodes
+
+**Recommended fix:** add a `validate_block_before_vote()` call in
+`handle_tsdc_block_proposal` that verifies block structure, reward amounts,
+all transaction inputs, all signatures, and absence of intra-block
+double-spends **before** casting a vote. See `docs/SECURITY_ANALYSIS.md` (now
+merged here) for a code sketch.
+
+---
+
 ## Vulnerability Disclosure
 
 We follow responsible disclosure practices:

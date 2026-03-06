@@ -237,6 +237,14 @@ time-cli mergeutxos --min-count 5 --max-count 50
 ```
 Merge multiple UTXOs into one to reduce UTXO set size.
 
+#### Wallet Notes
+
+- All amounts are in TIME (the base unit)
+- Transactions achieve instant finality via TimeVote consensus
+- Minimum transaction fee: 0.00001 TIME (0.1% of input value)
+- UTXOs are locked during transaction processing; rejected transactions unlock UTXOs automatically
+- Testnet addresses start with `TIME0`; mainnet addresses start with `TIME1`
+
 ---
 
 ### Daemon Control
