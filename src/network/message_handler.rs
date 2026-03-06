@@ -3291,8 +3291,10 @@ impl MessageHandler {
             self.direction, proposal_hex, vote.voter_mn_id, vote.vote, vote.voter_weight
         );
 
-        // Verify the vote signature - find masternode by address
-        let masternodes = context.masternode_registry.list_all().await;
+        // Verify the vote signature - find masternode by address.
+        // Use list_active() so disconnected nodes (removed or marked inactive) cannot
+        // cast votes or contribute to total_avs_weight.
+        let masternodes = context.masternode_registry.list_active().await;
         let voter = masternodes
             .iter()
             .find(|mn| mn.masternode.address == vote.voter_mn_id)
