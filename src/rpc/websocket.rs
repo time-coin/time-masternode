@@ -70,6 +70,12 @@ pub struct SubscriptionManager {
     subscriptions: DashMap<String, Vec<mpsc::UnboundedSender<ServerNotification>>>,
 }
 
+impl Default for SubscriptionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubscriptionManager {
     pub fn new() -> Self {
         Self {
@@ -359,7 +365,7 @@ async fn handle_connection(
                                             data: Some(serde_json::json!({"address": addr})),
                                         };
                                         let json = serde_json::to_string(&resp)?;
-                                        ws_sender.send(Message::Text(json.into())).await?;
+                                        ws_sender.send(Message::Text(json)).await?;
                                     }
                                 }
                                 "unsubscribe" => {
@@ -371,7 +377,7 @@ async fn handle_connection(
                                             data: Some(serde_json::json!({"address": addr})),
                                         };
                                         let json = serde_json::to_string(&resp)?;
-                                        ws_sender.send(Message::Text(json.into())).await?;
+                                        ws_sender.send(Message::Text(json)).await?;
                                     }
                                 }
                                 "ping" => {
@@ -380,7 +386,7 @@ async fn handle_connection(
                                         data: None,
                                     };
                                     let json = serde_json::to_string(&resp)?;
-                                    ws_sender.send(Message::Text(json.into())).await?;
+                                    ws_sender.send(Message::Text(json)).await?;
                                 }
                                 _ => {
                                     tracing::debug!("Unknown WebSocket method: {}", client_msg.method);
@@ -403,14 +409,14 @@ async fn handle_connection(
             // Outgoing notification to client
             Some(notification) = notif_rx.recv() => {
                 let json = serde_json::to_string(&notification)?;
-                if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                if ws_sender.send(Message::Text(json)).await.is_err() {
                     break;
                 }
             }
 
             // Heartbeat ping
             _ = heartbeat.tick() => {
-                if ws_sender.send(Message::Ping(vec![].into())).await.is_err() {
+                if ws_sender.send(Message::Ping(vec![])).await.is_err() {
                     break;
                 }
             }

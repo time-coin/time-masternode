@@ -1353,6 +1353,11 @@ pub struct BlockHeader {
     pub vrf_proof: bytes,
     pub finalized_root: Hash256,  // Merkle root of entries
     pub timestamp_ms: u64,
+    /// Ed25519 signature of the block hash by the block producer.
+    /// Prevents a valid VRF proof from being reused with tampered block
+    /// contents (transactions, rewards, merkle root).
+    /// Empty for pre-v1.3.0 blocks (backward-compatible via serde default).
+    pub producer_signature: Vec<u8>,
 }
 ```
 

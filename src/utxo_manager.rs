@@ -147,7 +147,7 @@ impl UTXOStateManager {
             // Build address index
             self.address_index
                 .entry(utxo.address.clone())
-                .or_insert_with(DashSet::new)
+                .or_default()
                 .insert(utxo.outpoint);
         }
 
@@ -221,7 +221,7 @@ impl UTXOStateManager {
         // Update address index
         self.address_index
             .entry(address)
-            .or_insert_with(DashSet::new)
+            .or_default()
             .insert(outpoint);
         Ok(())
     }

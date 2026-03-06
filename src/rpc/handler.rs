@@ -1723,8 +1723,6 @@ impl RpcHandler {
                 if sent > 0 || received > 0 {
                     let category = if tx_idx <= 1 {
                         "generate"
-                    } else if sent > 0 && received > 0 {
-                        "send"
                     } else if sent > 0 {
                         "send"
                     } else {

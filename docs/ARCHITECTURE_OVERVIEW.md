@@ -1,7 +1,43 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-02-22  
-**Version:** 1.2.0 (Fork Resolution Consolidation & VRF Tightening)
+**Last Updated:** 2026-03-06  
+**Version:** 1.3.0 (Block Producer Signatures, VRF Rolling Window, Genesis Checkpoint)
+
+---
+
+## Recent Updates (v1.3.0 - March 2026)
+
+### Ed25519 Block Producer Signatures
+
+- **`producer_signature` field added to `BlockHeader`**: the block producer signs the block hash with its Ed25519 key after VRF selection
+- **Prevents VRF proof reuse**: without this, a valid VRF proof could be detached from its original block and paired with tampered content (different transactions, rewards, or merkle root)
+- **Verified in two places**: `validate_block_before_vote()` for newly proposed blocks; `add_block()` for synced blocks from peers
+- **Backward compatible**: empty signatures are accepted for pre-signature blocks; `#[serde(default)]` on the field
+
+### VRF Eligibility: 3-Block Rolling Participation Window
+
+- **Replaced single-block bitmap gate** with a rolling window spanning the last 3 blocks
+- A masternode is VRF-eligible if it appeared in the `consensus_participants_bitmap` (or was block producer) in any of the 3 most-recent blocks
+- **Motivation**: high-latency nodes whose precommit vote arrived slightly late for one round were excluded from the bitmap and systematically locked out of VRF sortition, losing block-producer rewards
+- **Grace period**: a node must miss 3 consecutive rounds before losing VRF eligibility; one late vote no longer disqualifies
+
+### Genesis Checkpoint Enforcement
+
+- **Testnet genesis hash hardcoded** in `constants.rs`; `GenesisBlock::verify_checkpoint()` validates the hash on startup and on every `add_block` at height 0
+- **Infinite fork-resolution loop fixed**: previously, a genesis hash mismatch caused endless retry loops as the node attempted to resolve a fork with a peer on a different chain; now a `genesis_mismatch_detected` flag is set after the first mismatch at `common_ancestor=0` and further attempts are suppressed with a logged warning
+- **No automatic data deletion**: the operator must manually resolve a genesis mismatch; the node never deletes its own chain based on a peer's claim
+
+### Block Producer Signature Mismatch During Sync (Warning, Not Error)
+
+- **Changed from fatal rejection to logged warning** when a synced block's `producer_signature` fails verification
+- **Root cause**: a freshly syncing node has stale public keys in its masternode registry (loaded from disk before the chain is rebuilt); collateral-UTXO checks prevent live announcements from updating those keys until enough UTXOs are synced, creating a dead-lock
+- **Safety**: the block hash chain still guarantees integrity; once the node reaches the chain tip the registry is refreshed via live announcements and real-time blocks are fully verified
+
+### Reward Address Routing Fix
+
+- **`masternode re-registration now overwrites `wallet_address`** when `reward_address` in `time.conf` changes
+- **Previous bug**: changing `reward_address` and restarting did not update the stored `masternode.wallet_address`; block rewards continued routing to the old local wallet instead of the newly configured GUI wallet address
+- **Fix applied in `register_internal()`** in `masternode_registry.rs`
 
 ---
 
