@@ -349,153 +349,80 @@ struct ConnectionResources {
 }
 
 impl ConnectionResources {
-    /// Spawn a persistent connection task for a peer
+    /// Spawn a one-shot connection task for a peer.
+    /// Reconnection is handled externally by the Phase 3 discovery loop (every 120s),
+    /// which re-spawns tasks for any masternode still in the registry.
     fn spawn(&self, ip: String, is_masternode: bool) {
         let res = self.clone();
         let tag = if is_masternode { "[MASTERNODE]" } else { "" };
         tracing::debug!("{} spawn_connection_task called for {}", tag, ip);
 
         tokio::spawn(async move {
-            let mut session_start: Option<std::time::Instant> = None;
-
-            loop {
-                // Get AI-powered reconnection advice
-                let advice = res
-                    .reconnection_ai
-                    .get_reconnection_advice(&ip, is_masternode);
-
-                if !advice.should_attempt {
-                    tracing::info!(
-                        "🧠 [AI] Skipping reconnection to {}: {}",
-                        ip,
-                        advice.reasoning
-                    );
-                    res.connection_manager.clear_reconnecting(&ip);
-                    break;
-                }
-
-                let connect_start = std::time::Instant::now();
-
-                match maintain_peer_connection(
-                    &ip,
-                    res.port,
-                    res.connection_manager.clone(),
-                    res.masternode_registry.clone(),
-                    res.blockchain.clone(),
-                    res.peer_manager.clone(),
-                    res.peer_registry.clone(),
-                    res.local_ip.clone(),
-                    is_masternode,
-                    res.ip_blacklist.clone(),
-                    res.tls_config.clone(),
-                    res.network_type,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        let connect_time = connect_start.elapsed().as_millis() as u64;
-                        res.reconnection_ai.record_connection_success(
-                            &ip,
-                            is_masternode,
-                            connect_time,
-                        );
-
-                        if let Some(start) = session_start {
-                            res.reconnection_ai
-                                .record_session_end(&ip, start.elapsed().as_secs());
-                        }
-                        session_start = Some(std::time::Instant::now());
-
-                        let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-                        tracing::info!("{} Connection to {} ended gracefully", tag, ip);
-                    }
-                    Err(e) => {
-                        res.reconnection_ai
-                            .record_connection_failure(&ip, is_masternode, &e);
-
-                        if let Some(start) = session_start {
-                            res.reconnection_ai
-                                .record_session_end(&ip, start.elapsed().as_secs());
-                        }
-                        session_start = None;
-
-                        let tag = if is_masternode { "[MASTERNODE]" } else { "" };
-                        tracing::warn!("{} Connection to {} failed: {}", tag, ip, e);
-                    }
-                }
-
-                res.connection_manager.mark_disconnected(&ip);
-
-                // Only mark masternode inactive if we don't have a live inbound connection
-                // (outbound may have been superseded by inbound via IP tiebreaker)
-                if is_masternode && !res.peer_registry.is_connected(&ip) {
-                    if let Err(e) = res
-                        .masternode_registry
-                        .mark_inactive_on_disconnect(&ip)
-                        .await
-                    {
-                        tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
-                    }
-                }
-
-                let advice = res
-                    .reconnection_ai
-                    .get_reconnection_advice(&ip, is_masternode);
-                let retry_delay = advice.delay_secs;
-
-                let tag = if is_masternode { "[MASTERNODE]" } else { "" };
+            // Check if AI advises skipping this peer entirely
+            let advice = res
+                .reconnection_ai
+                .get_reconnection_advice(&ip, is_masternode);
+            if !advice.should_attempt {
                 tracing::info!(
-                    "{} 🧠 [AI] Reconnecting to {} in {}s (priority={:?})",
-                    tag,
+                    "🧠 [AI] Skipping connection to {}: {}",
                     ip,
-                    retry_delay,
-                    advice.priority
+                    advice.reasoning
                 );
-
-                res.connection_manager.mark_reconnecting(
-                    &ip,
-                    std::time::Duration::from_secs(retry_delay),
-                    0,
-                );
-
-                sleep(Duration::from_secs(retry_delay)).await;
-
                 res.connection_manager.clear_reconnecting(&ip);
+                return;
+            }
 
-                if res.connection_manager.is_connected(&ip) || res.peer_registry.is_connected(&ip) {
-                    tracing::debug!(
-                        "{} Already connected to {} during reconnect, task exiting",
-                        tag,
-                        ip
+            let connect_start = std::time::Instant::now();
+            match maintain_peer_connection(
+                &ip,
+                res.port,
+                res.connection_manager.clone(),
+                res.masternode_registry.clone(),
+                res.blockchain.clone(),
+                res.peer_manager.clone(),
+                res.peer_registry.clone(),
+                res.local_ip.clone(),
+                is_masternode,
+                res.ip_blacklist.clone(),
+                res.tls_config.clone(),
+                res.network_type,
+            )
+            .await
+            {
+                Ok(_) => {
+                    let connect_time = connect_start.elapsed().as_millis() as u64;
+                    res.reconnection_ai.record_connection_success(
+                        &ip,
+                        is_masternode,
+                        connect_time,
                     );
-                    break;
+                    tracing::info!("{} Connection to {} ended gracefully", tag, ip);
                 }
-
-                if !res.connection_manager.mark_connecting(&ip) {
-                    tracing::debug!(
-                        "{} Already connecting to {} during reconnect, task exiting",
-                        tag,
-                        ip
-                    );
-                    break;
+                Err(e) => {
+                    res.reconnection_ai
+                        .record_connection_failure(&ip, is_masternode, &e);
+                    tracing::warn!("{} Connection to {} failed: {}", tag, ip, e);
                 }
             }
 
             res.connection_manager.mark_disconnected(&ip);
 
-            if is_masternode {
+            // Mark inactive on disconnect (only if no live inbound connection replaced it)
+            if is_masternode && !res.peer_registry.is_connected(&ip) {
                 if let Err(e) = res
                     .masternode_registry
                     .mark_inactive_on_disconnect(&ip)
                     .await
                 {
                     tracing::debug!(
-                        "Could not mark masternode {} as inactive on task exit: {:?}",
+                        "Could not mark masternode {} as inactive: {:?}",
                         ip,
                         e
                     );
                 }
             }
+            // Task exits here. If this node is still in the registry (OnChain tier),
+            // the Phase 3 loop will re-spawn a connection attempt every 120 seconds.
         });
     }
 }
