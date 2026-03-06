@@ -2141,11 +2141,7 @@ impl MessageHandler {
                 now,
             );
 
-            let is_new = context
-                .masternode_registry
-                .get(&peer_ip)
-                .await
-                .is_none();
+            let is_new = context.masternode_registry.get(&peer_ip).await.is_none();
 
             match context
                 .masternode_registry
@@ -2163,14 +2159,15 @@ impl MessageHandler {
                     }
                     if is_new {
                         if let Some(broadcast_tx) = &context.broadcast_tx {
-                            let relay = crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
-                                address: peer_ip.clone(),
-                                reward_address,
-                                tier,
-                                public_key,
-                                collateral_outpoint: Some(outpoint_for_relay),
-                                certificate: Vec::new(),
-                            };
+                            let relay =
+                                crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
+                                    address: peer_ip.clone(),
+                                    reward_address,
+                                    tier,
+                                    public_key,
+                                    collateral_outpoint: Some(outpoint_for_relay),
+                                    certificate: Vec::new(),
+                                };
                             let _ = broadcast_tx.send(relay);
                             debug!(
                                 "📡 [{}] Relayed new {:?} masternode {} announcement to all peers",
@@ -2188,11 +2185,7 @@ impl MessageHandler {
             }
         } else {
             // Free tier — no collateral verification needed
-            let is_new = context
-                .masternode_registry
-                .get(&peer_ip)
-                .await
-                .is_none();
+            let is_new = context.masternode_registry.get(&peer_ip).await.is_none();
 
             let mn = crate::types::Masternode::new_legacy(
                 peer_ip.clone(),
@@ -2221,14 +2214,15 @@ impl MessageHandler {
                     // masternode still learn about it (large-network discovery).
                     if is_new {
                         if let Some(broadcast_tx) = &context.broadcast_tx {
-                            let relay = crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
-                                address: peer_ip.clone(),
-                                reward_address,
-                                tier,
-                                public_key,
-                                collateral_outpoint: None,
-                                certificate: Vec::new(),
-                            };
+                            let relay =
+                                crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
+                                    address: peer_ip.clone(),
+                                    reward_address,
+                                    tier,
+                                    public_key,
+                                    collateral_outpoint: None,
+                                    certificate: Vec::new(),
+                                };
                             let _ = broadcast_tx.send(relay);
                             debug!(
                                 "📡 [{}] Relayed new Free masternode {} announcement to all peers",

@@ -2045,18 +2045,14 @@ async fn main() {
                             break;
                         }
                         let check_height = current_height - lookback;
-                        if let Ok(blk) =
-                            block_blockchain.get_block_by_height(check_height).await
-                        {
+                        if let Ok(blk) = block_blockchain.get_block_by_height(check_height).await {
                             // Block producer always participated
                             if !blk.header.leader.is_empty() {
                                 participant_union.insert(blk.header.leader.clone());
                             }
                             // All bitmap voters
                             let voters = block_registry
-                                .get_active_from_bitmap(
-                                    &blk.header.active_masternodes_bitmap,
-                                )
+                                .get_active_from_bitmap(&blk.header.active_masternodes_bitmap)
                                 .await;
                             for v in voters {
                                 participant_union.insert(v.masternode.address.clone());
