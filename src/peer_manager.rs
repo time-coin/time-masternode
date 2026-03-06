@@ -278,6 +278,21 @@ impl PeerManager {
             .collect()
     }
 
+    /// Remove a peer from memory and disk.
+    /// Called when a transient node (e.g. Free-tier masternode) disconnects so it
+    /// doesn't keep appearing in the Phase 3 regular-peer connection loop.
+    pub async fn remove_peer(&self, address: &str) {
+        self.peers.write().await.remove(address);
+        self.peer_info
+            .write()
+            .await
+            .retain(|p| p.address != address);
+        if let Ok(tree) = self.db.open_tree("peers") {
+            let _ = tree.remove(address.as_bytes());
+        }
+        tracing::debug!("🗑️  Removed {} from peer list", address);
+    }
+
     /// Get count of connected masternodes
     #[allow(dead_code)]
     pub async fn masternode_count(&self) -> usize {
