@@ -297,6 +297,17 @@ impl NetworkClient {
                         if connection_manager.is_reconnecting(ip) {
                             continue;
                         }
+                        // Check AI advice before spawning — avoids creating tasks that
+                        // immediately exit due to cooldown after repeated failures.
+                        let advice = res.reconnection_ai.get_reconnection_advice(ip, false);
+                        if !advice.should_attempt {
+                            tracing::debug!(
+                                "⏭️  [PHASE3-PEER] Skipping {} (AI cooldown: {})",
+                                ip,
+                                advice.reasoning
+                            );
+                            continue;
+                        }
                         if !connection_manager.mark_connecting(ip) {
                             continue;
                         }
@@ -391,11 +402,8 @@ impl ConnectionResources {
             {
                 Ok(_) => {
                     let connect_time = connect_start.elapsed().as_millis() as u64;
-                    res.reconnection_ai.record_connection_success(
-                        &ip,
-                        is_masternode,
-                        connect_time,
-                    );
+                    res.reconnection_ai
+                        .record_connection_success(&ip, is_masternode, connect_time);
                     tracing::info!("{} Connection to {} ended gracefully", tag, ip);
                 }
                 Err(e) => {
@@ -414,11 +422,13 @@ impl ConnectionResources {
                     .mark_inactive_on_disconnect(&ip)
                     .await
                 {
-                    tracing::debug!(
-                        "Could not mark masternode {} as inactive: {:?}",
-                        ip,
-                        e
-                    );
+                    tracing::debug!("Could not mark masternode {} as inactive: {:?}", ip, e);
+                }
+
+                // If the node was removed (Free/Handshake tier), also remove it from the
+                // peer list so it doesn't re-appear as a regular peer in the Phase 3 loop.
+                if res.masternode_registry.get(&ip).await.is_none() {
+                    res.peer_manager.remove_peer(&ip).await;
                 }
             }
             // Task exits here. If this node is still in the registry (OnChain tier),
