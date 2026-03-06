@@ -510,10 +510,12 @@ impl MasternodeRegistry {
 
             // Broadcast removal so peers update their active sets immediately.
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-                let _ = tx.send(crate::network::message::NetworkMessage::MasternodeInactive {
-                    address: address.to_string(),
-                    timestamp: now,
-                });
+                let _ = tx.send(
+                    crate::network::message::NetworkMessage::MasternodeInactive {
+                        address: address.to_string(),
+                        timestamp: now,
+                    },
+                );
             }
 
             // Remove from disk.
@@ -537,10 +539,12 @@ impl MasternodeRegistry {
 
             // Broadcast inactive status to all peers for consensus.
             if let Some(tx) = self.broadcast_tx.read().await.as_ref() {
-                let _ = tx.send(crate::network::message::NetworkMessage::MasternodeInactive {
-                    address: address.to_string(),
-                    timestamp: now,
-                });
+                let _ = tx.send(
+                    crate::network::message::NetworkMessage::MasternodeInactive {
+                        address: address.to_string(),
+                        timestamp: now,
+                    },
+                );
             }
 
             // Persist to disk.

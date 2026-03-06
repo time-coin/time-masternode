@@ -15,10 +15,26 @@
 use dashmap::DashMap;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+
+/// Maximum concurrent WebSocket connections. When reached, new connections
+/// receive an HTTP 503 with a JSON body so the wallet can failover to another node.
+const MAX_WS_CONNECTIONS: usize = 5_000;
+
+/// RAII guard that decrements the connection counter when dropped.
+struct ConnGuard(Arc<AtomicUsize>);
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 /// Transaction lifecycle status for WebSocket events
 #[derive(Clone, Debug)]
@@ -253,6 +269,7 @@ pub async fn start_ws_server(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     let sub_manager = Arc::new(SubscriptionManager::new());
+    let conn_count = Arc::new(AtomicUsize::new(0));
 
     println!("  ✅ WebSocket server listening on {}", addr);
 
@@ -309,14 +326,34 @@ pub async fn start_ws_server(
             result = listener.accept() => {
                 match result {
                     Ok((stream, addr)) => {
-                        tracing::debug!("📡 WebSocket connection from {}", addr);
-                        let mgr = sub_manager.clone();
-                        let conn_shutdown = shutdown.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, mgr, conn_shutdown).await {
-                                tracing::debug!("WebSocket connection error from {}: {}", addr, e);
-                            }
-                        });
+                        let current = conn_count.load(Ordering::Relaxed);
+                        if current >= MAX_WS_CONNECTIONS {
+                            // Reject: send HTTP 503 before WebSocket upgrade
+                            tracing::warn!(
+                                "⚠ WS connection from {} rejected — at capacity ({}/{})",
+                                addr, current, MAX_WS_CONNECTIONS
+                            );
+                            tokio::spawn(async move {
+                                let body = r#"{"error":"capacity","message":"Server at capacity. Try another masternode."}"#;
+                                let response = format!(
+                                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    body.len(), body
+                                );
+                                let mut s = stream;
+                                let _ = s.write_all(response.as_bytes()).await;
+                            });
+                        } else {
+                            conn_count.fetch_add(1, Ordering::Relaxed);
+                            tracing::debug!("📡 WebSocket connection from {} ({}/{})", addr, current + 1, MAX_WS_CONNECTIONS);
+                            let mgr = sub_manager.clone();
+                            let conn_shutdown = shutdown.clone();
+                            let cc = conn_count.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(stream, mgr, conn_shutdown, cc).await {
+                                    tracing::debug!("WebSocket connection error from {}: {}", addr, e);
+                                }
+                            });
+                        }
                     }
                     Err(e) => {
                         tracing::error!("WebSocket accept error: {}", e);
@@ -337,7 +374,10 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     sub_manager: Arc<SubscriptionManager>,
     shutdown: tokio_util::sync::CancellationToken,
+    conn_count: Arc<AtomicUsize>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Auto-decrement the connection counter when this function exits for any reason
+    let _guard = ConnGuard(conn_count);
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
