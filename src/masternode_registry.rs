@@ -1455,6 +1455,18 @@ impl MasternodeRegistry {
         };
 
         for (addr, info) in masternodes.iter_mut() {
+            // Handshake nodes' lifecycle is owned by TCP connect/disconnect events.
+            // Their presence in the registry already means they ARE directly connected —
+            // never let gossip-based report counts flip them inactive.
+            if info.registration_source == RegistrationSource::Handshake {
+                info.peer_reports
+                    .retain(|_, ts| now.saturating_sub(*ts) < REPORT_EXPIRY_SECS);
+                if info.is_active {
+                    total_active += 1;
+                }
+                continue;
+            }
+
             // Remove expired reports
             let before_count = info.peer_reports.len();
             info.peer_reports
@@ -1521,6 +1533,10 @@ impl MasternodeRegistry {
         let mut to_remove = Vec::new();
         if uptime >= STARTUP_GRACE_PERIOD_SECS {
             for (address, info) in masternodes.iter() {
+                // Handshake nodes are removed immediately on TCP disconnect — never auto-remove.
+                if info.registration_source == RegistrationSource::Handshake {
+                    continue;
+                }
                 if info.peer_reports.is_empty() {
                     // Check when last seen
                     let last_seen = info.uptime_start;

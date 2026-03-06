@@ -883,6 +883,14 @@ impl MessageHandler {
                     self.direction, address, timestamp
                 );
             }
+            // NotFound is expected: we may have already processed this disconnect ourselves
+            // (our own TCP handler fires before peers relay the same notification).
+            Err(crate::masternode_registry::RegistryError::NotFound) => {
+                debug!(
+                    "⏭️ [{}] Masternode {} already removed — duplicate inactive notification from {}",
+                    self.direction, address, self.peer_ip
+                );
+            }
             Err(e) => {
                 warn!(
                     "⚠️ [{}] Failed to mark masternode {} as inactive: {}",
@@ -2122,6 +2130,7 @@ impl MessageHandler {
             }
 
             // Create masternode with verified collateral
+            let outpoint_for_relay = outpoint.clone();
             let mn = crate::types::Masternode::new_with_collateral(
                 peer_ip.clone(),
                 reward_address.clone(),
@@ -2132,9 +2141,15 @@ impl MessageHandler {
                 now,
             );
 
+            let is_new = context
+                .masternode_registry
+                .get(&peer_ip)
+                .await
+                .is_none();
+
             match context
                 .masternode_registry
-                .register(mn, reward_address)
+                .register(mn, reward_address.clone())
                 .await
             {
                 Ok(()) => {
@@ -2144,7 +2159,24 @@ impl MessageHandler {
                         self.direction, tier, peer_ip, count
                     );
                     if let Some(peer_manager) = &context.peer_manager {
-                        peer_manager.add_peer(peer_ip).await;
+                        peer_manager.add_peer(peer_ip.clone()).await;
+                    }
+                    if is_new {
+                        if let Some(broadcast_tx) = &context.broadcast_tx {
+                            let relay = crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
+                                address: peer_ip.clone(),
+                                reward_address,
+                                tier,
+                                public_key,
+                                collateral_outpoint: Some(outpoint_for_relay),
+                                certificate: Vec::new(),
+                            };
+                            let _ = broadcast_tx.send(relay);
+                            debug!(
+                                "📡 [{}] Relayed new {:?} masternode {} announcement to all peers",
+                                self.direction, tier, peer_ip
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -2156,6 +2188,12 @@ impl MessageHandler {
             }
         } else {
             // Free tier — no collateral verification needed
+            let is_new = context
+                .masternode_registry
+                .get(&peer_ip)
+                .await
+                .is_none();
+
             let mn = crate::types::Masternode::new_legacy(
                 peer_ip.clone(),
                 reward_address.clone(),
@@ -2167,7 +2205,7 @@ impl MessageHandler {
 
             match context
                 .masternode_registry
-                .register(mn, reward_address)
+                .register(mn, reward_address.clone())
                 .await
             {
                 Ok(()) => {
@@ -2177,7 +2215,26 @@ impl MessageHandler {
                         self.direction, peer_ip, count
                     );
                     if let Some(peer_manager) = &context.peer_manager {
-                        peer_manager.add_peer(peer_ip).await;
+                        peer_manager.add_peer(peer_ip.clone()).await;
+                    }
+                    // Relay to all other peers so nodes not directly connected to this
+                    // masternode still learn about it (large-network discovery).
+                    if is_new {
+                        if let Some(broadcast_tx) = &context.broadcast_tx {
+                            let relay = crate::network::message::NetworkMessage::MasternodeAnnouncementV3 {
+                                address: peer_ip.clone(),
+                                reward_address,
+                                tier,
+                                public_key,
+                                collateral_outpoint: None,
+                                certificate: Vec::new(),
+                            };
+                            let _ = broadcast_tx.send(relay);
+                            debug!(
+                                "📡 [{}] Relayed new Free masternode {} announcement to all peers",
+                                self.direction, peer_ip
+                            );
+                        }
                     }
                 }
                 Err(e) => {
