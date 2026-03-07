@@ -1405,7 +1405,7 @@ mod tests {
         writeln!(f, "server=1").unwrap();
         writeln!(f, "addnode=node1.example.com").unwrap();
         writeln!(f, "addnode=node2.example.com").unwrap();
-        writeln!(f, "").unwrap();
+        writeln!(f).unwrap();
         writeln!(f, "  masternode = 0  ").unwrap();
         drop(f);
 

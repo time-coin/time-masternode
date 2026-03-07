@@ -707,8 +707,13 @@ async fn main() {
                         "⚠️ Warning: Could not look up collateral UTXO for tier auto-detection: {}",
                         e
                     );
-                    eprintln!("   Node will start as Free tier. Set tier= in time.conf or ensure collateral UTXO exists.");
-                    println!("✓ Running as Free masternode");
+                    eprintln!("   The collateral transaction may not be confirmed yet.");
+                    eprintln!("   Node will start as Free tier and automatically upgrade");
+                    eprintln!(
+                        "   to the correct tier once the on-chain registration is processed."
+                    );
+                    eprintln!("   Tip: Set tier=bronze (or silver/gold) in time.conf to skip auto-detection.");
+                    println!("✓ Running as Free masternode (provisional — will upgrade on-chain)");
                     println!("  └─ Wallet: {}", mn.address);
                     println!("  └─ Collateral: 0 TIME");
                 }
@@ -1210,33 +1215,44 @@ async fn main() {
         // Start masternode announcement task
         let mn_for_announcement = mn.clone();
         let peer_registry_for_announcement = peer_connection_registry.clone();
+        let registry_for_announcement = registry.clone();
 
         let announcement_handle = tokio::spawn(async move {
             // Wait 10 seconds for initial peer connections
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
-            // Broadcast V3 announcement (certificate field kept empty for compat)
-            let announcement = NetworkMessage::MasternodeAnnouncementV3 {
-                address: mn_for_announcement.address.clone(),
-                reward_address: mn_for_announcement.wallet_address.clone(),
-                tier: mn_for_announcement.tier,
-                public_key: mn_for_announcement.public_key,
-                collateral_outpoint: mn_for_announcement.collateral_outpoint.clone(),
-                certificate: vec![0u8; 64],
-            };
+            // Build the announcement, using current registry state so that any
+            // tier upgrade (e.g. on-chain registration processed after startup)
+            // is reflected in re-broadcasts.
+            let build_announcement =
+                |mn: &types::Masternode| NetworkMessage::MasternodeAnnouncementV3 {
+                    address: mn.address.clone(),
+                    reward_address: mn.wallet_address.clone(),
+                    tier: mn.tier,
+                    public_key: mn.public_key,
+                    collateral_outpoint: mn.collateral_outpoint.clone(),
+                    certificate: vec![0u8; 64],
+                };
 
-            peer_registry_for_announcement
-                .broadcast(announcement.clone())
-                .await;
+            let announcement = build_announcement(&mn_for_announcement);
+            peer_registry_for_announcement.broadcast(announcement).await;
             tracing::info!("📢 Broadcast masternode announcement (V3) to network");
 
-            // Continue broadcasting every 60 seconds to ensure visibility
+            // Continue broadcasting every 60 seconds; refresh tier from registry
+            // so that an on-chain registration that upgrades Free→Bronze is propagated.
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                peer_registry_for_announcement
-                    .broadcast(announcement.clone())
-                    .await;
-                tracing::debug!("📢 Re-broadcast masternode announcement");
+                let current_mn = registry_for_announcement
+                    .get(&mn_for_announcement.address)
+                    .await
+                    .map(|info| info.masternode.clone())
+                    .unwrap_or_else(|| mn_for_announcement.clone());
+                let announcement = build_announcement(&current_mn);
+                peer_registry_for_announcement.broadcast(announcement).await;
+                tracing::debug!(
+                    "📢 Re-broadcast masternode announcement (tier: {:?})",
+                    current_mn.tier
+                );
             }
         });
         shutdown_manager.register_task(announcement_handle);
@@ -3500,7 +3516,10 @@ async fn main() {
                         Some(tls_config.acceptor())
                     }
                     Err(e) => {
-                        eprintln!("  ⚠️  WebSocket TLS init failed: {}. Falling back to plain ws://.", e);
+                        eprintln!(
+                            "  ⚠️  WebSocket TLS init failed: {}. Falling back to plain ws://.",
+                            e
+                        );
                         None
                     }
                 }
@@ -3509,8 +3528,13 @@ async fn main() {
             };
 
             let ws_handle = tokio::spawn(async move {
-                if let Err(e) =
-                    rpc::websocket::start_ws_server(&ws_addr, ws_tx_sender, ws_shutdown, ws_tls_acceptor).await
+                if let Err(e) = rpc::websocket::start_ws_server(
+                    &ws_addr,
+                    ws_tx_sender,
+                    ws_shutdown,
+                    ws_tls_acceptor,
+                )
+                .await
                 {
                     eprintln!("  ❌ WebSocket server error: {}", e);
                 }

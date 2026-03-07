@@ -1982,7 +1982,11 @@ impl MessageHandler {
         let our_count = context.peer_registry.connected_count() as u16;
         let our_ip = context.peer_registry.get_local_ip().unwrap_or_default();
         let our_tier = if let Some(ip) = context.peer_registry.get_local_ip() {
-            context.masternode_registry.get(&ip).await.map(|i| i.masternode.tier)
+            context
+                .masternode_registry
+                .get(&ip)
+                .await
+                .map(|i| i.masternode.tier)
         } else {
             None
         };
@@ -1998,10 +2002,10 @@ impl MessageHandler {
         // Sort by tier priority (Gold first) then by load within each tier
         entries.sort_by(|a, b| {
             let tier_ord = |t: &Option<crate::types::MasternodeTier>| match t {
-                Some(crate::types::MasternodeTier::Gold)   => 0u8,
+                Some(crate::types::MasternodeTier::Gold) => 0u8,
                 Some(crate::types::MasternodeTier::Silver) => 1,
                 Some(crate::types::MasternodeTier::Bronze) => 2,
-                Some(crate::types::MasternodeTier::Free)   => 3,
+                Some(crate::types::MasternodeTier::Free) => 3,
                 None => 4,
             };
             tier_ord(&a.tier)
@@ -2011,7 +2015,9 @@ impl MessageHandler {
 
         debug!(
             "📤 [{}] Sending PeerExchange ({} peers, tier-sorted) to {}",
-            self.direction, entries.len(), self.peer_ip
+            self.direction,
+            entries.len(),
+            self.peer_ip
         );
         Ok(Some(NetworkMessage::PeerExchange(entries)))
     }
@@ -2038,16 +2044,13 @@ impl MessageHandler {
 
             // Add as peer candidate if new
             if let Some(peer_manager) = &context.peer_manager {
-                if peer_manager
-                    .add_peer_candidate(entry.address.clone())
-                    .await
-                {
+                if peer_manager.add_peer_candidate(entry.address.clone()).await {
                     added += 1;
                 }
             } else {
                 context
                     .peer_registry
-                    .add_discovered_peers(&[entry.address.clone()])
+                    .add_discovered_peers(std::slice::from_ref(&entry.address))
                     .await;
             }
         }

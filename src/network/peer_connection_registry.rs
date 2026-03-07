@@ -568,7 +568,10 @@ impl PeerConnectionRegistry {
     }
 
     pub fn get_local_ip(&self) -> Option<String> {
-        self.local_ip.load().as_ref().map(|arc| arc.as_ref().clone())
+        self.local_ip
+            .load()
+            .as_ref()
+            .map(|arc| arc.as_ref().clone())
     }
 
     pub fn should_connect_to(&self, peer_ip: &str) -> bool {

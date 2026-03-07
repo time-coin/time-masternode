@@ -1434,8 +1434,11 @@ impl MasternodeRegistry {
 
         // Snapshot connected peers once so we can protect directly-connected
         // OnChain nodes from having their is_active flipped by stale gossip counts.
-        let connected_peers: std::collections::HashSet<String> =
-            peer_registry.get_connected_peers().await.into_iter().collect();
+        let connected_peers: std::collections::HashSet<String> = peer_registry
+            .get_connected_peers()
+            .await
+            .into_iter()
+            .collect();
 
         let mut status_changes = 0;
         let mut total_active = 0;
@@ -1965,14 +1968,18 @@ impl MasternodeRegistry {
         &self,
         outpoint: OutPoint,
         masternode_ip: &str,
-        masternode_port: u16,
+        _masternode_port: u16,
         payout_address: &str,
         owner_pubkey_hex: &str,
         tier: MasternodeTier,
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> Result<(), RegistryError> {
         let owner_pubkey = Self::parse_pubkey(owner_pubkey_hex)?;
-        let address = format!("{}:{}", masternode_ip, masternode_port);
+        // Use IP-only as the registry key — consistent with startup registration
+        // (main.rs strips port via split(':').next()) and P2P announcement handling
+        // (server.rs does peer.addr.split(':').next()).  Using "IP:port" would create
+        // a duplicate entry and prevent RegistrationSource::OnChain from ever being set.
+        let address = masternode_ip.to_string();
 
         let masternode = Masternode::new_with_collateral(
             address.clone(),
@@ -1990,16 +1997,15 @@ impl MasternodeRegistry {
             .load(std::sync::atomic::Ordering::Relaxed);
         let _ = utxo_manager.lock_collateral(outpoint, address.clone(), height, tier.collateral());
 
-        // Register in the registry
+        // Register in the registry (insert or update existing entry)
         self.register(masternode, payout_address.to_string())
             .await?;
 
-        // Mark as on-chain registration
-        let ip_only = masternode_ip.to_string();
+        // Mark as on-chain registration so the node persists across disconnects
         let mut nodes = self.masternodes.write().await;
-        if let Some(info) = nodes.get_mut(&ip_only) {
+        if let Some(info) = nodes.get_mut(&address) {
             info.registration_source = RegistrationSource::OnChain(height);
-            self.store_masternode(&ip_only, info)?;
+            self.store_masternode(&address, info)?;
         }
 
         Ok(())

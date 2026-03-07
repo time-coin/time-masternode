@@ -19,7 +19,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
@@ -266,12 +266,14 @@ pub async fn start_ws_server(
     addr: &str,
     tx_events: broadcast::Sender<TransactionEvent>,
     shutdown: tokio_util::sync::CancellationToken,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listener = TcpListener::bind(addr).await?;
     let sub_manager = Arc::new(SubscriptionManager::new());
     let conn_count = Arc::new(AtomicUsize::new(0));
+    let scheme = if tls_acceptor.is_some() { "wss" } else { "ws" };
 
-    println!("  ✅ WebSocket server listening on {}", addr);
+    println!("  ✅ WebSocket server listening on {}://{}", scheme, addr);
 
     // Spawn cleanup task (every 60s, remove dead connections)
     let cleanup_mgr = sub_manager.clone();
@@ -327,31 +329,24 @@ pub async fn start_ws_server(
                 match result {
                     Ok((stream, addr)) => {
                         let current = conn_count.load(Ordering::Relaxed);
-                        if current >= MAX_WS_CONNECTIONS {
-                            // Reject: send HTTP 503 before WebSocket upgrade
-                            tracing::warn!(
-                                "⚠ WS connection from {} rejected — at capacity ({}/{})",
-                                addr, current, MAX_WS_CONNECTIONS
-                            );
+                        let mgr = sub_manager.clone();
+                        let conn_shutdown = shutdown.clone();
+                        let cc = conn_count.clone();
+                        if let Some(ref acceptor) = tls_acceptor {
+                            let acceptor = acceptor.clone();
                             tokio::spawn(async move {
-                                let body = r#"{"error":"capacity","message":"Server at capacity. Try another masternode."}"#;
-                                let response = format!(
-                                    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                                    body.len(), body
-                                );
-                                let mut s = stream;
-                                let _ = s.write_all(response.as_bytes()).await;
+                                match acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        dispatch_connection(tls_stream, addr, current, mgr, conn_shutdown, cc).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!("TLS handshake failed from {}: {}", addr, e);
+                                    }
+                                }
                             });
                         } else {
-                            conn_count.fetch_add(1, Ordering::Relaxed);
-                            tracing::debug!("📡 WebSocket connection from {} ({}/{})", addr, current + 1, MAX_WS_CONNECTIONS);
-                            let mgr = sub_manager.clone();
-                            let conn_shutdown = shutdown.clone();
-                            let cc = conn_count.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = handle_connection(stream, mgr, conn_shutdown, cc).await {
-                                    tracing::debug!("WebSocket connection error from {}: {}", addr, e);
-                                }
+                                dispatch_connection(stream, addr, current, mgr, conn_shutdown, cc).await;
                             });
                         }
                     }
@@ -370,12 +365,55 @@ pub async fn start_ws_server(
     Ok(())
 }
 
-async fn handle_connection(
-    stream: tokio::net::TcpStream,
+/// Check capacity and either reject with HTTP 503 or hand off to `handle_connection`.
+async fn dispatch_connection<S>(
+    stream: S,
+    addr: std::net::SocketAddr,
+    current: usize,
     sub_manager: Arc<SubscriptionManager>,
     shutdown: tokio_util::sync::CancellationToken,
     conn_count: Arc<AtomicUsize>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) where
+    S: tokio::io::AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    if current >= MAX_WS_CONNECTIONS {
+        tracing::warn!(
+            "⚠ WS connection from {} rejected — at capacity ({}/{})",
+            addr,
+            current,
+            MAX_WS_CONNECTIONS
+        );
+        let body =
+            r#"{"error":"capacity","message":"Server at capacity. Try another masternode."}"#;
+        let response = format!(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let mut s = stream;
+        let _ = s.write_all(response.as_bytes()).await;
+    } else {
+        conn_count.fetch_add(1, Ordering::Relaxed);
+        tracing::debug!(
+            "📡 WebSocket connection from {} ({}/{})",
+            addr,
+            current + 1,
+            MAX_WS_CONNECTIONS
+        );
+        if let Err(e) = handle_connection(stream, sub_manager, shutdown, conn_count).await {
+            tracing::debug!("WebSocket connection error from {}: {}", addr, e);
+        }
+    }
+}
+
+async fn handle_connection<S>(
+    stream: S,
+    sub_manager: Arc<SubscriptionManager>,
+    shutdown: tokio_util::sync::CancellationToken,
+    conn_count: Arc<AtomicUsize>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + AsyncWrite + Unpin,
+{
     // Auto-decrement the connection counter when this function exits for any reason
     let _guard = ConnGuard(conn_count);
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
