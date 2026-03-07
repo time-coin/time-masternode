@@ -61,10 +61,10 @@ This document outlines the development roadmap for TimeCoin.
 ## 🔄 Phase 1 — Network Hardening (Q1–Q2 2026)
 
 ### In Progress / Near Term
-- [ ] **Enforce TLS for P2P** — TLS code exists and is optional; make it mandatory for all masternode connections
-- [ ] **Enforce TLS for RPC** — RPC server supports TLS via `set_tls()`; expose via `time.conf` option
+- [x] **Enforce TLS for P2P** — enabled by default; self-signed certs auto-generated; `tls=0` opt-out for debugging
+- [x] **Enforce TLS for RPC** — enabled by default; `rpctls=0` opt-out; `time-cli` auto-negotiates TLS
+- [x] **Stub completion** — all 6 blockchain stubs implemented with real data
 - [ ] **Network partition detection** — detect when a node is isolated from the rest of the network and alert/recover automatically
-- [ ] **Stub completion** — fill in 6 blockchain stubs: `get_pending_transactions`, `get_utxo_state_hash`, `get_utxo_count`, `get_all_utxos`, `is_transaction_finalized`, `get_transaction_confirmations`
 - [ ] **Checkpoint system** — replace placeholder checkpoints with real mainnet/testnet block hashes
 
 ### Medium Priority
@@ -111,10 +111,11 @@ This document outlines the development roadmap for TimeCoin.
 - [ ] Zero-knowledge proof integration research
 
 ### Infrastructure
-- [ ] Mobile wallet compatibility
-- [ ] Multi-signature wallet support
-- [ ] Atomic swaps with other chains
-- [ ] Cross-chain bridge research
+- [ ] **Mobile wallet** — iOS/Android app with TOFU (Trust On First Use) cert pinning: warn on first connect to a node, pin the self-signed cert fingerprint, transparent on subsequent connections (same model as SSH)
+- [ ] **Multi-signature wallet support**
+- [ ] **Atomic swaps with other chains**
+- [ ] **Cross-chain bridge research**
+- [ ] **Public RPC infrastructure** (`rpc.timecoin.network`) — TIME Coin-operated nodes with real domain + Let's Encrypt certs for wallets that need CA-trusted TLS without cert pinning
 
 ---
 
