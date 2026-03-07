@@ -172,8 +172,14 @@ impl NetworkClient {
                     .collect()
             };
 
-            // PHASE 1: Connect to all registered masternodes FIRST (priority)
-            let masternodes = masternode_registry.list_all().await;
+            // PHASE 1: Connect to registered masternodes — use a random sample so every
+            // node picks a different subset on startup, distributing inbound load across
+            // the network rather than always hammering the same first N masternodes.
+            let mut masternodes = masternode_registry.list_all().await;
+            {
+                use rand::seq::SliceRandom;
+                masternodes.shuffle(&mut rand::thread_rng());
+            }
             let masternode_ips: Vec<&str> = masternodes
                 .iter()
                 .map(|m| m.masternode.address.as_str())
@@ -270,10 +276,15 @@ impl NetworkClient {
                 // We do not actively reconnect to them here to avoid hammering
                 // nodes that are legitimately offline.
 
-                // Fill remaining slots with regular peers
+                // Fill remaining slots with regular peers — prefer less-loaded ones
+                // so new nodes naturally spread connections across the network.
                 let available_slots = max_peers.saturating_sub(outbound_count + inbound_count);
                 if available_slots > 0 {
-                    let unique_peers = dedup_peers(peer_manager.get_all_peers().await);
+                    let mut unique_peers = dedup_peers(peer_manager.get_all_peers().await);
+                    // Sort by known connection load (ascending) so we dial the least-loaded
+                    // candidates first.  Peers with unknown load sort to the back (u16::MAX).
+                    unique_peers
+                        .sort_by_key(|ip| peer_registry.get_peer_load(ip));
                     for ip in unique_peers.iter().take(available_slots) {
                         if should_skip(ip) {
                             continue;
