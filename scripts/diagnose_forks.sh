@@ -310,7 +310,7 @@ echo ""
 # 8. Check masternode status
 echo "8. Checking masternode status..."
 if [ -n "$CLI" ]; then
-    MN_STATUS=$($CLI masternode-status 2>/dev/null)
+    MN_STATUS=$($CLI masternodestatus 2>/dev/null)
     if [ -n "$MN_STATUS" ]; then
         echo "$MN_STATUS"
     else
@@ -401,6 +401,6 @@ if [ -n "$BLOCKS_BEHIND" ] && [ "$BLOCKS_BEHIND" -gt 5 ]; then
 fi
 
 echo ""
-echo "For detailed fork analysis, see: FORK_ANALYSIS.md"
-echo "For deployment guide, see: FORK_RESOLUTION_DEPLOYMENT.md"
+echo "For architecture details, see: docs/ARCHITECTURE_OVERVIEW.md"
+echo "For protocol spec, see: docs/TIMECOIN_PROTOCOL.md"
 echo ""
