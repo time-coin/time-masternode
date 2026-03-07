@@ -277,6 +277,17 @@ impl NetworkClient {
                     if connection_manager.is_active(ip) {
                         continue;
                     }
+                    // Pre-check AI before marking connecting to avoid spawning tasks that
+                    // immediately exit because the peer is in exponential backoff cooldown.
+                    let advice = res.reconnection_ai.get_reconnection_advice(ip, true);
+                    if !advice.should_attempt {
+                        tracing::debug!(
+                            "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
+                            ip,
+                            advice.reasoning
+                        );
+                        continue;
+                    }
                     if connection_manager.mark_connecting(ip) {
                         tracing::info!("🎯 [PHASE3-MN] Reconnecting to masternode: {}", ip);
                         res.spawn(ip.clone(), true);
