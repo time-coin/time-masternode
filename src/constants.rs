@@ -6,8 +6,9 @@
 /// Genesis block checkpoints — hardcoded hashes like Bitcoin's checkpoints.
 /// Nodes reject any genesis block whose hash doesn't match these values.
 pub mod genesis {
-    /// Testnet genesis block hash (set after network launch)
-    pub const TESTNET_GENESIS_HASH: Option<&str> = None;
+    /// Testnet genesis block hash — locked in 2026-03-07 with 7-node testnet
+    pub const TESTNET_GENESIS_HASH: Option<&str> =
+        Some("866273966c0f380e3f71360d4cd59933f2e8c936b02f4c2774b9fd0e913f0ebb");
 
     /// Mainnet genesis block hash (set before mainnet launch)
     pub const MAINNET_GENESIS_HASH: Option<&str> = None;
