@@ -373,6 +373,9 @@ impl MessageHandler {
             NetworkMessage::PeersResponse(peers) => {
                 self.handle_peers_response(peers.clone(), context).await
             }
+            NetworkMessage::PeerExchange(entries) => {
+                self.handle_peer_exchange(entries.clone(), context).await
+            }
 
             // === Masternode Messages ===
             NetworkMessage::GetMasternodes => self.handle_get_masternodes(context).await,
@@ -1955,7 +1958,8 @@ impl MessageHandler {
         Ok(None)
     }
 
-    /// Handle GetPeers request
+    /// Handle GetPeers request — respond with a load-sorted PeerExchange so the
+    /// requester can find less-loaded peers and the network self-balances.
     async fn handle_get_peers(
         &self,
         context: &MessageContext,
@@ -1965,20 +1969,72 @@ impl MessageHandler {
             self.direction, self.peer_ip
         );
 
-        // Use peer_manager if available, otherwise use peer_registry
-        let peers = if let Some(peer_manager) = &context.peer_manager {
-            peer_manager.get_all_peers().await
-        } else {
-            context.peer_registry.get_connected_peers().await
-        };
+        // Build a load-aware peer list from currently connected peers
+        let mut entries = context.peer_registry.get_peers_by_load(32).await;
+
+        // Include ourselves so the requester knows our current load
+        let our_count = context.peer_registry.connected_count() as u16;
+        entries.push(crate::network::message::PeerExchangeEntry {
+            address: context
+                .peer_registry
+                .get_local_ip()
+                .unwrap_or_default(),
+            connection_count: our_count,
+            is_masternode: true,
+        });
+        entries.sort_by_key(|e| e.connection_count);
 
         debug!(
-            "📤 [{}] Sending {} peer(s) to {}",
+            "📤 [{}] Sending PeerExchange ({} peers) to {}",
             self.direction,
-            peers.len(),
+            entries.len(),
             self.peer_ip
         );
-        Ok(Some(NetworkMessage::PeersResponse(peers)))
+        Ok(Some(NetworkMessage::PeerExchange(entries)))
+    }
+
+    /// Handle incoming PeerExchange — store load data and add new peers as candidates.
+    async fn handle_peer_exchange(
+        &self,
+        entries: Vec<crate::network::message::PeerExchangeEntry>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        debug!(
+            "📥 [{}] Received PeerExchange from {} ({} entries)",
+            self.direction,
+            self.peer_ip,
+            entries.len()
+        );
+
+        let mut added = 0usize;
+        for entry in &entries {
+            // Store load info so Phase 3 can prefer less-loaded peers
+            context
+                .peer_registry
+                .update_peer_load(&entry.address, entry.connection_count);
+
+            // Add as peer candidate if new
+            if let Some(peer_manager) = &context.peer_manager {
+                if peer_manager
+                    .add_peer_candidate(entry.address.clone())
+                    .await
+                {
+                    added += 1;
+                }
+            } else {
+                context
+                    .peer_registry
+                    .add_discovered_peers(&[entry.address.clone()])
+                    .await;
+            }
+        }
+        if added > 0 {
+            info!(
+                "✓ [{}] Added {} new peer candidate(s) from PeerExchange ({})",
+                self.direction, added, self.peer_ip
+            );
+        }
+        Ok(None)
     }
 
     /// Handle PeersResponse

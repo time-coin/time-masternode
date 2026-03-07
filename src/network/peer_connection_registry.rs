@@ -88,6 +88,8 @@ pub struct PeerConnectionRegistry {
     chain_tip_updated: Arc<tokio::sync::Notify>,
     // Cached result of get_compatible_peers() to avoid repeated lock acquisitions
     compatible_peers_cache: Arc<RwLock<(Vec<String>, std::time::Instant)>>,
+    // Reported connection counts from peer exchange — used for load-aware routing
+    peer_load: DashMap<String, u16>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -122,6 +124,7 @@ impl PeerConnectionRegistry {
             fork_error_counts: DashMap::new(),
             chain_tip_updated: Arc::new(tokio::sync::Notify::new()),
             compatible_peers_cache: Arc::new(RwLock::new((Vec::new(), std::time::Instant::now()))),
+            peer_load: DashMap::new(),
         }
     }
 
@@ -562,6 +565,10 @@ impl PeerConnectionRegistry {
 
     pub fn set_local_ip(&self, ip: String) {
         self.local_ip.store(Some(Arc::new(ip)));
+    }
+
+    pub fn get_local_ip(&self) -> Option<String> {
+        self.local_ip.load().as_ref().map(|arc| arc.as_ref().clone())
     }
 
     pub fn should_connect_to(&self, peer_ip: &str) -> bool {
@@ -1228,6 +1235,46 @@ impl PeerConnectionRegistry {
     /// Get discovered peers count
     pub async fn discovered_peers_count(&self) -> usize {
         self.discovered_peers.read().await.len()
+    }
+
+    /// Record the reported connection count for a peer (from PeerExchange messages).
+    /// Used for load-aware peer selection so nodes can steer new connections toward
+    /// less-loaded masternodes instead of always hitting the same bootstrap nodes.
+    pub fn update_peer_load(&self, ip: &str, connection_count: u16) {
+        self.peer_load.insert(ip.to_string(), connection_count);
+    }
+
+    /// Get the last-reported connection count for a peer, or u16::MAX if unknown.
+    /// Returning MAX for unknown peers causes them to sort to the back, so we prefer
+    /// known-underloaded peers while still eventually trying unknown ones.
+    pub fn get_peer_load(&self, ip: &str) -> u16 {
+        self.peer_load.get(ip).map(|v| *v).unwrap_or(u16::MAX)
+    }
+
+    /// Build a PeerExchange list of currently connected peers, sorted by ascending
+    /// connection load, capped at `limit` entries.  Callers use this to respond to
+    /// GetPeers requests and to redirect overloaded inbound connections.
+    pub async fn get_peers_by_load(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::network::message::PeerExchangeEntry> {
+        let connected = self.get_connected_peers().await;
+        let mut entries: Vec<_> = connected
+            .into_iter()
+            .map(|ip| {
+                let count = self.get_peer_load(&ip);
+                let is_masternode = self.peer_load.get(&ip).is_some(); // best-effort
+                crate::network::message::PeerExchangeEntry {
+                    address: ip,
+                    connection_count: count,
+                    is_masternode,
+                }
+            })
+            .collect();
+        // Sort ascending by load — least loaded first
+        entries.sort_by_key(|e| e.connection_count);
+        entries.truncate(limit);
+        entries
     }
 }
 

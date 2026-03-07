@@ -108,7 +108,9 @@ pub enum NetworkMessage {
     PendingTransactionsResponse(Vec<Transaction>),
     // Peer exchange
     GetPeers,
-    PeersResponse(Vec<String>), // List of peer addresses (IP:port)
+    PeersResponse(Vec<String>), // List of peer addresses (IP:port) — legacy, kept for compat
+    /// Load-aware peer exchange: recipients should prefer peers with lower connection_count
+    PeerExchange(Vec<PeerExchangeEntry>),
     // Fork resolution
     GetBlockHash(u64),
     BlockHashResponse {
@@ -253,6 +255,19 @@ pub enum NetworkMessage {
     UnknownMessage,
 }
 
+/// An entry in a PeerExchange message — a peer address with its current connection load.
+/// Recipients should prefer peers with the lowest `connection_count` when choosing
+/// who to connect to, which naturally distributes load across the network.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PeerExchangeEntry {
+    /// IP address of the peer (no port — port is derived from NetworkType)
+    pub address: String,
+    /// Number of active connections this peer currently has (best-effort, may be slightly stale)
+    pub connection_count: u16,
+    /// True if this peer is a registered masternode
+    pub is_masternode: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct UTXOStateChange {
     pub outpoint: OutPoint,
@@ -366,6 +381,7 @@ impl NetworkMessage {
             NetworkMessage::MasternodeAnnouncementV2 { .. } => "MasternodeAnnouncementV2",
             NetworkMessage::MasternodeAnnouncementV3 { .. } => "MasternodeAnnouncementV3",
             NetworkMessage::UnknownMessage => "UnknownMessage",
+            NetworkMessage::PeerExchange(_) => "PeerExchange",
         }
     }
 

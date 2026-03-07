@@ -504,7 +504,7 @@ async fn handle_peer(
     _local_ip: Option<String>,
     block_cache: Arc<BlockCache>, // Phase 3E.1: Block cache parameter
     _peer_fork_status: Arc<DashMap<String, PeerForkStatus>>, // Phase 2: Fork status tracker (no longer used - periodic resolution handles forks)
-    _is_whitelisted: bool,
+    is_whitelisted: bool,
     tls_config: Option<Arc<crate::network::tls::TlsConfig>>,
     network_type: crate::network_type::NetworkType,
 ) -> Result<(), std::io::Error> {
@@ -700,6 +700,37 @@ async fn handle_peer(
                                             message_type: "Handshake".to_string(),
                                         };
                                         let _ = peer_registry.send_to_peer(&ip_str, ack_msg).await;
+
+                                        // Load-balancing redirect: if we're above our soft
+                                        // inbound limit and this is not a whitelisted peer,
+                                        // send a PeerExchange of less-loaded alternatives and
+                                        // close.  MIN_CONNECTIONS ensures the network never
+                                        // fractures — we always keep at least that many inbound.
+                                        const INBOUND_REDIRECT_THRESHOLD: usize = 70; // 70 % of MAX_INBOUND_CONNECTIONS
+                                        const MIN_CONNECTIONS: usize = 8;
+                                        let cur_inbound = peer_registry.inbound_count();
+                                        if !is_whitelisted
+                                            && cur_inbound > INBOUND_REDIRECT_THRESHOLD
+                                        {
+                                            let alternatives =
+                                                peer_registry.get_peers_by_load(12).await;
+                                            if alternatives.len() >= 3
+                                                && cur_inbound > MIN_CONNECTIONS
+                                            {
+                                                tracing::info!(
+                                                    "↩️  Redirecting {} to {} less-loaded peers (inbound: {})",
+                                                    ip_str, alternatives.len(), cur_inbound
+                                                );
+                                                let redirect = NetworkMessage::PeerExchange(alternatives);
+                                                let _ = peer_registry.send_to_peer(&ip_str, redirect).await;
+                                                // Small delay so the message can be flushed
+                                                tokio::time::sleep(
+                                                    std::time::Duration::from_millis(200),
+                                                )
+                                                .await;
+                                                break; // Close after redirect
+                                            }
+                                        }
 
                                         // Send our masternode announcement if we're a masternode
                                         let local_address = masternode_registry.get_local_address().await;
