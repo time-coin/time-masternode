@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use crate::block::types::Block;
+use crate::block::types::{Block, BlockHeader, MasternodeTierCounts};
 use crate::types::MasternodeTier;
 use crate::NetworkType;
 
@@ -115,7 +115,66 @@ impl GenesisBlock {
         rewards
     }
 
-    /// Verify genesis block hash matches the hardcoded checkpoint for the network.
+    /// Returns the hardcoded testnet genesis block.
+    ///
+    /// This encodes the exact genesis block produced by the 7-node testnet that launched
+    /// 2026-03-07. A fresh node (e.g., after reset-chain.sh) calls this instead of waiting
+    /// for masternodes to re-register, ensuring it always creates the identical block whose
+    /// SHA-256 hash is the TESTNET_GENESIS_HASH checkpoint.
+    ///
+    /// 6 masternodes were registered at genesis time (all Free tier):
+    ///   165.232.154.150  — leader (lowest alphabetical, receives full block reward)
+    ///   165.84.215.117
+    ///   178.128.199.144
+    ///   50.28.104.50
+    ///   64.91.241.10
+    ///   69.167.168.176   — now inactive; was present at genesis
+    ///
+    /// active_masternodes_bitmap = 0xFC (6 MSBs set, sorted by address string)
+    pub fn testnet_genesis() -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                height: 0,
+                timestamp: 1764547200, // 2025-12-01T00:00:00Z
+                previous_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                leader: "165.232.154.150".to_string(),
+                attestation_root: [0u8; 32],
+                masternode_tiers: MasternodeTierCounts {
+                    free: 6,
+                    bronze: 0,
+                    silver: 0,
+                    gold: 0,
+                },
+                block_reward: 10_000_000_000, // 100 TIME
+                // All 6 masternodes active; sorted alphabetically, bits set MSB→LSB:
+                //   bit7=165.232.154.150, bit6=165.84.215.117, bit5=178.128.199.144,
+                //   bit4=50.28.104.50,    bit3=64.91.241.10,   bit2=69.167.168.176
+                //   → 11111100 = 0xFC
+                active_masternodes_bitmap: vec![0xFC],
+                liveness_recovery: Some(false),
+                vrf_output: [0u8; 32],
+                vrf_proof: vec![],
+                vrf_score: 0,
+                producer_signature: vec![],
+            },
+            transactions: vec![],
+            masternode_rewards: vec![
+                ("64.91.241.10".to_string(), 0),
+                ("178.128.199.144".to_string(), 0),
+                ("50.28.104.50".to_string(), 0),
+                ("165.84.215.117".to_string(), 0),
+                ("165.232.154.150".to_string(), 10_000_000_000),
+                ("69.167.168.176".to_string(), 0),
+            ],
+            time_attestations: vec![],
+            consensus_participants_bitmap: vec![],
+            liveness_recovery: Some(false),
+        }
+    }
+
+
     /// Returns Ok(()) if the hash matches or no checkpoint is set (mainnet pre-launch).
     pub fn verify_checkpoint(block: &Block, network: NetworkType) -> Result<(), String> {
         let expected_hex = match network {
@@ -232,5 +291,20 @@ mod tests {
         // Verify total equals block reward
         let total: u64 = rewards.iter().map(|(_, v)| v).sum();
         assert_eq!(total, 10_000_000_000);
+    }
+
+    #[test]
+    fn test_testnet_genesis_hash() {
+        let genesis = GenesisBlock::testnet_genesis();
+        let hash = hex::encode(genesis.hash());
+        assert_eq!(
+            hash,
+            "866273966c0f380e3f71360d4cd59933f2e8c936b02f4c2774b9fd0e913f0ebb",
+            "Hardcoded testnet genesis must produce the canonical checkpoint hash"
+        );
+        assert!(GenesisBlock::verify_structure(&genesis).is_ok());
+        assert!(
+            GenesisBlock::verify_checkpoint(&genesis, crate::NetworkType::Testnet).is_ok()
+        );
     }
 }
