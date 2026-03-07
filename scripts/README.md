@@ -594,6 +594,25 @@ bash scripts/reindex.sh --testnet --tx-only
 bash scripts/reindex.sh --testnet
 ```
 
+### reset-chain.sh
+Delete all blocks and resync from scratch. Preserves wallet, config, and peer data.
+Use when a node is hopelessly behind, corrupt, or you want a clean resync.
+
+**What is deleted**: block database, transaction index, UTXO state  
+**What is kept**: `time.conf`, `masternode.conf`, `wallet.json`, peer database
+
+**Usage**:
+```bash
+# Testnet reset (prompts for confirmation)
+bash scripts/reset-chain.sh --testnet
+
+# Mainnet reset
+bash scripts/reset-chain.sh --mainnet
+
+# Skip confirmation prompt (for automated use)
+bash scripts/reset-chain.sh --testnet --yes
+```
+
 ### node-monitor.sh
 Persistent log watcher with color-coded event filtering.
 
