@@ -165,8 +165,8 @@ pub struct RpcConfig {
     /// Hashed credentials: "user:salt$hash" (Bitcoin-style rpcauth)
     #[serde(default)]
     pub rpcauth: Vec<String>,
-    /// Enable TLS for RPC (rpctls=1 in time.conf)
-    #[serde(default)]
+    /// Enable TLS for RPC (rpctls=0 in time.conf to disable)
+    #[serde(default = "default_true")]
     pub rpctls: bool,
     /// Path to TLS certificate PEM file
     #[serde(default)]
@@ -174,6 +174,15 @@ pub struct RpcConfig {
     /// Path to TLS private key PEM file
     #[serde(default)]
     pub rpctlskey: String,
+    /// Enable TLS for WebSocket server (wstls=0 to disable, default: 1)
+    #[serde(default = "default_true")]
+    pub wstls: bool,
+    /// Path to WebSocket TLS certificate PEM file
+    #[serde(default)]
+    pub wstlscert: String,
+    /// Path to WebSocket TLS private key PEM file
+    #[serde(default)]
+    pub wstlskey: String,
 }
 
 impl RpcConfig {
@@ -574,6 +583,9 @@ impl Config {
                 rpctls: false,
                 rpctlscert: String::new(),
                 rpctlskey: String::new(),
+                wstls: true,
+                wstlscert: String::new(),
+                wstlskey: String::new(),
             },
             storage: StorageConfig {
                 backend: "sled".to_string(),
@@ -736,6 +748,7 @@ impl Config {
         self.security.api_key = String::new();
         self.security.enable_tls = true;
         self.security.enable_message_signing = true;
+        self.rpc.rpctls = true;
         self.security.message_max_age_seconds = 300;
 
         // AI — all hardcoded with safe defaults
@@ -843,6 +856,12 @@ impl Config {
             if let Some(v) = entries.get("rpctls") {
                 config.rpc.rpctls = v.last().is_some_and(|s| s == "1");
             }
+            // tls=0 disables P2P TLS (default: enabled); useful for isolated testnets
+            if let Some(v) = entries.get("tls") {
+                if v.last().is_some_and(|s| s == "0") {
+                    config.security.enable_tls = false;
+                }
+            }
             if let Some(v) = entries.get("rpctlscert") {
                 if let Some(path) = v.last() {
                     config.rpc.rpctlscert = path.clone();
@@ -851,6 +870,19 @@ impl Config {
             if let Some(v) = entries.get("rpctlskey") {
                 if let Some(path) = v.last() {
                     config.rpc.rpctlskey = path.clone();
+                }
+            }
+            if let Some(v) = entries.get("wstls") {
+                config.rpc.wstls = v.last().is_some_and(|s| s != "0");
+            }
+            if let Some(v) = entries.get("wstlscert") {
+                if let Some(path) = v.last() {
+                    config.rpc.wstlscert = path.clone();
+                }
+            }
+            if let Some(v) = entries.get("wstlskey") {
+                if let Some(path) = v.last() {
+                    config.rpc.wstlskey = path.clone();
                 }
             }
             if let Some(v) = entries.get("masternode") {

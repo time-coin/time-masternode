@@ -371,7 +371,10 @@ impl PeerConnection {
             let tls_stream = tls
                 .connect_client(stream, "timecoin.local")
                 .await
-                .map_err(|e| format!("TLS handshake failed with {}: {}", addr, e))?;
+                .map_err(|e| {
+                    tracing::warn!("🚫 TLS handshake failed with {}: {}", addr, e);
+                    format!("TLS handshake failed with {}: {}", addr, e)
+                })?;
             let peer_addr = addr.clone();
             // Single I/O bridge task owns the entire TLS stream
             tokio::spawn(async move {

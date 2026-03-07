@@ -580,6 +580,7 @@ async fn handle_peer(
             }
         }
     } else {
+        tracing::debug!("🔓 Plaintext connection from {}", peer.addr);
         let (r, w) = stream.into_split();
         // Spawn reader task for non-TLS
         let peer_addr = peer.addr.clone();

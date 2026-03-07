@@ -87,6 +87,10 @@ struct Args {
     #[arg(long)]
     human: bool,
 
+    /// Skip TLS certificate verification (for self-signed RPC certs)
+    #[arg(long)]
+    no_tls_verify: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -440,6 +444,39 @@ async fn main() {
 }
 
 /// Read RPC credentials from the .cookie file in the data directory.
+/// Read rpctls setting from time.conf (defaults to true, matching server default).
+fn read_conf_rpctls(testnet: bool) -> bool {
+    let data_dir = if testnet {
+        match dirs::home_dir() {
+            Some(d) => d.join(".timecoin").join("testnet"),
+            None => return true,
+        }
+    } else {
+        match dirs::home_dir() {
+            Some(d) => d.join(".timecoin"),
+            None => return true,
+        }
+    };
+    let conf_path = data_dir.join("time.conf");
+    let contents = match std::fs::read_to_string(&conf_path) {
+        Ok(c) => c,
+        Err(_) => return true, // default: TLS on
+    };
+    let mut rpctls = true; // server default
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        if let Some((key, value)) = line.split_once('=') {
+            if key.trim() == "rpctls" {
+                rpctls = value.trim() != "0";
+            }
+        }
+    }
+    rpctls
+}
+
 fn read_cookie_file(testnet: bool) -> Option<(String, String)> {
     let data_dir = if testnet {
         dirs::home_dir()?.join(".timecoin").join("testnet")
@@ -480,49 +517,63 @@ fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
 }
 
 async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
+    // Build reqwest client: always accept self-signed certs (P2P nodes use self-signed RPC certs).
+    // --no-tls-verify is kept for explicitness but self-signed acceptance is always on for HTTPS.
+    let tls_client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .unwrap_or_else(|_| Client::new());
+
     let (rpc_url, is_testnet) = if let Some(url) = &args.rpc_url {
         let testnet = args.testnet || url.contains("24101");
         (url.clone(), testnet)
     } else {
-        // Auto-detect: try both ports with credentials
+        // Auto-detect: prefer HTTPS (server default) then fall back to HTTP
         let mut detected = None;
-        let client = Client::new();
-        for (url, testnet) in &[
-            ("http://127.0.0.1:24101", true),
-            ("http://127.0.0.1:24001", false),
+        for (base_url, testnet) in &[
+            ("127.0.0.1:24101", true),
+            ("127.0.0.1:24001", false),
         ] {
-            let (user, pass) = read_cookie_file(*testnet)
-                .or_else(|| read_conf_credentials(*testnet))
-                .unwrap_or_default();
-            let mut req = client
-                .post(*url)
-                .json(&serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getblockchaininfo",
-                    "params": []
-                }))
-                .timeout(std::time::Duration::from_secs(2));
-            if !user.is_empty() && !pass.is_empty() {
-                req = req.basic_auth(&user, Some(&pass));
-            }
-            if let Ok(response) = req.send().await {
-                if response.status().is_success() {
-                    if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
-                        if rpc_response.get("result").is_some() {
-                            detected = Some((url.to_string(), *testnet));
-                            break;
+            let use_tls = read_conf_rpctls(*testnet);
+            let schemes: &[&str] = if use_tls { &["https", "http"] } else { &["http"] };
+            for scheme in schemes {
+                let url = format!("{}://{}", scheme, base_url);
+                let (user, pass) = read_cookie_file(*testnet)
+                    .or_else(|| read_conf_credentials(*testnet))
+                    .unwrap_or_default();
+                let mut req = tls_client
+                    .post(&url)
+                    .json(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "getblockchaininfo",
+                        "params": []
+                    }))
+                    .timeout(std::time::Duration::from_secs(2));
+                if !user.is_empty() && !pass.is_empty() {
+                    req = req.basic_auth(&user, Some(&pass));
+                }
+                if let Ok(response) = req.send().await {
+                    if response.status().is_success() {
+                        if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
+                            if rpc_response.get("result").is_some() {
+                                detected = Some((url, *testnet));
+                                break;
+                            }
                         }
                     }
                 }
             }
+            if detected.is_some() {
+                break;
+            }
         }
         detected.unwrap_or_else(|| {
-            if args.testnet {
-                ("http://127.0.0.1:24101".to_string(), true)
-            } else {
-                ("http://127.0.0.1:24001".to_string(), false)
-            }
+            let testnet = args.testnet;
+            let port = if testnet { 24101 } else { 24001 };
+            let use_tls = read_conf_rpctls(testnet);
+            let scheme = if use_tls { "https" } else { "http" };
+            (format!("{}://127.0.0.1:{}", scheme, port), testnet)
         })
     };
 
@@ -534,7 +585,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default(),
     };
 
-    let client = Client::new();
+    let client = tls_client;
 
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
@@ -626,11 +677,26 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         params,
     };
 
-    let mut req = client.post(&rpc_url).json(&request);
-    if !rpc_user.is_empty() && !rpc_pass.is_empty() {
-        req = req.basic_auth(&rpc_user, Some(&rpc_pass));
-    }
-    let response = req.send().await?;
+    // Send request; if HTTPS fails, retry over HTTP with a warning (allows use when cert issues)
+    let response = {
+        let mut req = client.post(&rpc_url).json(&request);
+        if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+            req = req.basic_auth(&rpc_user, Some(&rpc_pass));
+        }
+        match req.send().await {
+            Ok(r) => r,
+            Err(e) if rpc_url.starts_with("https://") => {
+                let http_url = rpc_url.replacen("https://", "http://", 1);
+                eprintln!("⚠️  HTTPS RPC failed ({}); retrying over plain HTTP — check rpctlscert/rpctlskey", e);
+                let mut req = client.post(&http_url).json(&request);
+                if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+                    req = req.basic_auth(&rpc_user, Some(&rpc_pass));
+                }
+                req.send().await?
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
 
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err("RPC authentication failed. Check rpcuser/rpcpassword in time.conf or use --rpcuser/--rpcpassword flags.".into());
