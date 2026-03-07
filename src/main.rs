@@ -1897,7 +1897,7 @@ async fn main() {
 
         // Leader rotation timeout tracking
         // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
-        const LEADER_TIMEOUT_SECS: u64 = 10; // Wait 10s before rotating to backup leader (2x block production time)
+        const LEADER_TIMEOUT_SECS: u64 = 5; // Wait 5s before rotating to backup leader
         let mut waiting_for_height: Option<u64> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
         let mut height_first_seen = std::time::Instant::now();
@@ -2474,7 +2474,10 @@ async fn main() {
             //   capping relaxation to prevent every node becoming eligible at once
             if waiting_for_height != Some(next_height) {
                 waiting_for_height = Some(next_height);
-                leader_attempt = 0;
+                // Pre-boost leader_attempt when significantly behind so paid tiers have
+                // immediate 2x VRF weight boost and we don't spend one full timeout cycle
+                // at normal strictness while trying to catch up.
+                leader_attempt = if blocks_behind > 50 { 1 } else { 0 };
                 height_first_seen = std::time::Instant::now();
             }
             let slot_elapsed_secs = time_past_scheduled.max(0) as u64;
@@ -2565,10 +2568,10 @@ async fn main() {
             // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
             // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
             // SECURITY: Free tier nodes only get emergency boost after extended deadlock
-            // (attempt >= 6 = 60s) to maintain sybil resistance while preventing permanent stalls.
+            // (attempt >= 3 = 15s) to maintain sybil resistance while preventing permanent stalls.
             let effective_sampling_weight = if leader_attempt > 0 {
                 let allow_boost = if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {
-                    leader_attempt >= 6 // Free tier: only after 60s deadlock
+                    leader_attempt >= 3 // Free tier: only after 15s deadlock (was 60s)
                 } else {
                     true // Paid tiers: immediate relaxation
                 };
