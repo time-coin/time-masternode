@@ -966,6 +966,14 @@ async fn main() {
     // Create shared peer connection registry for both client and server
     let peer_connection_registry = Arc::new(PeerConnectionRegistry::new());
 
+    // Shared timestamp updated whenever a block is added; used by PartitionDetector.
+    let last_block_time = Arc::new(std::sync::atomic::AtomicU64::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    ));
+
     // Create unified peer state manager for connection tracking
     let peer_state = Arc::new(PeerStateManager::new());
     let connection_manager = Arc::new(ConnectionManager::new());
@@ -1278,6 +1286,41 @@ async fn main() {
                 .utxo_manager
                 .rebuild_collateral_locks(entries);
         }
+    }
+
+    // Spawn background task that updates last_block_time whenever the chain grows.
+    {
+        let lbt = last_block_time.clone();
+        let bc = blockchain.clone();
+        let mut last_seen_height = bc.get_height();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let h = bc.get_height();
+                if h != last_seen_height {
+                    last_seen_height = h;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    lbt.store(now, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+    }
+
+    // Spawn partition detector — monitors peer count and block staleness.
+    {
+        let detector = network::partition_detector::PartitionDetector::new(
+            peer_connection_registry.clone(),
+            registry.clone(),
+            peer_manager.clone(),
+            config.network.bootstrap_peers.clone(),
+            network_type,
+            last_block_time.clone(),
+        );
+        tokio::spawn(async move { detector.run().await });
     }
 
     // Initialize blockchain and sync from peers in background

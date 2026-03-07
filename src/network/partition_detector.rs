@@ -84,7 +84,7 @@ impl PartitionDetector {
         loop {
             interval.tick().await;
 
-            let peer_count = self.peer_registry.peer_count();
+            let peer_count = self.peer_registry.peer_count().await;
             let now_unix = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
