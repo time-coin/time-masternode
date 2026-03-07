@@ -3308,7 +3308,7 @@ async fn main() {
 
             // Start gossip-based masternode status tracking
             registry.start_gossip_broadcaster(peer_connection_registry.clone());
-            registry.start_report_cleanup();
+            registry.start_report_cleanup(peer_connection_registry.clone());
             tracing::info!("✓ Gossip-based masternode status tracking started");
 
             // Share TimeLock resources with peer connection registry for outbound connections

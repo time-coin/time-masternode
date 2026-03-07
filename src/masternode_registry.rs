@@ -1436,22 +1436,33 @@ impl MasternodeRegistry {
     }
 
     /// Start cleanup task - runs every 60 seconds
-    pub fn start_report_cleanup(&self) {
+    pub fn start_report_cleanup(
+        &self,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
         let registry = self.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                registry.cleanup_stale_reports().await;
+                registry.cleanup_stale_reports(&peer_registry).await;
             }
         });
         tracing::info!("✓ Gossip cleanup task started (runs every 60s)");
     }
 
     /// Remove stale peer reports and update is_active status
-    async fn cleanup_stale_reports(&self) {
+    async fn cleanup_stale_reports(
+        &self,
+        peer_registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
+    ) {
         let now = Self::now();
         let mut masternodes = self.masternodes.write().await;
+
+        // Snapshot connected peers once so we can protect directly-connected
+        // OnChain nodes from having their is_active flipped by stale gossip counts.
+        let connected_peers: std::collections::HashSet<String> =
+            peer_registry.get_connected_peers().await.into_iter().collect();
 
         let mut status_changes = 0;
         let mut total_active = 0;
@@ -1526,16 +1537,22 @@ impl MasternodeRegistry {
             } else {
                 true // Small networks exempt from diversity requirement
             };
-            info.is_active = meets_count && meets_diversity;
+            // A direct TCP connection is authoritative proof of liveness —
+            // gossip counts are a secondary signal for nodes we aren't directly
+            // connected to. Never flip is_active to false while we have a live
+            // connection, regardless of how many gossip reporters we have.
+            let is_directly_connected = connected_peers.contains(addr.as_str());
+            info.is_active = is_directly_connected || (meets_count && meets_diversity);
 
             if was_active != info.is_active {
                 status_changes += 1;
                 tracing::debug!(
-                    "Masternode {} status changed: {} ({} peer reports, {} required)",
+                    "Masternode {} status changed: {} ({} peer reports, {} required, direct={})",
                     addr,
                     if info.is_active { "ACTIVE" } else { "INACTIVE" },
                     report_count,
-                    min_reports
+                    min_reports,
+                    is_directly_connected
                 );
             }
 
