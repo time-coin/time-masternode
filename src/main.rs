@@ -3285,7 +3285,7 @@ async fn main() {
                     Ok(tls) => {
                         let tls = Arc::new(tls);
                         server.set_tls_config(tls.clone());
-                        tracing::info!("🔒 TLS encryption enabled for P2P connections");
+                        tracing::info!("🔒 TLS enabled for P2P connections");
                         Some(tls)
                     }
                     Err(e) => {
@@ -3297,7 +3297,7 @@ async fn main() {
                     }
                 }
             } else {
-                tracing::info!("🔓 TLS disabled by configuration");
+                tracing::info!("⚠️ TLS disabled (tls=0 in config)");
                 None
             };
 
@@ -3387,6 +3387,10 @@ async fn main() {
             let rpc_tls_cert = config.rpc.rpctlscert.clone();
             let rpc_tls_key = config.rpc.rpctlskey.clone();
             let rpc_data_dir = config.storage.data_dir.clone();
+            let ws_tls_enabled = config.rpc.wstls;
+            let ws_tls_cert = config.rpc.wstlscert.clone();
+            let ws_tls_key = config.rpc.wstlskey.clone();
+            let ws_data_dir = config.storage.data_dir.clone();
 
             let rpc_handle = tokio::spawn(async move {
                 match RpcServer::new(
@@ -3445,6 +3449,8 @@ async fn main() {
                                     );
                                 }
                             }
+                        } else {
+                            println!("  ⚠️  RPC TLS disabled (rpctls=0 in config)");
                         }
 
                         tokio::select! {
@@ -3470,9 +3476,41 @@ async fn main() {
             let ws_shutdown = shutdown_token.clone();
             let ws_tx_sender = tx_event_sender.clone();
             let ws_addr_display = ws_addr.clone();
+
+            // Build WS TLS acceptor (enabled by default)
+            let ws_tls_acceptor: Option<tokio_rustls::TlsAcceptor> = if ws_tls_enabled {
+                use crate::network::tls::TlsConfig;
+                let tls_result = if !ws_tls_cert.is_empty() && !ws_tls_key.is_empty() {
+                    TlsConfig::from_pem_files(
+                        std::path::Path::new(&ws_tls_cert),
+                        std::path::Path::new(&ws_tls_key),
+                    )
+                } else {
+                    TlsConfig::new_self_signed()
+                };
+                match tls_result {
+                    Ok(tls_config) => {
+                        let _ = std::fs::write(
+                            std::path::Path::new(&ws_data_dir).join("ws_tls.txt"),
+                            "WS TLS is enabled with a self-signed certificate.\n\
+                             To disable: wstls=0 in time.conf\n\
+                             To use your own cert: wstlscert=/path/cert.pem  wstlskey=/path/key.pem\n",
+                        );
+                        println!("  🔒 WebSocket TLS enabled");
+                        Some(tls_config.acceptor())
+                    }
+                    Err(e) => {
+                        eprintln!("  ⚠️  WebSocket TLS init failed: {}. Falling back to plain ws://.", e);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             let ws_handle = tokio::spawn(async move {
                 if let Err(e) =
-                    rpc::websocket::start_ws_server(&ws_addr, ws_tx_sender, ws_shutdown).await
+                    rpc::websocket::start_ws_server(&ws_addr, ws_tx_sender, ws_shutdown, ws_tls_acceptor).await
                 {
                     eprintln!("  ❌ WebSocket server error: {}", e);
                 }
