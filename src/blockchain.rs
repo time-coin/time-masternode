@@ -797,10 +797,46 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No local blockchain - genesis will be generated dynamically via generate_dynamic_genesis()
-        tracing::info!(
-            "📋 No genesis block found - will be generated dynamically when masternodes register"
-        );
+        // No local blockchain - on testnet use hardcoded genesis; on mainnet wait for masternodes
+        match self.network_type {
+            NetworkType::Testnet
+                if crate::constants::genesis::TESTNET_GENESIS_HASH.is_some() =>
+            {
+                tracing::info!(
+                    "📋 No genesis found — creating from hardcoded testnet genesis data"
+                );
+                let genesis = GenesisBlock::testnet_genesis();
+                GenesisBlock::verify_checkpoint(&genesis, self.network_type)?;
+
+                let genesis_hash = genesis.hash();
+                let genesis_bytes = bincode::serialize(&genesis)
+                    .map_err(|e| format!("Failed to serialize hardcoded genesis: {}", e))?;
+                self.storage
+                    .insert("block_0".as_bytes(), genesis_bytes)
+                    .map_err(|e| format!("Failed to store hardcoded genesis: {}", e))?;
+                self.storage
+                    .insert(genesis_hash.as_slice(), &0u64.to_be_bytes())
+                    .map_err(|e| format!("Failed to index hardcoded genesis: {}", e))?;
+                let height_bytes =
+                    bincode::serialize(&0u64).map_err(|e| e.to_string())?;
+                self.storage
+                    .insert("chain_height".as_bytes(), height_bytes)
+                    .map_err(|e| format!("Failed to save chain_height: {}", e))?;
+                self.storage
+                    .flush()
+                    .map_err(|e| format!("Failed to flush hardcoded genesis: {}", e))?;
+                self.current_height.store(0, Ordering::Release);
+                tracing::info!(
+                    "🎉 Hardcoded testnet genesis stored: {}",
+                    hex::encode(&genesis_hash[..8])
+                );
+            }
+            _ => {
+                tracing::info!(
+                    "📋 No genesis block found — will be generated dynamically when masternodes register"
+                );
+            }
+        }
         Ok(())
     }
 
