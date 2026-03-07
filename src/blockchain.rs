@@ -3846,9 +3846,9 @@ impl Blockchain {
         self.block_cache.estimated_memory_usage()
     }
 
-    /// Get pending transactions (stub for compatibility)
+    /// Get pending transactions from the mempool
     pub fn get_pending_transactions(&self) -> Vec<Transaction> {
-        vec![]
+        self.consensus.tx_pool.get_pending_transactions()
     }
 
     /// Get block by height  
@@ -3856,19 +3856,19 @@ impl Blockchain {
         self.get_block(height)
     }
 
-    /// Get UTXO state hash (stub for compatibility)
+    /// Get UTXO state hash — deterministic SHA-256 over the sorted UTXO set
     pub async fn get_utxo_state_hash(&self) -> [u8; 32] {
-        [0u8; 32]
+        self.utxo_manager.calculate_utxo_set_hash().await
     }
 
-    /// Get UTXO count (stub for compatibility)
+    /// Get count of all unspent UTXOs
     pub async fn get_utxo_count(&self) -> usize {
-        0
+        self.utxo_manager.list_all_utxos().await.len()
     }
 
-    /// Get all UTXOs (stub for compatibility)
+    /// Get the full UTXO set
     pub async fn get_all_utxos(&self) -> Vec<crate::types::UTXO> {
-        vec![]
+        self.utxo_manager.list_all_utxos().await
     }
 
     /// Get block hash at height
@@ -4129,12 +4129,29 @@ impl Blockchain {
         blocks
     }
 
-    /// Check if transaction is finalized (stub for compatibility)
-    pub async fn is_transaction_finalized(&self, _txid: &[u8; 32]) -> bool {
-        true
+    /// Check if a transaction is finalized.
+    ///
+    /// A transaction is considered finalized when it has been:
+    /// 1. Included in a block (present in the transaction index), OR
+    /// 2. Reached 51% TimeVote threshold and is waiting for block inclusion
+    ///    (present in the finalized pool or timevote consensus state).
+    pub async fn is_transaction_finalized(&self, txid: &[u8; 32]) -> bool {
+        // Highest confidence: transaction is already in a block
+        if let Some(ref tx_index) = self.tx_index {
+            if tx_index.get_location(txid).is_some() {
+                return true;
+            }
+        }
+        // Transaction reached timevote finality but not yet included in a block
+        if self.consensus.tx_pool.is_finalized(txid) {
+            return true;
+        }
+        self.consensus.timevote.is_finalized(txid)
     }
 
-    /// Get transaction confirmations (stub for compatibility)
+    /// Get how many blocks deep a transaction is (1-based confirmations).
+    ///
+    /// Returns `None` when the transaction has not yet been included in any block.
     pub async fn get_transaction_confirmations(&self, txid: &[u8; 32]) -> Option<u64> {
         if let Some(ref tx_index) = self.tx_index {
             if let Some(location) = tx_index.get_location(txid) {
@@ -4142,7 +4159,7 @@ impl Blockchain {
                 return Some(current_height.saturating_sub(location.block_height) + 1);
             }
         }
-        Some(0)
+        None
     }
 
     /// Get all finalized transaction IDs in a height range (for reorg protection)
