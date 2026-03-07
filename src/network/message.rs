@@ -255,9 +255,9 @@ pub enum NetworkMessage {
     UnknownMessage,
 }
 
-/// An entry in a PeerExchange message — a peer address with its current connection load.
-/// Recipients should prefer peers with the lowest `connection_count` when choosing
-/// who to connect to, which naturally distributes load across the network.
+/// An entry in a PeerExchange message — a peer address with its current connection load
+/// and tier.  Recipients use tier to route connections up the pyramid (Free→Bronze→Silver→Gold)
+/// and use connection_count to prefer less-loaded peers within each tier.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PeerExchangeEntry {
     /// IP address of the peer (no port — port is derived from NetworkType)
@@ -266,6 +266,8 @@ pub struct PeerExchangeEntry {
     pub connection_count: u16,
     /// True if this peer is a registered masternode
     pub is_masternode: bool,
+    /// Masternode tier — drives pyramid routing (None = unregistered / regular peer)
+    pub tier: Option<MasternodeTier>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
