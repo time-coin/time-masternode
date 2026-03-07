@@ -280,6 +280,22 @@ impl AdaptiveReconnectionAI {
         queue
     }
 
+    /// Get the number of consecutive failures for a peer (0 if unknown).
+    /// Used by callers to decide whether to evict a persistently dead peer.
+    pub fn consecutive_failures_for(&self, ip: &str) -> u32 {
+        self.profiles
+            .read()
+            .get(ip)
+            .map(|p| p.consecutive_failures)
+            .unwrap_or(0)
+    }
+
+    /// Forget a peer entirely — removes its profile so the failure history is cleared.
+    /// Call this after evicting a peer from the peer_manager.
+    pub fn forget_peer(&self, ip: &str) {
+        self.profiles.write().remove(ip);
+    }
+
     /// Update network health factor (called from consensus health monitor)
     pub fn set_network_health(&self, health: f64) {
         *self.network_health.write() = health.clamp(0.0, 1.0);
