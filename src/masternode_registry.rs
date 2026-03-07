@@ -742,13 +742,10 @@ impl MasternodeRegistry {
     ) -> Vec<MasternodeInfo> {
         let current_height = blockchain.get_height();
 
-        // BOOTSTRAP MODE: Only for block 1 (height 0 → 1), use ALL registered masternodes
-        // - Block 0 (genesis): already exists
-        // - Block 1: Use all registered masternodes (including inactive) since no bitmap exists yet
-        // - Block 2+: Use bitmap from previous block (normal participation-based selection)
+        // BOOTSTRAP MODE: Block 1 (height 0 → 1) uses ALL registered masternodes
+        // since there is no previous bitmap yet.
         if current_height == 0 {
             let all_masternodes: Vec<MasternodeInfo> = self.list_all().await;
-            // Rate-limit this log to avoid spam when stuck at height 0
             static LAST_BLOCK1_LOG: std::sync::atomic::AtomicI64 =
                 std::sync::atomic::AtomicI64::new(0);
             let now_secs = chrono::Utc::now().timestamp();
@@ -763,7 +760,10 @@ impl MasternodeRegistry {
             return all_masternodes;
         }
 
-        // Get previous block to see who participated
+        // Get previous block to see who participated.
+        // The bitmap in each block now includes BOTH direct voters AND gossip-active
+        // masternodes, so all online nodes (even those not directly connected to the
+        // previous producer) appear here and qualify for rewards this block.
         let prev_block = match blockchain.get_block_by_height(current_height).await {
             Ok(block) => block,
             Err(e) => {
@@ -772,20 +772,17 @@ impl MasternodeRegistry {
                     current_height,
                     e
                 );
-                // Fallback to active masternodes if we can't get previous block
                 return self.get_active_masternodes().await;
             }
         };
 
-        // Collect addresses that participated (producer + consensus voters)
+        // Collect addresses that participated (producer + bitmap voters)
         let mut participants = std::collections::HashSet::new();
 
-        // Block producer always participated
         if !prev_block.header.leader.is_empty() {
             participants.insert(prev_block.header.leader.clone());
         }
 
-        // Get consensus participants from bitmap (compact representation)
         let voters_from_bitmap = self
             .get_active_from_bitmap(&prev_block.consensus_participants_bitmap)
             .await;
@@ -802,7 +799,6 @@ impl MasternodeRegistry {
             return self.get_active_masternodes().await;
         }
 
-        // Filter masternodes to only those that participated
         let masternodes = self.masternodes.read().await;
         let eligible: Vec<MasternodeInfo> = masternodes
             .values()
@@ -811,21 +807,16 @@ impl MasternodeRegistry {
             .collect();
 
         tracing::debug!(
-            "💰 Block {}: {} masternodes eligible for rewards (participated in block {})",
+            "💰 Block {}: {} masternodes eligible for rewards (in previous block {} bitmap)",
             current_height + 1,
             eligible.len(),
             current_height
         );
 
-        // CRITICAL SAFETY: If insufficient eligible masternodes after filtering, fall back progressively
-        // This prevents deadlock when participation records are broken or incomplete
-        // Minimum 3 masternodes required for block production
+        // CRITICAL SAFETY: refuse block production if too few masternodes.
         if eligible.len() < 3 {
             let active = self.get_active_masternodes().await;
-
-            // CRITICAL: If still insufficient active masternodes, return empty to prevent block production
             if active.len() < 3 {
-                // Rate-limit this error (once per 60s) to avoid log spam
                 use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
                 static LAST_FORK_WARN: AtomicI64 = AtomicI64::new(0);
                 let now_secs = chrono::Utc::now().timestamp();
@@ -839,30 +830,12 @@ impl MasternodeRegistry {
                 }
                 return Vec::new();
             }
-
-            // Rate-limit participation recovery logs (once per 60s) to avoid spam
-            use std::sync::atomic::{AtomicI64, Ordering as AtomOrd};
-            static LAST_PARTICIPATION_WARN: AtomicI64 = AtomicI64::new(0);
-            let now_secs = chrono::Utc::now().timestamp();
-            let last = LAST_PARTICIPATION_WARN.load(AtomOrd::Relaxed);
-            if now_secs - last >= 60 {
-                LAST_PARTICIPATION_WARN.store(now_secs, AtomOrd::Relaxed);
-                tracing::debug!(
-                    "⚠️ Participation recovery: block {} bitmap had {} participants, falling back to {} active masternodes",
-                    current_height,
-                    participants.len(),
-                    active.len()
-                );
-            }
-            return active;
-        }
-
-        for mn in &eligible {
-            tracing::debug!(
-                "   → {} (tier {:?})",
-                mn.masternode.address,
-                mn.masternode.tier
+            tracing::warn!(
+                "⚠️ Bitmap had {} participants, falling back to {} active masternodes",
+                eligible.len(),
+                active.len()
             );
+            return active;
         }
 
         eligible
