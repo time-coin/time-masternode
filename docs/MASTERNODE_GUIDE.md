@@ -243,7 +243,61 @@ To upgrade or downgrade your tier:
 
 ---
 
+## Masternode Active Status
+
+### How a Node Becomes (and Stays) Active
+
+The daemon determines whether a masternode is `is_active` using two complementary signals:
+
+**1. Direct TCP Connection (Authoritative)**
+
+If a masternode has an established, post-handshake TCP connection in `PeerConnectionRegistry`, it is considered active regardless of gossip counts. `cleanup_stale_reports()` accepts a `peer_registry` reference and will never flip `is_active = false` for a directly-connected peer. Direct connections are the ground truth.
+
+**2. Gossip-Based Status (Secondary)**
+
+Masternodes broadcast `StatusGossip` messages to the network roughly every 60 seconds. A masternode records its own status locally (self-recording) before broadcasting, so it appears in its own registry from the first cycle. Peers relay these sightings, and the `cleanup_stale_reports()` sweep deactivates nodes that have not been seen within the TTL window.
+
+**Dynamic Minimum-Reports Threshold**
+
+The number of distinct gossip sightings required before a node is considered active scales with network size:
+
+| Network Size | `min_reports` Required |
+|--------------|----------------------|
+| ≤ 4 nodes | 1 |
+| 5–12 nodes | 2 |
+| 13+ nodes | 3 |
+
+This prevents premature deactivation on small testnets where only a few peers exist.
+
+### Summary of Active-Status Rules
+
+```
+Direct TCP connection present → is_active = true (cleanup cannot override)
+No direct connection + gossip sightings ≥ min_reports within TTL → is_active = true
+No direct connection + gossip sightings < min_reports or TTL expired → is_active = false
+```
+
+---
+
 ## Reward Distribution
+
+### Reward Eligibility — Bitmap Gate
+
+Before a masternode can receive tier-pool rewards it must appear in the **`consensus_participants_bitmap`** of the most recent block. This bitmap is built by the block producer from two sources:
+1. **Direct voters** — nodes that sent `TimeVotePrepare` or `TimeVotePrecommit` for that block
+2. **Gossip-active masternodes** — nodes recorded as active via gossip sightings (~30–60 s accumulation)
+
+Both sets are merged into the bitmap. This ensures pyramid-topology nodes that are not directly connected to the block producer still appear and remain eligible.
+
+**One-block delay for new participants:**
+A node must be in block N's bitmap to receive rewards in block N+1. Nodes joining mid-block or with insufficient gossip history at production time will not appear in the current block's bitmap and must wait for the next block cycle.
+
+```
+Eligibility chain:
+  gossip sighting OR direct TimeVote → bitmap in block N → reward payout in block N+1
+```
+
+> **Practical implication:** A newly started masternode may miss the first reward block while gossip propagates (~30–60 s). This is expected behavior, not a bug.
 
 ### How Rewards Work
 

@@ -1,7 +1,7 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-03-06  
-**Version:** 1.3.0 (Block Producer Signatures, VRF Rolling Window, Genesis Checkpoint)
+**Last Updated:** 2026-03-07  
+**Version:** 1.4.0 (Full-Mesh Small Networks, Peer Eviction, PeerExchange Load Info, Catch-up Acceleration, Masternode Active Status, Bitmap Gossip-Active, get_connected_peers Fix)
 
 ---
 
@@ -41,6 +41,63 @@
 
 ---
 
+## Recent Updates (v1.4.0 - March 2026)
+
+### Full-Mesh Topology for Small Networks
+
+- **`FULL_MESH_THRESHOLD = 50`**: when the total masternode count ≤ 50, Phase 1 of `client.rs` connects every node to every other node regardless of tier, guaranteeing that gossip, TimeVotes, and reward-eligibility sightings reach all participants
+- **Pyramid topology still used** when the network exceeds 50 masternodes: Gold → Silver → Bronze → Free hierarchy with reserved upstream-slot allocation as before
+- The threshold is evaluated at connection time; as nodes join and the count crosses 50 the topology transitions automatically
+
+### Peer Eviction for Persistently Dead Peers
+
+- **10 consecutive failures** → peer is permanently evicted from the sled `peer_manager` DB and the AI profile in `adaptive_reconnection.rs`
+- **Exponential cooldown** before re-attempt: 3 failures = 10 min, 5 = 40 min, 7 = 2.7 h, 9+ = 24 h (max)
+- **Evicted peers can re-enter** via PeerExchange (§PeerExchange below) if they recover
+- Phase 3-MN (masternode reconnect loop) was removed; masternodes connect outbound themselves on startup
+
+### PeerExchange with Load-Aware Routing
+
+- `GetPeers` responses now return **`PeerExchangeEntry`** structs instead of bare addresses:
+  ```rust
+  pub struct PeerExchangeEntry {
+      pub address: String,
+      pub connection_count: u32,
+      pub is_masternode: bool,
+      pub tier: Option<MasternodeTier>,
+  }
+  ```
+- Entries are sorted by tier (Gold first) then by ascending `connection_count` so new peers prefer underloaded nodes
+- **Overload redirect**: a node with `connection_count > 70% of MAX_INBOUND (100)` rejects new inbounds and sends an alternative `PeerExchangeEntry` list so the connecting peer can try a less-loaded peer instead
+- `PeerConnectionRegistry` tracks per-peer load via a `peer_load` DashMap
+
+### Block Catch-Up Acceleration
+
+- **`LEADER_TIMEOUT_SECS` reduced from 10 s to 5 s** — offline leaders are skipped twice as fast when the node is syncing
+- **Free-tier VRF eligibility** reduced from attempt ≥ 6 (60 s deadlock) to **attempt ≥ 3 (15 s deadlock)**, improving testnet and small-network liveness
+- When **`blocks_behind > 50`**, `leader_attempt` starts at 1 (pre-boost) so paid tiers skip the strict first cycle and catch-up proceeds faster
+
+### Masternode Active Status — Three Fixes
+
+- **Direct TCP is authoritative**: `cleanup_stale_reports()` now accepts a `peer_registry` reference and never flips `is_active = false` for a peer that has a live direct connection, regardless of the gossip counter
+- **Gossip self-recording**: `broadcast_status_gossip()` now calls `process_status_gossip()` locally before broadcasting so a node records its own sightings in its own registry
+- **Dynamic minimum-reports threshold**: 1 (≤ 4 nodes), 2 (5–12 nodes), 3 (13+ nodes) — prevents premature deactivation on small testnets
+
+### Consensus Bitmap Includes Gossip-Active Nodes
+
+- When building `consensus_participants_bitmap` during block production (`src/blockchain.rs`), **direct voters** (TimeVote prepare/precommit) are now **merged with gossip-active masternodes**
+- This ensures that pyramid-topology nodes not directly connected to the block producer still appear in the bitmap and remain eligible for tier-pool rewards and VRF leader selection
+- **Anti-gaming preserved**: gossip requires ~30–60 s to accumulate; nodes joining mid-block or later than the observation window do not qualify
+- **Reward eligibility chain**: gossip or direct-vote → bitmap in block N → rewards in block N+1
+
+### `get_connected_peers()` Returns Post-Handshake Peers Only
+
+- `PeerConnectionRegistry::get_connected_peers()` previously included all entries in the connections DashMap, including peers in `Connecting` state (TCP not yet established)
+- Now cross-references the `peer_writers` map — only IPs with a live, non-closed writer channel are returned
+- Eliminates the bug where AI peer selection and sync logic operated on not-yet-connected peers
+
+---
+
 ## Recent Updates (v1.2.0 - February 22, 2026)
 
 ### Fork Resolution Simplification
@@ -54,7 +111,7 @@
 
 - **`TARGET_PROPOSERS` reduced from 3 to 1**: targets exactly one block producer per slot, reducing competing blocks
 - **Wall-clock deadlock detection**: VRF threshold relaxation now uses real elapsed time waiting at a height, not time since slot was scheduled (prevents all nodes being eligible during catch-up)
-- **Free-tier sybil protection**: Free nodes require 60s of deadlock (attempt ≥ 6) before receiving VRF boost
+- **Free-tier sybil protection**: Free nodes require 15 s of deadlock (attempt ≥ 3) before receiving VRF boost (reduced from 60 s / attempt ≥ 6 in v1.4.0)
 
 ### Catch-up Micro-fork Prevention
 
@@ -378,6 +435,8 @@ pub enum UTXOState {
 **Responsibility:** P2P peer communication with persistent connections
 
 **Key Features:**
+- **Full-Mesh Topology (≤ 50 masternodes):** Every node connects to every other node, ensuring all gossip, votes, and reward-eligibility sightings are universally visible on testnet and small networks
+- **Pyramid Topology (> 50 masternodes):** Gold/Silver/Bronze/Free hierarchy with reserved upstream-slot allocation for scalability
 - **Persistent Masternode Mesh:** Two-way connections established once, never disconnected
 - **Message Types:**
   - TransactionBroadcast: New transactions
@@ -825,6 +884,9 @@ Block {
     transactions: Vec<Transaction>,
     masternode_rewards: Vec<(String, u64)>,
     time_attestations: Vec<TimeAttestation>,
+    // Direct voters (TimeVote prepare/precommit) MERGED with gossip-active masternodes.
+    // Ensures pyramid-topology nodes not directly connected to producer appear in the
+    // bitmap and remain eligible for rewards/VRF in the next block.
     consensus_participants_bitmap: Vec<u8>,
     liveness_recovery: Option<bool>,
 }

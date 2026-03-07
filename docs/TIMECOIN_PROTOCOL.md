@@ -692,7 +692,10 @@ Lower `score_i` is better. Among multiple valid proposals, the one with the lowe
 - **Tight selection:** TARGET_PROPOSERS=1 ensures ~67% probability of exactly one proposer per slot with 6 equal-weight nodes; empty slots are resolved by the timeout fallback below
 
 **Timeout Fallback (Deadlock Recovery):**
-If no valid proposal is received within 10 seconds of **wall-clock wait time** at the current height, nodes progressively relax the threshold by multiplying `effective_weight_i` by `2^attempt` (where attempt increments every 10s of real waiting). This uses actual elapsed time since the node started waiting for a given height, NOT time since the slot was scheduled—preventing all nodes from being immediately eligible during catch-up scenarios. After ~20 seconds of deadlock, probability of at least one proposer exceeds 99.9%. Free-tier nodes require 60s of deadlock (attempt ≥ 6) before receiving any VRF boost, maintaining sybil resistance.
+If no valid proposal is received within **5 seconds** of **wall-clock wait time** at the current height, nodes progressively relax the threshold by multiplying `effective_weight_i` by `2^attempt` (where attempt increments every 5 s of real waiting). This uses actual elapsed time since the node started waiting for a given height, NOT time since the slot was scheduled — preventing all nodes from being immediately eligible during catch-up scenarios. After ~10 seconds of deadlock, probability of at least one proposer exceeds 99.9%. Free-tier nodes require **15 s of deadlock (attempt ≥ 3)** before receiving any VRF boost, maintaining sybil resistance.
+
+**Catch-up Acceleration:**
+When a node detects it is **more than 50 blocks behind** the network tip (`blocks_behind > 50`), `leader_attempt` is initialized to 1 (pre-boost) instead of 0. This causes paid-tier nodes to skip the strict first VRF cycle immediately, allowing faster block production from available leaders during bulk synchronization.
 
 **Security Note (VRF Grinding Mitigation):**
 The VRF input MUST include `prev_block_hash` to prevent grinding attacks. The domain separator `"TIMECOIN_VRF_V2"` and block `height` are predictable, but `prev_block_hash` changes with each block and cannot be known in advance, making pre-computation attacks infeasible. This follows best practices from Algorand, Ethereum 2.0, and Cardano.
@@ -727,7 +730,9 @@ A block MUST contain:
   - `transactions: Vec<Transaction>` (full transaction data)
   - `masternode_rewards: Vec<(String, u64)>` (reward allocations)
   - `time_attestations: Vec<TimeAttestation>`
-  - `consensus_participants_bitmap: Vec<u8>`
+  - `consensus_participants_bitmap: Vec<u8>` — **direct voters (TimeVote prepare/precommit) MERGED with gossip-active masternodes**. Inclusion in this bitmap is the gateway to tier-pool rewards and VRF eligibility in the next block. Gossip-active nodes are included to ensure pyramid-topology peers not directly connected to the producer remain reward-eligible. Anti-gaming: gossip requires ~30–60 s to accumulate, preventing mid-block joiners from qualifying.
+
+**Reward eligibility chain:** gossip sighting or direct vote → present in `consensus_participants_bitmap` in block N → eligible for rewards in block N+1. Nodes joining less than one gossip cycle before block production do not receive rewards until the following block.
 
 Blocks include full transactions (not hashes/entries) so syncing nodes can reconstruct UTXO state. Transactions are sorted lexicographically by `txid`.
 
@@ -876,7 +881,7 @@ pub enum NetworkMessage {
 
     // --- Peer Exchange ---
     GetPeers,
-    PeersResponse(Vec<String>),
+    PeersResponse(Vec<PeerExchangeEntry>),  // includes connection_count, is_masternode, tier
     Ping { nonce: u64, timestamp: i64, height: Option<u64> },
     Pong { nonce: u64, timestamp: i64, height: Option<u64> },
 

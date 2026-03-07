@@ -56,7 +56,9 @@ Transport:     TCP (plain, TLS planned)
 Serialization: bincode (internal), JSON (RPC)
 Framing:       [length: u32_be] [type: u8] [payload]
 Max message:   4 MB
-Max peers:     50 (configurable)
+Max peers:     50 (configurable outbound)
+MAX_INBOUND:   100 (overload redirect at 70%)
+FULL_MESH_THRESHOLD: 50 masternodes (full-mesh below, pyramid above)
 Port:          24000 (mainnet), 24100 (testnet)
 Storage:       Sled embedded database
 Bootstrap:     Configured in time.conf (addnode=)
@@ -75,8 +77,11 @@ TimeVote:
   
 TimeLock:
   BLOCK_INTERVAL:  600 s       # 10 minutes
+  LEADER_TIMEOUT_SECS: 5 s    # offline leader skipped every 5s (was 10s in v1.2)
+  FREE_TIER_VRF_ATTEMPT: 3    # Free tier gets VRF boost after attempt 3 (15s deadlock, was 6/60s)
   SLOT_GRACE:      30 s        # accept blocks in [slot-30, slot+30]
   FUTURE_TOLERANCE: 5 s        # reject blocks > 5s in future
+  CATCH_UP_PRESTART: 1         # leader_attempt starts at 1 when blocks_behind > 50
 
 AVS:
   HEARTBEAT_PERIOD: 60 s
