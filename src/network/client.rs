@@ -358,15 +358,27 @@ impl NetworkClient {
                         if connection_manager.is_reconnecting(ip) {
                             continue;
                         }
-                        // Check AI advice before spawning — avoids creating tasks that
-                        // immediately exit due to cooldown after repeated failures.
+                        // Check AI advice before spawning. If a peer has failed enough
+                        // times to reach deep exponential backoff (≥10 consecutive
+                        // failures ≈ 17-hour cooldown), evict it from the peer_manager
+                        // entirely — it will be re-added via PeerExchange if it recovers.
+                        const FORGET_THRESHOLD: u32 = 10;
                         let advice = res.reconnection_ai.get_reconnection_advice(ip, false);
                         if !advice.should_attempt {
-                            tracing::debug!(
-                                "⏭️  [PHASE3-PEER] Skipping {} (AI cooldown: {})",
-                                ip,
-                                advice.reasoning
-                            );
+                            let failures = res.reconnection_ai.consecutive_failures_for(ip);
+                            if failures >= FORGET_THRESHOLD {
+                                peer_manager.remove_peer(ip).await;
+                                res.reconnection_ai.forget_peer(ip);
+                                tracing::info!(
+                                    "🗑️  Evicted persistently unreachable peer {} ({} consecutive failures)",
+                                    ip, failures
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "⏭️  [PHASE3-PEER] Skipping {} (AI cooldown: {})",
+                                    ip, advice.reasoning
+                                );
+                            }
                             continue;
                         }
                         if !connection_manager.mark_connecting(ip) {
