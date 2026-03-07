@@ -20,7 +20,7 @@ $CLI getpeerinfo 2>&1 | jq -r '.[] | {address: .addr, height: .height}'
 
 echo ""
 echo "=== MASTERNODE STATUS ==="
-$CLI masternodestatus 2>&1 | jq -r '{status: .status, tier: .tier, is_active: .is_active}'
+$CLI masternodestatus 2>&1 | jq -r '{status: .status, tier: .tier, is_active: .is_active}' 2>/dev/null || echo "Not a masternode or not available"
 
 echo ""
 echo "=== CONSENSUS INFO ==="

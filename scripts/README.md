@@ -7,7 +7,7 @@ This directory contains scripts for installing, managing, configuring, and unins
 ## 📦 Scripts
 
 ### configure-masternode.sh / configure-masternode.bat
-**NEW!** Interactive configuration tool for masternode setup.
+Interactive configuration tool for masternode setup.
 
 **Features**:
 - ✅ Interactive prompts for all masternode settings
@@ -253,13 +253,13 @@ sudo nano /root/.timecoin/testnet/time.conf
 sudo systemctl restart timed
 ```
 
-### 3. Create Wallet
+### 3. Get Wallet Info
 ```bash
-# Create new wallet
-time-cli wallet create
-
 # Check balance
-time-cli wallet balance <your-address>
+time-cli getbalance
+
+# Get wallet info
+time-cli getwalletinfo
 ```
 
 ### 4. Monitor
@@ -271,7 +271,7 @@ systemctl status timed
 journalctl -u timed -f
 
 # Check blockchain height
-time-cli node info
+time-cli getblockcount
 ```
 
 ---
@@ -318,7 +318,8 @@ sudo nano /root/.timecoin/time.conf
 
 ### Check Disk Usage
 ```bash
-du -sh /var/lib/timecoin
+# Check disk usage
+du -sh ~/.timecoin
 ```
 
 ---
@@ -347,11 +348,10 @@ The installation script implements security best practices:
 journalctl -u timed -n 50 --no-pager
 
 # Check config syntax
-timed --conf /root/.timecoin/time.conf
+timed --conf ~/.timecoin/time.conf
 
 # Verify permissions
-ls -la /etc/timecoin/
-ls -la /var/lib/timecoin/
+ls -la ~/.timecoin/
 ```
 
 ### Build Fails
@@ -520,7 +520,7 @@ See [LICENSE](../LICENSE) file in the repository root.
 
 ---
 
-**Last Updated**: 2026-02-24
+**Last Updated**: 2026-03-10
 
 ---
 
@@ -649,3 +649,93 @@ bash scripts/stress_test.sh --help
 ```
 
 **CSV Columns**: `tx_seq, txid, target_tps, actual_tps, send_time_unix, send_latency_ms, finality_time_ms, finalized, votes, accumulated_weight, confirmations, error`
+
+---
+
+### test.sh / test.bat
+Basic smoke test: starts the daemon, runs common CLI commands, and stops the daemon.
+
+```bash
+bash scripts/test.sh
+```
+
+### test_transaction.sh
+Full TimeVote transaction flow test. Sends 1 TIME to a connected masternode and monitors the entire lifecycle: broadcast → vote collection → finalization (51% threshold) → TimeProof assembly → block archival.
+
+```bash
+# Requires: time-cli in PATH, daemon running, at least one connected masternode
+bash scripts/test_transaction.sh
+```
+
+### test_timevote.sh
+TimeVote Protocol validation suite. Tests masternode connectivity, stake-weighted voting, finalization at 51% threshold, and TimeProof certificate structure.
+
+```bash
+bash scripts/test_timevote.sh
+```
+
+### test_critical_flow.sh
+End-to-end critical transaction flow tests covering: transaction creation, broadcast, TimeVote request, finalization, TransactionFinalized broadcast, finalized pool state, block inclusion, fee calculation, finalized pool cleanup, and UTXO state transitions.
+
+```bash
+# Requires: time-cli in PATH, daemon running (v1.2.0+)
+bash scripts/test_critical_flow.sh
+```
+
+### test_finalization_propagation.sh
+Multi-node test verifying that transaction finalization propagates to all nodes. Configure the `NODES` array with SSH-accessible hosts, or override via env var.
+
+```bash
+# Default: single-node only
+bash scripts/test_finalization_propagation.sh
+
+# Multi-node via env var
+NODES="root@node1 root@node2 root@node3" bash scripts/test_finalization_propagation.sh
+```
+
+### stability_test.sh
+72-hour stability test for a 3-node local testnet. Monitors heights across nodes, logs mismatches, and produces a summary report. Assumes nodes are running on RPC ports 24111, 24121, 24131 (created by `setup_local_testnet.sh`).
+
+```bash
+bash scripts/stability_test.sh
+```
+
+### setup_local_testnet.sh
+Creates a 3-node local testnet with separate data directories and configs. Prints the commands needed to start each node.
+
+```bash
+bash scripts/setup_local_testnet.sh
+```
+
+---
+
+## 🔍 Diagnostic Scripts
+
+### diagnose_forks.sh
+Local fork diagnostic: checks daemon status, blockchain height, block hash, peer count, clock sync, P2P port, recent logs, and genesis time–based schedule comparison. Run directly on the node to investigate sync issues.
+
+```bash
+bash scripts/diagnose_forks.sh
+```
+
+### check_node_state.sh
+Per-node state check: service status, blockchain info, recent fork/reorg activity, peer connectivity, and recent log messages. Outputs a health status summary.
+
+```bash
+bash scripts/check_node_state.sh
+```
+
+### diagnose_status.sh
+Quick blockchain, mempool, peer, masternode, and consensus status dump using `time-cli`. Set `CLI_PATH` to specify a non-default binary location.
+
+```bash
+bash scripts/diagnose_status.sh
+# or: CLI_PATH=/usr/local/bin/time-cli bash scripts/diagnose_status.sh
+```
+
+### quick_check.sh
+Rapid RPC connectivity check. Tests both testnet (24101) and mainnet (24001) RPC ports and lists listening ports.
+
+```bash
+bash scripts/quick_check.sh
+```

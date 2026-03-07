@@ -61,8 +61,8 @@ check_prerequisites() {
     
     # Check version (from getnetworkinfo — version is numeric, e.g. 110000 for v1.1.0)
     VERSION=$(time-cli getnetworkinfo 2>/dev/null | jq -r '.version // 0')
-    if [ "$VERSION" -lt 110000 ]; then
-        log_fail "Wrong version: $VERSION (expected >= 110000 / v1.1.0)"
+    if [ "$VERSION" -lt 120000 ]; then
+        log_fail "Wrong version: $VERSION (expected >= 120000 / v1.2.0)"
         exit 1
     fi
     
@@ -165,7 +165,7 @@ test_transaction_finalization() {
     return 1
 }
 
-# Test 5: TransactionFinalized Broadcast (BUG #4 FIX)
+# Test 5: TransactionFinalized Broadcast
 test_finalization_broadcast() {
     log_info "Test 5: TransactionFinalized Broadcast ⭐ CRITICAL"
     
@@ -178,10 +178,10 @@ test_finalization_broadcast() {
     
     # Check for broadcast message
     if journalctl -u timed --since "10 seconds ago" 2>/dev/null | grep -q "Broadcast TransactionFinalized.*$TXID"; then
-        log_success "TransactionFinalized broadcast sent (BUG #4 FIXED)"
+        log_success "TransactionFinalized broadcast sent"
         return 0
     else
-        log_fail "TransactionFinalized NOT broadcast (BUG #4 STILL PRESENT)"
+        log_fail "TransactionFinalized NOT broadcast"
         return 1
     fi
 }
@@ -204,7 +204,7 @@ test_finalized_pool() {
         log_success "Finalized pool has $FINALIZED_COUNT transaction(s)"
         return 0
     else
-        log_fail "Finalized pool is empty (TX may have been prematurely cleared - BUG #1)"
+        log_fail "Finalized pool is empty (TX may have been prematurely cleared)"
         return 1
     fi
 }
@@ -243,21 +243,21 @@ test_block_inclusion() {
     return 1
 }
 
-# Test 8: Block Fee Calculation (BUG #3 FIX)
+# Test 8: Block Fee Calculation
 test_block_fees() {
     log_info "Test 8: Block Fee Calculation ⭐ CRITICAL"
     
     # Check recent logs for fee errors
     if journalctl -u timed --since "2 minutes ago" 2>/dev/null | grep -q "incorrect block_reward"; then
-        log_fail "Block reward mismatch detected (BUG #3 STILL PRESENT)"
+        log_fail "Block reward mismatch detected"
         return 1
     else
-        log_success "No block reward errors (BUG #3 FIXED)"
+        log_success "No block reward errors detected"
         return 0
     fi
 }
 
-# Test 9: Finalized Pool Cleanup (BUG #1 FIX)
+# Test 9: Finalized Pool Cleanup
 test_finalized_cleanup() {
     log_info "Test 9: Finalized Pool Cleanup ⭐ CRITICAL"
     
@@ -273,7 +273,7 @@ test_finalized_cleanup() {
         # TX is in blockchain, should be cleared from finalized pool
         # Check logs for selective clearing
         if journalctl -u timed --since "2 minutes ago" 2>/dev/null | grep -q "Clearing.*finalized transaction"; then
-            log_success "Finalized pool cleaned selectively (BUG #1 FIXED)"
+            log_success "Finalized pool cleaned selectively"
             return 0
         else
             log_fail "No finalized pool cleanup logged"
@@ -317,7 +317,7 @@ test_utxo_states() {
 # Main test execution
 main() {
     echo "================================================================"
-    echo "  TimeCoin v1.1.0 - Critical Transaction Flow Tests"
+    echo "  TimeCoin - Critical Transaction Flow Tests"
     echo "================================================================"
     echo ""
     
