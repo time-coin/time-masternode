@@ -1372,6 +1372,14 @@ impl MasternodeRegistry {
             timestamp: now,
         };
 
+        // Record our own sightings in our local registry BEFORE broadcasting.
+        // Without this, a direct peer's peer_reports for masternodes we can see
+        // would never include US as a reporter (we only sent gossip outward),
+        // causing the gossip-based is_active check to under-count reporters for
+        // nodes we are directly connected to.
+        self.process_status_gossip(reporter.clone(), visible.clone(), now)
+            .await;
+
         self.broadcast_message(msg).await;
 
         tracing::debug!(
@@ -1451,8 +1459,14 @@ impl MasternodeRegistry {
         // Calculate dynamic threshold once before the loop
         let total_masternodes = masternodes.len();
         let min_reports = if total_masternodes <= 4 {
-            // Small network: require reports from at least half
+            // Very small network: require at least half
             (total_masternodes / 2).max(1)
+        } else if total_masternodes <= 12 {
+            // Small-to-mid network (testnet range): require 2 reporters.
+            // Pyramid leaf nodes connect to 5-6 upward peers; each direct peer
+            // self-records its own gossip, so a leaf reachable from 2+ nodes
+            // will have ≥ 2 reporters in every node's registry.
+            2
         } else {
             // Large network: use standard threshold
             MIN_PEER_REPORTS
