@@ -2722,14 +2722,17 @@ async fn main() {
             let selected_producer = our_mn;
 
             // Safety checks before producing
-            // Always require at least 3 peers to prevent isolated nodes from creating forks
-            // We need network consensus to produce valid blocks
+            // Require at least 1/3 of active masternodes as connected peers, with a hard
+            // floor of 3, to prevent isolated nodes from creating forks.
             let connected_peers = block_peer_registry.get_compatible_peers().await;
-            let min_peers_required = 3;
+            let active_mn_count = block_registry.count_active().await;
+            let min_peers_required = (active_mn_count / 3).max(3);
             if connected_peers.len() < min_peers_required {
                 tracing::warn!(
-                    "⚠️ Only {} peer(s) connected - waiting for more peers before producing",
-                    connected_peers.len()
+                    "⚠️ Only {} peer(s) connected (need {}/{} active masternodes) - waiting for more peers before producing",
+                    connected_peers.len(),
+                    min_peers_required,
+                    active_mn_count
                 );
                 continue;
             }
