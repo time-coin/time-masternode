@@ -252,47 +252,23 @@ impl NetworkClient {
                     tracing::info!("🧹 Reset {} stale connecting peer(s)", stale);
                 }
 
-                let all_masternodes = masternode_registry.list_all().await;
                 let active_count = masternode_registry.list_active().await.len();
                 let outbound_count = connection_manager.connected_count();
                 let inbound_count = peer_registry.inbound_count();
 
                 tracing::debug!(
-                    "🔍 Peer check: {} connected ({} out, {} in), {} known masternodes ({} active), {} total slots",
+                    "🔍 Peer check: {} connected ({} out, {} in), {} active masternodes, {} total slots",
                     outbound_count + inbound_count,
                     outbound_count,
                     inbound_count,
-                    all_masternodes.len(),
                     active_count,
                     max_peers
                 );
 
-                // Reconnect to any disconnected masternodes (HIGH PRIORITY)
-                for mn in all_masternodes.iter().take(reserved_masternode_slots) {
-                    let ip = &mn.masternode.address;
-                    if should_skip(ip) {
-                        continue;
-                    }
-                    // Only spawn if no task is already handling this peer
-                    if connection_manager.is_active(ip) {
-                        continue;
-                    }
-                    // Pre-check AI before marking connecting to avoid spawning tasks that
-                    // immediately exit because the peer is in exponential backoff cooldown.
-                    let advice = res.reconnection_ai.get_reconnection_advice(ip, true);
-                    if !advice.should_attempt {
-                        tracing::debug!(
-                            "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
-                            ip,
-                            advice.reasoning
-                        );
-                        continue;
-                    }
-                    if connection_manager.mark_connecting(ip) {
-                        tracing::info!("🎯 [PHASE3-MN] Reconnecting to masternode: {}", ip);
-                        res.spawn(ip.clone(), true);
-                    }
-                }
+                // Masternodes are servers — when they come back online they will
+                // initiate their own outbound connections (Phase 1 on startup).
+                // We do not actively reconnect to them here to avoid hammering
+                // nodes that are legitimately offline.
 
                 // Fill remaining slots with regular peers
                 let available_slots = max_peers.saturating_sub(outbound_count + inbound_count);
@@ -302,7 +278,8 @@ impl NetworkClient {
                         if should_skip(ip) {
                             continue;
                         }
-                        if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
+                        // Skip masternodes — handled at startup (Phase 1) only
+                        if masternode_registry.get(ip).await.is_some() {
                             continue;
                         }
                         if connection_manager.is_reconnecting(ip) {
