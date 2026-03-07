@@ -2790,8 +2790,15 @@ impl Blockchain {
         let merkle_root = crate::block::types::calculate_merkle_root(&all_txs);
 
         // Create active masternode bitmap based on who voted on the PREVIOUS block
-        // New nodes can vote immediately after announcing, getting into next bitmap
-        // Only nodes in previous bitmap are eligible for leader selection
+        // ELIGIBILITY RULES:
+        //  1. Direct voters: nodes whose timevote messages this producer received directly
+        //  2. Gossip-active nodes: nodes known to be online via gossip during the block period
+        //     Gossip proves a node was online — it must have been seen by ≥ min_reports peers
+        //     within the last 5 minutes. A node that joined mid-block won't have fresh enough
+        //     gossip records yet (gossip runs every 30s, cleanup every 60s).
+        //  3. Combines (1) and (2) so that pyramid-topology nodes not directly connected to
+        //     the producer still appear in the bitmap and remain eligible for rewards / leader
+        //     selection next block.
         let voters = if next_height == 1 {
             // Block 1: Genesis has no voters, so use all active masternodes
             tracing::debug!("📊 Block 1 (after genesis): using all active masternodes for bitmap");
@@ -2834,6 +2841,26 @@ impl Blockchain {
                 .get_voters(prev_block_hash)
             {
                 voters_set.insert(v);
+            }
+
+            // 4. Add gossip-active masternodes. These nodes were confirmed online during
+            //    the block period by ≥ min_reports independent peers, but may not be
+            //    directly connected to this producer (pyramid topology). Including them
+            //    ensures they appear in the bitmap and stay eligible for rewards / leader
+            //    selection without requiring direct connectivity to the block producer.
+            let gossip_active = self.masternode_registry.get_active_masternodes().await;
+            let gossip_active_count_before = voters_set.len();
+            for mn in &gossip_active {
+                voters_set.insert(mn.masternode.address.clone());
+            }
+            let added_via_gossip = voters_set.len() - gossip_active_count_before;
+            if added_via_gossip > 0 {
+                tracing::debug!(
+                    "📊 Block {}: added {} gossip-active masternode(s) to bitmap (total {} direct voters + gossip)",
+                    next_height,
+                    added_via_gossip,
+                    voters_set.len()
+                );
             }
 
             let precommit_voters: Vec<String> = voters_set.into_iter().collect();
