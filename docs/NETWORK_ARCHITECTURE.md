@@ -1,7 +1,7 @@
 # Network Architecture - TIME Coin Protocol v6.2
 
-**Document Version:** 1.1  
-**Last Updated:** February 9, 2026  
+**Document Version:** 1.2  
+**Last Updated:** March 7, 2026  
 **Status:** Production-Ready
 
 ---
@@ -102,6 +102,7 @@ Disconnected → Connecting → Connected → Reconnecting → Disconnected
 - Send messages to peers
 - Broadcast to multiple peers
 - Gossip protocol support
+- Per-peer load tracking via `peer_load` DashMap (used for PeerExchange)
 
 **Methods:**
 ```rust
@@ -109,9 +110,30 @@ pub fn register_peer(&self, ip: &str) -> Result<(), String>
 pub fn unregister_peer(&self, ip: &str)
 pub async fn send_to_peer(&self, peer_ip: &str, message: NetworkMessage) -> Result<(), String>
 pub async fn broadcast(&self, message: NetworkMessage)
-pub async fn get_connected_peers(&self) -> Vec<String>
+pub async fn get_connected_peers(&self) -> Vec<String>  // post-handshake only (see §Connection States)
 pub async fn peer_count(&self) -> usize
 ```
+
+**Connection States and `get_connected_peers()` Behavior:**
+
+Peers progress through states: `Connecting → Connected`. `get_connected_peers()` cross-references the `peer_writers` DashMap — only IPs with a live, non-closed writer channel are returned. Peers that are still in TCP-handshake (`Connecting` state) are intentionally excluded. This prevents the AI peer selector and sync logic from targeting not-yet-connected peers.
+
+---
+
+#### `ai/adaptive_reconnection.rs` — Peer Eviction
+
+**Exponential backoff and permanent eviction:**
+
+| Consecutive Failures | Cooldown Before Retry |
+|---------------------|-----------------------|
+| 3 | 10 minutes |
+| 5 | 40 minutes |
+| 7 | 2.7 hours |
+| 9+ | 24 hours (max) |
+
+After **10 consecutive failures** a peer is **permanently evicted** — removed from the sled `peer_manager` database and its AI profile is deleted. Evicted peers can re-enter the peer set only via a new `PeerExchange` response from another peer (i.e., must be re-advertised by the network).
+
+Phase 3-MN (the dedicated masternode reconnect loop) has been removed; masternodes connect outbound themselves on daemon startup.
 
 ---
 
@@ -126,7 +148,9 @@ pub async fn peer_count(&self) -> usize
 - Peer discovery integration
 
 **Two-Phase Connection Strategy:**
-1. **Phase 1**: Connect to active masternodes first (priority)
+1. **Phase 1**: Detect total masternode count.
+   - If total ≤ `FULL_MESH_THRESHOLD` (50): connect to **all** other masternodes regardless of tier (full-mesh mode — ensures testnet and small networks see each other for gossip, voting, and rewards).
+   - If total > 50: connect to upstream tiers only (pyramid mode — Gold/Silver/Bronze/Free hierarchy).
 2. **Phase 2**: Connect to regular peers (best-effort)
 
 ---
@@ -257,6 +281,21 @@ pub fn rotate_if_expired()
 - **Sync**: Block/UTXO requests
 - **Peer**: Discovery, heartbeat, handshake
 - **Data**: Transaction, block broadcasting
+
+**PeerExchange (Updated):**
+
+`GetPeers` responses now carry rich per-peer metadata instead of bare IP strings:
+
+```rust
+pub struct PeerExchangeEntry {
+    pub address: String,
+    pub connection_count: u32,   // current inbound load
+    pub is_masternode: bool,
+    pub tier: Option<MasternodeTier>,
+}
+```
+
+Entries are sorted by tier (Gold first) then ascending `connection_count` so connecting nodes naturally prefer underloaded peers. A node whose inbound count exceeds **70 % of `MAX_INBOUND` (100)** rejects new inbounds and redirects the connecting peer with an alternative `PeerExchangeEntry` list.
 
 ---
 
@@ -422,15 +461,34 @@ max_requests_per_second = 1000
 ### Network Topology
 
 ```
-Testnet:
-  P2P Port: 24100
-  RPC Port: 24101
-  Min Masternodes: 3
-  
-Mainnet:
-  P2P Port: 24000
-  RPC Port: 24001
-  Min Masternodes: 10
+Small Network (≤ 50 masternodes) — Full Mesh:
+  Every masternode ←→ every other masternode
+  Guarantees universal gossip, vote, and reward-eligibility visibility
+
+Large Network (> 50 masternodes) — Pyramid:
+  Gold ←→ Gold          (upstream tier, fully connected)
+  Gold ←→ Silver        (cross-tier upstream connections)
+  Silver ←→ Bronze      (cross-tier upstream connections)
+  Bronze ←→ Free        (downstream tier connects up)
+  Free → Bronze/Silver  (outbound-only to upstream)
+```
+
+**Testnet:** Uses full-mesh automatically (nearly always ≤ 50 nodes).  
+**Mainnet:** Expected to exceed the threshold; pyramid topology applies.
+
+The topology is evaluated per connection cycle — as the network grows past 50 masternodes it transitions from full-mesh to pyramid without operator intervention.
+
+```
+P2P Ports:
+  Testnet: 24100
+  Mainnet: 24000
+
+RPC Ports:
+  Testnet: 24101
+  Mainnet: 24001
+
+Min Masternodes: 3 (quorum)
+MAX_INBOUND:     100
 ```
 
 ### Recommended Configuration
