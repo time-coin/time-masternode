@@ -1127,16 +1127,35 @@ impl PeerConnectionRegistry {
     }
 
     /// Get list of connected peer IPs
+    /// Only returns peers that have completed the handshake and have an active
+    /// writer channel — i.e. truly connected, not just in the Connecting state.
     pub async fn get_connected_peers(&self) -> Vec<String> {
+        let writers = self.peer_writers.read().await;
         self.connections
             .iter()
+            .filter(|entry| {
+                // Only include peers that have a live writer (post-handshake)
+                writers
+                    .get(entry.key())
+                    .map(|w| !w.is_closed())
+                    .unwrap_or(false)
+            })
             .map(|entry| entry.key().clone())
             .collect()
     }
 
-    /// Get count of connected peers
+    /// Get count of connected peers (post-handshake only)
     pub async fn peer_count(&self) -> usize {
-        self.connections.len()
+        let writers = self.peer_writers.read().await;
+        self.connections
+            .iter()
+            .filter(|entry| {
+                writers
+                    .get(entry.key())
+                    .map(|w| !w.is_closed())
+                    .unwrap_or(false)
+            })
+            .count()
     }
 
     /// Get a snapshot of connected peer IPs (for stats/monitoring)
