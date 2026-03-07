@@ -184,16 +184,16 @@ impl NetworkClient {
             // SMALL NETWORK EXCEPTION: if total masternodes ≤ connection limit, every
             // node connects to every other node (full mesh regardless of tier).  This
             // guarantees all nodes see each other for gossip, voting, and rewards.
-            use rand::seq::SliceRandom;
             use crate::types::MasternodeTier;
+            use rand::seq::SliceRandom;
 
             // Number of peers to connect to per relationship
-            const GOLD_SILVER_EXTRAS:   usize = 3; // Gold also connects to N Silver for downward visibility
-            const SILVER_LATERAL:       usize = 4; // Silver lateral peers within Silver tier
-            const BRONZE_UPWARD:        usize = 5; // Bronze → Silver connections
-            const BRONZE_LATERAL:       usize = 3; // Bronze lateral peers within Bronze tier
-            const FREE_UPWARD:          usize = 5; // Free → Bronze connections (+ 1 Silver fallback)
-            const FULL_MESH_THRESHOLD:  usize = 20; // Use full mesh when total nodes ≤ this
+            const GOLD_SILVER_EXTRAS: usize = 3; // Gold also connects to N Silver for downward visibility
+            const SILVER_LATERAL: usize = 4; // Silver lateral peers within Silver tier
+            const BRONZE_UPWARD: usize = 5; // Bronze → Silver connections
+            const BRONZE_LATERAL: usize = 3; // Bronze lateral peers within Bronze tier
+            const FREE_UPWARD: usize = 5; // Free → Bronze connections (+ 1 Silver fallback)
+            const FULL_MESH_THRESHOLD: usize = 20; // Use full mesh when total nodes ≤ this
 
             // Determine our own tier
             let our_tier: Option<MasternodeTier> = {
@@ -205,17 +205,21 @@ impl NetworkClient {
             };
 
             // Fetch masternodes by tier once
-            let gold_nodes   = masternode_registry.list_by_tier(MasternodeTier::Gold).await;
-            let mut silver_nodes = masternode_registry.list_by_tier(MasternodeTier::Silver).await;
-            let mut bronze_nodes = masternode_registry.list_by_tier(MasternodeTier::Bronze).await;
-            let mut free_nodes   = masternode_registry.list_by_tier(MasternodeTier::Free).await;
+            let gold_nodes = masternode_registry.list_by_tier(MasternodeTier::Gold).await;
+            let mut silver_nodes = masternode_registry
+                .list_by_tier(MasternodeTier::Silver)
+                .await;
+            let mut bronze_nodes = masternode_registry
+                .list_by_tier(MasternodeTier::Bronze)
+                .await;
+            let mut free_nodes = masternode_registry.list_by_tier(MasternodeTier::Free).await;
 
             silver_nodes.shuffle(&mut rand::thread_rng());
             bronze_nodes.shuffle(&mut rand::thread_rng());
             free_nodes.shuffle(&mut rand::thread_rng());
 
-            let total_masternodes = gold_nodes.len() + silver_nodes.len()
-                + bronze_nodes.len() + free_nodes.len();
+            let total_masternodes =
+                gold_nodes.len() + silver_nodes.len() + bronze_nodes.len() + free_nodes.len();
 
             // Build the connection target list for our tier
             let targets: Vec<String> = if total_masternodes <= FULL_MESH_THRESHOLD {
@@ -223,9 +227,11 @@ impl NetworkClient {
                 // can gossip, vote, and see each other regardless of tier.
                 tracing::info!(
                     "🔗 [PHASE1] Small network ({} masternodes ≤ {}): using full mesh",
-                    total_masternodes, FULL_MESH_THRESHOLD
+                    total_masternodes,
+                    FULL_MESH_THRESHOLD
                 );
-                gold_nodes.iter()
+                gold_nodes
+                    .iter()
                     .chain(silver_nodes.iter())
                     .chain(bronze_nodes.iter())
                     .chain(free_nodes.iter())
@@ -235,29 +241,63 @@ impl NetworkClient {
                 match our_tier {
                     Some(MasternodeTier::Gold) => {
                         // Gold: full mesh with ALL Gold + a few Silver for downward visibility
-                        let mut t: Vec<String> = gold_nodes.iter().map(|m| m.masternode.address.clone()).collect();
-                        t.extend(silver_nodes.iter().take(GOLD_SILVER_EXTRAS).map(|m| m.masternode.address.clone()));
+                        let mut t: Vec<String> = gold_nodes
+                            .iter()
+                            .map(|m| m.masternode.address.clone())
+                            .collect();
+                        t.extend(
+                            silver_nodes
+                                .iter()
+                                .take(GOLD_SILVER_EXTRAS)
+                                .map(|m| m.masternode.address.clone()),
+                        );
                         t
                     }
                     Some(MasternodeTier::Silver) => {
                         // Silver: connect to ALL Gold (backbone) + lateral Silver peers
-                        let mut t: Vec<String> = gold_nodes.iter().map(|m| m.masternode.address.clone()).collect();
-                        t.extend(silver_nodes.iter().take(SILVER_LATERAL).map(|m| m.masternode.address.clone()));
+                        let mut t: Vec<String> = gold_nodes
+                            .iter()
+                            .map(|m| m.masternode.address.clone())
+                            .collect();
+                        t.extend(
+                            silver_nodes
+                                .iter()
+                                .take(SILVER_LATERAL)
+                                .map(|m| m.masternode.address.clone()),
+                        );
                         t
                     }
                     Some(MasternodeTier::Bronze) => {
                         // Bronze: N Silver (upward) + lateral Bronze peers; fall back to Gold if no Silver
-                        let mut t: Vec<String> = silver_nodes.iter().take(BRONZE_UPWARD).map(|m| m.masternode.address.clone()).collect();
+                        let mut t: Vec<String> = silver_nodes
+                            .iter()
+                            .take(BRONZE_UPWARD)
+                            .map(|m| m.masternode.address.clone())
+                            .collect();
                         if t.is_empty() {
                             t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
                         }
-                        t.extend(bronze_nodes.iter().take(BRONZE_LATERAL).map(|m| m.masternode.address.clone()));
+                        t.extend(
+                            bronze_nodes
+                                .iter()
+                                .take(BRONZE_LATERAL)
+                                .map(|m| m.masternode.address.clone()),
+                        );
                         t
                     }
                     None | Some(MasternodeTier::Free) => {
                         // Free / unregistered: connect upward to Bronze, with a Silver fallback
-                        let mut t: Vec<String> = bronze_nodes.iter().take(FREE_UPWARD).map(|m| m.masternode.address.clone()).collect();
-                        t.extend(silver_nodes.iter().take(1).map(|m| m.masternode.address.clone()));
+                        let mut t: Vec<String> = bronze_nodes
+                            .iter()
+                            .take(FREE_UPWARD)
+                            .map(|m| m.masternode.address.clone())
+                            .collect();
+                        t.extend(
+                            silver_nodes
+                                .iter()
+                                .take(1)
+                                .map(|m| m.masternode.address.clone()),
+                        );
                         if t.is_empty() {
                             // Last resort: any Gold that is reachable
                             t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
@@ -366,8 +406,7 @@ impl NetworkClient {
                     let mut unique_peers = dedup_peers(peer_manager.get_all_peers().await);
                     // Sort by known connection load (ascending) so we dial the least-loaded
                     // candidates first.  Peers with unknown load sort to the back (u16::MAX).
-                    unique_peers
-                        .sort_by_key(|ip| peer_registry.get_peer_load(ip));
+                    unique_peers.sort_by_key(|ip| peer_registry.get_peer_load(ip));
                     for ip in unique_peers.iter().take(available_slots) {
                         if should_skip(ip) {
                             continue;
@@ -397,7 +436,8 @@ impl NetworkClient {
                             } else {
                                 tracing::debug!(
                                     "⏭️  [PHASE3-PEER] Skipping {} (AI cooldown: {})",
-                                    ip, advice.reasoning
+                                    ip,
+                                    advice.reasoning
                                 );
                             }
                             continue;

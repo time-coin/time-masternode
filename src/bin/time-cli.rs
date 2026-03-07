@@ -530,12 +530,13 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Auto-detect: prefer HTTPS (server default) then fall back to HTTP
         let mut detected = None;
-        for (base_url, testnet) in &[
-            ("127.0.0.1:24101", true),
-            ("127.0.0.1:24001", false),
-        ] {
+        for (base_url, testnet) in &[("127.0.0.1:24101", true), ("127.0.0.1:24001", false)] {
             let use_tls = read_conf_rpctls(*testnet);
-            let schemes: &[&str] = if use_tls { &["https", "http"] } else { &["http"] };
+            let schemes: &[&str] = if use_tls {
+                &["https", "http"]
+            } else {
+                &["http"]
+            };
             for scheme in schemes {
                 let url = format!("{}://{}", scheme, base_url);
                 let (user, pass) = read_cookie_file(*testnet)
