@@ -256,10 +256,14 @@ impl SecureStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
+
+    static CRYPTO_INIT: OnceLock<()> = OnceLock::new();
 
     fn init_crypto() {
-        // Initialize crypto provider for rustls
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        CRYPTO_INIT.get_or_init(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
     }
 
     #[test]
