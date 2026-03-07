@@ -1254,6 +1254,7 @@ impl PeerConnectionRegistry {
     /// Build a PeerExchange list of currently connected peers, sorted by ascending
     /// connection load, capped at `limit` entries.  Callers use this to respond to
     /// GetPeers requests and to redirect overloaded inbound connections.
+    /// Note: `tier` is left as None here — callers with registry access fill it in.
     pub async fn get_peers_by_load(
         &self,
         limit: usize,
@@ -1263,11 +1264,12 @@ impl PeerConnectionRegistry {
             .into_iter()
             .map(|ip| {
                 let count = self.get_peer_load(&ip);
-                let is_masternode = self.peer_load.get(&ip).is_some(); // best-effort
+                let is_mn = self.peer_load.contains_key(ip.as_str());
                 crate::network::message::PeerExchangeEntry {
                     address: ip,
                     connection_count: count,
-                    is_masternode,
+                    is_masternode: is_mn,
+                    tier: None, // filled in by callers that have masternode registry access
                 }
             })
             .collect();

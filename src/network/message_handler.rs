@@ -1958,8 +1958,8 @@ impl MessageHandler {
         Ok(None)
     }
 
-    /// Handle GetPeers request — respond with a load-sorted PeerExchange so the
-    /// requester can find less-loaded peers and the network self-balances.
+    /// Handle GetPeers request — respond with a load-and-tier-sorted PeerExchange so the
+    /// requester can route itself correctly up the pyramid (Free→Bronze→Silver→Gold).
     async fn handle_get_peers(
         &self,
         context: &MessageContext,
@@ -1969,26 +1969,49 @@ impl MessageHandler {
             self.direction, self.peer_ip
         );
 
-        // Build a load-aware peer list from currently connected peers
+        // Build load-aware list and enrich each entry with tier info from the registry
         let mut entries = context.peer_registry.get_peers_by_load(32).await;
+        for entry in entries.iter_mut() {
+            if let Some(info) = context.masternode_registry.get(&entry.address).await {
+                entry.is_masternode = true;
+                entry.tier = Some(info.masternode.tier);
+            }
+        }
 
-        // Include ourselves so the requester knows our current load
+        // Include ourselves
         let our_count = context.peer_registry.connected_count() as u16;
-        entries.push(crate::network::message::PeerExchangeEntry {
-            address: context
-                .peer_registry
-                .get_local_ip()
-                .unwrap_or_default(),
-            connection_count: our_count,
-            is_masternode: true,
+        let our_ip = context.peer_registry.get_local_ip().unwrap_or_default();
+        let our_tier = if let Some(ip) = context.peer_registry.get_local_ip() {
+            context.masternode_registry.get(&ip).await.map(|i| i.masternode.tier)
+        } else {
+            None
+        };
+        if !our_ip.is_empty() {
+            entries.push(crate::network::message::PeerExchangeEntry {
+                address: our_ip,
+                connection_count: our_count,
+                is_masternode: our_tier.is_some(),
+                tier: our_tier,
+            });
+        }
+
+        // Sort by tier priority (Gold first) then by load within each tier
+        entries.sort_by(|a, b| {
+            let tier_ord = |t: &Option<crate::types::MasternodeTier>| match t {
+                Some(crate::types::MasternodeTier::Gold)   => 0u8,
+                Some(crate::types::MasternodeTier::Silver) => 1,
+                Some(crate::types::MasternodeTier::Bronze) => 2,
+                Some(crate::types::MasternodeTier::Free)   => 3,
+                None => 4,
+            };
+            tier_ord(&a.tier)
+                .cmp(&tier_ord(&b.tier))
+                .then(a.connection_count.cmp(&b.connection_count))
         });
-        entries.sort_by_key(|e| e.connection_count);
 
         debug!(
-            "📤 [{}] Sending PeerExchange ({} peers) to {}",
-            self.direction,
-            entries.len(),
-            self.peer_ip
+            "📤 [{}] Sending PeerExchange ({} peers, tier-sorted) to {}",
+            self.direction, entries.len(), self.peer_ip
         );
         Ok(Some(NetworkMessage::PeerExchange(entries)))
     }

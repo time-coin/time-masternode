@@ -172,27 +172,89 @@ impl NetworkClient {
                     .collect()
             };
 
-            // PHASE 1: Connect to registered masternodes — use a random sample so every
-            // node picks a different subset on startup, distributing inbound load across
-            // the network rather than always hammering the same first N masternodes.
-            let mut masternodes = masternode_registry.list_all().await;
-            {
-                use rand::seq::SliceRandom;
-                masternodes.shuffle(&mut rand::thread_rng());
-            }
-            let masternode_ips: Vec<&str> = masternodes
-                .iter()
-                .map(|m| m.masternode.address.as_str())
-                .collect();
+            // PHASE 1: Pyramid-aware startup connections.
+            //
+            // Network topology mirrors the collateral tier hierarchy:
+            //
+            //          ┌──── Gold ────┐   ← full mesh backbone (few nodes, high stake)
+            //         Silver ── Silver      ← connect ALL Gold + lateral Silver peers
+            //        Bronze  ── Bronze      ← connect N Silver (upward) + lateral Bronze
+            //       Free  Free  Free  Free  ← connect N Bronze/Silver (upward only)
+            //
+            // This prevents hub-and-spoke: every tier only needs upward connections,
+            // so load distributes across the whole pyramid.  Anti-fracture guarantee:
+            // each tier always has a path upward, and Gold is fully meshed.
+            use rand::seq::SliceRandom;
+            use crate::types::MasternodeTier;
+
+            // Number of peers to connect to per relationship
+            const GOLD_SILVER_EXTRAS:   usize = 3; // Gold also connects to N Silver for downward visibility
+            const SILVER_LATERAL:       usize = 4; // Silver lateral peers within Silver tier
+            const BRONZE_UPWARD:        usize = 5; // Bronze → Silver connections
+            const BRONZE_LATERAL:       usize = 3; // Bronze lateral peers within Bronze tier
+            const FREE_UPWARD:          usize = 5; // Free → Bronze connections (+ 1 Silver fallback)
+
+            // Determine our own tier
+            let our_tier: Option<MasternodeTier> = {
+                let our_ip = masternode_registry.get_local_address().await;
+                match our_ip {
+                    Some(ref ip) => masternode_registry.get(ip).await.map(|i| i.masternode.tier),
+                    None => None,
+                }
+            };
+
+            // Fetch masternodes by tier once
+            let gold_nodes   = masternode_registry.list_by_tier(MasternodeTier::Gold).await;
+            let mut silver_nodes = masternode_registry.list_by_tier(MasternodeTier::Silver).await;
+            let mut bronze_nodes = masternode_registry.list_by_tier(MasternodeTier::Bronze).await;
+
+            silver_nodes.shuffle(&mut rand::thread_rng());
+            bronze_nodes.shuffle(&mut rand::thread_rng());
+
+            // Build the connection target list for our tier
+            let targets: Vec<String> = match our_tier {
+                Some(MasternodeTier::Gold) => {
+                    // Gold: full mesh with ALL Gold + a few Silver for downward visibility
+                    let mut t: Vec<String> = gold_nodes.iter().map(|m| m.masternode.address.clone()).collect();
+                    t.extend(silver_nodes.iter().take(GOLD_SILVER_EXTRAS).map(|m| m.masternode.address.clone()));
+                    t
+                }
+                Some(MasternodeTier::Silver) => {
+                    // Silver: connect to ALL Gold (backbone) + lateral Silver peers
+                    let mut t: Vec<String> = gold_nodes.iter().map(|m| m.masternode.address.clone()).collect();
+                    t.extend(silver_nodes.iter().take(SILVER_LATERAL).map(|m| m.masternode.address.clone()));
+                    t
+                }
+                Some(MasternodeTier::Bronze) => {
+                    // Bronze: N Silver (upward) + lateral Bronze peers; fall back to Gold if no Silver
+                    let mut t: Vec<String> = silver_nodes.iter().take(BRONZE_UPWARD).map(|m| m.masternode.address.clone()).collect();
+                    if t.is_empty() {
+                        t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
+                    }
+                    t.extend(bronze_nodes.iter().take(BRONZE_LATERAL).map(|m| m.masternode.address.clone()));
+                    t
+                }
+                None | Some(MasternodeTier::Free) => {
+                    // Free / unregistered: connect upward to Bronze, with a Silver fallback
+                    let mut t: Vec<String> = bronze_nodes.iter().take(FREE_UPWARD).map(|m| m.masternode.address.clone()).collect();
+                    t.extend(silver_nodes.iter().take(1).map(|m| m.masternode.address.clone()));
+                    if t.is_empty() {
+                        // Last resort: any Gold that is reachable
+                        t.extend(gold_nodes.iter().map(|m| m.masternode.address.clone()));
+                    }
+                    t
+                }
+            };
+
             tracing::info!(
-                "🎯 Connecting to {} registered masternode(s) with priority: {:?}",
-                masternodes.len(),
-                masternode_ips
+                "🔺 [PHASE1] Pyramid startup (our tier: {:?}) — {} target(s): {:?}",
+                our_tier,
+                targets.len(),
+                targets
             );
 
             let mut masternode_connections = 0;
-            for mn in masternodes.iter().take(reserved_masternode_slots) {
-                let ip = &mn.masternode.address;
+            for ip in targets.iter().take(reserved_masternode_slots) {
                 if should_skip(ip) {
                     if connection_manager.is_connected(ip) || peer_registry.is_connected(ip) {
                         masternode_connections += 1;
@@ -203,7 +265,7 @@ impl NetworkClient {
                     continue;
                 }
                 masternode_connections += 1;
-                tracing::info!("🔗 [PHASE1-MN] Initiating priority connection to: {}", ip);
+                tracing::info!("🔗 [PHASE1] Connecting to: {} (tier: {:?})", ip, our_tier);
                 res.spawn(ip.clone(), true);
             }
 
@@ -230,8 +292,8 @@ impl NetworkClient {
                     if should_skip(ip) {
                         continue;
                     }
-                    // Skip masternodes (already handled in Phase 1)
-                    if masternodes.iter().any(|mn| mn.masternode.address == *ip) {
+                    // Skip masternodes — handled at startup (Phase 1) only
+                    if masternode_registry.get(ip).await.is_some() {
                         continue;
                     }
                     if !connection_manager.mark_connecting(ip) {
