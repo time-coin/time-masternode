@@ -2581,7 +2581,7 @@ async fn main() {
             };
 
             // Calculate sampling weights with fairness bonus
-            // Fairness bonus: +1 per 10 blocks without reward, capped at +20
+            // Fairness bonus: +1 per 10 blocks without reward, uncapped
             // This ensures nodes that haven't produced blocks get increasing priority
             let blocks_without_reward_map = block_registry
                 .get_verifiable_reward_tracking(&block_blockchain)
@@ -2591,7 +2591,7 @@ async fn main() {
                 .get(&our_addr)
                 .copied()
                 .unwrap_or(0);
-            let our_fairness_bonus = (our_blocks_without / 10).min(20);
+            let our_fairness_bonus = our_blocks_without / 10;
             let our_sampling_weight = {
                 let raw = our_mn.tier.sampling_weight() + our_fairness_bonus;
                 // Cap Free tier effective weight below Bronze base to prevent
@@ -2609,7 +2609,7 @@ async fn main() {
                     let bonus = blocks_without_reward_map
                         .get(&mn.address)
                         .copied()
-                        .map(|b| (b / 10).min(20))
+                        .map(|b| b / 10)
                         .unwrap_or(0);
                     let raw = mn.tier.sampling_weight() + bonus;
                     // Apply same Free-tier cap for total weight calculation

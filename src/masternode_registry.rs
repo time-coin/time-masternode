@@ -2172,8 +2172,8 @@ pub fn select_leader(
         let tier_weight = mn.tier.sampling_weight(); // §5.2/§9.2: use sampling weight for VRF sortition
         let blocks_without = blocks_without_reward.get(&mn.address).copied().unwrap_or(0);
 
-        // Fairness bonus: +1 per 10 blocks without reward, capped at +20 (§5.2.1)
-        let fairness_bonus = (blocks_without / 10).min(20);
+        // Fairness bonus: +1 per 10 blocks without reward, uncapped (§5.2.1)
+        let fairness_bonus = blocks_without / 10;
         let final_weight = tier_weight + fairness_bonus;
 
         total_weight = total_weight.saturating_add(final_weight);
