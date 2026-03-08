@@ -1,7 +1,7 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-03-07  
-**Version:** 1.4.0 (Full-Mesh Small Networks, Peer Eviction, PeerExchange Load Info, Catch-up Acceleration, Masternode Active Status, Bitmap Gossip-Active, get_connected_peers Fix)
+**Last Updated:** 2026-03-08  
+**Version:** 1.5.0 (Hardcoded Genesis, Fairness Cap Removal, Leader Weight Fix, Peer Eviction Hardening, Dashboard Enhancements, Uptime Fix)
 
 ---
 
@@ -51,9 +51,11 @@
 
 ### Peer Eviction for Persistently Dead Peers
 
-- **10 consecutive failures** → peer is permanently evicted from the sled `peer_manager` DB and the AI profile in `adaptive_reconnection.rs`
-- **Exponential cooldown** before re-attempt: 3 failures = 10 min, 5 = 40 min, 7 = 2.7 h, 9+ = 24 h (max)
-- **Evicted peers can re-enter** via PeerExchange (§PeerExchange below) if they recover
+- **5 consecutive failures** → peer is permanently evicted from the sled `peer_manager` DB and the AI profile in `adaptive_reconnection.rs`
+- **Exponential cooldown** before re-attempt: 3 failures = 10 min, 5 = 40 min (max before eviction)
+- **Eviction check runs unconditionally** during PHASE 3 slot-filling — checked before AI reconnection advice, not only during AI cooldown periods
+- **Gossip re-addition blocked:** `PeerManager` tracks evicted IPs with a 1-hour cooldown; `add_peer_candidate()` rejects recently-evicted addresses even if re-advertised via PeerExchange
+- **Startup filtering:** `list_by_tier()` only returns active masternodes — PHASE 1 no longer dials inactive masternodes
 - Phase 3-MN (masternode reconnect loop) was removed; masternodes connect outbound themselves on startup
 
 ### PeerExchange with Load-Aware Routing

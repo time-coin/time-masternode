@@ -312,7 +312,7 @@ Within each tier's pool, rewards are divided equally among selected recipients. 
 
 When a tier has more active nodes than the per-block cap of 25, a fairness bonus ensures every node eventually gets paid — no starvation, no dust outputs:
 
-1. **Fairness bonus** per node: `min(blocks_since_last_paid / 10, 20)` — computed on-chain by scanning `masternode_rewards` in recent blocks (up to 1,000 blocks back); deterministic across all validators
+1. **Fairness bonus** per node: `blocks_since_last_paid / 10` — computed on-chain by scanning `masternode_rewards` in recent blocks (up to 1,000 blocks back); deterministic across all validators
 2. **Sort** eligible nodes by fairness bonus (descending), then address (ascending) as a deterministic tiebreaker
 3. **Select** top 25 nodes; distribute `tier_pool / recipient_count` equally
 4. **Minimum payout guard**: if `tier_pool / recipients < 1 TIME`, the pool goes to the block producer to prevent dust outputs
@@ -387,19 +387,19 @@ Each node tracks reward-distribution violations per block producer address (life
 | `FREE_MATURITY_BLOCKS` | 72 | Free tier maturity gate (mainnet) |
 | `REWARD_VIOLATION_THRESHOLD` | 3 | Strikes before producer is marked misbehaving |
 
-**Key implementation files:** `src/constants.rs` (all reward constants), `src/types.rs` (`MasternodeTier::pool_allocation()` and `reward_weight()`), `src/blockchain.rs` (`produce_block_at_height()` and `validate_pool_distribution()`), `src/masternode_registry.rs` (`get_eligible_pool_nodes()` and `get_pool_reward_tracking()`).
+**Key implementation files:** `src/constants.rs` (all reward constants), `src/types.rs` (`MasternodeTier::pool_allocation()` and `sampling_weight()`), `src/blockchain.rs` (`produce_block_at_height()` and `validate_pool_distribution()`), `src/masternode_registry.rs` (`get_eligible_pool_nodes()` and `get_pool_reward_tracking()`).
 
 ---
 
 ## Block Producer Selection
 
-TIME Coin selects block producers using **weighted VRF sortition** — each masternode's probability of being chosen as leader is proportional to its tier weight. Higher tiers produce more blocks and earn proportionally more leader bonuses over time, with no participant lists stored in blocks.
+TIME Coin selects block producers using **weighted VRF sortition** — each masternode's probability of being chosen as leader is proportional to its tier's sampling weight. Higher tiers produce more blocks and earn proportionally more leader bonuses over time, with no participant lists stored in blocks.
 
 ### Selection Algorithm
 
 ```
 1. Collect all active masternodes, sorted deterministically by address
-2. Build a cumulative weight array using each node's tier.reward_weight()
+2. Build a cumulative weight array using each node's tier.sampling_weight()
 3. Derive a deterministic random value:
    Hash(prev_block_hash || block_height || attempt_number)
 4. Select the masternode where the random value falls in the cumulative array
@@ -412,20 +412,20 @@ On timeout the `attempt` counter increments, rotating to a different producer de
 
 | Tier | Weight | Relative to Bronze |
 |------|--------|--------------------|
-| Free | 100 | 0.1x |
-| Bronze | 1,000 | 1x (baseline) |
-| Silver | 10,000 | 10x |
-| Gold | 100,000 | 100x |
+| Free | 1 | 0.1x |
+| Bronze | 10 | 1x (baseline) |
+| Silver | 100 | 10x |
+| Gold | 1,000 | 100x |
 
 ### Selection Probability
 
 ```
-Probability(node) = node.tier.reward_weight() / total_network_weight
+Probability(node) = node.tier.sampling_weight() / total_network_weight
 ```
 
-**Example — 5 Free + 1 Bronze (total weight: 1,500):**
-- Each Free node: 100 / 1,500 = **6.67%**
-- Bronze node: 1,000 / 1,500 = **66.67%**
+**Example — 5 Free + 1 Bronze (total weight: 15):**
+- Each Free node: 1 / 15 = **6.67%**
+- Bronze node: 10 / 15 = **66.67%**
 
 ### Expected Leader Earnings (144 blocks/day at 10-min blocks)
 
@@ -475,7 +475,7 @@ A Gold whale dominates block production until more high-tier nodes join — crea
 - **Fee distribution**: Currently all transaction fees go to the producer; a future enhancement could split fees among recent participants or include a developer fund allocation
 - **Tier expansion**: Platinum/Diamond tiers or dynamic collateral thresholds as the network matures
 
-**Implementation:** `src/main.rs` (cumulative weight array + deterministic selection), `src/masternode_registry.rs`, `src/types.rs` (`MasternodeTier::reward_weight()`), `src/constants.rs` (weight constants).
+**Implementation:** `src/main.rs` (cumulative weight array + deterministic selection), `src/masternode_registry.rs`, `src/types.rs` (`MasternodeTier::sampling_weight()`), `src/constants.rs` (weight constants).
 
 ---
 
