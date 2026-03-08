@@ -1895,12 +1895,22 @@ impl RpcHandler {
 
     async fn masternode_status(&self) -> Result<Value, RpcError> {
         if let Some(local_mn) = self.registry.get_local_masternode().await {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let computed_uptime = if local_mn.is_active && local_mn.uptime_start > 0 {
+                local_mn.total_uptime + now_secs.saturating_sub(local_mn.uptime_start)
+            } else {
+                local_mn.total_uptime
+            };
             Ok(json!({
                 "status": "active",
                 "address": local_mn.masternode.address,
                 "reward_address": local_mn.reward_address,
                 "tier": format!("{:?}", local_mn.masternode.tier),
-                "total_uptime": local_mn.total_uptime,
+                "uptime_start": local_mn.uptime_start,
+                "total_uptime": computed_uptime,
                 "is_active": local_mn.is_active,
                 "public_key": hex::encode(local_mn.masternode.public_key.to_bytes()),
                 "version": env!("CARGO_PKG_VERSION"),
@@ -2249,12 +2259,22 @@ impl RpcHandler {
             })
             .collect();
 
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         // Filter to connected only if show_all is false
         let filtered_list: Vec<Value> = full_list
             .iter()
             .filter(|(_, is_connected, _, _)| show_all || *is_connected)
             .map(
                 |(mn, is_connected, collateral_locked, collateral_outpoint)| {
+                    let computed_uptime = if mn.is_active && mn.uptime_start > 0 {
+                        mn.total_uptime + now_secs.saturating_sub(mn.uptime_start)
+                    } else {
+                        mn.total_uptime
+                    };
                     json!({
                         "address": mn.masternode.address,
                         "wallet_address": mn.masternode.wallet_address,
@@ -2264,7 +2284,7 @@ impl RpcHandler {
                         "is_active": mn.is_active,
                         "is_connected": is_connected,
                         "uptime_start": mn.uptime_start,
-                        "total_uptime": mn.total_uptime,
+                        "total_uptime": computed_uptime,
                         "collateral_locked": collateral_locked,
                         "collateral_outpoint": collateral_outpoint,
                     })
