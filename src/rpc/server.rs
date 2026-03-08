@@ -307,7 +307,7 @@ impl RpcServer {
             "enabled"
         };
         let tls_mode = if self.tls_acceptor.is_some() {
-            "TLS"
+            "TLS + plain (auto-detect)"
         } else {
             "plain"
         };
@@ -332,15 +332,14 @@ impl RpcServer {
 
             // Rate limit check (before TLS handshake to save resources)
             if !self.rate_limiter.check(addr.ip()) {
-                if self.tls_acceptor.is_none() {
-                    let _ = Self::send_error_tcp(
-                        socket,
-                        "Rate limit exceeded. Try again later.",
-                        -32005,
-                    )
-                    .await;
-                }
-                // For TLS, just drop — can't send HTTP before handshake
+                // Best-effort plain error; if client is doing TLS we can't respond before
+                // the handshake, so just drop it.
+                let _ = Self::send_error_tcp(
+                    socket,
+                    "Rate limit exceeded. Try again later.",
+                    -32005,
+                )
+                .await;
                 continue;
             }
 
@@ -350,15 +349,37 @@ impl RpcServer {
 
             tokio::spawn(async move {
                 if let Some(acceptor) = tls {
-                    match acceptor.accept(socket).await {
-                        Ok(tls_stream) => {
-                            if let Err(e) =
-                                Self::handle_connection(tls_stream, handler, &auth).await
-                            {
-                                eprintln!("RPC TLS error: {}", e);
+                    // Peek the first byte to auto-detect TLS vs plain HTTP.
+                    // TLS ClientHello always starts with 0x16 (22).
+                    // Plain HTTP starts with an ASCII method byte (e.g. 'P' = 0x50).
+                    // Accepting both on the same port avoids "tls handshake eof" noise
+                    // from clients that connect with http:// instead of https://.
+                    let mut peek = [0u8; 1];
+                    match socket.peek(&mut peek).await {
+                        Ok(1) if peek[0] == 0x16 => {
+                            // TLS ClientHello — do the handshake then dispatch
+                            match acceptor.accept(socket).await {
+                                Ok(tls_stream) => {
+                                    if let Err(e) =
+                                        Self::handle_connection(tls_stream, handler, &auth).await
+                                    {
+                                        eprintln!("RPC TLS connection error: {}", e);
+                                    }
+                                }
+                                Err(_e) => {
+                                    // Handshake failure (e.g. client sent plain HTTP) — ignore
+                                }
                             }
                         }
-                        Err(e) => eprintln!("RPC TLS handshake failed from {}: {}", addr, e),
+                        Ok(1) => {
+                            // Plain HTTP on a TLS-enabled port — serve directly
+                            if let Err(e) =
+                                Self::handle_connection(socket, handler, &auth).await
+                            {
+                                eprintln!("RPC plain connection error from {}: {}", addr, e);
+                            }
+                        }
+                        _ => {} // connection closed before first byte — ignore silently
                     }
                 } else if let Err(e) = Self::handle_connection(socket, handler, &auth).await {
                     eprintln!("RPC error: {}", e);
