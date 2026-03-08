@@ -1014,7 +1014,9 @@ impl MasternodeRegistry {
             .await
             .values()
             .filter(|info| {
-                std::mem::discriminant(&info.masternode.tier) == std::mem::discriminant(&tier)
+                info.is_active
+                    && std::mem::discriminant(&info.masternode.tier)
+                        == std::mem::discriminant(&tier)
             })
             .cloned()
             .collect()

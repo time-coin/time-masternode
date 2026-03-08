@@ -17,7 +17,7 @@
 use crate::config::NetworkConfig;
 use crate::network_type::NetworkType;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Duration};
@@ -62,6 +62,9 @@ pub struct PeerManager {
     db: Arc<sled::Db>,
     network_config: NetworkConfig,
     network_type: NetworkType,
+    /// IPs recently evicted for persistent failure — prevents PeerExchange re-addition.
+    /// Maps IP → eviction timestamp (unix secs). Entries expire after 1 hour.
+    evicted: Arc<RwLock<HashMap<String, i64>>>,
 }
 
 #[allow(dead_code)]
@@ -77,6 +80,7 @@ impl PeerManager {
             db,
             network_config,
             network_type,
+            evicted: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -149,6 +153,18 @@ impl PeerManager {
 
     /// Add a peer to the manager (only adds to candidate list, not saved until connection succeeds)
     pub async fn add_peer_candidate(&self, address: String) -> bool {
+        // Don't re-add recently evicted peers
+        const EVICTION_COOLDOWN_SECS: i64 = 3600; // 1 hour
+        {
+            let evicted = self.evicted.read().await;
+            if let Some(&evicted_at) = evicted.get(&address) {
+                let now = chrono::Utc::now().timestamp();
+                if now - evicted_at < EVICTION_COOLDOWN_SECS {
+                    return false;
+                }
+            }
+        }
+
         let mut peers = self.peers.write().await;
         let is_new = peers.insert(address.clone());
 
@@ -278,9 +294,10 @@ impl PeerManager {
             .collect()
     }
 
-    /// Remove a peer from memory and disk.
+    /// Remove a peer from memory and disk and mark it as evicted.
     /// Called when a transient node (e.g. Free-tier masternode) disconnects so it
     /// doesn't keep appearing in the Phase 3 regular-peer connection loop.
+    /// Eviction prevents PeerExchange from immediately re-adding it.
     pub async fn remove_peer(&self, address: &str) {
         self.peers.write().await.remove(address);
         self.peer_info
@@ -290,6 +307,9 @@ impl PeerManager {
         if let Ok(tree) = self.db.open_tree("peers") {
             let _ = tree.remove(address.as_bytes());
         }
+        // Record eviction time to prevent PeerExchange from re-adding immediately
+        let now = chrono::Utc::now().timestamp();
+        self.evicted.write().await.insert(address.to_string(), now);
         tracing::debug!("🗑️  Removed {} from peer list", address);
     }
 
@@ -621,6 +641,7 @@ impl PeerManager {
             db: self.db.clone(),
             network_config: self.network_config.clone(),
             network_type: self.network_type,
+            evicted: self.evicted.clone(),
         })
     }
 }
@@ -633,6 +654,7 @@ impl Clone for PeerManager {
             db: self.db.clone(),
             network_config: self.network_config.clone(),
             network_type: self.network_type,
+            evicted: self.evicted.clone(),
         }
     }
 }
