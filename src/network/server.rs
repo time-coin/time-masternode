@@ -747,6 +747,7 @@ async fn handle_peer(
                                                     public_key: our_mn.masternode.public_key,
                                                     collateral_outpoint: our_mn.masternode.collateral_outpoint.clone(),
                                                     certificate: cert.to_vec(),
+                                                    started_at: masternode_registry.get_started_at(),
                                                 };
                                                 let _ = peer_registry.send_to_peer(&ip_str, announcement).await;
                                                 tracing::info!("📢 Sent masternode announcement (V3) to peer {}", ip_str);
@@ -1148,6 +1149,7 @@ async fn handle_peer(
                                         public_key: *public_key,
                                         collateral_outpoint: collateral_outpoint.clone(),
                                         certificate: vec![0u8; 64],
+                                        started_at: 0,
                                     };
                                     // Fall through to V3 handler below
                                     // (re-dispatch via the message handler for consistency)
@@ -1168,7 +1170,7 @@ async fn handle_peer(
                                         let _ = peer_registry.send_to_peer(&peer.addr, response).await;
                                     }
                                 }
-                                NetworkMessage::MasternodeAnnouncementV3 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate } => {
+                                NetworkMessage::MasternodeAnnouncementV3 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate, started_at } => {
                                     check_rate_limit!("masternode_announce");
                                     if !is_stable_connection {
                                         is_stable_connection = true;
@@ -1183,6 +1185,7 @@ async fn handle_peer(
                                         public_key: *public_key,
                                         collateral_outpoint: collateral_outpoint.clone(),
                                         certificate: certificate.clone(),
+                                        started_at: *started_at,
                                     };
                                     let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
                                     let mut context = MessageContext::minimal(

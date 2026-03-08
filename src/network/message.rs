@@ -250,6 +250,9 @@ pub enum NetworkMessage {
         /// Ed25519 signature from the authority over the masternode's public key (64 bytes)
         /// Empty/zeroed for free nodes without certificates (allowed when enforcement is off)
         certificate: Vec<u8>,
+        /// Unix timestamp when the announcing node's daemon started (for remote uptime display)
+        #[serde(default)]
+        started_at: u64,
     },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,

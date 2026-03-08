@@ -34,7 +34,7 @@ use tokio::sync::RwLock as TokioRwLock;
 const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
 #[allow(dead_code)] // Used by TransactionPool for mempool size limits
 const MAX_MEMPOOL_SIZE_BYTES: usize = 300_000_000; // 300MB
-const MAX_TX_SIZE: usize = 1_000_000; // 1MB
+const MAX_TX_SIZE: usize = 10_000_000; // 10MB
 const MIN_TX_FEE: u64 = 1_000_000; // 0.01 TIME minimum fee
 const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
 const SATOSHIS_PER_TIME: u64 = 100_000_000;

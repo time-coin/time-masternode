@@ -194,6 +194,8 @@ struct MasternodeListEntry {
     is_connected: bool,
     collateral: f64,
     total_uptime: u64,
+    #[serde(default)]
+    daemon_started_at: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,12 +357,11 @@ impl App {
         }
 
         // Fetch network masternode list
-        match self
+        if let Ok(list) = self
             .rpc_call::<MasternodeList>("masternodelist", vec![serde_json::json!(true)])
             .await
         {
-            Ok(list) => self.data.masternode_list = Some(list),
-            Err(_) => {} // Optional — not all nodes expose this
+            self.data.masternode_list = Some(list);
         }
 
         // Fetch consensus info
@@ -927,8 +928,24 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
 
     // Network masternode list
     if let Some(list) = &app.data.masternode_list {
-        let rows: Vec<Row> = list
-            .masternodes
+        // Sort masternodes by tier: Gold > Silver > Bronze > Free
+        let tier_order = |t: &str| -> u8 {
+            match t {
+                "Gold" => 0,
+                "Silver" => 1,
+                "Bronze" => 2,
+                _ => 3,
+            }
+        };
+        let mut sorted: Vec<&MasternodeListEntry> = list.masternodes.iter().collect();
+        sorted.sort_by(|a, b| tier_order(&a.tier).cmp(&tier_order(&b.tier)));
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let rows: Vec<Row> = sorted
             .iter()
             .map(|mn| {
                 let active_style = if mn.is_active {
@@ -941,7 +958,24 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                let uptime_hrs = mn.total_uptime / 3600;
+                // Use daemon_started_at for real remote uptime, fall back to local total_uptime
+                let uptime_secs = if mn.daemon_started_at > 0 {
+                    now_secs.saturating_sub(mn.daemon_started_at)
+                } else {
+                    mn.total_uptime
+                };
+                let uptime_hrs = uptime_secs / 3600;
+                let uptime_str = if uptime_hrs >= 24 {
+                    format!("{}d {}h", uptime_hrs / 24, uptime_hrs % 24)
+                } else {
+                    format!("{}h", uptime_hrs)
+                };
+                let tier_color = match mn.tier.as_str() {
+                    "Gold" => Color::Yellow,
+                    "Silver" => Color::White,
+                    "Bronze" => Color::Rgb(205, 127, 50),
+                    _ => Color::Cyan,
+                };
                 let short_addr = if mn.address.len() > 22 {
                     format!("{}…", &mn.address[..22])
                 } else {
@@ -949,10 +983,10 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 };
                 Row::new(vec![
                     Cell::from(short_addr),
-                    Cell::from(mn.tier.clone()).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(mn.tier.clone()).style(Style::default().fg(tier_color)),
                     Cell::from(if mn.is_active { "✓" } else { "✗" }).style(active_style),
                     Cell::from(if mn.is_connected { "✓" } else { "✗" }).style(conn_style),
-                    Cell::from(format!("{}h", uptime_hrs)),
+                    Cell::from(uptime_str),
                 ])
             })
             .collect();
@@ -964,7 +998,7 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(10),
                 Constraint::Length(8),
                 Constraint::Length(10),
-                Constraint::Length(8),
+                Constraint::Length(10),
             ],
         )
         .header(

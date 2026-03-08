@@ -2286,6 +2286,7 @@ impl RpcHandler {
                         "is_connected": is_connected,
                         "uptime_start": mn.uptime_start,
                         "total_uptime": computed_uptime,
+                        "daemon_started_at": mn.daemon_started_at,
                         "collateral_locked": collateral_locked,
                         "collateral_outpoint": collateral_outpoint,
                     })
