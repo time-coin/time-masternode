@@ -690,7 +690,7 @@ impl VerifiableFinality {
 /// 3. All votes have decision=Accept
 /// 4. Voters are distinct (by voter_mn_id)
 /// 5. Each voter is in AVS snapshot for slot_index
-/// 6. Sum of voter weights ≥ Q_finality (51% of total AVS weight - simple majority)
+/// 6. Sum of voter weights ≥ Q_finality (67% of total AVS weight — supermajority per §8.3)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeProof {
     /// The transaction this proof finalizes
