@@ -334,12 +334,9 @@ impl RpcServer {
             if !self.rate_limiter.check(addr.ip()) {
                 // Best-effort plain error; if client is doing TLS we can't respond before
                 // the handshake, so just drop it.
-                let _ = Self::send_error_tcp(
-                    socket,
-                    "Rate limit exceeded. Try again later.",
-                    -32005,
-                )
-                .await;
+                let _ =
+                    Self::send_error_tcp(socket, "Rate limit exceeded. Try again later.", -32005)
+                        .await;
                 continue;
             }
 
@@ -373,9 +370,7 @@ impl RpcServer {
                         }
                         Ok(1) => {
                             // Plain HTTP on a TLS-enabled port — serve directly
-                            if let Err(e) =
-                                Self::handle_connection(socket, handler, &auth).await
-                            {
+                            if let Err(e) = Self::handle_connection(socket, handler, &auth).await {
                                 eprintln!("RPC plain connection error from {}: {}", addr, e);
                             }
                         }

@@ -1,9 +1,9 @@
 pub mod blacklist;
 pub mod block_cache;
 pub mod client;
-pub mod partition_detector;
 pub mod connection_manager;
 pub mod dedup_filter;
+pub mod partition_detector;
 
 pub mod message;
 pub mod message_handler;

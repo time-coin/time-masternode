@@ -799,9 +799,7 @@ impl Blockchain {
 
         // No local blockchain - on testnet use hardcoded genesis; on mainnet wait for masternodes
         match self.network_type {
-            NetworkType::Testnet
-                if crate::constants::genesis::TESTNET_GENESIS_HASH.is_some() =>
-            {
+            NetworkType::Testnet if crate::constants::genesis::TESTNET_GENESIS_HASH.is_some() => {
                 tracing::info!(
                     "📋 No genesis found — creating from hardcoded testnet genesis data"
                 );
@@ -817,8 +815,7 @@ impl Blockchain {
                 self.storage
                     .insert(genesis_hash.as_slice(), &0u64.to_be_bytes())
                     .map_err(|e| format!("Failed to index hardcoded genesis: {}", e))?;
-                let height_bytes =
-                    bincode::serialize(&0u64).map_err(|e| e.to_string())?;
+                let height_bytes = bincode::serialize(&0u64).map_err(|e| e.to_string())?;
                 self.storage
                     .insert("chain_height".as_bytes(), height_bytes)
                     .map_err(|e| format!("Failed to save chain_height: {}", e))?;
@@ -3233,14 +3230,27 @@ impl Blockchain {
 
         // LONGEST CHAIN RULE: If no peer has a chain taller than ours, we have the
         // longest chain and should continue producing. Peers will sync to us.
+        // HOWEVER: If peers at our height have DIFFERENT hashes, we're in a fork —
+        // don't use this escape; fall through to weighted agreement check.
         let max_peer_height = peer_states.iter().map(|(_, h, _, _)| *h).max().unwrap_or(0);
         if max_peer_height <= our_height {
-            tracing::debug!(
-                "✅ Block production allowed: longest chain rule (our height {} >= max peer height {})",
-                our_height,
-                max_peer_height
-            );
-            return true;
+            let fork_at_our_height = peer_states
+                .iter()
+                .any(|(_, h, hash, _)| *h == our_height && *hash != our_hash);
+            if fork_at_our_height {
+                tracing::warn!(
+                    "⚠️ Same-height fork detected: peers at height {} have different hashes - blocking production until resolved",
+                    our_height
+                );
+                // Fall through to weighted agreement check below
+            } else {
+                tracing::debug!(
+                    "✅ Block production allowed: longest chain rule (our height {} >= max peer height {}, no fork)",
+                    our_height,
+                    max_peer_height
+                );
+                return true;
+            }
         }
 
         // Some peers are taller than us on a potentially different fork.
@@ -7000,21 +7010,17 @@ impl Blockchain {
         let height_advantage = consensus_height.saturating_sub(second_highest);
 
         if height_advantage == 0 {
-            // Same-height fork — chain was selected by deterministic hash tiebreaker.
-            // Require simple majority (>50%) weighted support before acting, to avoid
-            // switching on incomplete information. The minority MUST switch eventually.
-            let required_weight = total_responding_weight / 2 + 1; // strict majority
-            if consensus_weight < required_weight {
-                tracing::warn!(
-                    "⚠️  Same-height fork at {}: consensus has insufficient weighted support: {}/{} weight ({:.1}%) - need majority ({}).",
-                    consensus_height,
-                    consensus_weight,
-                    total_responding_weight,
-                    (consensus_weight as f64 / total_responding_weight as f64) * 100.0,
-                    required_weight
-                );
-                return None;
-            }
+            // Same-height fork — chain was selected by deterministic hash tiebreaker
+            // (lower hash wins). Use the tiebreaker directly — requiring weighted
+            // majority here causes deadlock when all nodes are on different chains
+            // since no single chain can reach >50%.
+            tracing::info!(
+                "🔀 Same-height fork at {}: using deterministic hash tiebreaker ({}/{} weight, {:.1}%)",
+                consensus_height,
+                consensus_weight,
+                total_responding_weight,
+                (consensus_weight as f64 / total_responding_weight as f64) * 100.0,
+            );
         } else {
             // Longest chain is strictly taller — it wins by longest chain rule
             // Log at debug to avoid noise; this is the normal, expected case

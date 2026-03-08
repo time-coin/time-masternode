@@ -2263,7 +2263,10 @@ impl MessageHandler {
                         }
                     }
                     // Store remote daemon start time for uptime display
-                    context.masternode_registry.update_daemon_started_at(&peer_ip, started_at).await;
+                    context
+                        .masternode_registry
+                        .update_daemon_started_at(&peer_ip, started_at)
+                        .await;
                 }
                 Err(e) => {
                     warn!(
@@ -2321,7 +2324,10 @@ impl MessageHandler {
                         }
                     }
                     // Store remote daemon start time for uptime display
-                    context.masternode_registry.update_daemon_started_at(&peer_ip, started_at).await;
+                    context
+                        .masternode_registry
+                        .update_daemon_started_at(&peer_ip, started_at)
+                        .await;
                 }
                 Err(e) => {
                     warn!(
@@ -2880,18 +2886,26 @@ impl MessageHandler {
             }
         } else if peer_height > our_height {
             // Peer is ahead — accept blocks from peers that are close (≤5 blocks).
-            // Only check consensus membership for large gaps to avoid rejecting
-            // legitimate peers during rapid catch-up when consensus list is stale.
+            // For large gaps, check consensus membership BUT allow sync when
+            // the node is very far behind (>20 blocks) regardless, to prevent
+            // deadlock when fork resolution hasn't established clear consensus.
             let height_gap = peer_height - our_height;
             if height_gap > 5 {
                 let is_consensus_peer =
                     context.blockchain.is_peer_in_consensus(&self.peer_ip).await;
                 if !is_consensus_peer {
-                    warn!(
-                        "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {}, gap {})",
-                        self.direction, self.peer_ip, peer_height, our_height, height_gap
+                    if height_gap <= 20 {
+                        warn!(
+                            "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {}, gap {})",
+                            self.direction, self.peer_ip, peer_height, our_height, height_gap
+                        );
+                        return Ok(None);
+                    }
+                    // Very far behind (>20 blocks) — accept from any peer to break deadlock
+                    debug!(
+                        "🔓 [{}] Accepting blocks from {} despite non-consensus (gap {} > 20, need to catch up)",
+                        self.direction, self.peer_ip, height_gap
                     );
-                    return Ok(None);
                 }
             }
 

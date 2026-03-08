@@ -131,8 +131,9 @@ impl PartitionDetector {
             } else {
                 // We have at least one peer — clear partition state.
                 if self.is_partitioned.load(Ordering::Relaxed) {
-                    let isolated_duration =
-                        partition_start.map(|ps| ps.elapsed().as_secs()).unwrap_or(0);
+                    let isolated_duration = partition_start
+                        .map(|ps| ps.elapsed().as_secs())
+                        .unwrap_or(0);
                     tracing::info!(
                         "✅ Partition resolved — reconnected to {} peers after {}s isolation",
                         peer_count,
