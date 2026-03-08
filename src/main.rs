@@ -1226,6 +1226,8 @@ async fn main() {
             // Wait 10 seconds for initial peer connections
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
 
+            let daemon_started_at = registry_for_announcement.get_started_at();
+
             // Build the announcement, using current registry state so that any
             // tier upgrade (e.g. on-chain registration processed after startup)
             // is reflected in re-broadcasts.
@@ -1237,6 +1239,7 @@ async fn main() {
                     public_key: mn.public_key,
                     collateral_outpoint: mn.collateral_outpoint.clone(),
                     certificate: vec![0u8; 64],
+                    started_at: daemon_started_at,
                 };
 
             let announcement = build_announcement(&mn_for_announcement);

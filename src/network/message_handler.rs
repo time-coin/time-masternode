@@ -402,6 +402,7 @@ impl MessageHandler {
                     *public_key,
                     collateral_outpoint.clone(),
                     vec![0u8; 64],
+                    0, // V2 has no started_at
                     context,
                 )
                 .await
@@ -413,6 +414,7 @@ impl MessageHandler {
                 public_key,
                 collateral_outpoint,
                 certificate,
+                started_at,
             } => {
                 self.handle_masternode_announcement(
                     address.clone(),
@@ -421,6 +423,7 @@ impl MessageHandler {
                     *public_key,
                     collateral_outpoint.clone(),
                     certificate.clone(),
+                    *started_at,
                     context,
                 )
                 .await
@@ -2108,6 +2111,7 @@ impl MessageHandler {
         public_key: ed25519_dalek::VerifyingKey,
         collateral_outpoint: Option<crate::types::OutPoint>,
         certificate: Vec<u8>,
+        started_at: u64,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let peer_ip = self.peer_ip.clone();
@@ -2249,6 +2253,7 @@ impl MessageHandler {
                                     public_key,
                                     collateral_outpoint: Some(outpoint_for_relay),
                                     certificate: Vec::new(),
+                                    started_at,
                                 };
                             let _ = broadcast_tx.send(relay);
                             debug!(
@@ -2257,6 +2262,8 @@ impl MessageHandler {
                             );
                         }
                     }
+                    // Store remote daemon start time for uptime display
+                    context.masternode_registry.update_daemon_started_at(&peer_ip, started_at).await;
                 }
                 Err(e) => {
                     warn!(
@@ -2304,6 +2311,7 @@ impl MessageHandler {
                                     public_key,
                                     collateral_outpoint: None,
                                     certificate: Vec::new(),
+                                    started_at,
                                 };
                             let _ = broadcast_tx.send(relay);
                             debug!(
@@ -2312,6 +2320,8 @@ impl MessageHandler {
                             );
                         }
                     }
+                    // Store remote daemon start time for uptime display
+                    context.masternode_registry.update_daemon_started_at(&peer_ip, started_at).await;
                 }
                 Err(e) => {
                     warn!(

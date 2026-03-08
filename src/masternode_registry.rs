@@ -83,6 +83,11 @@ pub struct MasternodeInfo {
     pub total_uptime: u64,      // Total uptime in seconds
     pub is_active: bool,
 
+    /// Unix timestamp when this masternode's daemon last started.
+    /// Reported via MasternodeAnnouncementV3 and used for real remote uptime display.
+    #[serde(default)]
+    pub daemon_started_at: u64,
+
     /// Reward tracking for fairness
     #[serde(default)]
     pub last_reward_height: u64, // Last block height where this MN received reward (0 = never)
@@ -157,6 +162,10 @@ impl MasternodeRegistry {
                     let mut updated_info = info;
                     updated_info.masternode.address = ip_only.clone();
                     updated_info.peer_reports = Arc::new(DashMap::new());
+                    // Accumulate outstanding uptime from the previous session before marking inactive
+                    if updated_info.is_active && updated_info.uptime_start > 0 && updated_info.uptime_start <= now {
+                        updated_info.total_uptime += now - updated_info.uptime_start;
+                    }
                     updated_info.is_active = false; // Force inactive on load - only active on connection
                     nodes.insert(ip_only, updated_info);
                 }
@@ -415,6 +424,7 @@ impl MasternodeRegistry {
             uptime_start: now,
             total_uptime: 0,
             is_active: should_activate, // Only active if explicitly activated (true for connections, false for gossip)
+            daemon_started_at: 0,
             last_reward_height: 0,
             blocks_without_reward: 0,
             registration_height: current_h, // Anti-sybil: track when node first appeared
@@ -587,6 +597,25 @@ impl MasternodeRegistry {
     #[allow(dead_code)]
     pub async fn get(&self, address: &str) -> Option<MasternodeInfo> {
         self.masternodes.read().await.get(address).cloned()
+    }
+
+    /// Returns the timestamp when this daemon started (for inclusion in announcements)
+    pub fn get_started_at(&self) -> u64 {
+        self.started_at
+    }
+
+    /// Update a masternode's daemon_started_at from an announcement
+    pub async fn update_daemon_started_at(&self, address: &str, started_at: u64) {
+        if started_at == 0 {
+            return;
+        }
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(address) {
+            if info.daemon_started_at != started_at {
+                info.daemon_started_at = started_at;
+                let _ = self.store_masternode(address, info);
+            }
+        }
     }
 
     pub async fn list_all(&self) -> Vec<MasternodeInfo> {
