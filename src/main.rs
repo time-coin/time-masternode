@@ -245,9 +245,6 @@ async fn main() {
                             if let Some(entry) = entries.first() {
                                 cfg.masternode.collateral_txid = entry.collateral_txid.clone();
                                 cfg.masternode.collateral_vout = entry.collateral_vout;
-                                if !entry.address.is_empty() {
-                                    cfg.network.external_address = Some(entry.address.clone());
-                                }
                                 println!("  ✓ Loaded masternode.conf: alias={}", entry.alias);
                             }
                         }
