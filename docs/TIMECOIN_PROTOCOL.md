@@ -127,7 +127,7 @@ Each tier has multiple weight types for different protocol functions:
 To prevent higher-tier masternodes from monopolizing block production, a **fairness bonus** is added to each masternode's sampling weight during VRF sortition (§9.2). The bonus increases the longer a masternode goes without producing a block:
 
 ```
-fairness_bonus = min(blocks_without_reward / 10, 20)
+fairness_bonus = blocks_without_reward / 10
 effective_weight = sampling_weight + fairness_bonus
 ```
 
@@ -136,12 +136,13 @@ effective_weight = sampling_weight + fairness_bonus
 | 0 | 0 | 1 | 10 |
 | 50 | 5 | 6 | 15 |
 | 100 | 10 | 11 | 20 |
-| 200+ | 20 (cap) | 21 | 30 |
+| 200 | 20 | 21 | 30 |
+| 500 | 50 | 51 | 60 |
 
 **Key properties:**
 - **On-chain verifiable:** All nodes independently scan blockchain history to compute `blocks_without_reward`, preventing local manipulation
 - **Additive, not multiplicative:** Prevents Gold tier from getting outsized bonuses
-- **Capped at +20:** Prevents unbounded weight inflation
+- **Uncapped:** Grows linearly without bound, ensuring even long-idle nodes eventually produce blocks
 - **Resets on reward:** Counter returns to 0 when a masternode produces a block and receives a reward
 - **Tier crossover:** A Free tier node waiting 200+ blocks (effective weight 21) can outcompete a Bronze node (base weight 10) that recently produced
 - **Dual use:** The fairness bonus is also used during VRF sortition (§9.2) to give longer-waiting nodes a better chance at block production
@@ -673,7 +674,7 @@ Each masternode `i` in the AVS independently evaluates whether it is eligible to
    - `score_i = uint64_le(vrf_output_i[0..8])`
 
 2. Compute effective weight with fairness bonus (§5.2.1):
-   - `effective_weight_i = sampling_weight_i + min(blocks_without_reward_i / 10, 20)`
+   - `effective_weight_i = sampling_weight_i + blocks_without_reward_i / 10`
    - `total_effective_weight = Σ effective_weight_j` for all `j ∈ AVS`
 
 3. Check eligibility threshold:
@@ -809,7 +810,7 @@ Their total = leader_bonus + tier_pool_share.
 When a tier has more active nodes than `MAX_TIER_RECIPIENTS` (25), nodes are selected by fairness bonus (longest without reward first). Within the selected set, each node receives an equal share of their tier's pool. Excluded nodes rotate in on subsequent blocks.
 
 ```
-fairness_bonus = min(blocks_without_pool_reward / 10, 20)
+fairness_bonus = blocks_without_pool_reward / 10
 Selection: sort by fairness_bonus DESC, then address ASC (deterministic tiebreak)
 Take top 25 per tier → distribute tier_pool / recipient_count equally
 Minimum payout: 1 TIME per node (if share < 1 TIME, remainder goes to producer)

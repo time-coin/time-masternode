@@ -127,13 +127,13 @@ Peers progress through states: `Connecting → Connected`. `get_connected_peers(
 | Consecutive Failures | Cooldown Before Retry |
 |---------------------|-----------------------|
 | 3 | 10 minutes |
-| 5 | 40 minutes |
-| 7 | 2.7 hours |
-| 9+ | 24 hours (max) |
+| 5+ | Permanently evicted |
 
-After **10 consecutive failures** a peer is **permanently evicted** — removed from the sled `peer_manager` database and its AI profile is deleted. Evicted peers can re-enter the peer set only via a new `PeerExchange` response from another peer (i.e., must be re-advertised by the network).
+After **5 consecutive failures** a peer is **permanently evicted** — removed from the sled `peer_manager` database and its AI profile is deleted. The `PeerManager` records the evicted IP with a **1-hour cooldown**, during which `add_peer_candidate()` rejects the address even if re-advertised via PeerExchange gossip. After the cooldown expires, the peer may be re-added if another node gossips it.
 
-Phase 3-MN (the dedicated masternode reconnect loop) has been removed; masternodes connect outbound themselves on daemon startup.
+The PHASE 3 eviction check runs **unconditionally** before AI reconnection advice is consulted — previously it only ran inside the AI cooldown branch, so peers whose cooldown had expired were never evicted regardless of failure count.
+
+Additionally, `list_by_tier()` now filters for `is_active`, so PHASE 1 startup connections no longer dial inactive masternodes that will just timeout.
 
 ---
 

@@ -5,6 +5,26 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-03-08
+
+### Fixed — Consensus & Block Production
+- **`select_leader()` used wrong weight function**: Was using `reward_weight()` (1:5:20:60) instead of `sampling_weight()` (1:10:100:1000) per protocol §5.2/§9.2. Invisible on all-Free testnet but would have given Gold nodes 60x instead of 1000x selection probability.
+- **`getblock` RPC returned wrong hash**: Was computing hash from 4 fields inline; now uses canonical `Block::hash()` (11-field SHA-256).
+- **Uptime always showed 0**: `total_uptime` only accumulated on disconnect; active nodes always read 0. RPC now computes `total_uptime + (now - uptime_start)` at query time.
+- **Fairness bonus cap removed**: Removed stale `.min(20)` caps from 5 locations (VRF leader selection in `main.rs`, `message_handler.rs`, `masternode_registry.rs`). The cap had already been removed from `blockchain.rs` reward selection, creating an inconsistency. Fairness bonus now grows linearly without bound (`blocks_without_reward / 10`), matching the whitepaper specification.
+
+### Fixed — Network & Peer Management
+- **Persistent reconnection to offline peers**: Three-part fix:
+  1. `list_by_tier()` now filters `is_active` — PHASE 1 startup no longer dials inactive masternodes
+  2. PHASE 3 eviction check moved before AI cooldown check — previously only ran during cooldown periods, so eviction never triggered when cooldown expired
+  3. `PeerManager` tracks evicted IPs with 1-hour cooldown — prevents PeerExchange gossip from immediately re-adding just-evicted peers
+- **Eviction threshold reduced**: `FORGET_THRESHOLD` lowered from 10 to 5 consecutive failures for faster cleanup of dead peers
+
+### Added
+- **Hardcoded testnet genesis block**: `GenesisBlock::testnet_genesis()` creates deterministic genesis with 6 masternodes, verified hash `866273...`. Fresh nodes recreate identical genesis without network bootstrapping.
+- **Dynamic block production quorum**: `max(active_masternodes / 3, 3)` instead of hardcoded 3
+- **Dashboard network tab enhancements**: Scrollable peer table with status indicator (●/○), direction, address, type (Masternode/Peer), height, ping columns. Color-coded rows (green=active outbound, cyan=inbound, gray=inactive). In/out breakdown in network summary.
+
 ## [1.2.0] - 2026-02-12
 
 ### Changed - Config-Based Masternode Management
