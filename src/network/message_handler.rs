@@ -3646,7 +3646,7 @@ impl MessageHandler {
                 .get(&proposer)
                 .copied()
                 .unwrap_or(0);
-            let proposer_fairness_bonus = (proposer_blocks_without / 10).min(20);
+            let proposer_fairness_bonus = proposer_blocks_without / 10;
             let proposer_weight =
                 proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
 
@@ -3660,7 +3660,7 @@ impl MessageHandler {
                     let bonus = blocks_without_reward_map
                         .get(&mn.address)
                         .copied()
-                        .map(|b| (b / 10).min(20))
+                        .map(|b| b / 10)
                         .unwrap_or(0);
                     mn.tier.sampling_weight() + bonus
                 })
