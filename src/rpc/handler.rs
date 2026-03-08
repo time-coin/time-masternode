@@ -1716,6 +1716,15 @@ impl RpcHandler {
                 }
 
                 if sent > 0 || received > 0 {
+                    // For coinbase/reward-distribution transactions (tx_idx 0 or 1),
+                    // the wallet address may appear only as a staking *input* with no
+                    // corresponding output in that same tx (the payout arrives later in
+                    // another "generate" entry where received > 0).  Skip these to avoid
+                    // flooding the wallet with +0.00 TIME "generate" entries.
+                    if tx_idx <= 1 && received == 0 {
+                        continue;
+                    }
+
                     let category = if tx_idx <= 1 {
                         "generate"
                     } else if sent > 0 {
