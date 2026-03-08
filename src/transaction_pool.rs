@@ -258,8 +258,8 @@ impl TransactionPool {
     }
 
     /// Remove stale pending transactions older than max_age.
-    /// Returns the number of transactions evicted.
-    pub fn cleanup_stale_pending(&self, max_age: std::time::Duration) -> usize {
+    /// Returns the evicted transactions so callers can revert UTXO states.
+    pub fn cleanup_stale_pending(&self, max_age: std::time::Duration) -> Vec<Transaction> {
         let now = Instant::now();
         let stale_txids: Vec<Hash256> = self
             .pending
@@ -268,18 +268,18 @@ impl TransactionPool {
             .map(|entry| *entry.key())
             .collect();
 
-        let mut evicted = 0;
+        let mut evicted = Vec::new();
         for txid in &stale_txids {
             if let Some((_, entry)) = self.pending.remove(txid) {
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
-                evicted += 1;
+                evicted.push(entry.tx);
             }
         }
-        if evicted > 0 {
+        if !evicted.is_empty() {
             tracing::info!(
                 "🧹 TxPool: Evicted {} stale pending transaction(s) (older than {}s)",
-                evicted,
+                evicted.len(),
                 max_age.as_secs()
             );
         }
