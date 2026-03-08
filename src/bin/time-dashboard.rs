@@ -134,6 +134,25 @@ struct MasternodeStatus {
     git_hash: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct MasternodeListEntry {
+    address: String,
+    wallet_address: String,
+    tier: String,
+    is_active: bool,
+    is_connected: bool,
+    collateral: f64,
+    total_uptime: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct MasternodeList {
+    total: usize,
+    total_in_registry: usize,
+    masternodes: Vec<MasternodeListEntry>,
+}
+
 #[derive(Debug, Deserialize)]
 struct ConsensusInfo {
     protocol: String,
@@ -182,6 +201,7 @@ struct DashboardData {
     network: Option<NetworkInfo>,
     peers: Vec<PeerInfo>,
     masternode: Option<MasternodeStatus>,
+    masternode_list: Option<MasternodeList>,
     consensus: Option<ConsensusInfo>,
     mempool: Option<MempoolInfo>,
     mempool_txs: Vec<MempoolTx>,
@@ -197,6 +217,7 @@ impl Default for DashboardData {
             network: None,
             peers: Vec::new(),
             masternode: None,
+            masternode_list: None,
             consensus: None,
             mempool: None,
             mempool_txs: Vec::new(),
@@ -278,6 +299,15 @@ impl App {
         {
             Ok(status) => self.data.masternode = Some(status),
             Err(e) => self.error_message = Some(format!("masternodestatus: {}", e)),
+        }
+
+        // Fetch network masternode list
+        match self
+            .rpc_call::<MasternodeList>("masternodelist", vec![serde_json::json!(true)])
+            .await
+        {
+            Ok(list) => self.data.masternode_list = Some(list),
+            Err(_) => {} // Optional — not all nodes expose this
         }
 
         // Fetch consensus info
@@ -475,9 +505,9 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8), // Blockchain info
+            Constraint::Length(9), // Blockchain info (5 lines + border)
             Constraint::Length(7), // Wallet info
-            Constraint::Length(8), // Consensus info
+            Constraint::Min(0),    // Consensus info
         ])
         .split(area);
 
@@ -500,6 +530,17 @@ fn render_overview(f: &mut Frame, area: Rect, app: &App) {
             Line::from(vec![
                 Span::raw("Consensus: "),
                 Span::styled(&bc.consensus, Style::default().fg(Color::Magenta)),
+            ]),
+            Line::from(vec![
+                Span::raw("Sync Progress: "),
+                Span::styled(
+                    format!("{:.2}%", bc.verificationprogress * 100.0),
+                    Style::default().fg(if bc.verificationprogress >= 0.999 {
+                        Color::Green
+                    } else {
+                        Color::Yellow
+                    }),
+                ),
             ]),
         ];
 
@@ -674,6 +715,14 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(10), // Local node details
+            Constraint::Min(0),     // Network masternode list
+        ])
+        .split(area);
+
     if let Some(mn) = &app.data.masternode {
         let status_color = if mn.is_active {
             Color::Green
@@ -731,20 +780,85 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Masternode Details"),
+                    .title("Local Masternode"),
             )
             .style(Style::default().fg(Color::White));
-        f.render_widget(block, area);
+        f.render_widget(block, chunks[0]);
     } else {
         let text = Paragraph::new("No masternode registered on this node")
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Masternode Details"),
+                    .title("Local Masternode"),
             )
             .style(Style::default().fg(Color::Gray))
             .alignment(Alignment::Center);
-        f.render_widget(text, area);
+        f.render_widget(text, chunks[0]);
+    }
+
+    // Network masternode list
+    if let Some(list) = &app.data.masternode_list {
+        let rows: Vec<Row> = list
+            .masternodes
+            .iter()
+            .map(|mn| {
+                let active_style = if mn.is_active {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::Red)
+                };
+                let conn_style = if mn.is_connected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let uptime_hrs = mn.total_uptime / 3600;
+                let short_addr = if mn.address.len() > 22 {
+                    format!("{}…", &mn.address[..22])
+                } else {
+                    mn.address.clone()
+                };
+                Row::new(vec![
+                    Cell::from(short_addr),
+                    Cell::from(mn.tier.clone()).style(Style::default().fg(Color::Cyan)),
+                    Cell::from(if mn.is_active { "✓" } else { "✗" }).style(active_style),
+                    Cell::from(if mn.is_connected { "✓" } else { "✗" }).style(conn_style),
+                    Cell::from(format!("{}h", uptime_hrs)),
+                ])
+            })
+            .collect();
+
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Min(24),
+                Constraint::Length(10),
+                Constraint::Length(8),
+                Constraint::Length(10),
+                Constraint::Length(8),
+            ],
+        )
+        .header(
+            Row::new(vec!["Address", "Tier", "Active", "Connected", "Uptime"])
+                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        )
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Network Masternodes ({}/{})",
+            list.total, list.total_in_registry
+        )))
+        .style(Style::default().fg(Color::White));
+
+        f.render_widget(table, chunks[1]);
+    } else {
+        let placeholder = Paragraph::new("Loading masternode list…")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Network Masternodes"),
+            )
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(placeholder, chunks[1]);
     }
 }
 
@@ -1020,14 +1134,21 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(footer, area);
 }
 
-async fn detect_network() -> (String, bool) {
+async fn detect_network(prefer_testnet: bool) -> (String, bool) {
     let client = Client::new();
 
-    // Try both networks; return which one responds
-    let ports: Vec<(&str, bool)> = vec![
-        ("http://127.0.0.1:24101", true),  // testnet
-        ("http://127.0.0.1:24001", false), // mainnet
-    ];
+    // Try preferred network first, then fall back to the other
+    let ports: Vec<(&str, bool)> = if prefer_testnet {
+        vec![
+            ("http://127.0.0.1:24101", true),  // testnet
+            ("http://127.0.0.1:24001", false), // mainnet
+        ]
+    } else {
+        vec![
+            ("http://127.0.0.1:24001", false), // mainnet
+            ("http://127.0.0.1:24101", true),  // testnet
+        ]
+    };
 
     for (url, is_testnet) in ports {
         let (user, pass) = resolve_credentials(is_testnet);
@@ -1054,21 +1175,26 @@ async fn detect_network() -> (String, bool) {
         }
     }
 
-    // Default to testnet
-    ("http://127.0.0.1:24101".to_string(), true)
+    // Default: mainnet (or testnet if --testnet was passed)
+    if prefer_testnet {
+        ("http://127.0.0.1:24101".to_string(), true)
+    } else {
+        ("http://127.0.0.1:24001".to_string(), false)
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
+    let prefer_testnet = args.iter().any(|a| a == "--testnet");
 
     // Parse command line arguments or auto-detect network
     let (rpc_url, is_testnet) = if let Some(url) = args.iter().find(|a| a.starts_with("http")) {
-        let testnet = args.iter().any(|a| a == "--testnet") || url.contains("24101");
+        let testnet = prefer_testnet || url.contains("24101");
         (url.clone(), testnet)
     } else {
-        // Auto-detect: try testnet first, then mainnet
-        detect_network().await
+        // Auto-detect: try preferred network first
+        detect_network(prefer_testnet).await
     };
 
     let (rpc_user, rpc_pass) = resolve_credentials(is_testnet);
