@@ -68,6 +68,50 @@ fn resolve_credentials(testnet: bool) -> (String, String) {
         .or_else(|| read_conf_credentials(testnet))
         .unwrap_or_default()
 }
+
+/// Check ~/.timecoin/time.conf for testnet=1 to auto-detect network preference.
+fn conf_prefers_testnet() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let conf_path = home.join(".timecoin").join("time.conf");
+    let Ok(contents) = std::fs::read_to_string(&conf_path) else {
+        return false;
+    };
+    contents.lines().any(|line| {
+        let line = line.trim();
+        !line.starts_with('#') && line == "testnet=1"
+    })
+}
+
+/// Detect which network is running by checking which data directory has a live
+/// .cookie file. Falls back to time.conf then defaults to mainnet.
+fn detect_running_network() -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let mainnet_cookie = home.join(".timecoin").join(".cookie");
+    let testnet_cookie = home.join(".timecoin").join("testnet").join(".cookie");
+
+    let mainnet_exists = mainnet_cookie.exists();
+    let testnet_exists = testnet_cookie.exists();
+
+    match (mainnet_exists, testnet_exists) {
+        (true, false) => false,  // only mainnet cookie → mainnet
+        (false, true) => true,   // only testnet cookie → testnet
+        (true, true) => {
+            // Both running; prefer whichever cookie is newer
+            let mt = std::fs::metadata(&mainnet_cookie)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let tt = std::fs::metadata(&testnet_cookie)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            tt > mt // testnet cookie is newer
+        }
+        (false, false) => conf_prefers_testnet(), // no cookies, fall back to config
+    }
+}
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct BlockchainInfo {
@@ -249,6 +293,7 @@ impl App {
             rpc_pass,
             client: Client::builder()
                 .timeout(Duration::from_secs(3))
+                .danger_accept_invalid_certs(true)
                 .build()
                 .unwrap_or_default(),
             current_tab: 0,
@@ -1135,65 +1180,71 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 }
 
 async fn detect_network(prefer_testnet: bool) -> (String, bool) {
-    let client = Client::new();
+    let client = Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
 
-    // Try preferred network first, then fall back to the other
-    let ports: Vec<(&str, bool)> = if prefer_testnet {
-        vec![
-            ("http://127.0.0.1:24101", true),  // testnet
-            ("http://127.0.0.1:24001", false), // mainnet
-        ]
+    // Preferred network first; for each port try https then http
+    let ports: Vec<(u16, bool)> = if prefer_testnet {
+        vec![(24101, true), (24001, false)]
     } else {
-        vec![
-            ("http://127.0.0.1:24001", false), // mainnet
-            ("http://127.0.0.1:24101", true),  // testnet
-        ]
+        vec![(24001, false), (24101, true)]
     };
 
-    for (url, is_testnet) in ports {
-        let (user, pass) = resolve_credentials(is_testnet);
-        let mut req = client
-            .post(url)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getblockchaininfo",
-                "params": []
-            }))
-            .timeout(Duration::from_secs(2));
-        if !user.is_empty() && !pass.is_empty() {
-            req = req.basic_auth(&user, Some(&pass));
-        }
-        if let Ok(response) = req.send().await {
-            if response.status().is_success() {
-                if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
-                    if rpc_response.get("result").is_some() {
-                        return (url.to_string(), is_testnet);
+    for (port, is_testnet) in &ports {
+        let (user, pass) = resolve_credentials(*is_testnet);
+        for scheme in &["https", "http"] {
+            let url = format!("{}://127.0.0.1:{}", scheme, port);
+            let mut req = client
+                .post(&url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getblockchaininfo",
+                    "params": []
+                }));
+            if !user.is_empty() && !pass.is_empty() {
+                req = req.basic_auth(&user, Some(&pass));
+            }
+            if let Ok(response) = req.send().await {
+                let status = response.status();
+                if status.is_success() {
+                    if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
+                        if rpc_response.get("result").is_some() {
+                            return (url, *is_testnet);
+                        }
                     }
+                } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                    // Port is alive even if credentials weren't found
+                    return (url, *is_testnet);
                 }
             }
         }
     }
 
-    // Default: mainnet (or testnet if --testnet was passed)
+    // Default fallback
+    let scheme = "http";
     if prefer_testnet {
-        ("http://127.0.0.1:24101".to_string(), true)
+        (format!("{}://127.0.0.1:24101", scheme), true)
     } else {
-        ("http://127.0.0.1:24001".to_string(), false)
+        (format!("{}://127.0.0.1:24001", scheme), false)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let prefer_testnet = args.iter().any(|a| a == "--testnet");
+    // --testnet flag overrides; otherwise detect from cookie files / time.conf
+    let prefer_testnet = args.iter().any(|a| a == "--testnet") || detect_running_network();
 
     // Parse command line arguments or auto-detect network
     let (rpc_url, is_testnet) = if let Some(url) = args.iter().find(|a| a.starts_with("http")) {
         let testnet = prefer_testnet || url.contains("24101");
         (url.clone(), testnet)
     } else {
-        // Auto-detect: try preferred network first
+        // Auto-detect: probe https then http on preferred port first
         detect_network(prefer_testnet).await
     };
 
