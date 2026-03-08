@@ -1170,105 +1170,30 @@ async fn handle_peer(
                                 }
                                 NetworkMessage::MasternodeAnnouncementV3 { address: _, reward_address, tier, public_key, collateral_outpoint, certificate } => {
                                     check_rate_limit!("masternode_announce");
-
                                     if !is_stable_connection {
                                         is_stable_connection = true;
                                     }
-
-                                    let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
-                                    if peer_ip.is_empty() { continue; }
-
-                                    tracing::debug!("📨 Received V3 masternode announcement from {} (tier: {:?})", peer.addr, tier);
-
-                                    // Certificate field ignored (certificate system removed in v1.2.0)
-                                    let _ = certificate;
-
-                                    let now = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap()
-                                        .as_secs();
-
-                                    if *tier != crate::types::MasternodeTier::Free {
-                                        let outpoint = match collateral_outpoint {
-                                            Some(op) => op.clone(),
-                                            None => {
-                                                tracing::warn!("❌ Rejecting {:?} masternode from {} — no collateral outpoint", tier, peer_ip);
-                                                continue;
-                                            }
-                                        };
-
-                                        match consensus.utxo_manager.get_utxo(&outpoint).await {
-                                            Ok(utxo) => {
-                                                let required = tier.collateral();
-                                                if utxo.value != required {
-                                                    tracing::warn!("❌ Rejecting {:?} masternode from {} — collateral {} != required {}", tier, peer_ip, utxo.value, required);
-                                                    continue;
-                                                }
-                                                if consensus.utxo_manager.is_collateral_locked(&outpoint) {
-                                                    let existing = consensus.utxo_manager.get_locked_collateral(&outpoint);
-                                                    if existing.map(|info| info.masternode_address != peer_ip).unwrap_or(false) {
-                                                        tracing::warn!("❌ Rejecting masternode from {} — collateral already locked by another", peer_ip);
-                                                        continue;
-                                                    }
-                                                }
-                                                tracing::debug!("✅ Collateral verified for {:?} masternode {} ({} TIME)", tier, peer_ip, utxo.value as f64 / 100_000_000.0);
-                                            }
-                                            Err(_) => {
-                                                tracing::warn!("❌ Rejecting {:?} masternode from {} — collateral UTXO not found", tier, peer_ip);
-                                                continue;
-                                            }
-                                        }
-
-                                        let mn = crate::types::Masternode::new_with_collateral(
-                                            peer_ip.clone(),
-                                            reward_address.clone(),
-                                            tier.collateral(),
-                                            outpoint.clone(),
-                                            *public_key,
-                                            *tier,
-                                            now,
-                                        );
-
-                                        let lock_height = blockchain.get_height();
-                                        if let Err(e) = consensus.utxo_manager.lock_collateral(outpoint, peer_ip.clone(), lock_height, tier.collateral()) {
-                                            if matches!(e, crate::utxo_manager::UtxoError::LockedAsCollateral) {
-                                                tracing::debug!("🔒 Collateral for {} already locked — proceeding", peer_ip);
-                                            } else {
-                                                tracing::warn!("❌ Rejecting {:?} masternode from {} — failed to lock collateral: {:?}", tier, peer_ip, e);
-                                                continue;
-                                            }
-                                        }
-
-                                        match masternode_registry.register(mn, reward_address.clone()).await {
-                                            Ok(()) => {
-                                                let count = masternode_registry.total_count().await;
-                                                tracing::debug!("✅ Registered {:?} masternode {} (total: {})", tier, peer_ip, count);
-                                                peer_manager.add_peer(peer_ip.clone()).await;
-                                            },
-                                            Err(e) => {
-                                                tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);
-                                            }
-                                        }
-                                    } else {
-                                        let mn = crate::types::Masternode::new_legacy(
-                                            peer_ip.clone(),
-                                            reward_address.clone(),
-                                            0,
-                                            *public_key,
-                                            *tier,
-                                            now,
-                                        );
-
-                                        match masternode_registry.register(mn, reward_address.clone()).await {
-                                            Ok(()) => {
-                                                let count = masternode_registry.total_count().await;
-                                                tracing::debug!("✅ Registered Free masternode {} (total: {})", peer_ip, count);
-                                                peer_manager.add_peer(peer_ip.clone()).await;
-                                            },
-                                            Err(e) => {
-                                                tracing::warn!("❌ Failed to register masternode {}: {}", peer_ip, e);
-                                            }
-                                        }
+                                    let peer_ip_str = peer.addr.split(':').next().unwrap_or("").to_string();
+                                    if peer_ip_str.is_empty() { continue; }
+                                    // Delegate to unified message handler (same path as V2)
+                                    let v3_msg = NetworkMessage::MasternodeAnnouncementV3 {
+                                        address: peer_ip_str.clone(),
+                                        reward_address: reward_address.clone(),
+                                        tier: *tier,
+                                        public_key: *public_key,
+                                        collateral_outpoint: collateral_outpoint.clone(),
+                                        certificate: certificate.clone(),
+                                    };
+                                    let handler = MessageHandler::new(peer_ip_str, ConnectionDirection::Inbound);
+                                    let mut context = MessageContext::minimal(
+                                        Arc::clone(&blockchain),
+                                        Arc::clone(&peer_registry),
+                                        Arc::clone(&masternode_registry),
+                                    );
+                                    context.utxo_manager = Some(Arc::clone(&consensus.utxo_manager));
+                                    context.peer_manager = Some(Arc::clone(&peer_manager));
+                                    if let Ok(Some(response)) = handler.handle_message(&v3_msg, &context).await {
+                                        let _ = peer_registry.send_to_peer(&peer.addr, response).await;
                                     }
                                 }
                                 NetworkMessage::GetPeers => {
