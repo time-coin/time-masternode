@@ -1023,6 +1023,9 @@ async fn handle_peer(
                                         tracing::debug!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
                                     }
 
+                                    // Notify WS subscribers on this node that the transaction is finalized
+                                    consensus.signal_tx_finalized(*txid);
+
                                     // Gossip finalization to other peers
                                     match broadcast_tx.send(msg.clone()) {
                                         Ok(receivers) => {
