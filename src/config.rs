@@ -264,11 +264,10 @@ pub struct MasternodeConfig {
     pub reward_address: String,
 }
 
-/// A parsed entry from masternode.conf (collateral info only; key is in time.conf)
+/// A parsed entry from masternode.conf (collateral info only; IP and key are in time.conf)
 #[derive(Debug, Clone)]
 pub struct MasternodeConfEntry {
     pub alias: String,
-    pub address: String,
     pub collateral_txid: String,
     pub collateral_vout: u32,
 }
@@ -978,12 +977,6 @@ impl Config {
                 config.masternode.enabled = true;
                 config.masternode.collateral_txid = entry.collateral_txid.clone();
                 config.masternode.collateral_vout = entry.collateral_vout;
-                if !entry.address.is_empty() {
-                    // Extract IP from IP:port
-                    let ip = entry.address.split(':').next().unwrap_or(&entry.address);
-                    config.network.external_address = Some(entry.address.clone());
-                    let _ = ip; // used above via entry.address
-                }
                 println!("  ✓ Loaded masternode config: alias={}", entry.alias);
             }
         } else {
@@ -1001,9 +994,6 @@ impl Config {
                 let entries = parse_masternode_conf(&mn_conf_path)?;
                 if let Some(entry) = entries.first() {
                     config.masternode.enabled = true;
-                    if !entry.address.is_empty() {
-                        config.network.external_address = Some(entry.address.clone());
-                    }
                     // Skip collateral — all-zeros is a free-tier placeholder
                     println!(
                         "  ✓ Auto-populated masternode config: alias={}",
@@ -1093,9 +1083,11 @@ pub fn detect_network_from_conf(conf_path: &PathBuf) -> NetworkType {
 // ─── masternode.conf parser ──────────────────────────────────────────
 
 /// Parse a masternode.conf file (one entry per line, space-delimited).
-/// Format: alias IP:port collateral_txid collateral_vout
-/// Legacy 5-field (key) and 6-field (key+cert) formats are accepted for backward
-/// compatibility but the key/cert fields are ignored (key belongs in time.conf).
+/// New format: alias  collateral_txid  collateral_vout
+/// Legacy formats (still accepted for backward compatibility):
+///   4 fields: alias IP:port txid vout        (IP is ignored — use externalip in time.conf)
+///   5 fields: alias IP:port privkey txid vout (IP+privkey ignored)
+///   6 fields: alias IP:port key cert txid vout (IP+key+cert ignored)
 #[allow(dead_code)]
 pub fn parse_masternode_conf(
     path: &PathBuf,
@@ -1113,17 +1105,19 @@ pub fn parse_masternode_conf(
 
         let parts: Vec<&str> = line.split_whitespace().collect();
 
-        // All formats: alias is parts[0], address is parts[1]
-        // 4 fields: alias IP:port txid vout
-        // 5 fields: alias IP:port privkey txid vout (legacy, privkey ignored)
-        // 6 fields: alias IP:port key cert txid vout (legacy, key+cert ignored)
+        // Determine txid/vout positions based on field count.
+        // 3 fields (new):  alias txid vout
+        // 4 fields (legacy): alias IP:port txid vout
+        // 5 fields (legacy): alias IP:port privkey txid vout
+        // 6 fields (legacy): alias IP:port key cert txid vout
         let (txid_idx, vout_idx) = match parts.len() {
+            3 => (1, 2),
             4 => (2, 3),
             5 => (3, 4),
             6 => (4, 5),
             _ => {
                 tracing::warn!(
-                    "⚠️ masternode.conf:{}: expected 4-6 fields, got {} — skipping",
+                    "⚠️ masternode.conf:{}: expected 3-6 fields, got {} — skipping",
                     line_num + 1,
                     parts.len()
                 );
@@ -1142,7 +1136,6 @@ pub fn parse_masternode_conf(
 
         entries.push(MasternodeConfEntry {
             alias: parts[0].to_string(),
-            address: parts[1].to_string(),
             collateral_txid: parts[txid_idx].to_string(),
             collateral_vout: vout,
         });
@@ -1334,14 +1327,14 @@ pub fn generate_default_masternode_conf(
         r#"# TIME Coin Masternode Configuration
 #
 # Format (one entry per line):
-#   alias  IP:port  collateral_txid  collateral_vout
+#   alias  collateral_txid  collateral_vout
 #
 # Fields:
 #   alias            - A name for this masternode (e.g., mn1)
-#   IP:port          - Your masternode's public IP and port
 #   collateral_txid  - Transaction ID of your collateral deposit
 #   collateral_vout  - Output index of your collateral (usually 0)
 #
+# Your node's IP address is read from externalip= in time.conf.
 # Your masternode private key is auto-generated on first startup and
 # saved to time.conf. You can also set it manually:
 #   masternodeprivkey=<key from `time-cli masternodegenkey`>
@@ -1351,28 +1344,30 @@ pub fn generate_default_masternode_conf(
 #   reward_address=TIME0...your_wallet_address...
 #
 # Steps to set up a masternode:
-#   1. Start the node — masternodeprivkey is auto-generated
-#   2. (Optional) Set reward_address in time.conf to your GUI wallet address
-#   3. For staked tiers, send collateral to yourself:
+#   1. Set externalip=<your_public_ip> in time.conf
+#   2. Start the node — masternodeprivkey is auto-generated in time.conf
+#   3. (Optional) Set reward_address in time.conf to your GUI wallet address
+#   4. For staked tiers, send collateral to yourself:
 #      time-cli sendtoaddress <your_address> 1000    (Bronze = 1,000 TIME)
 #      time-cli sendtoaddress <your_address> 10000   (Silver = 10,000 TIME)
 #      time-cli sendtoaddress <your_address> 100000  (Gold   = 100,000 TIME)
-#   4. Find your collateral TXID:
+#   5. Find your collateral TXID:
 #      time-cli listtransactions
-#   5. Add a line below and restart timed
+#   6. Add a line below and restart timed
 #
 # Example:
-#   mn1  69.167.168.176:24100  fc5b049a39807958cf...  0
+#   mn1  fc5b049a39807958cf...  0
 "#,
     );
 
-    // Auto-populate a free-tier entry with detected IP on first run
+    // Include a commented upgrade hint if an external address is known
     if let Some(addr) = external_address {
         if !addr.is_empty() {
             contents.push_str(&format!(
                 "\n# Free tier — no collateral entry needed.\n\
                  # To upgrade, add a line with your collateral info:\n\
-                 #   mn1  {}  <collateral_txid>  <collateral_vout>\n",
+                 #   mn1  <collateral_txid>  <collateral_vout>\n\
+                 # (Your IP {} is already set via externalip= in time.conf)\n",
                 addr
             ));
         }

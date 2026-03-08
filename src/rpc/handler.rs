@@ -259,10 +259,10 @@ impl RpcHandler {
 
     async fn get_peer_info(&self) -> Result<Value, RpcError> {
         let masternodes = self.registry.list_all().await;
+        let current_height = self.blockchain.get_height();
         let peers: Vec<Value> = masternodes
             .iter()
             .map(|mn| {
-                // Simulated ping time based on activity
                 // TODO: Replace with actual ping times from peer connection registry
                 let pingtime = if mn.is_active {
                     Some(0.020 + (rand::random::<f64>() * 0.030)) // 20-50ms for active nodes
@@ -279,10 +279,11 @@ impl RpcHandler {
                     "conntime": mn.masternode.registered_at,
                     "timeoffset": 0,
                     "pingtime": pingtime,
-                    "version": 110000, // 1.1.0
+                    "version": 110000,
                     "is_masternode": true,
                     "tier": format!("{:?}", mn.masternode.tier),
                     "active": mn.is_active,
+                    "height": if mn.is_active { current_height } else { 0u64 },
                 })
             })
             .collect();
