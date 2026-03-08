@@ -174,7 +174,6 @@ impl GenesisBlock {
         }
     }
 
-
     /// Returns Ok(()) if the hash matches or no checkpoint is set (mainnet pre-launch).
     pub fn verify_checkpoint(block: &Block, network: NetworkType) -> Result<(), String> {
         let expected_hex = match network {
@@ -298,13 +297,10 @@ mod tests {
         let genesis = GenesisBlock::testnet_genesis();
         let hash = hex::encode(genesis.hash());
         assert_eq!(
-            hash,
-            "866273966c0f380e3f71360d4cd59933f2e8c936b02f4c2774b9fd0e913f0ebb",
+            hash, "866273966c0f380e3f71360d4cd59933f2e8c936b02f4c2774b9fd0e913f0ebb",
             "Hardcoded testnet genesis must produce the canonical checkpoint hash"
         );
         assert!(GenesisBlock::verify_structure(&genesis).is_ok());
-        assert!(
-            GenesisBlock::verify_checkpoint(&genesis, crate::NetworkType::Testnet).is_ok()
-        );
+        assert!(GenesisBlock::verify_checkpoint(&genesis, crate::NetworkType::Testnet).is_ok());
     }
 }

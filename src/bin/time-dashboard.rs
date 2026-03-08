@@ -97,8 +97,8 @@ fn detect_running_network() -> bool {
     let testnet_exists = testnet_cookie.exists();
 
     match (mainnet_exists, testnet_exists) {
-        (true, false) => false,  // only mainnet cookie → mainnet
-        (false, true) => true,   // only testnet cookie → testnet
+        (true, false) => false, // only mainnet cookie → mainnet
+        (false, true) => true,  // only testnet cookie → testnet
         (true, true) => {
             // Both running; prefer whichever cookie is newer
             let mt = std::fs::metadata(&mainnet_cookie)
@@ -816,26 +816,26 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         table_state.select(Some(scroll));
     }
 
-    let title = format!(
-        "Connected Peers ({})  [↑↓ scroll]",
-        total_peers
-    );
+    let title = format!("Connected Peers ({})  [↑↓ scroll]", total_peers);
 
     let peer_table = Table::new(
         rows,
         [
-            Constraint::Length(4),  // #
-            Constraint::Length(2),  // status dot
-            Constraint::Length(6),  // dir
-            Constraint::Min(22),    // address
-            Constraint::Length(8),  // type
-            Constraint::Length(8),  // height
-            Constraint::Length(9),  // ping
+            Constraint::Length(4), // #
+            Constraint::Length(2), // status dot
+            Constraint::Length(6), // dir
+            Constraint::Min(22),   // address
+            Constraint::Length(8), // type
+            Constraint::Length(8), // height
+            Constraint::Length(9), // ping
         ],
     )
     .header(
-        Row::new(vec!["#", "", "Dir", "Address", "Type", "Height", "Ping"])
-            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Row::new(vec!["#", "", "Dir", "Address", "Type", "Height", "Ping"]).style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
     )
     .block(Block::default().borders(Borders::ALL).title(title))
     .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
@@ -1002,8 +1002,11 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
             ],
         )
         .header(
-            Row::new(vec!["Address", "Tier", "Active", "Connected", "Uptime"])
-                .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Row::new(vec!["Address", "Tier", "Active", "Connected", "Uptime"]).style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
         )
         .block(Block::default().borders(Borders::ALL).title(format!(
             "Network Masternodes ({}/{})",
@@ -1315,14 +1318,12 @@ async fn detect_network(prefer_testnet: bool) -> (String, bool) {
         let (user, pass) = resolve_credentials(*is_testnet);
         for scheme in &["https", "http"] {
             let url = format!("{}://127.0.0.1:{}", scheme, port);
-            let mut req = client
-                .post(&url)
-                .json(&serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "method": "getblockchaininfo",
-                    "params": []
-                }));
+            let mut req = client.post(&url).json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getblockchaininfo",
+                "params": []
+            }));
             if !user.is_empty() && !pass.is_empty() {
                 req = req.basic_auth(&user, Some(&pass));
             }

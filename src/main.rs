@@ -3299,9 +3299,9 @@ async fn main() {
 
             // Clean up stale pending transactions (older than 5 minutes)
             // These are transactions that never reached TimeVote consensus
-            let stale_txs = cleanup_consensus.tx_pool.cleanup_stale_pending(
-                std::time::Duration::from_secs(300),
-            );
+            let stale_txs = cleanup_consensus
+                .tx_pool
+                .cleanup_stale_pending(std::time::Duration::from_secs(300));
             if !stale_txs.is_empty() {
                 // Revert UTXO states for evicted transactions: SpentPending/Locked → Unspent
                 for tx in &stale_txs {

@@ -163,7 +163,10 @@ impl MasternodeRegistry {
                     updated_info.masternode.address = ip_only.clone();
                     updated_info.peer_reports = Arc::new(DashMap::new());
                     // Accumulate outstanding uptime from the previous session before marking inactive
-                    if updated_info.is_active && updated_info.uptime_start > 0 && updated_info.uptime_start <= now {
+                    if updated_info.is_active
+                        && updated_info.uptime_start > 0
+                        && updated_info.uptime_start <= now
+                    {
                         updated_info.total_uptime += now - updated_info.uptime_start;
                     }
                     updated_info.is_active = false; // Force inactive on load - only active on connection
