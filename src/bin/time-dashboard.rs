@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs},
     Frame, Terminal,
 };
 use reqwest::Client;
@@ -157,6 +157,12 @@ struct PeerInfo {
     pingtime: Option<f64>,
     #[serde(default)]
     inbound: bool,
+    #[serde(default)]
+    tier: String,
+    #[serde(default)]
+    active: bool,
+    #[serde(default)]
+    height: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -282,6 +288,7 @@ struct App {
     error_message: Option<String>,
     mempool_scroll: usize,
     mempool_detail: Option<usize>,
+    peer_scroll: usize,
 }
 
 impl App {
@@ -301,6 +308,7 @@ impl App {
             error_message: None,
             mempool_scroll: 0,
             mempool_detail: None,
+            peer_scroll: 0,
         }
     }
 
@@ -683,7 +691,11 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         ])
         .split(area);
 
-    // Network info
+    // Count inbound vs outbound
+    let outbound_count = app.data.peers.iter().filter(|p| !p.inbound).count();
+    let inbound_count = app.data.peers.iter().filter(|p| p.inbound).count();
+    let active_count = app.data.peers.iter().filter(|p| p.active).count();
+
     if let Some(network) = &app.data.network {
         let info = vec![
             Line::from(vec![
@@ -692,9 +704,7 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
                     format!("{}", network.version),
                     Style::default().fg(Color::Cyan),
                 ),
-            ]),
-            Line::from(vec![
-                Span::raw("Subversion: "),
+                Span::raw("  Subversion: "),
                 Span::styled(&network.subversion, Style::default().fg(Color::Gray)),
             ]),
             Line::from(vec![
@@ -703,6 +713,25 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
                     format!("{}", network.connections),
                     Style::default().fg(Color::Green),
                 ),
+                Span::raw("  ("),
+                Span::styled(
+                    format!("{} out", outbound_count),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::raw(" / "),
+                Span::styled(
+                    format!("{} in", inbound_count),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(")"),
+            ]),
+            Line::from(vec![
+                Span::raw("Active masternodes: "),
+                Span::styled(
+                    format!("{}", active_count),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(format!(" / {} peers", app.data.peers.len())),
             ]),
         ];
 
@@ -712,51 +741,106 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(block, chunks[0]);
     }
 
-    // Peer list — sorted by fastest ping, numbered
+    // Peer list — sorted: active masternodes first, then by ping
     let mut sorted_peers: Vec<&PeerInfo> = app.data.peers.iter().collect();
     sorted_peers.sort_by(|a, b| {
-        let pa = a.pingtime.unwrap_or(f64::MAX);
-        let pb = b.pingtime.unwrap_or(f64::MAX);
-        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+        // Active masternodes first
+        let a_mn = !a.tier.is_empty() && a.tier != "Unknown";
+        let b_mn = !b.tier.is_empty() && b.tier != "Unknown";
+        match (a.active, b.active, a_mn, b_mn) {
+            (true, false, _, _) => std::cmp::Ordering::Less,
+            (false, true, _, _) => std::cmp::Ordering::Greater,
+            _ => {
+                // Among peers of same status, masternodes before non-masternodes
+                match (a_mn, b_mn) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => {
+                        let pa = a.pingtime.unwrap_or(f64::MAX);
+                        let pb = b.pingtime.unwrap_or(f64::MAX);
+                        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                }
+            }
+        }
     });
-    let peers: Vec<Row> = sorted_peers
+
+    let total_peers = sorted_peers.len();
+    let scroll = app.peer_scroll.min(total_peers.saturating_sub(1));
+
+    let rows: Vec<Row> = sorted_peers
         .iter()
-        .take(20)
         .enumerate()
         .map(|(i, peer)| {
             let ping = peer
                 .pingtime
                 .map(|p| format!("{:.0} ms", p * 1000.0))
-                .unwrap_or_else(|| "N/A".to_string());
-            let direction = if peer.inbound { "←" } else { "→" };
+                .unwrap_or_else(|| "—".to_string());
+            let direction = if peer.inbound { "← in" } else { "→ out" };
+            let tier_display = if peer.tier.is_empty() || peer.tier == "Unknown" {
+                "—".to_string()
+            } else {
+                peer.tier.clone()
+            };
+            let height_str = if peer.height > 0 {
+                format!("{}", peer.height)
+            } else {
+                "—".to_string()
+            };
+            let status_marker = if peer.active { "●" } else { "○" };
+
+            let row_style = if peer.active && !peer.inbound {
+                Style::default().fg(Color::Green)
+            } else if peer.active {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
 
             Row::new(vec![
                 Cell::from(format!("{}", i + 1)),
+                Cell::from(status_marker),
                 Cell::from(direction),
                 Cell::from(peer.addr.clone()),
+                Cell::from(tier_display),
+                Cell::from(height_str),
                 Cell::from(ping),
             ])
+            .style(row_style)
         })
         .collect();
 
+    let mut table_state = TableState::default();
+    if !rows.is_empty() {
+        table_state.select(Some(scroll));
+    }
+
+    let title = format!(
+        "Connected Peers ({})  [↑↓ scroll]",
+        total_peers
+    );
+
     let peer_table = Table::new(
-        peers,
+        rows,
         [
-            Constraint::Length(4),
-            Constraint::Length(3),
-            Constraint::Min(30),
-            Constraint::Length(12),
+            Constraint::Length(4),  // #
+            Constraint::Length(2),  // status dot
+            Constraint::Length(6),  // dir
+            Constraint::Min(22),    // address
+            Constraint::Length(8),  // type
+            Constraint::Length(8),  // height
+            Constraint::Length(9),  // ping
         ],
     )
-    .header(Row::new(vec!["#", "Dir", "Address", "Ping"]).style(Style::default().fg(Color::Yellow)))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!("Connected Peers ({})", app.data.peers.len())),
+    .header(
+        Row::new(vec!["#", "", "Dir", "Address", "Type", "Height", "Ping"])
+            .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
     )
+    .block(Block::default().borders(Borders::ALL).title(title))
+    .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
     .style(Style::default().fg(Color::White));
 
-    f.render_widget(peer_table, chunks[1]);
+    f.render_stateful_widget(peer_table, chunks[1], &mut table_state);
 }
 
 fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
@@ -1326,6 +1410,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Up => {
                             if app.current_tab == 3 && app.mempool_detail.is_none() {
                                 app.mempool_scroll = app.mempool_scroll.saturating_sub(1);
+                            } else if app.current_tab == 1 {
+                                app.peer_scroll = app.peer_scroll.saturating_sub(1);
                             }
                         }
                         KeyCode::Down => {
@@ -1333,6 +1419,11 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 let max = app.data.mempool_txs.len().saturating_sub(1);
                                 if app.mempool_scroll < max {
                                     app.mempool_scroll += 1;
+                                }
+                            } else if app.current_tab == 1 {
+                                let max = app.data.peers.len().saturating_sub(1);
+                                if app.peer_scroll < max {
+                                    app.peer_scroll += 1;
                                 }
                             }
                         }
