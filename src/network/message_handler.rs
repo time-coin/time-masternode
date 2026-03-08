@@ -757,9 +757,11 @@ impl MessageHandler {
         }
 
         let mut blocks = Vec::new();
-        // Send blocks we have: cap at our_height, requested end, and batch limit of 100
+        // Send blocks we have: cap at our_height, requested end, and response limit.
+        // Use MAX_BLOCKS_PER_RESPONSE (not SYNC_BATCH_SIZE) to ensure the serialized
+        // response fits within the 8MB frame limit.
         let effective_end = end
-            .min(start + crate::constants::network::SYNC_BATCH_SIZE - 1)
+            .min(start + crate::constants::network::MAX_BLOCKS_PER_RESPONSE - 1)
             .min(our_height);
 
         if start <= our_height {

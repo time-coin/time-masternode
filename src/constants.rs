@@ -90,8 +90,15 @@ pub mod network {
     /// Maximum invalid blocks from a peer before disconnection
     pub const MAX_INVALID_BLOCKS: u32 = 5;
 
-    /// Batch size for block synchronization
+    /// Batch size for block synchronization requests
     pub const SYNC_BATCH_SIZE: u64 = 100;
+
+    /// Max blocks per response to avoid exceeding 8MB frame limit.
+    /// At ~100-150KB per block, 50 blocks ≈ 5-7.5MB (under 8MB).
+    pub const MAX_BLOCKS_PER_RESPONSE: u64 = 50;
+
+    /// Batch size for fork resolution block requests (smaller to ensure delivery)
+    pub const FORK_RESOLUTION_BATCH_SIZE: u64 = 20;
 
     /// Pipeline depth for concurrent block requests
     pub const SYNC_PIPELINE_DEPTH: usize = 3;

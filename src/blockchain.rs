@@ -7589,10 +7589,10 @@ impl Blockchain {
             fork_height, peer_addr, blocks.len(), peer_tip_height, our_height
         );
 
-        // STRATEGY: Request blocks covering MAX_REORG_DEPTH from our height.
-        // The common ancestor MUST be within MAX_REORG_DEPTH or we'd reject the reorg anyway.
-        // This prevents the old bug where fork_height shifted down each iteration,
-        // causing the node to download the entire blockchain back to genesis.
+        // STRATEGY: We need blocks covering the range from common ancestor to peer tip.
+        // Instead of requesting from search_floor to peer_tip (100+ blocks that exceed
+        // the 8MB frame limit), request only blocks BELOW the fork point in small batches.
+        // The peer already sent us blocks above the fork point.
         let lowest_peer_block = all_blocks
             .iter()
             .map(|b| b.header.height)
@@ -7601,16 +7601,61 @@ impl Blockchain {
         let search_floor = our_height.saturating_sub(MAX_REORG_DEPTH);
 
         if lowest_peer_block > search_floor && search_floor > 0 {
-            // We don't have enough block history - request one batch covering the reorg window
-            let request_from = search_floor;
-            let request_to = peer_tip_height;
+            // Detect accumulation stall: if we already had accumulated blocks and
+            // the lowest block hasn't changed, we're in an infinite loop.
+            let (stalled, original_started_at) = {
+                let current_state = self.fork_state.read().await;
+                if let ForkResolutionState::FetchingChain {
+                    accumulated_blocks,
+                    started_at,
+                    ..
+                } = &*current_state
+                {
+                    let prev_lowest = accumulated_blocks
+                        .iter()
+                        .map(|b| b.header.height)
+                        .min()
+                        .unwrap_or(u64::MAX);
+                    let elapsed = started_at.elapsed();
+                    // Stalled if lowest block hasn't changed AND we've been trying for >60s
+                    let is_stalled = lowest_peer_block >= prev_lowest
+                        && elapsed > std::time::Duration::from_secs(60);
+                    (is_stalled, Some(*started_at))
+                } else {
+                    (false, None)
+                }
+            };
+
+            if stalled {
+                warn!(
+                    "🔄 Fork resolution stalled: lowest block still {} after 60s, aborting",
+                    lowest_peer_block
+                );
+                *self.fork_state.write().await = ForkResolutionState::None;
+                return Ok(());
+            }
+
+            // Request a SMALL batch of blocks below the fork point to find common ancestor.
+            // Don't request all the way to peer_tip — we already have those blocks.
+            let batch_size = crate::constants::network::FORK_RESOLUTION_BATCH_SIZE;
+            let request_to = lowest_peer_block.saturating_sub(1);
+            let request_from = request_to.saturating_sub(batch_size - 1).max(search_floor);
+
+            if request_from > request_to {
+                warn!(
+                    "⚠️ Fork resolution: cannot request blocks (from {} > to {}), aborting",
+                    request_from, request_to
+                );
+                *self.fork_state.write().await = ForkResolutionState::None;
+                return Ok(());
+            }
 
             info!(
                 "📥 Requesting blocks {}-{} from {} for fork resolution (need coverage back to {}, have {}-{})",
                 request_from, request_to, peer_addr, search_floor, lowest_peer_block, peer_tip_height
             );
 
-            // Transition to fetching state
+            // Transition to fetching state (preserve original start time for stall detection)
             *self.fork_state.write().await = ForkResolutionState::FetchingChain {
                 common_ancestor: 0, // Not yet known
                 fork_height,
@@ -7618,7 +7663,7 @@ impl Blockchain {
                 peer_height: peer_tip_height,
                 fetched_up_to: peer_tip_height, // We already have up to peer tip
                 accumulated_blocks: all_blocks.clone(), // Save all blocks we have
-                started_at: std::time::Instant::now(),
+                started_at: original_started_at.unwrap_or_else(std::time::Instant::now),
             };
 
             // Request the blocks
@@ -7827,6 +7872,7 @@ impl Blockchain {
                     // previous fetches), not just the latest batch from the peer, to avoid
                     // an infinite loop when the peer splits its response across multiple messages.
                     let all_blocks_count = all_blocks.len();
+                    let all_blocks_saved = all_blocks.clone();
                     let reorg_blocks: Vec<Block> = all_blocks
                         .into_iter()
                         .filter(|b| b.header.height > common_ancestor)
@@ -7852,7 +7898,7 @@ impl Blockchain {
                                 peer_addr: peer_addr.clone(),
                                 peer_height: peer_tip_height,
                                 fetched_up_to: peer_tip_height,
-                                accumulated_blocks: Vec::new(),
+                                accumulated_blocks: all_blocks_saved,
                                 started_at: std::time::Instant::now(),
                             };
 
@@ -7892,7 +7938,7 @@ impl Blockchain {
                             peer_addr: peer_addr.clone(),
                             peer_height: peer_tip_height,
                             fetched_up_to: peer_tip_height,
-                            accumulated_blocks: Vec::new(), // Will be filled when blocks arrive
+                            accumulated_blocks: reorg_blocks,
                             started_at: std::time::Instant::now(),
                         };
 
