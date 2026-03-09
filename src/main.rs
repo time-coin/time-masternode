@@ -1112,7 +1112,7 @@ async fn main() {
         let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
         let peer_exchange_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
                 tokio::select! {
                     _ = shutdown_token_clone.cancelled() => {
@@ -1137,8 +1137,8 @@ async fn main() {
         let health_shutdown = shutdown_token.clone();
         let health_handle = tokio::spawn(async move {
             // Wait for peers to connect before first health check
-            tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120)); // Every 2 minutes
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60)); // Every minute
             loop {
                 tokio::select! {
                     _ = health_shutdown.cancelled() => {
@@ -1345,8 +1345,8 @@ async fn main() {
             // This handles joining an existing network
             let mut sync_attempts = 0;
             const MAX_SYNC_ATTEMPTS: u32 = 3;
-            const PEER_WAIT_SECS: u64 = 15;
-            const GENESIS_WAIT_SECS: u64 = 20;
+            const PEER_WAIT_SECS: u64 = 5;
+            const GENESIS_WAIT_SECS: u64 = 10;
 
             while sync_attempts < MAX_SYNC_ATTEMPTS && !blockchain_init.has_genesis() {
                 sync_attempts += 1;
@@ -1392,7 +1392,7 @@ async fn main() {
                 // Wait for masternodes to discover each other with exponential backoff
                 // Start with 30s, then 60s, then 90s - total 180s max wait
                 const DISCOVERY_ROUNDS: u32 = 3;
-                const BASE_DISCOVERY_WAIT: u64 = 30;
+                const BASE_DISCOVERY_WAIT: u64 = 10;
 
                 for round in 1..=DISCOVERY_ROUNDS {
                     if blockchain_init.has_genesis() {
