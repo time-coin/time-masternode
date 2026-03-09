@@ -3338,10 +3338,13 @@ impl Blockchain {
             }
         }
 
-        // If peers report being ahead, block production and sync instead.
-        // To prevent a single rogue peer from stalling us with a fake height,
-        // require the claimed height to be plausible (within time-based expected
-        // range) AND confirmed by at least 2 peers independently.
+        // If peers report being ahead, consider blocking production to sync.
+        // ATTACK DEFENSE: A single malicious node could produce a block early
+        // and claim a higher height to stall the network. Only block production
+        // when MULTIPLE independent peers confirm the higher height AND the
+        // height is plausible (within time-based expected range).
+        // A single peer ahead triggers a background sync attempt but does NOT
+        // block production — this prevents a lone attacker from halting the chain.
         if max_peer_height > our_height {
             let time_expected = self.calculate_expected_height();
             // Plausible = at most 2 minutes of block time beyond the expected height.
@@ -3363,15 +3366,17 @@ impl Blockchain {
                 );
                 return false;
             } else if height_is_plausible {
-                // Only one peer ahead — block production but log as suspicious
-                tracing::warn!(
-                    "⚠️ Block production blocked: peer ahead at height {} (we are at {}). \
-                     Single peer, but height is plausible (expected ~{}). Syncing first.",
+                // Single peer ahead — could be legitimate OR an attack.
+                // Do NOT block production (attacker could stall us).
+                // Instead, attempt sync in background and continue normally.
+                tracing::info!(
+                    "🔄 Single peer ahead at height {} (we are at {}, expected ~{}). \
+                     Attempting sync but not blocking production (could be attack).",
                     max_peer_height,
                     our_height,
                     time_expected
                 );
-                return false;
+                // Fall through to weighted consensus check
             } else {
                 tracing::warn!(
                     "⚠️ Ignoring implausible peer height {} (expected ~{}, we are at {}). {} peer(s) claim this.",
