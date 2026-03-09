@@ -3344,7 +3344,9 @@ impl Blockchain {
         // range) AND confirmed by at least 2 peers independently.
         if max_peer_height > our_height {
             let time_expected = self.calculate_expected_height();
-            let height_is_plausible = max_peer_height <= time_expected + 10;
+            // Plausible = at most 2 minutes of block time beyond the expected height.
+            // With 600s block interval, 120s ≈ 0.2 blocks, so allow +1 block margin.
+            let height_is_plausible = max_peer_height <= time_expected + 1;
             let peers_ahead: Vec<&(String, u64, [u8; 32], u64)> = peer_states
                 .iter()
                 .filter(|(_, h, _, _)| *h > our_height)
