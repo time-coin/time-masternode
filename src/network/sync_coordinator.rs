@@ -24,8 +24,10 @@ use tracing::{debug, info, warn};
 /// Minimum time between sync requests to the same peer
 const SYNC_THROTTLE_DURATION: Duration = Duration::from_secs(60);
 
-/// Maximum concurrent syncs across all peers
-const MAX_CONCURRENT_SYNCS: usize = 3;
+/// Maximum concurrent syncs across all peers — keep to 1 so only one GetBlocks
+/// request is outstanding at a time. Multiple simultaneous syncs compete for the
+/// same peer responses and cause 30-second timeouts.
+const MAX_CONCURRENT_SYNCS: usize = 1;
 
 /// Represents an active or queued sync request
 #[derive(Debug, Clone)]
@@ -408,18 +410,15 @@ mod tests {
     async fn test_concurrent_sync_limit() {
         let coordinator = SyncCoordinator::new();
 
-        // Start 3 syncs (the limit)
-        for i in 0..3 {
-            let peer = format!("192.168.1.{}", i + 1);
-            let result = coordinator
-                .request_sync(peer, 0, 100, SyncSource::Periodic)
-                .await;
-            assert_eq!(result, Ok(true));
-        }
-
-        // Fourth sync should be queued
+        // First sync should be approved (limit is 1)
         let result = coordinator
-            .request_sync("192.168.1.4".to_string(), 0, 100, SyncSource::Periodic)
+            .request_sync("192.168.1.1".to_string(), 0, 100, SyncSource::Periodic)
+            .await;
+        assert_eq!(result, Ok(true));
+
+        // Second sync from a different peer should be queued (at limit)
+        let result = coordinator
+            .request_sync("192.168.1.2".to_string(), 0, 100, SyncSource::Periodic)
             .await;
         assert_eq!(result, Ok(false));
     }

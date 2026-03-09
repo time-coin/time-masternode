@@ -7405,68 +7405,17 @@ impl Blockchain {
                             }
                         }
                     } else if consensus_height > our_height {
-                        // We're behind — could be simple lag OR behind-and-forked.
-                        // Request blocks starting from our_height-20 so overlapping blocks
-                        // reveal whether we're on the same chain. If forked, process_peer_blocks
-                        // will detect the mismatch and trigger handle_fork() automatically.
-                        tracing::info!(
-                            "🔀 Periodic fork detection: consensus height {} > our height {}, requesting blocks from {}",
-                            consensus_height,
+                        // We're simply behind — spawn_sync_coordinator (running every 10s) already
+                        // handles catching up via sync_from_peers(). Initiating a second concurrent
+                        // GetBlocks request here would compete with that one for peer responses and
+                        // cause 30-second timeouts on both sides. Do nothing; let the sync coordinator
+                        // own the "behind" case.
+                        tracing::debug!(
+                            "📊 Chain comparison: {} blocks behind ({} vs {}), sync coordinator will handle catch-up",
+                            consensus_height - our_height,
                             our_height,
-                            consensus_peer
+                            consensus_height,
                         );
-
-                        if let Some(peer_registry) = blockchain.peer_registry.read().await.as_ref()
-                        {
-                            let request_from = our_height.saturating_sub(20).max(1);
-
-                            match blockchain
-                                .sync_coordinator
-                                .request_sync(
-                                    consensus_peer.clone(),
-                                    request_from,
-                                    consensus_height,
-                                    crate::network::sync_coordinator::SyncSource::ForkResolution,
-                                )
-                                .await
-                            {
-                                Ok(true) => {
-                                    let req =
-                                        NetworkMessage::GetBlocks(request_from, consensus_height);
-                                    if let Err(e) =
-                                        peer_registry.send_to_peer(&consensus_peer, req).await
-                                    {
-                                        blockchain
-                                            .sync_coordinator
-                                            .cancel_sync(&consensus_peer)
-                                            .await;
-                                        tracing::warn!(
-                                            "⚠️  Failed to request blocks from {}: {}",
-                                            consensus_peer,
-                                            e
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            "📤 Requested blocks {}-{} from {} (overlap from {} to detect forks)",
-                                            request_from,
-                                            consensus_height,
-                                            consensus_peer,
-                                            our_height
-                                        );
-                                    }
-                                }
-                                Ok(false) => {
-                                    tracing::debug!("⏸️ Sync queued with {}", consensus_peer);
-                                }
-                                Err(e) => {
-                                    tracing::debug!(
-                                        "⏱️ Sync throttled with {}: {}",
-                                        consensus_peer,
-                                        e
-                                    );
-                                }
-                            }
-                        }
                     } else {
                         // consensus_height < our_height — solo fork detected
                         // We advanced beyond peers on a divergent chain. Roll back and resync.
