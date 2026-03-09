@@ -5,6 +5,44 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-03-09
+
+### Fixed — Solo Block Production & Fork Prevention
+- **Solo block production eliminated**: Longest-chain-rule path now requires `MIN_AGREEING_PEERS` (2) peers confirming they're on the same chain before allowing production. A single node can no longer produce blocks even if it believes it has the "longest chain."
+- **Fallback consensus requires peer votes**: `prepare_weight > 1` required for TimeGuard fallback — the producer's own vote alone no longer counts. Previously `prepare_weight > 0` always succeeded since the producer votes for its own block.
+- **Block timing enforcement**: Blocks cannot be produced before their scheduled timestamp (`genesis_ts + height × BLOCK_TIME`). `validate_block()` also rejects incoming blocks produced too early (30s clock-skew grace, only for recent blocks within 10 of chain tip).
+- **Single-node attack defense**: A single peer claiming a higher height cannot stall the network. Block production is only halted when ≥2 independent peers report a plausible height ahead (within 1 block of time-based expected height). A single peer triggers background sync but does not block production.
+
+### Fixed — Sync & Catch-Up
+- **Sync loop no longer blocks catch-up production**: When all peers are at the same height and far behind target, `sync_from_peers` now requests fresh chain tips, waits 3s, and re-checks. If no peer is ahead after refresh, returns immediately to allow catch-up block production. Previously fell through to a 120s sync loop that accomplished nothing.
+- **Consensus failure triggers sync**: When `check_2_3_consensus` fails in the block production loop, the node now spawns `sync_from_peers` in the background instead of just retrying production endlessly.
+- **Fork alerts update chain tip cache**: `handle_fork_alert` now updates the alerting peer's chain tip with the consensus height/hash, so `sync_from_peers` can discover peers ahead of us. Previously the chain tip cache remained stale after fork alerts.
+
+### Fixed — Fork Resolution (Bugs 1-4)
+- **Bug 1 — Same-height fork detection**: `check_2_3_consensus_for_production()` no longer allows production via the "longest chain rule" escape when peers at the same height have different block hashes.
+- **Bug 2 — Deterministic fork tiebreaker**: Same-height forks now use a deterministic hash comparison (lower hash wins) instead of requiring >50% weighted majority, which was impossible when N nodes were on N different chains.
+- **Bug 3 — Non-consensus sync deadlock**: Lowered the non-consensus peer blocking threshold from gap > 20 to gap > 10, allowing behind nodes to sync from any peer when significantly behind.
+- **Bug 4 — Fork resolution infinite loop**: `handle_fork` now requests blocks in small batches (`FORK_RESOLUTION_BATCH_SIZE=20`) with 60s stall detection. `MAX_BLOCKS_PER_RESPONSE=50` caps response size to prevent 8MB frame overflow.
+
+### Fixed — Block Validation & Sync
+- **Bitmap-based registry divergence detection**: `validate_reward_distribution` uses `active_masternodes_bitmap` set bits to determine how many masternodes were active when the block was produced. If bitmap count differs from local registry count, strict reward checks become warnings — enabling sync through historical blocks with different reward rules.
+- **Max block size increased**: 1MB → 2MB (`MAX_BLOCK_SIZE`) to accommodate large blocks with many transactions.
+- **`sync_from_specific_peer` fallback**: When consensus height is known but peer chain tip is missing, falls back to requesting a small batch instead of failing with "No chain tip data."
+- **Fork detection patterns expanded**: `"incorrect block_reward"` and `"pool theft"` errors now trigger fork resolution instead of falling into the generic error handler.
+
+### Changed — Faster Peer Connections
+- **`PEER_WAIT_SECS`**: 15s → 5s (initial wait for peer connections at startup)
+- **`GENESIS_WAIT_SECS`**: 20s → 10s (genesis block response wait)
+- **`BASE_DISCOVERY_WAIT`**: 30s → 10s (discovery round backoff base, reducing exponential sequence from 30/60/90s to 10/20/30s)
+- **Peer exchange broadcast**: 60s → 30s (GetMasternodes interval)
+- **Health monitoring**: Start delay 120s → 30s, interval 120s → 60s
+- **Peer discovery loop (PHASE 3)**: 120s → 30s (rediscovery interval)
+- Best-case startup-to-connected reduced from ~43s to ~18s.
+
+### Added
+- **Remote uptime via announcements**: `started_at: u64` field added to `MasternodeAnnouncementV3`. Dashboard computes real uptime from `daemon_started_at` instead of relying on local `total_uptime`. Masternodes sorted by tier (Gold→Free) in dashboard.
+- **Stale pending TX cleanup**: `cleanup_stale_pending()` runs every 10 minutes in the main loop, reverting UTXOs for transactions pending > 300s.
+
 ## [1.2.1] - 2026-03-08
 
 ### Fixed — Consensus & Block Production
