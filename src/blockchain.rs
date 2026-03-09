@@ -1344,8 +1344,9 @@ impl Blockchain {
 
                 if peers_checked >= 2 && max_peer_height <= current {
                     // Only skip sync if we're close to the expected time-based height.
-                    // If we're far behind, our peers' chain tips are likely stale —
-                    // request fresh chain tips rather than assuming blocks must be produced.
+                    // If we're far behind, request fresh chain tips first. But if after
+                    // refreshing, peers STILL report the same height, allow production —
+                    // the network genuinely needs to produce blocks to catch up.
                     if blocks_behind_target <= MAX_BOOTSTRAP_SHORTCUT_BEHIND {
                         tracing::info!(
                             "✅ No peers have blocks beyond height {} ({} peers checked, target {}). Skipping sync — blocks must be produced.",
@@ -1355,22 +1356,49 @@ impl Blockchain {
                         );
                         return Ok(());
                     } else {
-                        tracing::warn!(
-                            "⚠️ No peers have blocks beyond height {} ({} peers checked) but we're {} blocks behind target {}. \
-                             Requesting fresh chain tips — peer cache may be stale.",
+                        tracing::info!(
+                            "🔄 {} blocks behind target but no peers ahead (height {}, {} peers checked). \
+                             Requesting fresh chain tips before allowing production.",
+                            blocks_behind_target,
                             current,
                             peers_checked,
-                            blocks_behind_target,
-                            target
                         );
-                        // Request fresh chain tips from all peers
+                        // Request fresh chain tips and wait briefly for responses
                         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
                             peer_registry
                                 .broadcast(crate::network::message::NetworkMessage::GetChainTip)
                                 .await;
                         }
-                        // Don't return — fall through to normal sync logic which will
-                        // wait for chain tip updates and try to sync
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+                        // Re-check with refreshed data
+                        let mut refreshed_max = current;
+                        if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                            for peer_ip in &peer_registry.get_compatible_peers().await {
+                                if let Some((height, _)) =
+                                    peer_registry.get_peer_chain_tip(peer_ip).await
+                                {
+                                    if height > refreshed_max {
+                                        refreshed_max = height;
+                                    }
+                                }
+                            }
+                        }
+
+                        if refreshed_max <= current {
+                            // Still no peer ahead after refresh — blocks must be produced
+                            tracing::info!(
+                                "✅ After refresh: still no peers beyond height {}. Allowing production to catch up.",
+                                current
+                            );
+                            return Ok(());
+                        }
+                        // A peer is now ahead — fall through to normal sync
+                        tracing::info!(
+                            "🔀 After refresh: peer now at height {} (we are at {}). Syncing.",
+                            refreshed_max,
+                            current
+                        );
                     }
                 }
             }
