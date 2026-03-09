@@ -1711,10 +1711,27 @@ impl Blockchain {
         let registry = peer_registry.as_ref().ok_or("No peer registry available")?;
 
         // Get peer's actual chain tip to avoid requesting blocks they don't have
-        let (peer_height, _peer_hash) = registry
-            .get_peer_chain_tip(peer_ip)
-            .await
-            .ok_or_else(|| format!("No chain tip data for peer {}", peer_ip))?;
+        // Fall back to requesting from our height if chain tip isn't known yet
+        let peer_height = match registry.get_peer_chain_tip(peer_ip).await {
+            Some((h, _hash)) => h,
+            None => {
+                // Peer hasn't sent a ChainTipResponse yet — estimate from consensus
+                let consensus = self.consensus_peers.read().await;
+                if !consensus.is_empty() {
+                    // Use a reasonable estimate: request a small batch ahead
+                    let est = current + 50;
+                    tracing::info!(
+                        "📤 No chain tip for {} — requesting blocks {}-{} (estimated)",
+                        peer_ip,
+                        current + 1,
+                        est
+                    );
+                    est
+                } else {
+                    return Err(format!("No chain tip data for peer {}", peer_ip));
+                }
+            }
+        };
 
         if current >= peer_height {
             tracing::info!("✓ Already synced to peer {} height {}", peer_ip, current);
