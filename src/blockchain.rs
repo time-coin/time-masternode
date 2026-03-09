@@ -1343,13 +1343,35 @@ impl Blockchain {
                 }
 
                 if peers_checked >= 2 && max_peer_height <= current {
-                    tracing::info!(
-                        "✅ No peers have blocks beyond height {} ({} peers checked, target {}). Skipping sync — blocks must be produced.",
-                        current,
-                        peers_checked,
-                        target
-                    );
-                    return Ok(());
+                    // Only skip sync if we're close to the expected time-based height.
+                    // If we're far behind, our peers' chain tips are likely stale —
+                    // request fresh chain tips rather than assuming blocks must be produced.
+                    if blocks_behind_target <= MAX_BOOTSTRAP_SHORTCUT_BEHIND {
+                        tracing::info!(
+                            "✅ No peers have blocks beyond height {} ({} peers checked, target {}). Skipping sync — blocks must be produced.",
+                            current,
+                            peers_checked,
+                            target
+                        );
+                        return Ok(());
+                    } else {
+                        tracing::warn!(
+                            "⚠️ No peers have blocks beyond height {} ({} peers checked) but we're {} blocks behind target {}. \
+                             Requesting fresh chain tips — peer cache may be stale.",
+                            current,
+                            peers_checked,
+                            blocks_behind_target,
+                            target
+                        );
+                        // Request fresh chain tips from all peers
+                        if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                            peer_registry
+                                .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                                .await;
+                        }
+                        // Don't return — fall through to normal sync logic which will
+                        // wait for chain tip updates and try to sync
+                    }
                 }
             }
         }
@@ -3282,6 +3304,10 @@ impl Blockchain {
         // longest chain and should continue producing. Peers will sync to us.
         // HOWEVER: If peers at our height have DIFFERENT hashes, we're in a fork —
         // don't use this escape; fall through to weighted agreement check.
+        // CRITICAL: Also require at least MIN_AGREEING_PEERS peers confirming they're
+        // on our chain. A solo node must NOT produce blocks just because it has the
+        // "longest chain" — it needs confirmation from others.
+        const MIN_AGREEING_PEERS: u32 = 2;
         let max_peer_height = peer_states.iter().map(|(_, h, _, _)| *h).max().unwrap_or(0);
         if max_peer_height <= our_height {
             let fork_at_our_height = peer_states
@@ -3293,13 +3319,22 @@ impl Blockchain {
                     our_height
                 );
                 // Fall through to weighted agreement check below
-            } else {
+            } else if peers_agreeing >= MIN_AGREEING_PEERS {
                 tracing::debug!(
-                    "✅ Block production allowed: longest chain rule (our height {} >= max peer height {}, no fork)",
+                    "✅ Block production allowed: longest chain rule (our height {} >= max peer height {}, {} peers agree, no fork)",
                     our_height,
-                    max_peer_height
+                    max_peer_height,
+                    peers_agreeing
                 );
                 return true;
+            } else {
+                tracing::warn!(
+                    "⚠️ Block production blocked: only {} peers agree (need {} minimum). \
+                     Cannot produce blocks without peer confirmation.",
+                    peers_agreeing,
+                    MIN_AGREEING_PEERS
+                );
+                return false;
             }
         }
 
@@ -3319,7 +3354,7 @@ impl Blockchain {
         // CRITICAL: Also require a minimum NUMBER of peers in sync (not just weight).
         // Prevents a single high-weight node from enabling block production.
         // "3 nodes in sync" = us + at least 2 agreeing peers.
-        const MIN_AGREEING_PEERS: u32 = 2;
+        // (MIN_AGREEING_PEERS declared above at the longest-chain-rule check)
         let enough_peers_in_sync = peers_agreeing >= MIN_AGREEING_PEERS;
 
         if has_consensus && enough_peers_in_sync {
