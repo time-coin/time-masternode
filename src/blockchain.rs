@@ -2529,6 +2529,21 @@ impl Blockchain {
 
         let prev_hash = self.get_block_hash(current_height)?;
 
+        // CRITICAL: Do not produce a block before its expected timestamp.
+        // Each block's expected time = genesis_timestamp + (height * BLOCK_TIME_SECONDS).
+        // Producing early is how a malicious node could claim a higher chain.
+        let now = Utc::now().timestamp();
+        let genesis_ts = self.genesis_timestamp();
+        let earliest_allowed = genesis_ts + (next_height as i64) * BLOCK_TIME_SECONDS;
+        if now < earliest_allowed {
+            let wait_secs = earliest_allowed - now;
+            return Err(format!(
+                "Cannot produce block {}: too early ({}s before expected time). \
+                 Blocks must not be produced before their scheduled timestamp.",
+                next_height, wait_secs
+            ));
+        }
+
         // CRITICAL: Validate producer_address is provided for non-genesis blocks
         // This prevents creating blocks with empty leader field (which breaks participation tracking)
         if next_height > 3 && producer_address.is_none() {
@@ -6025,6 +6040,25 @@ impl Blockchain {
             return Err(format!(
                 "Block {} exceeds maximum expected height {} (genesis-based calculation)",
                 block.header.height, max_expected_height
+            ));
+        }
+
+        // Reject blocks produced before their scheduled time.
+        // Expected earliest time = genesis_timestamp + (height * BLOCK_TIME_SECONDS).
+        // Allow 30s grace for minor clock skew between nodes.
+        // Only enforce for recent blocks (within 10 of chain tip) — historical blocks
+        // during sync may have been produced under different timing rules.
+        let chain_tip = self.current_height.load(Ordering::Acquire);
+        let block_expected_time =
+            genesis_timestamp + (block.header.height as i64 * BLOCK_TIME_SECONDS);
+        if block.header.height + 10 > chain_tip && block.header.timestamp < block_expected_time - 30
+        {
+            return Err(format!(
+                "Block {} timestamp {} is before its scheduled time {} (produced too early by {}s)",
+                block.header.height,
+                block.header.timestamp,
+                block_expected_time,
+                block_expected_time - block.header.timestamp
             ));
         }
 
