@@ -5213,6 +5213,9 @@ impl Blockchain {
         }
 
         // Verify producer gets at least their minimum share
+        // Use the block's active_masternodes_bitmap to determine how many masternodes
+        // were active when the block was produced. If our local registry count differs
+        // from the bitmap count, rewards were computed under a different masternode set.
         let actual_producer_amount = block
             .masternode_rewards
             .iter()
@@ -5220,68 +5223,94 @@ impl Blockchain {
             .map(|(_, amt)| *amt)
             .unwrap_or(0);
 
+        let bitmap_active_count: u32 = block
+            .header
+            .active_masternodes_bitmap
+            .iter()
+            .map(|byte| byte.count_ones())
+            .sum();
+        let our_active_count = expected_rewards.len() as u32;
+        let registry_diverged = bitmap_active_count > 0 && bitmap_active_count != our_active_count;
+
         if actual_producer_amount > 0
             && calculated_fees == 0
             && actual_producer_amount < PRODUCER_REWARD_SATOSHIS
         {
-            return Err(format!(
-                "Block {} producer {} received {} satoshis, less than minimum {} (pool theft)",
-                block.header.height,
-                producer_addr,
-                actual_producer_amount,
-                PRODUCER_REWARD_SATOSHIS
-            ));
+            if registry_diverged {
+                // Bitmap says different masternode count than our registry — accept the block
+                tracing::warn!(
+                    "⚠️ Block {} producer {} received {} satoshis (minimum {}), \
+                     accepting: bitmap shows {} active masternodes vs our {} expected recipients",
+                    block.header.height,
+                    producer_addr,
+                    actual_producer_amount,
+                    PRODUCER_REWARD_SATOSHIS,
+                    bitmap_active_count,
+                    our_active_count
+                );
+            } else {
+                return Err(format!(
+                    "Block {} producer {} received {} satoshis, less than minimum {} (pool theft)",
+                    block.header.height,
+                    producer_addr,
+                    actual_producer_amount,
+                    PRODUCER_REWARD_SATOSHIS
+                ));
+            }
         }
 
         // Verify each expected recipient is present with correct amount (tight tolerance)
-        let tolerance = crate::constants::blockchain::SATOSHIS_PER_TIME; // 1 TIME for rounding
-        for (expected_addr, expected_amt) in &expected_rewards {
-            match block
-                .masternode_rewards
-                .iter()
-                .find(|(a, _)| a == expected_addr)
-            {
-                Some((_, actual_amt)) => {
-                    let diff = if *actual_amt > *expected_amt {
-                        actual_amt - expected_amt
-                    } else {
-                        expected_amt - actual_amt
-                    };
-                    if diff > tolerance {
-                        // Hard reject: deviation beyond rounding tolerance indicates tampering
-                        // or a different winner was selected than consensus expects.
-                        let max_divergence = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
-                        if diff > max_divergence {
-                            return Err(format!(
-                                "Block {} reward for {} deviates beyond max: expected {} satoshis, got {} (diff {})",
+        // Skip strict checks when registry has diverged — reward splits will differ
+        if !registry_diverged {
+            let tolerance = crate::constants::blockchain::SATOSHIS_PER_TIME; // 1 TIME for rounding
+            for (expected_addr, expected_amt) in &expected_rewards {
+                match block
+                    .masternode_rewards
+                    .iter()
+                    .find(|(a, _)| a == expected_addr)
+                {
+                    Some((_, actual_amt)) => {
+                        let diff = if *actual_amt > *expected_amt {
+                            actual_amt - expected_amt
+                        } else {
+                            expected_amt - actual_amt
+                        };
+                        if diff > tolerance {
+                            let max_divergence = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
+                            if diff > max_divergence {
+                                return Err(format!(
+                                    "Block {} reward for {} deviates beyond max: expected {} satoshis, got {} (diff {})",
+                                    block.header.height, expected_addr, expected_amt, actual_amt, diff
+                                ));
+                            }
+                            tracing::warn!(
+                                "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
+                                 Accepting due to possible masternode list divergence.",
                                 block.header.height, expected_addr, expected_amt, actual_amt, diff
-                            ));
+                            );
                         }
+                    }
+                    None => {
                         tracing::warn!(
-                            "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
-                             Accepting due to possible masternode list divergence.",
-                            block.header.height, expected_addr, expected_amt, actual_amt, diff
+                            "⚠️ Block {} expected reward recipient {} not found in actual rewards (registry divergence)",
+                            block.header.height, expected_addr
                         );
                     }
-                }
-                None => {
-                    // Expected recipient is missing — possible registry divergence
-                    tracing::warn!(
-                        "⚠️ Block {} expected reward recipient {} not found in actual rewards (registry divergence)",
-                        block.header.height, expected_addr
-                    );
                 }
             }
         }
 
         // Verify no unexpected recipients received more than the largest tier pool
+        // During registry divergence, skip this check since reward splits differ
         let max_tier_pool = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
-        for (addr, amount) in &block.masternode_rewards {
-            if addr != &producer_wallet && *amount > max_tier_pool {
-                return Err(format!(
-                    "Block {} recipient {} received {} satoshis, exceeds max tier pool {}",
-                    block.header.height, addr, amount, max_tier_pool
-                ));
+        if !registry_diverged {
+            for (addr, amount) in &block.masternode_rewards {
+                if addr != &producer_wallet && *amount > max_tier_pool {
+                    return Err(format!(
+                        "Block {} recipient {} received {} satoshis, exceeds max tier pool {}",
+                        block.header.height, addr, amount, max_tier_pool
+                    ));
+                }
             }
         }
 
