@@ -1463,10 +1463,20 @@ impl RpcHandler {
                 }
 
                 if sent > 0 || received > 0 {
+                    // Detect consolidation: all outputs go to our address (self-send)
+                    let all_outputs_to_self = sent > 0
+                        && received > 0
+                        && tx
+                            .outputs
+                            .iter()
+                            .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
+
                     // Skip coinbase (tx_idx 0) and reward distribution (tx_idx 1) for "send"
                     // They are always "receive" type
                     let category = if tx_idx <= 1 {
                         "generate"
+                    } else if all_outputs_to_self {
+                        "consolidate"
                     } else if sent > 0 && received > 0 {
                         // Change back to self — net effect is a send
                         "send"
@@ -1476,7 +1486,10 @@ impl RpcHandler {
                         "receive"
                     };
 
-                    let net_amount = if category == "send" {
+                    let net_amount = if category == "consolidate" {
+                        // Show the consolidated output value (what you end up with)
+                        received as f64 / 100_000_000.0
+                    } else if category == "send" {
                         // For sends, show the net amount leaving the wallet (negative)
                         // sent - received = total input from wallet - change back
                         -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
@@ -1484,8 +1497,8 @@ impl RpcHandler {
                         received as f64 / 100_000_000.0
                     };
 
-                    // Calculate fee for sends
-                    let fee = if category == "send" {
+                    // Calculate fee for sends and consolidations
+                    let fee = if category == "send" || category == "consolidate" {
                         let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
                         let total_in = sent; // We only know our inputs
                         if total_in > total_out {
@@ -1725,21 +1738,33 @@ impl RpcHandler {
                         continue;
                     }
 
+                    // Detect consolidation: all outputs go to one of our tracked addresses
+                    let all_outputs_to_self = sent > 0
+                        && received > 0
+                        && tx.outputs.iter().all(|o| {
+                            let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
+                            addr_set.contains(&addr)
+                        });
+
                     let category = if tx_idx <= 1 {
                         "generate"
+                    } else if all_outputs_to_self {
+                        "consolidate"
                     } else if sent > 0 {
                         "send"
                     } else {
                         "receive"
                     };
 
-                    let net_amount = if category == "send" {
+                    let net_amount = if category == "consolidate" {
+                        received as f64 / 100_000_000.0
+                    } else if category == "send" {
                         -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
                     } else {
                         received as f64 / 100_000_000.0
                     };
 
-                    let fee = if category == "send" {
+                    let fee = if category == "send" || category == "consolidate" {
                         let total_out: u64 = tx.outputs.iter().map(|o| o.value).sum();
                         if sent > total_out {
                             Some(-((sent - total_out) as f64 / 100_000_000.0))
@@ -2535,7 +2560,8 @@ impl RpcHandler {
                 consolidate_utxos.truncate(MAX_TX_INPUTS);
 
                 let consolidate_total: u64 = consolidate_utxos.iter().map(|u| u.value).sum();
-                let consolidate_fee = fee_schedule.required_fee(consolidate_total);
+                // Self-sends (consolidations) only pay MIN_TX_FEE, not 1% of total value
+                let consolidate_fee = crate::consensus::MIN_TX_FEE;
 
                 if consolidate_total <= consolidate_fee {
                     return Err(RpcError {

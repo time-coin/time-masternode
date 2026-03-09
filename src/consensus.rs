@@ -35,7 +35,7 @@ const MAX_MEMPOOL_TRANSACTIONS: usize = 10_000;
 #[allow(dead_code)] // Used by TransactionPool for mempool size limits
 const MAX_MEMPOOL_SIZE_BYTES: usize = 300_000_000; // 300MB
 const MAX_TX_SIZE: usize = 10_000_000; // 10MB
-const MIN_TX_FEE: u64 = 1_000_000; // 0.01 TIME minimum fee
+pub const MIN_TX_FEE: u64 = 1_000_000; // 0.01 TIME minimum fee
 const DUST_THRESHOLD: u64 = 546; // Minimum output value (prevents spam)
 const SATOSHIS_PER_TIME: u64 = 100_000_000;
 
@@ -2327,15 +2327,28 @@ impl ConsensusEngine {
 
         // 3. Check input values >= output values (no inflation)
         let mut input_sum = 0u64;
+        let mut input_addresses: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for input in &tx.inputs {
             if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
                 input_sum += utxo.value;
+                input_addresses.insert(utxo.address.clone());
             } else {
                 return Err("UTXO not found".to_string());
             }
         }
 
         let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+
+        // Detect self-sends (consolidation): all inputs and outputs go to the same single address
+        let output_addresses: std::collections::HashSet<String> = tx
+            .outputs
+            .iter()
+            .map(|o| String::from_utf8_lossy(&o.script_pubkey).to_string())
+            .collect();
+        let is_self_send = input_addresses.len() == 1
+            && output_addresses.len() == 1
+            && input_addresses == output_addresses;
 
         // 4. Dust prevention - reject outputs below threshold
         for output in &tx.outputs {
@@ -2359,15 +2372,18 @@ impl ConsensusEngine {
         }
 
         // Check tiered proportional fee (governance-adjustable schedule)
-        let fee_schedule = FeeSchedule::default();
-        let send_amount = tx.outputs.first().map(|o| o.value).unwrap_or(output_sum);
-        let min_proportional_fee = fee_schedule.required_fee(send_amount);
+        // Self-sends (consolidations) only need MIN_TX_FEE — no value transfer occurs
+        if !is_self_send {
+            let fee_schedule = FeeSchedule::default();
+            let send_amount = tx.outputs.first().map(|o| o.value).unwrap_or(output_sum);
+            let min_proportional_fee = fee_schedule.required_fee(send_amount);
 
-        if actual_fee < min_proportional_fee {
-            return Err(format!(
-                "Insufficient fee: {} satoshis < {} satoshis required for send amount {}",
-                actual_fee, min_proportional_fee, send_amount
-            ));
+            if actual_fee < min_proportional_fee {
+                return Err(format!(
+                    "Insufficient fee: {} satoshis < {} satoshis required for send amount {}",
+                    actual_fee, min_proportional_fee, send_amount
+                ));
+            }
         }
 
         if input_sum < output_sum {
