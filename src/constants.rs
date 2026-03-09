@@ -47,8 +47,8 @@ pub mod blockchain {
     /// Only enforced on mainnet (testnet = 0 for rapid development iteration).
     pub const FREE_MATURITY_BLOCKS: u64 = 72; // ~12 hours at 10 min/block
 
-    /// Maximum block size in bytes (1 MB)
-    pub const MAX_BLOCK_SIZE: usize = 1_000_000;
+    /// Maximum block size in bytes (2 MB)
+    pub const MAX_BLOCK_SIZE: usize = 2_000_000;
 
     /// Maximum timestamp tolerance for future blocks (5 seconds for clock drift)
     /// Blocks should be produced on time — this only covers minor NTP drift.

@@ -471,7 +471,7 @@ impl NetworkServer {
 #[allow(dead_code)]
 const MAX_MESSAGE_SIZE: usize = 2_000_000;
 #[allow(dead_code)]
-const MAX_BLOCK_SIZE: usize = 1_000_000;
+const MAX_BLOCK_SIZE: usize = 2_000_000;
 #[allow(dead_code)]
 const MAX_TX_SIZE: usize = 100_000;
 #[allow(dead_code)]
@@ -2149,7 +2149,7 @@ mod tests {
     fn test_message_size_limits() {
         // Phase 2.3: Verify message size constants are properly set
         assert_eq!(MAX_MESSAGE_SIZE, 2_000_000); // 2MB absolute max
-        assert_eq!(MAX_BLOCK_SIZE, 1_000_000); // 1MB for blocks
+        assert_eq!(MAX_BLOCK_SIZE, 2_000_000); // 2MB for blocks
         assert_eq!(MAX_TX_SIZE, 100_000); // 100KB for transactions
         assert_eq!(MAX_VOTE_SIZE, 1_000); // 1KB for votes
         assert_eq!(MAX_GENERAL_SIZE, 50_000); // 50KB for general
@@ -2158,8 +2158,8 @@ mod tests {
         // Note: These are constant assertions that clippy warns about.
         // The hierarchy is enforced at compile time by the constant values themselves.
         // Documented here for clarity:
-        // MAX_BLOCK_SIZE (1MB) < MAX_MESSAGE_SIZE (2MB)
-        // MAX_TX_SIZE (100KB) < MAX_BLOCK_SIZE (1MB)
+        // MAX_BLOCK_SIZE (2MB) < MAX_MESSAGE_SIZE (2MB) — equal is fine
+        // MAX_TX_SIZE (100KB) < MAX_BLOCK_SIZE (2MB)
         // MAX_VOTE_SIZE (1KB) < MAX_TX_SIZE (100KB)
         // MAX_GENERAL_SIZE (50KB) < MAX_TX_SIZE (100KB)
     }
@@ -2173,7 +2173,7 @@ mod tests {
             "Oversized message should exceed limit"
         );
 
-        let block_size = 1_500_000; // 1.5MB
+        let block_size = 2_500_000; // 2.5MB
         assert!(
             block_size > MAX_BLOCK_SIZE,
             "Oversized block should exceed limit"
