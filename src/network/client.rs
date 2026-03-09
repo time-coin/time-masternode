@@ -371,7 +371,7 @@ impl NetworkClient {
             }
 
             // PHASE 3: Periodic peer discovery with masternode priority
-            let peer_discovery_interval = Duration::from_secs(120);
+            let peer_discovery_interval = Duration::from_secs(30);
             loop {
                 sleep(peer_discovery_interval).await;
 
