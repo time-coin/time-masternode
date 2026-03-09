@@ -61,6 +61,14 @@ impl TransactionIndex {
         Ok(())
     }
 
+    /// Clear all entries (used before a full rebuild to eliminate stale entries)
+    pub fn clear(&self) -> Result<(), String> {
+        self.db
+            .clear()
+            .map_err(|e| format!("Failed to clear txindex: {}", e))?;
+        Ok(())
+    }
+
     /// Get total number of indexed transactions
     pub fn len(&self) -> usize {
         self.db.len()

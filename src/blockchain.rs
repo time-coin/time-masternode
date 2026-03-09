@@ -394,6 +394,16 @@ impl Blockchain {
         tracing::info!("   Current blockchain height: {}", current_height);
         tracing::info!("   Current index size: {} transactions", index_len);
 
+        // Always clear before rebuilding. A partial or stale index (e.g., left by
+        // an incomplete rollback) causes validate_block_rewards to look up the wrong
+        // transaction and compute wrong fees, resulting in blocks being rejected.
+        if let Err(e) = tx_index.clear() {
+            tracing::warn!(
+                "Failed to clear existing tx_index before rebuild: {}. Proceeding anyway.",
+                e
+            );
+        }
+
         let mut indexed_count = 0;
         let start = std::time::Instant::now();
 
@@ -4904,16 +4914,23 @@ impl Blockchain {
                 let spent_txid = input.previous_output.txid;
                 let spent_vout = input.previous_output.vout;
 
-                // Try tx_index first for O(1) lookup
+                // Try tx_index first for O(1) lookup.
+                // CRITICAL: Always verify src_tx.txid() == spent_txid after the lookup.
+                // Stale tx_index entries (left by incomplete rollbacks) may point to a
+                // different transaction at the same block/index position, which would
+                // return the wrong output value and cause fee validation to fail.
                 let mut found = false;
                 if let Some(ref txi) = self.tx_index {
                     if let Some(loc) = txi.get_location(&spent_txid) {
                         if let Ok(src_block) = self.get_block(loc.block_height) {
                             if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
-                                if let Some(output) = src_tx.outputs.get(spent_vout as usize) {
-                                    input_sum += output.value;
-                                    found = true;
+                                if src_tx.txid() == spent_txid {
+                                    if let Some(output) = src_tx.outputs.get(spent_vout as usize) {
+                                        input_sum += output.value;
+                                        found = true;
+                                    }
                                 }
+                                // txid mismatch → stale entry; fall through to linear search
                             }
                         }
                     }
@@ -5247,7 +5264,12 @@ impl Blockchain {
             .map(|byte| byte.count_ones())
             .sum();
         let our_active_count = expected_rewards.len() as u32;
-        let registry_diverged = bitmap_active_count > 0 && bitmap_active_count != our_active_count;
+        // Detect registry divergence via bitmap mismatch OR recipient count mismatch.
+        // The bitmap may be absent/zeroed in older blocks, so the recipient count
+        // mismatch is the reliable fallback (the warning at 5237 already logged it).
+        let recipient_count_diverged = block.masternode_rewards.len() as u32 != our_active_count;
+        let registry_diverged = recipient_count_diverged
+            || (bitmap_active_count > 0 && bitmap_active_count != our_active_count);
 
         if actual_producer_amount > 0
             && calculated_fees == 0
@@ -5787,6 +5809,25 @@ impl Blockchain {
 
         // Step 2: Remove blocks from storage (highest first)
         for height in (target_height + 1..=current).rev() {
+            // Clean tx_index BEFORE removing the block from storage so we can still read it.
+            // Not doing this leaves stale entries that map txids to positions in blocks that
+            // no longer exist (or have been replaced by a different chain's blocks), which
+            // causes validate_block_rewards to look up the wrong transaction and compute
+            // inflated fees.
+            if let Some(ref txi) = self.tx_index {
+                if let Ok(block) = self.get_block(height) {
+                    for tx in &block.transactions {
+                        if let Err(e) = txi.remove_transaction(&tx.txid()) {
+                            tracing::warn!(
+                                "Failed to remove tx from index during rollback at height {}: {}",
+                                height,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             let key = format!("block_{}", height);
             if let Err(e) = self.storage.remove(key.as_bytes()) {
                 tracing::warn!("Failed to remove block {}: {}", height, e);

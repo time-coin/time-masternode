@@ -865,18 +865,16 @@ async fn main() {
         }
     }
 
-    // Build transaction index if it exists and is empty
-    if let Some(ref idx) = tx_index {
-        if idx.is_empty() && blockchain.get_height() > 0 {
+    // Build (or rebuild) transaction index on startup.
+    // build_tx_index() clears any stale entries before rebuilding from scratch, so it is safe
+    // to always run it. A stale index (e.g., from an incomplete rollback) causes
+    // validate_block_rewards to look up the wrong transaction and reject valid peer blocks.
+    if let Some(ref _idx) = tx_index {
+        if blockchain.get_height() > 0 {
             tracing::info!("📊 Building transaction index from blockchain...");
             if let Err(e) = blockchain.build_tx_index().await {
                 tracing::warn!("Failed to build transaction index: {}", e);
             }
-        } else {
-            tracing::info!(
-                "✅ Transaction index ready: {} transactions indexed",
-                idx.len()
-            );
         }
     }
 
