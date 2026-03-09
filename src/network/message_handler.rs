@@ -590,6 +590,7 @@ impl MessageHandler {
                     *consensus_hash,
                     *consensus_peer_count,
                     message.clone(),
+                    context,
                 )
                 .await
             }
@@ -2722,6 +2723,7 @@ impl MessageHandler {
     }
 
     /// Handle ForkAlert
+    #[allow(clippy::too_many_arguments)]
     async fn handle_fork_alert(
         &self,
         your_height: u64,
@@ -2730,6 +2732,7 @@ impl MessageHandler {
         consensus_hash: [u8; 32],
         consensus_peer_count: usize,
         message: String,
+        context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         warn!(
             "🚨 [{}] FORK ALERT from {}: {}",
@@ -2755,6 +2758,19 @@ impl MessageHandler {
                 "   ⚠️ We appear to be on minority fork (our height {} vs consensus {})! Requesting consensus chain...",
                 your_height, consensus_height
             );
+
+            // Update the alerting peer's chain tip so sync_from_peers can find them.
+            // Without this, the chain tip cache stays stale and sync_from_peers
+            // concludes "no peers have blocks beyond our height".
+            context
+                .peer_registry
+                .update_peer_chain_tip(&self.peer_ip, consensus_height, consensus_hash)
+                .await;
+            context
+                .peer_registry
+                .set_peer_height(&self.peer_ip, consensus_height)
+                .await;
+
             // Start request before our tip for chain validation overlap
             let request_from = if we_are_behind {
                 your_height.saturating_sub(5)

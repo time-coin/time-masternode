@@ -2828,9 +2828,18 @@ async fn main() {
 
                 if consensus_ok != Ok(true) {
                     tracing::warn!(
-                        "⏱️ No majority peer consensus for block {} after 10s — skipping this attempt",
+                        "⏱️ No majority peer consensus for block {} after 10s — triggering sync instead",
                         next_height
                     );
+                    // Instead of just skipping, actively try to sync.
+                    // If peers are ahead of us, we should catch up rather than
+                    // endlessly retrying block production.
+                    let sync_bc = block_blockchain.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = sync_bc.sync_from_peers(None).await {
+                            tracing::debug!("Sync after consensus failure: {}", e);
+                        }
+                    });
                     is_producing.store(false, Ordering::SeqCst);
                     continue;
                 }
@@ -3040,10 +3049,15 @@ async fn main() {
 
                                 let validator_count =
                                     block_consensus_engine.timevote.get_validators().len();
-                                // Only fallback when we have SOME consensus support or the
-                                // network is too small for normal voting. Never force-add a
-                                // block with zero votes — that creates forks.
-                                let should_fallback = prepare_weight > 0 || validator_count <= 2;
+                                // Fallback only when we have votes from OTHER validators.
+                                // The block producer always votes for its own block
+                                // (prepare_weight >= 1), so require weight > 1 for networks
+                                // with more than 2 validators. This prevents solo block
+                                // production when no other node has confirmed the block.
+                                let min_weight_for_fallback: u64 =
+                                    if validator_count <= 2 { 0 } else { 2 };
+                                let should_fallback = prepare_weight >= min_weight_for_fallback
+                                    && (prepare_weight > 1 || validator_count <= 2);
 
                                 if should_fallback {
                                     tracing::warn!(
