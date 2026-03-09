@@ -5984,7 +5984,7 @@ impl Blockchain {
             }
         }
 
-        // 5. Block size check (Phase 1.3: 1MB hard cap)
+        // 5. Block size check (2MB hard cap)
         let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
         if serialized.len() > MAX_BLOCK_SIZE {
             return Err(format!(
