@@ -2265,23 +2265,46 @@ impl Blockchain {
                     );
 
                     if consensus_height > our_height && !already_syncing {
-                        // We're behind - sync to longer chain
-                        info!(
-                            "📥 Starting sync: {} → {} ({} blocks behind)",
-                            our_height,
-                            consensus_height,
-                            consensus_height - our_height
-                        );
+                        // We're behind - sync to longer chain. Gate through the sync coordinator
+                        // so the 60s per-peer throttle prevents back-to-back retries to the same peer.
+                        let approved = self
+                            .sync_coordinator
+                            .request_sync(
+                                _sync_peer.clone(),
+                                our_height + 1,
+                                consensus_height,
+                                crate::network::sync_coordinator::SyncSource::Periodic,
+                            )
+                            .await;
 
-                        let blockchain_clone = Arc::clone(&self);
-                        tokio::spawn(async move {
-                            if let Err(e) = blockchain_clone
-                                .sync_from_peers(Some(consensus_height))
-                                .await
-                            {
-                                warn!("⚠️  Sync failed: {}", e);
+                        match approved {
+                            Ok(true) => {
+                                info!(
+                                    "📥 Starting sync: {} → {} ({} blocks behind)",
+                                    our_height,
+                                    consensus_height,
+                                    consensus_height - our_height
+                                );
+                                let blockchain_clone = Arc::clone(&self);
+                                tokio::spawn(async move {
+                                    if let Err(e) = blockchain_clone
+                                        .sync_from_peers(Some(consensus_height))
+                                        .await
+                                    {
+                                        warn!("⚠️  Sync failed: {}", e);
+                                    }
+                                });
                             }
-                        });
+                            Ok(false) => {
+                                debug!(
+                                    "⏸️ Sync queued for {} (another sync in progress)",
+                                    _sync_peer
+                                );
+                            }
+                            Err(e) => {
+                                debug!("⏱️ Sync throttled for {}: {}", _sync_peer, e);
+                            }
+                        }
                     } else if consensus_height == our_height && !already_syncing {
                         // Same-height fork detected - request blocks from consensus peer
                         // for atomic reorg (rollback happens when blocks arrive)

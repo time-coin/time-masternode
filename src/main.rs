@@ -2679,12 +2679,23 @@ async fn main() {
             }
 
             // We are VRF-eligible to propose!
-            tracing::info!(
-                "🎯 VRF selected as block proposer for height {} (score: {}, {}s past scheduled time)",
-                next_height,
-                vrf_score,
-                time_past_scheduled
-            );
+            // Rate-limit this log when far behind: we're eligible every second but
+            // can't produce (e.g., not enough peers), so cap to once per 30s.
+            {
+                static LAST_PROPOSER_LOG: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(0);
+                let now_secs = chrono::Utc::now().timestamp();
+                let last = LAST_PROPOSER_LOG.load(Ordering::Relaxed);
+                if blocks_behind < 5 || now_secs - last >= 30 {
+                    LAST_PROPOSER_LOG.store(now_secs, Ordering::Relaxed);
+                    tracing::info!(
+                        "🎯 VRF selected as block proposer for height {} (score: {}, {}s past scheduled time)",
+                        next_height,
+                        vrf_score,
+                        time_past_scheduled
+                    );
+                }
+            }
 
             // RACE CONDITION PREVENTION: Check if a block proposal at this height
             // was already received (or produced by us) and cached. If a peer's cached
@@ -2726,12 +2737,20 @@ async fn main() {
             let active_mn_count = block_registry.count_active().await;
             let min_peers_required = (active_mn_count / 3).max(3);
             if connected_peers.len() < min_peers_required {
-                tracing::warn!(
-                    "⚠️ Only {} peer(s) connected (need {}/{} active masternodes) - waiting for more peers before producing",
-                    connected_peers.len(),
-                    min_peers_required,
-                    active_mn_count
-                );
+                // Rate-limit to once per 30s — this fires every second when syncing
+                static LAST_PEER_WARN: std::sync::atomic::AtomicI64 =
+                    std::sync::atomic::AtomicI64::new(0);
+                let now_secs = chrono::Utc::now().timestamp();
+                let last = LAST_PEER_WARN.load(Ordering::Relaxed);
+                if now_secs - last >= 30 {
+                    LAST_PEER_WARN.store(now_secs, Ordering::Relaxed);
+                    tracing::warn!(
+                        "⚠️ Only {} peer(s) connected (need {}/{} active masternodes) - waiting for more peers before producing",
+                        connected_peers.len(),
+                        min_peers_required,
+                        active_mn_count
+                    );
+                }
                 continue;
             }
 
