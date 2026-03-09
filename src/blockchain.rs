@@ -3338,7 +3338,51 @@ impl Blockchain {
             }
         }
 
-        // Some peers are taller than us on a potentially different fork.
+        // If peers report being ahead, block production and sync instead.
+        // To prevent a single rogue peer from stalling us with a fake height,
+        // require the claimed height to be plausible (within time-based expected
+        // range) AND confirmed by at least 2 peers independently.
+        if max_peer_height > our_height {
+            let time_expected = self.calculate_expected_height();
+            let height_is_plausible = max_peer_height <= time_expected + 10;
+            let peers_ahead: Vec<&(String, u64, [u8; 32], u64)> = peer_states
+                .iter()
+                .filter(|(_, h, _, _)| *h > our_height)
+                .collect();
+            let multiple_peers_ahead = peers_ahead.len() >= 2;
+
+            if height_is_plausible && multiple_peers_ahead {
+                tracing::warn!(
+                    "⚠️ Block production blocked: {} peers ahead at height {} (we are at {}, expected ~{}). Must sync first.",
+                    peers_ahead.len(),
+                    max_peer_height,
+                    our_height,
+                    time_expected
+                );
+                return false;
+            } else if height_is_plausible {
+                // Only one peer ahead — block production but log as suspicious
+                tracing::warn!(
+                    "⚠️ Block production blocked: peer ahead at height {} (we are at {}). \
+                     Single peer, but height is plausible (expected ~{}). Syncing first.",
+                    max_peer_height,
+                    our_height,
+                    time_expected
+                );
+                return false;
+            } else {
+                tracing::warn!(
+                    "⚠️ Ignoring implausible peer height {} (expected ~{}, we are at {}). {} peer(s) claim this.",
+                    max_peer_height,
+                    time_expected,
+                    our_height,
+                    peers_ahead.len()
+                );
+                // Fall through to weighted consensus check — don't trust implausible heights
+            }
+        }
+
+        // All peers are at or below our height (handled by longest-chain-rule above).
         // Include our own weight in the calculation — we're on our own chain.
         let our_weight = match self.masternode_registry.get_local_masternode().await {
             Some(info) => info.masternode.tier.sampling_weight(),
