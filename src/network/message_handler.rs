@@ -2889,23 +2889,23 @@ impl MessageHandler {
         } else if peer_height > our_height {
             // Peer is ahead — accept blocks from peers that are close (≤5 blocks).
             // For large gaps, check consensus membership BUT allow sync when
-            // the node is very far behind (>20 blocks) regardless, to prevent
-            // deadlock when fork resolution hasn't established clear consensus.
+            // the node is far behind (>10 blocks) regardless, to prevent
+            // deadlock when on a minority fork.
             let height_gap = peer_height - our_height;
             if height_gap > 5 {
                 let is_consensus_peer =
                     context.blockchain.is_peer_in_consensus(&self.peer_ip).await;
                 if !is_consensus_peer {
-                    if height_gap <= 20 {
+                    if height_gap <= 10 {
                         warn!(
                             "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {}, gap {})",
                             self.direction, self.peer_ip, peer_height, our_height, height_gap
                         );
                         return Ok(None);
                     }
-                    // Very far behind (>20 blocks) — accept from any peer to break deadlock
-                    debug!(
-                        "🔓 [{}] Accepting blocks from {} despite non-consensus (gap {} > 20, need to catch up)",
+                    // Far behind (>10 blocks) — accept from any peer to break deadlock
+                    info!(
+                        "🔓 [{}] Accepting blocks from {} despite non-consensus (gap {} > 10, need to catch up)",
                         self.direction, self.peer_ip, height_gap
                     );
                 }
@@ -3089,12 +3089,17 @@ impl MessageHandler {
                     );
                     skipped += 1;
                 }
-                Err(e) if e.contains("Fork detected") || e.contains("previous_hash") => {
+                Err(e)
+                    if e.contains("Fork detected")
+                        || e.contains("previous_hash")
+                        || e.contains("incorrect block_reward")
+                        || e.contains("pool theft") =>
+                {
                     fork_detected = true;
                     skipped += 1;
 
                     debug!(
-                        "🔀 [{}] Fork detected from {}: {}",
+                        "🔀 [{}] Fork/divergence detected from {}: {}",
                         self.direction, self.peer_ip, e
                     );
 
