@@ -1,7 +1,7 @@
 # Network Architecture - TIME Coin Protocol v6.2
 
-**Document Version:** 1.2  
-**Last Updated:** March 7, 2026  
+**Document Version:** 1.3  
+**Last Updated:** March 9, 2026  
 **Status:** Production-Ready
 
 ---
@@ -16,6 +16,23 @@ The TIME Coin network layer implements a production-ready P2P system with:
 - IP blacklisting
 - Peer discovery and bootstrap
 - State synchronization
+- Fork alert chain tip propagation (v1.2.2)
+
+---
+
+## Recent Changes (v1.2.2 - March 2026)
+
+### Faster Peer Connection Timings
+- **PEER_WAIT_SECS**: 15s → 5s — initial peer wait at startup
+- **GENESIS_WAIT_SECS**: 20s → 10s — genesis block response wait
+- **BASE_DISCOVERY_WAIT**: 30s → 10s — reduces exponential backoff from 30/60/90s to 10/20/30s
+- **Peer exchange**: 60s → 30s — GetMasternodes broadcast interval
+- **Health monitoring**: starts at 30s (was 120s), runs every 60s (was 120s)
+- **PHASE 3 rediscovery**: 120s → 30s — periodic peer discovery loop
+
+### Fork Alert Chain Tip Propagation
+- `handle_fork_alert` now updates the alerting peer's chain tip in the `PeerConnectionRegistry` with the reported consensus height and hash
+- This ensures `sync_from_peers` can discover peers at the consensus height even if the local chain tip cache is stale
 
 ---
 

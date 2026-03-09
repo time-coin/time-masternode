@@ -1,7 +1,40 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-03-08  
-**Version:** 1.5.0 (Hardcoded Genesis, Fairness Cap Removal, Leader Weight Fix, Peer Eviction Hardening, Dashboard Enhancements, Uptime Fix)
+**Last Updated:** 2026-03-09  
+**Version:** 1.6.0 (Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections)
+
+---
+
+## Recent Updates (v1.5.0 - March 2026)
+
+### Solo Block Production Prevention
+
+- **`MIN_AGREEING_PEERS = 2`** enforced in both the longest-chain-rule path and the weighted consensus path of `check_2_3_consensus_for_production()`. A node can no longer produce blocks without at least 2 other peers confirming they're on the same chain at the same height.
+- **Fallback consensus requires `prepare_weight > 1`**: the TimeGuard fallback no longer accepts the producer's own vote as sufficient. Since the producer always votes for its own block (`prepare_weight >= 1`), this prevented solo block production via timeout.
+- **Single-node attack defense**: a malicious node producing a block early to claim a higher chain cannot stall other nodes. Only ≥2 independent peers reporting a plausible height (within 1 block of time-based expected) will block production. A single peer ahead triggers background sync only.
+
+### Block Timing Enforcement
+
+- **Production-side**: `produce_block_at_height()` refuses to create a block before `genesis_timestamp + (height × BLOCK_TIME_SECONDS)`. This prevents nodes from racing ahead of schedule.
+- **Validation-side**: `validate_block()` rejects incoming blocks with timestamps before their scheduled time (30s clock-skew grace). Only enforced for recent blocks (within 10 of chain tip) — historical blocks during sync are exempt.
+
+### Sync & Catch-Up Fixes
+
+- **Sync loop no longer blocks catch-up**: when all peers are at the same height and far behind the time-based target, `sync_from_peers` requests fresh chain tips, waits 3s, and re-checks. If no peer is ahead after refresh, allows production immediately instead of entering a 120s sync loop.
+- **Consensus failure triggers sync**: the block production loop in `main.rs` now spawns `sync_from_peers` when `check_2_3_consensus` fails, instead of just logging and retrying.
+- **Fork alerts update chain tip cache**: `handle_fork_alert` writes the alerting peer's consensus height/hash into the chain tip cache, enabling `sync_from_peers` to discover peers ahead.
+
+### Fork Resolution (Bugs 1-4)
+
+- **Bug 1**: Same-height fork detection blocks production when peers at our height have different hashes
+- **Bug 2**: Deterministic hash tiebreaker (lower hash wins) for same-height forks
+- **Bug 3**: Non-consensus peer blocking threshold lowered to gap > 10 (was > 20)
+- **Bug 4**: `handle_fork` uses small batches (20 blocks) with 60s stall detection; `MAX_BLOCKS_PER_RESPONSE = 50`
+
+### Faster Peer Connections
+
+- Startup delays reduced ~60%: `PEER_WAIT` 15→5s, `GENESIS_WAIT` 20→10s, discovery backoff 30→10s base
+- Peer exchange interval 60→30s, health monitoring 120→30s start / 60s interval, PHASE 3 rediscovery 120→30s
 
 ---
 
