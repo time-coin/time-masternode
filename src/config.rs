@@ -268,6 +268,8 @@ pub struct MasternodeConfig {
 #[derive(Debug, Clone)]
 pub struct MasternodeConfEntry {
     pub alias: String,
+    /// IP:port from 4–6-field entries; empty string for the compact 3-field format.
+    pub address: String,
     pub collateral_txid: String,
     pub collateral_vout: u32,
 }
@@ -1110,11 +1112,11 @@ pub fn parse_masternode_conf(
         // 4 fields (legacy): alias IP:port txid vout
         // 5 fields (legacy): alias IP:port privkey txid vout
         // 6 fields (legacy): alias IP:port key cert txid vout
-        let (txid_idx, vout_idx) = match parts.len() {
-            3 => (1, 2),
-            4 => (2, 3),
-            5 => (3, 4),
-            6 => (4, 5),
+        let (addr_idx, txid_idx, vout_idx) = match parts.len() {
+            3 => (None, 1, 2),
+            4 => (Some(1), 2, 3),
+            5 => (Some(1), 3, 4),
+            6 => (Some(1), 4, 5),
             _ => {
                 tracing::warn!(
                     "⚠️ masternode.conf:{}: expected 3-6 fields, got {} — skipping",
@@ -1136,6 +1138,7 @@ pub fn parse_masternode_conf(
 
         entries.push(MasternodeConfEntry {
             alias: parts[0].to_string(),
+            address: addr_idx.map(|i| parts[i].to_string()).unwrap_or_default(),
             collateral_txid: parts[txid_idx].to_string(),
             collateral_vout: vout,
         });
