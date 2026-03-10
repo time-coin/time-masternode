@@ -3148,10 +3148,12 @@ impl MessageHandler {
         let mut fork_detected = false;
 
         for (i, block) in blocks.iter().enumerate() {
-            // Yield periodically so the tokio runtime can service other tasks
-            // (RPC handler, timers, network I/O) during large batch processing.
+            // Sleep briefly every 10 blocks so the tokio runtime can poll I/O
+            // and service RPC, timers, and network tasks. yield_now() alone is
+            // insufficient on 1-worker runtimes because it re-queues immediately
+            // without polling the I/O driver for new events.
             if i > 0 && i % 10 == 0 {
-                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             // Validate block has non-zero previous_hash (except genesis at height 0)
             if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
@@ -3285,7 +3287,8 @@ impl MessageHandler {
         if added > 0 {
             // Flush storage after processing the batch — during sync, per-block
             // flushes are skipped to avoid blocking the tokio runtime with fsync.
-            if let Err(e) = context.blockchain.flush_storage() {
+            // flush_storage_async uses spawn_blocking internally.
+            if let Err(e) = context.blockchain.flush_storage_async().await {
                 warn!("⚠️ [{}] Post-batch flush failed: {}", self.direction, e);
             }
 
