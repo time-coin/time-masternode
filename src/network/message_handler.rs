@@ -3147,14 +3147,7 @@ impl MessageHandler {
         let mut skipped = 0;
         let mut fork_detected = false;
 
-        for (i, block) in blocks.iter().enumerate() {
-            // Sleep briefly every 10 blocks so the tokio runtime can poll I/O
-            // and service RPC, timers, and network tasks. yield_now() alone is
-            // insufficient on 1-worker runtimes because it re-queues immediately
-            // without polling the I/O driver for new events.
-            if i > 0 && i % 10 == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
+        for block in blocks.iter() {
             // Validate block has non-zero previous_hash (except genesis at height 0)
             if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
                 warn!(
@@ -3171,11 +3164,32 @@ impl MessageHandler {
                 continue;
             }
 
-            match context
-                .blockchain
-                .add_block_with_fork_handling(block.clone())
-                .await
-            {
+            // CRITICAL: Run block processing on a blocking thread so synchronous
+            // sled I/O doesn't starve tokio worker threads. Without this, every
+            // sled read/write (save_block, get_block, update_height, undo_log)
+            // blocks a worker thread, and with enough concurrent operations ALL
+            // workers get stuck — killing RPC, timers, and networking.
+            let blockchain = context.blockchain.clone();
+            let block_clone = block.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                tokio::runtime::Handle::current()
+                    .block_on(async { blockchain.add_block_with_fork_handling(block_clone).await })
+            })
+            .await;
+
+            // Unwrap the JoinError from spawn_blocking, then handle the inner Result
+            let result = match result {
+                Ok(inner) => inner,
+                Err(e) => {
+                    warn!(
+                        "❌ [{}] Block processing task panicked for block {} from {}: {}",
+                        self.direction, block.header.height, self.peer_ip, e
+                    );
+                    Err(format!("Block processing panicked: {}", e))
+                }
+            };
+
+            match result {
                 Ok(true) => {
                     added += 1;
 

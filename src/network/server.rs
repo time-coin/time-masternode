@@ -1325,7 +1325,15 @@ async fn handle_peer(
                                     tracing::info!("📥 Received block {} response from {}", block_height, peer.addr);
 
                                     // Add block to our blockchain with fork handling
-                                    match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                    // Run on blocking thread to keep tokio workers free for RPC/networking
+                                    let bc = blockchain.clone();
+                                    let blk = block.clone();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        tokio::runtime::Handle::current().block_on(async {
+                                            bc.add_block_with_fork_handling(blk).await
+                                        })
+                                    }).await;
+                                    match result.unwrap_or_else(|e| Err(format!("Block processing panicked: {}", e))) {
                                         Ok(true) => {
                                             tracing::info!("✅ Added block {} from {}", block_height, peer.addr);
 
@@ -1394,7 +1402,15 @@ async fn handle_peer(
                                     tracing::debug!("📥 Received legacy block {} announcement from {}", block_height, peer.addr);
 
                                     // Add block to our blockchain with fork handling
-                                    match blockchain.add_block_with_fork_handling(block.clone()).await {
+                                    // Run on blocking thread to keep tokio workers free for RPC/networking
+                                    let bc = blockchain.clone();
+                                    let blk = block.clone();
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        tokio::runtime::Handle::current().block_on(async {
+                                            bc.add_block_with_fork_handling(blk).await
+                                        })
+                                    }).await;
+                                    match result.unwrap_or_else(|e| Err(format!("Block processing panicked: {}", e))) {
                                         Ok(true) => {
                                             tracing::info!("✅ Added block {} from {}", block_height, peer.addr);
 
