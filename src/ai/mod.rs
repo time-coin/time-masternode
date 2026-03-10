@@ -17,7 +17,7 @@ pub use attack_detector::{
 pub use consensus_health::{
     ConsensusHealthMonitor, ConsensusMetrics, HealthPrediction as ConsensusHealthPrediction,
 };
-pub use fork_resolver::ForkResolver;
+pub use fork_resolver::{ForkResolutionState, ForkResolver};
 pub use metrics_dashboard::AIMetricsDashboard;
 pub use network_optimizer::NetworkOptimizer;
 pub use peer_selector::AIPeerSelector;

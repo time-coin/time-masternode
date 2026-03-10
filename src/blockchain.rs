@@ -7,7 +7,7 @@ use crate::block::types::{Block, BlockHeader};
 use crate::block_cache::BlockCacheManager;
 use crate::consensus::ConsensusEngine;
 use crate::constants;
-use crate::masternode_registry::{MasternodeInfo, MasternodeRegistry};
+use crate::masternode_registry::MasternodeRegistry;
 
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
@@ -126,48 +126,8 @@ pub struct ReorgMetrics {
     pub duration_ms: u64,
 }
 
-/// Result of canonical chain comparison for deterministic fork resolution
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CanonicalChoice {
-    /// Keep our current chain
-    KeepOurs,
-    /// Switch to peer's chain
-    AdoptPeers,
-    /// Chains are identical
-    Identical,
-}
-
-/// Fork resolution state machine
-#[derive(Debug, Clone)]
-pub enum ForkResolutionState {
-    /// No fork detected
-    None,
-
-    /// Common ancestor found, need to get peer's chain
-    FetchingChain {
-        common_ancestor: u64,
-        fork_height: u64,
-        peer_addr: String,
-        peer_height: u64,
-        fetched_up_to: u64,
-        accumulated_blocks: Vec<Block>, // Accumulate blocks as they arrive
-        started_at: std::time::Instant,
-    },
-
-    /// Have complete alternate chain, ready to reorg
-    ReadyToReorg {
-        common_ancestor: u64,
-        alternate_blocks: Vec<Block>,
-        started_at: std::time::Instant,
-    },
-
-    /// Performing reorganization
-    Reorging {
-        from_height: u64,
-        to_height: u64,
-        started_at: std::time::Instant,
-    },
-}
+// Re-export ForkResolutionState so existing `use crate::blockchain::ForkResolutionState` works
+pub use crate::ai::fork_resolver::ForkResolutionState;
 
 /// Cache for consensus check results - avoids redundant peer queries
 #[derive(Clone, Debug)]
@@ -2248,18 +2208,9 @@ impl Blockchain {
 
         // SECURITY: Check reorg depth limit
         let fork_depth = our_height.saturating_sub(common_ancestor);
-        if fork_depth > MAX_REORG_DEPTH {
-            tracing::warn!(
-                "🛡️ SECURITY: REJECTED deep rollback from peer {} - depth {} exceeds max {}",
-                peer_ip,
-                fork_depth,
-                MAX_REORG_DEPTH
-            );
-            return Err(format!(
-                "Security: Rejected deep rollback (depth {} > max {}) from peer {}",
-                fork_depth, MAX_REORG_DEPTH, peer_ip
-            ));
-        }
+        crate::ai::fork_resolver::check_reorg_depth(
+            fork_depth, our_height, common_ancestor, our_height, peer_ip,
+        )?;
 
         // CRITICAL FIX: If we're already at the common ancestor height, no rollback needed
         // This prevents unnecessary deletion of genesis block or existing blocks
@@ -3848,7 +3799,7 @@ impl Blockchain {
         );
 
         // Save block - but DON'T update chain height yet
-        self.save_block_without_height_update(&block)?;
+        self.save_block(&block, false)?;
 
         let is_syncing = self.is_syncing.load(Ordering::Acquire);
 
@@ -4279,79 +4230,6 @@ impl Blockchain {
         }
     }
 
-    // =========================================================================
-    // CANONICAL CHAIN SELECTION (Fork Resolution)
-    // =========================================================================
-
-    /// Determine which of two competing chains is canonical using deterministic rules.
-    ///
-    /// Rules (in order of precedence):
-    /// 1. Longer chain wins (most work)
-    /// 2. Lower tip hash wins (deterministic tiebreaker - consistent with all fork resolution)
-    ///
-    /// NOTE: VRF scores are NOT used for fork resolution tiebreaking because:
-    /// - VRF scores are derived from hashes, so they're redundant
-    /// - "Lower hash wins" is the standard blockchain convention (Bitcoin, Ethereum)
-    /// - Consistency across all fork resolution code paths is critical
-    ///
-    /// This function MUST be deterministic - all nodes must make the same decision
-    /// given the same inputs.
-    pub fn choose_canonical_chain(
-        our_height: u64,
-        our_tip_hash: [u8; 32],
-        _our_cumulative_score: u128,
-        peer_height: u64,
-        peer_tip_hash: [u8; 32],
-        _peer_cumulative_score: u128,
-    ) -> (CanonicalChoice, String) {
-        // Rule 1: Longer chain wins (most work)
-        if peer_height > our_height {
-            return (
-                CanonicalChoice::AdoptPeers,
-                format!(
-                    "Peer chain is longer: {} > {} blocks",
-                    peer_height, our_height
-                ),
-            );
-        }
-        if our_height > peer_height {
-            return (
-                CanonicalChoice::KeepOurs,
-                format!(
-                    "Our chain is longer: {} > {} blocks",
-                    our_height, peer_height
-                ),
-            );
-        }
-
-        // Rule 2: Lexicographically smaller hash wins (deterministic tiebreaker)
-        // This is consistent with fork_resolver.rs and masternode_authority.rs
-        if peer_tip_hash < our_tip_hash {
-            return (
-                CanonicalChoice::AdoptPeers,
-                format!(
-                    "Equal height {}, peer has lower hash (canonical tiebreaker)",
-                    our_height
-                ),
-            );
-        }
-        if our_tip_hash < peer_tip_hash {
-            return (
-                CanonicalChoice::KeepOurs,
-                format!(
-                    "Equal height {}, our hash is lower (canonical tiebreaker)",
-                    our_height
-                ),
-            );
-        }
-
-        // Hashes are identical - same chain
-        (
-            CanonicalChoice::Identical,
-            format!("Chains are identical at height {}", our_height),
-        )
-    }
-
     /// Calculate the VRF score for a single block.
     ///
     /// Prefers the block's stored VRF score if available (cryptographically generated).
@@ -4370,30 +4248,6 @@ impl Blockchain {
         // Fallback: use block hash for old blocks without VRF
         let hash = block.hash();
         u64::from_be_bytes(hash[0..8].try_into().unwrap_or([0u8; 8]))
-    }
-
-    /// Calculate cumulative VRF score for a range of blocks.
-    ///
-    /// Cumulative score = sum of all individual block VRF scores in the range.
-    /// This is used for chain comparison when heights are equal.
-    pub async fn calculate_chain_vrf_score(&self, from_height: u64, to_height: u64) -> u128 {
-        let mut total_score: u128 = 0;
-
-        for height in from_height..=to_height {
-            if let Ok(block) = self.get_block(height) {
-                total_score += self.calculate_block_vrf_score(&block) as u128;
-            }
-        }
-
-        total_score
-    }
-
-    /// Calculate VRF score for a list of blocks (used for peer chain evaluation)
-    pub fn calculate_blocks_vrf_score(&self, blocks: &[Block]) -> u128 {
-        blocks
-            .iter()
-            .map(|b| self.calculate_block_vrf_score(b) as u128)
-            .sum()
     }
 
     /// Check consensus with peer
@@ -4449,62 +4303,6 @@ impl Blockchain {
         None
     }
 
-    /// Get all finalized transaction IDs in a height range (for reorg protection)
-    ///
-    /// This method scans blocks in the given range and identifies which transactions
-    /// were finalized by timevote consensus before being included in blocks.
-    ///
-    /// CRITICAL: Finalized transactions MUST be preserved during reorgs (Approach A).
-    /// Once timevote finalizes a transaction, it cannot be excluded from the chain,
-    /// even if the block containing it is orphaned. Any fork missing a finalized
-    /// transaction must be rejected.
-    async fn get_finalized_txids_in_range(
-        &self,
-        start_height: u64,
-        end_height: u64,
-    ) -> Result<Vec<[u8; 32]>, String> {
-        let mut finalized_txids = Vec::new();
-
-        // IMPLEMENTATION NOTE: This is a simplified version that checks if transactions
-        // existed in the finalized pool when blocks were created. A production version
-        // would need persistent tracking of finalization status, possibly using:
-        // 1. Database table mapping txid -> (finalized_at_timestamp, block_height)
-        // 2. Bloom filter for fast lookup with occasional false positives
-        // 3. In-memory cache with persistence to disk
-        //
-        // Block structure: [coinbase, reward_distribution, ...finalized_txs]
-        // - Index 0: Coinbase (creates block reward)
-        // - Index 1: Reward distribution (spends coinbase, distributes to masternodes)
-        // - Index 2+: timevote-finalized user transactions
-        //
-        // Only transactions at index 2+ were finalized by timevote and need protection.
-        // Coinbase and reward distribution are block-specific and regenerated during reorgs.
-
-        for height in start_height..=end_height {
-            if let Ok(block) = self.get_block_by_height(height).await {
-                // CRITICAL: Block structure is [coinbase, reward_distribution, ...finalized_txs]
-                // Only transactions at index 2+ are actual timevote-finalized user transactions.
-                // Coinbase (index 0) and reward distribution (index 1) are block-specific and
-                // must NOT be protected during reorgs - they're regenerated for each block.
-                for (idx, tx) in block.transactions.iter().enumerate() {
-                    // Skip first two transactions (coinbase + reward distribution)
-                    if idx >= 2 {
-                        finalized_txids.push(tx.txid());
-                    }
-                }
-            }
-        }
-
-        tracing::debug!(
-            "Found {} finalized transactions in height range {} to {}",
-            finalized_txids.len(),
-            start_height,
-            end_height
-        );
-
-        Ok(finalized_txids)
-    }
-
     // ===== Internal Helper Methods =====
 
     fn load_chain_height(&self) -> Result<u64, String> {
@@ -4521,7 +4319,7 @@ impl Blockchain {
         }
     }
 
-    fn save_block(&self, block: &Block) -> Result<(), String> {
+    fn save_block(&self, block: &Block, update_height: bool) -> Result<(), String> {
         let key = format!("block_{}", block.header.height);
         let serialized = bincode::serialize(block).map_err(|e| {
             tracing::error!(
@@ -4545,13 +4343,11 @@ impl Blockchain {
                 );
                 compressed
             } else {
-                serialized // Don't compress if it makes data larger
+                serialized.clone()
             }
         } else {
             serialized.clone()
         };
-
-        let data_len = data_to_store.len();
 
         self.storage
             .insert(key.as_bytes(), data_to_store.clone())
@@ -4562,145 +4358,23 @@ impl Blockchain {
                     e,
                     e
                 );
-                tracing::error!(
-                    "   This may indicate database corruption. Try: rm -rf /root/.timecoin/testnet/db/blocks"
-                );
                 format!("Database insert failed: {}", e)
             })?;
 
         // CRITICAL: Update cache to ensure consistency
-        // Without this, cached stale blocks can cause hash mismatches
         let block_arc = Arc::new(block.clone());
         self.block_cache.put(block.header.height, block_arc);
 
-        // Update chain height
-        let height_key = "chain_height".as_bytes();
-        let height_bytes = bincode::serialize(&block.header.height).map_err(|e| e.to_string())?;
-        self.storage.insert(height_key, height_bytes).map_err(|e| {
-            tracing::error!("❌ Failed to update chain_height: {}", e);
-            e.to_string()
-        })?;
-
-        // Flush to ensure durability.
-        // During bulk sync (is_syncing), skip per-block flush to avoid blocking the
-        // tokio runtime with synchronous fsync. The caller (handle_blocks_response /
-        // sync_from_peers) flushes at batch boundaries instead.
-        if !self.is_syncing.load(Ordering::Acquire) {
-            self.storage.flush().map_err(|e| {
-                tracing::error!(
-                    "❌ Failed to flush block {} to disk: {}",
-                    block.header.height,
-                    e
-                );
+        // Update chain height if requested
+        if update_height {
+            let height_key = "chain_height".as_bytes();
+            let height_bytes =
+                bincode::serialize(&block.header.height).map_err(|e| e.to_string())?;
+            self.storage.insert(height_key, height_bytes).map_err(|e| {
+                tracing::error!("❌ Failed to update chain_height: {}", e);
                 e.to_string()
             })?;
         }
-
-        // VERIFICATION: Read back and verify block was stored correctly
-        // This catches storage corruption immediately instead of later
-        match self.storage.get(key.as_bytes()) {
-            Ok(Some(stored_data)) => {
-                if stored_data.len() != data_len {
-                    tracing::error!(
-                        "🚨 STORAGE CORRUPTION: Block {} wrote {} bytes but read back {} bytes!",
-                        block.header.height,
-                        data_len,
-                        stored_data.len()
-                    );
-                    return Err(format!(
-                        "Block {} storage verification failed: size mismatch ({} vs {})",
-                        block.header.height,
-                        data_len,
-                        stored_data.len()
-                    ));
-                }
-                // Verify we can deserialize what we stored
-                let decompressed = crate::storage::decompress_block(&stored_data).map_err(|e| {
-                    format!(
-                        "Block {} verification failed on decompress: {}",
-                        block.header.height, e
-                    )
-                })?;
-                let _: Block = bincode::deserialize(&decompressed).map_err(|e| {
-                    format!(
-                        "Block {} verification failed on deserialize: {}",
-                        block.header.height, e
-                    )
-                })?;
-            }
-            Ok(None) => {
-                tracing::error!(
-                    "🚨 STORAGE CORRUPTION: Block {} not found after save!",
-                    block.header.height
-                );
-                return Err(format!(
-                    "Block {} disappeared after save!",
-                    block.header.height
-                ));
-            }
-            Err(e) => {
-                tracing::error!(
-                    "🚨 STORAGE ERROR: Failed to verify block {}: {}",
-                    block.header.height,
-                    e
-                );
-                return Err(format!(
-                    "Block {} verification read failed: {}",
-                    block.header.height, e
-                ));
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Save block to storage without updating chain height (for verification)
-    fn save_block_without_height_update(&self, block: &Block) -> Result<(), String> {
-        let key = format!("block_{}", block.header.height);
-        let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
-
-        // Compress block data if enabled
-        let data_to_store = if self.compress_blocks {
-            let compressed = crate::storage::compress_block(&serialized);
-            // compress_block() adds magic header, so only use if actually smaller
-            if compressed.len() < serialized.len() {
-                tracing::debug!(
-                    "Block {} compressed: {} → {} bytes ({:.1}% reduction)",
-                    block.header.height,
-                    serialized.len(),
-                    compressed.len(),
-                    100.0 * (1.0 - compressed.len() as f64 / serialized.len() as f64)
-                );
-                compressed
-            } else {
-                tracing::debug!(
-                    "Block {} compression skipped: not beneficial ({} → {} bytes)",
-                    block.header.height,
-                    serialized.len(),
-                    compressed.len()
-                );
-                serialized.clone() // Store uncompressed (no magic header)
-            }
-        } else {
-            serialized.clone()
-        };
-
-        tracing::debug!(
-            "💾 Saving block {} to disk: {} bytes (serialized: {} bytes, compressed: {})",
-            block.header.height,
-            data_to_store.len(),
-            serialized.len(),
-            self.compress_blocks
-        );
-
-        // Use atomic transaction to ensure block is fully written
-        self.storage
-            .insert(key.as_bytes(), data_to_store.clone())
-            .map_err(|e| e.to_string())?;
-
-        // CRITICAL: Update cache to ensure consistency
-        let block_arc = Arc::new(block.clone());
-        self.block_cache.put(block.header.height, block_arc);
 
         // Flush to ensure durability (skip during bulk sync — caller flushes at batch boundaries)
         if !self.is_syncing.load(Ordering::Acquire) {
@@ -4714,7 +4388,7 @@ impl Blockchain {
             })?;
         }
 
-        // VERIFICATION: Read back immediately to ensure block was written completely
+        // VERIFICATION: Read back and verify block was stored correctly
         let readback = self.storage.get(key.as_bytes()).map_err(|e| {
             format!(
                 "Failed to read back block {} after write: {}",
@@ -4732,29 +4406,19 @@ impl Blockchain {
                         readback_data.len()
                     ));
                 }
-                // Try to deserialize to ensure it's valid
                 let decompressed =
                     crate::storage::decompress_block(&readback_data).map_err(|e| {
                         tracing::error!(
-                            "🚨 Block {} DECOMPRESS FAILED: {} (readback size: {}, has ZSTD magic: {})",
+                            "🚨 Block {} DECOMPRESS FAILED: {} (readback size: {})",
                             block.header.height,
                             e,
                             readback_data.len(),
-                            readback_data.len() > 4 && &readback_data[0..4] == b"ZSTD"
                         );
                         format!(
                             "Failed to decompress readback block {}: {}",
                             block.header.height, e
                         )
                     })?;
-
-                tracing::debug!(
-                    "Block {} decompressed: readback {} bytes → {} bytes (original serialized: {} bytes)",
-                    block.header.height,
-                    readback_data.len(),
-                    decompressed.len(),
-                    serialized.len()
-                );
 
                 bincode::deserialize::<Block>(&decompressed).map_err(|e| {
                     tracing::error!(
@@ -4764,17 +4428,6 @@ impl Blockchain {
                         decompressed.len(),
                         serialized.len()
                     );
-                    // Dump first/last bytes for debugging
-                    if decompressed.len() > 16 {
-                        tracing::error!(
-                            "   First 16 bytes: {:02x?}",
-                            &decompressed[0..16]
-                        );
-                        tracing::error!(
-                            "   Last 16 bytes: {:02x?}",
-                            &decompressed[decompressed.len()-16..]
-                        );
-                    }
                     format!(
                         "Failed to deserialize readback block {}: {}",
                         block.header.height, e
@@ -5053,30 +4706,6 @@ impl Blockchain {
                 }
             }
         }
-    }
-
-    #[allow(dead_code)]
-    fn calculate_rewards_with_amount(
-        &self,
-        masternodes: &[MasternodeInfo],
-        total_reward: u64,
-    ) -> Vec<(String, u64)> {
-        if masternodes.is_empty() {
-            return vec![];
-        }
-
-        // NEW: All rewards go to the block producer only (first masternode in list)
-        // The first masternode is the one selected as producer by the consensus algorithm
-        let producer = &masternodes[0];
-
-        tracing::info!(
-            "💰 Reward calculation: {} satoshis ({} TIME) -> block producer {}",
-            total_reward,
-            total_reward / 100_000_000,
-            producer.masternode.address
-        );
-
-        vec![(producer.masternode.wallet_address.clone(), total_reward)]
     }
 
     /// Validate block rewards are correct and not double-counted.
@@ -6372,7 +6001,7 @@ impl Blockchain {
 
             // Save genesis block
             let _ = self.process_block_utxos(&block).await;
-            self.save_block(&block)?;
+            self.save_block(&block, true)?;
             // Genesis is height 0, current_height stays at 0
 
             return Ok(true);
@@ -6481,7 +6110,7 @@ impl Blockchain {
                             hex::encode(&block.hash()[..8])
                         );
                         // Use save_block to store without updating height (height is already >= this)
-                        self.save_block(&block)?;
+                        self.save_block(&block, true)?;
                         return Ok(true);
                     }
                     Err(_) => {
@@ -6498,7 +6127,7 @@ impl Blockchain {
                 // Genesis block (height 0) - validate and add
                 self.validate_block(&block, None)?;
                 tracing::info!("✅ Filling gap: adding genesis block");
-                self.save_block(&block)?;
+                self.save_block(&block, true)?;
                 return Ok(true);
             }
         }
@@ -6569,25 +6198,6 @@ impl Blockchain {
         } else {
             Ok(None)
         }
-    }
-
-    /// Check if we should accept a peer's chain over our own
-    /// Uses longest-chain-by-work rule
-    pub async fn should_switch_to_chain(&self, peer_height: u64, _peer_tip_hash: [u8; 32]) -> bool {
-        let our_height = self.current_height.load(Ordering::Acquire);
-
-        // Primary rule: compare heights (proxy for work in simple case)
-        // For proper implementation, compare cumulative work
-        if peer_height > our_height {
-            tracing::info!(
-                "📊 Peer has longer chain: {} vs our {}",
-                peer_height,
-                our_height
-            );
-            return true;
-        }
-
-        false
     }
 
     /// Check if we should switch to peer's chain based on work comparison
@@ -6687,282 +6297,6 @@ impl Blockchain {
         }
 
         false
-    }
-
-    /// Perform a chain reorganization to adopt a peer's chain
-    /// 1. Find common ancestor
-    /// 2. Rollback to common ancestor
-    /// 3. Apply new blocks from peer
-    pub async fn reorganize_to_chain(
-        &self,
-        common_ancestor: u64,
-        new_blocks: Vec<Block>,
-    ) -> Result<(), String> {
-        let start_time = std::time::Instant::now();
-        let current = self.current_height.load(Ordering::Acquire);
-
-        if new_blocks.is_empty() {
-            return Err("No blocks provided for reorganization".to_string());
-        }
-
-        let first_new = new_blocks.first().unwrap().header.height;
-        let last_new = new_blocks.last().unwrap().header.height;
-        let blocks_to_add = new_blocks.len() as u64;
-
-        tracing::warn!(
-            "⚠️  REORG INITIATED: rollback {} -> {}, then apply {} blocks ({} -> {})",
-            current,
-            common_ancestor,
-            blocks_to_add,
-            first_new,
-            last_new
-        );
-
-        // Validate all new blocks BEFORE starting reorganization
-        tracing::info!(
-            "🔍 Validating {} blocks before reorganization...",
-            new_blocks.len()
-        );
-
-        let now = chrono::Utc::now().timestamp();
-
-        // CRITICAL FIX: Validate that the first block actually builds on common_ancestor
-        // Only check this for the FIRST block, then validate internal chain consistency
-        let common_ancestor_hash = if common_ancestor > 0 {
-            match self.get_block_hash(common_ancestor) {
-                Ok(hash) => {
-                    // Verify first block references this common ancestor
-                    if let Some(first_block) = new_blocks.first() {
-                        if first_block.header.previous_hash != hash {
-                            return Err(format!(
-                                "Fork validation failed: first block {} doesn't build on common ancestor {} \
-                                (expected prev_hash {}, got {}). This suggests the common ancestor was incorrectly identified.",
-                                first_block.header.height,
-                                common_ancestor,
-                                hex::encode(&hash[..8]),
-                                hex::encode(&first_block.header.previous_hash[..8])
-                            ));
-                        }
-                        tracing::info!(
-                            "✅ Verified first block {} builds on common ancestor {} (hash: {})",
-                            first_block.header.height,
-                            common_ancestor,
-                            hex::encode(&hash[..8])
-                        );
-                    }
-                    Some(hash)
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "Cannot validate fork: failed to get common ancestor {} hash: {}",
-                        common_ancestor, e
-                    ));
-                }
-            }
-        } else {
-            None
-        };
-
-        // Now validate that the peer's chain is internally consistent
-        let mut expected_prev_hash = common_ancestor_hash;
-
-        for (index, block) in new_blocks.iter().enumerate() {
-            let expected_height = common_ancestor + 1 + (index as u64);
-
-            // Validate block height is sequential
-            if block.header.height != expected_height {
-                return Err(format!(
-                    "Block height mismatch during reorg validation: expected {}, got {}",
-                    expected_height, block.header.height
-                ));
-            }
-
-            // Validate block timestamps are not in the future
-            if block.header.timestamp > now + TIMESTAMP_TOLERANCE_SECS {
-                return Err(format!(
-                    "Block {} timestamp {} is too far in future (now: {}, tolerance: {}s)",
-                    block.header.height, block.header.timestamp, now, TIMESTAMP_TOLERANCE_SECS
-                ));
-            }
-
-            // Validate previous hash chain continuity WITHIN peer's chain
-            if let Some(prev_hash) = expected_prev_hash {
-                if block.header.previous_hash != prev_hash {
-                    return Err(format!(
-                        "Peer chain not internally consistent: block {} previous_hash mismatch \
-                        (expected {}, got {}). Peer sent invalid/discontinuous chain.",
-                        block.header.height,
-                        hex::encode(&prev_hash[..8]),
-                        hex::encode(&block.header.previous_hash[..8])
-                    ));
-                }
-            }
-
-            // Validate merkle root
-            let computed_merkle = crate::block::types::calculate_merkle_root(&block.transactions);
-            if computed_merkle != block.header.merkle_root {
-                return Err(format!(
-                    "Block {} merkle root mismatch during reorg validation",
-                    block.header.height
-                ));
-            }
-
-            // Validate block size
-            let serialized = bincode::serialize(block).map_err(|e| e.to_string())?;
-            if serialized.len() > MAX_BLOCK_SIZE {
-                return Err(format!(
-                    "Block {} exceeds max size: {} > {} bytes",
-                    block.header.height,
-                    serialized.len(),
-                    MAX_BLOCK_SIZE
-                ));
-            }
-
-            // Update expected previous hash for next block in peer's chain
-            expected_prev_hash = Some(block.hash());
-        }
-
-        tracing::info!("✅ All blocks validated successfully, proceeding with reorganization");
-
-        // CRITICAL: Validate finalized transaction protection (Approach A)
-        // Once timevote finalizes a transaction, it MUST be in the canonical chain.
-        // Reject any fork that excludes a finalized transaction.
-        tracing::info!("🔒 Checking finalized transaction protection...");
-        let finalized_txs_to_check = self
-            .get_finalized_txids_in_range(common_ancestor + 1, current)
-            .await?;
-
-        if !finalized_txs_to_check.is_empty() {
-            tracing::info!(
-                "🔍 Found {} finalized transactions that must be preserved during reorg",
-                finalized_txs_to_check.len()
-            );
-
-            // Build set of all txids in the new chain
-            let mut new_chain_txids = std::collections::HashSet::new();
-            for block in &new_blocks {
-                for tx in &block.transactions {
-                    new_chain_txids.insert(tx.txid());
-                }
-            }
-
-            // Check each finalized transaction is present in new chain
-            for txid in &finalized_txs_to_check {
-                if !new_chain_txids.contains(txid) {
-                    return Err(format!(
-                        "⛔ REORG REJECTED: New chain is missing finalized transaction {} \
-                        (timevote instant finality guarantee violated). \
-                        Finalized transactions cannot be excluded from the canonical chain.",
-                        hex::encode(txid)
-                    ));
-                }
-            }
-
-            tracing::info!(
-                "✅ All {} finalized transactions are present in new chain",
-                finalized_txs_to_check.len()
-            );
-        }
-
-        // Step 1: Rollback to common ancestor
-        self.rollback_to_height(common_ancestor).await?;
-
-        // Recalculate cumulative work after rollback
-        let ancestor_work = self.get_work_at_height(common_ancestor).await.unwrap_or(0);
-        *self.cumulative_work.write().await = ancestor_work;
-
-        // Step 2: Apply new blocks in order (already validated)
-        let mut removed_txs: Vec<Transaction> = Vec::new();
-        let mut added_txs: Vec<Transaction> = Vec::new();
-
-        // Collect transactions from rolled-back blocks for mempool replay
-        for height in (common_ancestor + 1..=current).rev() {
-            if let Ok(block) = self.get_block_by_height(height).await {
-                // Store non-coinbase transactions from rolled-back blocks
-                for tx in block.transactions.iter().skip(1) {
-                    // Skip coinbase (first tx)
-                    removed_txs.push(tx.clone());
-                }
-            }
-        }
-
-        // Apply new blocks
-        for block in new_blocks.into_iter() {
-            // Track transactions added in new chain
-            for tx in block.transactions.iter().skip(1) {
-                // Skip coinbase
-                added_txs.push(tx.clone());
-            }
-
-            if let Err(e) = self.add_block(block.clone()).await {
-                tracing::error!(
-                    "❌ Failed to apply block {} during reorg: {}",
-                    block.header.height,
-                    e
-                );
-                return Err(format!(
-                    "Reorg failed at block {}: {}",
-                    block.header.height, e
-                ));
-            }
-        }
-
-        let new_height = self.current_height.load(Ordering::Acquire);
-        let new_work = *self.cumulative_work.read().await;
-
-        // Identify transactions to replay to mempool
-        // These are transactions that were in the old chain but not in the new chain
-        let added_txids: std::collections::HashSet<_> =
-            added_txs.iter().map(|tx| tx.txid()).collect();
-        let txs_to_replay: Vec<_> = removed_txs
-            .into_iter()
-            .filter(|tx| !added_txids.contains(&tx.txid()))
-            .collect();
-
-        if !txs_to_replay.is_empty() {
-            tracing::info!(
-                "🔄 {} transactions need mempool replay after reorg",
-                txs_to_replay.len()
-            );
-            // Note: Actual mempool replay requires access to TransactionPool
-            // This would be done by the caller with access to the mempool:
-            // for tx in txs_to_replay { mempool.add_pending(tx, calculate_fee(&tx))?; }
-        }
-
-        let duration_ms = start_time.elapsed().as_millis() as u64;
-
-        // Record reorganization metrics
-        let metrics = ReorgMetrics {
-            timestamp: chrono::Utc::now().timestamp(),
-            from_height: current,
-            to_height: new_height,
-            common_ancestor,
-            blocks_removed: current - common_ancestor,
-            blocks_added: blocks_to_add,
-            txs_to_replay: txs_to_replay.len(),
-            duration_ms,
-        };
-
-        self.reorg_history.write().await.push(metrics.clone());
-
-        // Keep only last 100 reorg events
-        {
-            let mut history = self.reorg_history.write().await;
-            let history_len = history.len();
-            if history_len > 100 {
-                history.drain(0..history_len - 100);
-            }
-        }
-
-        tracing::warn!(
-            "✅ REORG COMPLETE: new height {}, cumulative work {}, {} txs need replay, took {}ms",
-            new_height,
-            new_work,
-            txs_to_replay.len(),
-            duration_ms
-        );
-
-        Ok(())
     }
 
     /// Periodic chain comparison with peers to detect forks
@@ -8118,26 +7452,10 @@ impl Blockchain {
                 }
 
                 // CRITICAL SECURITY CHECK: Reject reorgs that are too deep
-                // Once blocks are more than MAX_REORG_DEPTH deep, they are considered FINAL
-                // This protects against long-range attacks where an attacker creates a fake longer chain
-                if fork_depth > MAX_REORG_DEPTH {
-                    warn!(
-                        "🛡️ SECURITY: REJECTED DEEP REORG from peer {} - fork depth {} exceeds maximum {} blocks",
-                        peer_addr, fork_depth, MAX_REORG_DEPTH
-                    );
-                    warn!(
-                        "   Our height: {}, common ancestor: {}, peer claims height: {}",
-                        our_height, common_ancestor, peer_tip_height
-                    );
-                    warn!(
-                        "   Blocks at depth >{} are considered FINAL and cannot be reorganized",
-                        MAX_REORG_DEPTH
-                    );
-                    warn!(
-                        "   Peer {} is attempting a deep reorg attack - marking as suspicious",
-                        peer_addr
-                    );
-
+                if let Err(reason) = crate::ai::fork_resolver::check_reorg_depth(
+                    fork_depth, our_height, common_ancestor, peer_tip_height, &peer_addr,
+                ) {
+                    warn!("🛡️ SECURITY: {}", reason);
                     *self.fork_state.write().await = ForkResolutionState::None;
                     return Ok(());
                 }
@@ -8649,6 +7967,16 @@ impl Blockchain {
             new_height
         );
 
+        // Pre-flight validation: check chain consistency before touching storage
+        let ancestor_hash = self.get_block_hash(common_ancestor).ok();
+        let now = chrono::Utc::now().timestamp();
+        crate::ai::fork_resolver::validate_fork_chain(
+            common_ancestor,
+            ancestor_hash,
+            &alternate_blocks,
+            now,
+        )?;
+
         // Update state to Reorging
         *self.fork_state.write().await = ForkResolutionState::Reorging {
             from_height: our_height,
@@ -8820,185 +8148,15 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Find common ancestor between our chain and competing blocks (for fork resolution)
-    /// Uses exponential + binary search algorithm for efficiency (O(log n) vs O(n))
-    /// Returns error if peer blocks don't go back far enough to find true common ancestor
+    /// Find common ancestor between our chain and competing blocks.
+    /// Delegates to fork_resolver::find_common_ancestor with a closure for block hash lookups.
     async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> Result<u64, String> {
-        if competing_blocks.is_empty() {
-            return Ok(0);
-        }
-
-        // Sort blocks by height to find the starting point
-        let mut sorted_blocks = competing_blocks.to_vec();
-        sorted_blocks.sort_by_key(|b| b.header.height);
-
-        // Build a map of peer's blocks for fast lookup
-        let peer_blocks: std::collections::HashMap<u64, [u8; 32]> = sorted_blocks
-            .iter()
-            .map(|b| (b.header.height, b.hash()))
-            .collect();
-
-        let peer_height = sorted_blocks.last().unwrap().header.height;
-        let peer_lowest = sorted_blocks.first().unwrap().header.height;
         let our_height = self.get_height();
-
-        info!(
-            "🔍 Finding common ancestor using exponential+binary search (our: {}, peer: {}, peer blocks: {}-{})",
-            our_height, peer_height, peer_lowest, peer_height
-        );
-
-        // SIMPLIFIED APPROACH: Instead of binary search (which can fail with incomplete data),
-        // search linearly downward to find the common ancestor.
-        // Start from our chain height and go down, checking if the peer has a matching block.
-
-        let mut candidate_ancestor = 0u64;
-
-        // Search from our height downward - at each height, check if peer has a matching block
-        for height in (0..=our_height).rev() {
-            // Get our block hash at this height
-            let our_hash = match self.get_block_hash(height) {
-                Ok(hash) => hash,
-                Err(_) => continue, // We don't have this block, try lower
-            };
-
-            // If peer has this block, check if hashes match
-            if let Some(peer_hash) = peer_blocks.get(&height) {
-                if our_hash == *peer_hash {
-                    // Found matching block - this could be common ancestor
-                    candidate_ancestor = height;
-                    info!(
-                        "✅ Found matching block at height {} (our hash {} == peer hash {})",
-                        height,
-                        hex::encode(&our_hash[..8]),
-                        hex::encode(&peer_hash[..8])
-                    );
-                    break;
-                } else {
-                    // Different blocks at same height - fork is below this
-                    info!(
-                        "🔀 Different blocks at height {}: ours {} vs peer {}",
-                        height,
-                        hex::encode(&our_hash[..8]),
-                        hex::encode(&peer_hash[..8])
-                    );
-                    continue;
-                }
-            } else {
-                // Peer doesn't have this block - check if peer's NEXT block builds on our block
-                // This handles the case where common ancestor is below peer's lowest block
-                if let Some(peer_next_block) =
-                    sorted_blocks.iter().find(|b| b.header.height == height + 1)
-                {
-                    if peer_next_block.header.previous_hash == our_hash {
-                        // Peer's next block builds on our block at this height - this is the ancestor
-                        candidate_ancestor = height;
-                        info!(
-                            "✅ Found common ancestor at height {} (peer's block {} builds on our block)",
-                            height,
-                            height + 1
-                        );
-                        break;
-                    }
-                }
-            }
-        }
-
-        // SANITY CHECK: Common ancestor cannot be higher than our height
-        if candidate_ancestor > our_height {
-            warn!(
-                "🚫 BUG DETECTED: Common ancestor {} > our height {}. Capping to our height.",
-                candidate_ancestor, our_height
-            );
-            candidate_ancestor = our_height;
-        }
-
-        info!(
-            "🔍 Common ancestor search complete: found ancestor at height {} (peer lowest: {}, our height: {})",
-            candidate_ancestor, peer_lowest, our_height
-        );
-
-        // CRITICAL VALIDATION: Verify that peer's next block actually builds on this ancestor
-        // If we say height N is common ancestor, peer's block N+1 must have previous_hash = our block N's hash
-        if candidate_ancestor < peer_height {
-            let our_block_hash = self.get_block_hash(candidate_ancestor)?;
-
-            // Find peer's next block after candidate ancestor
-            if let Some(peer_next_block) = sorted_blocks
-                .iter()
-                .find(|b| b.header.height == candidate_ancestor + 1)
-            {
-                let peer_next_prev_hash = peer_next_block.header.previous_hash;
-
-                if our_block_hash != peer_next_prev_hash {
-                    warn!(
-                        "⚠️  Binary search validation failed: candidate ancestor {} has hash {}, \
-                        but peer's block {} expects previous_hash {}",
-                        candidate_ancestor,
-                        hex::encode(our_block_hash),
-                        candidate_ancestor + 1,
-                        hex::encode(peer_next_prev_hash)
-                    );
-
-                    // The binary search gave us a false positive - actual fork is earlier
-                    // Search backwards from candidate to find the true common ancestor
-                    let mut true_ancestor = candidate_ancestor;
-                    while true_ancestor > 0 {
-                        true_ancestor -= 1;
-
-                        // Check if blocks at this height match
-                        if let Ok(our_hash_at) = self.get_block_hash(true_ancestor) {
-                            if let Some(peer_hash_at) = peer_blocks.get(&true_ancestor) {
-                                if our_hash_at == *peer_hash_at {
-                                    // Verify this is a true common ancestor by checking next block
-                                    if let Some(peer_next) = sorted_blocks
-                                        .iter()
-                                        .find(|b| b.header.height == true_ancestor + 1)
-                                    {
-                                        if self.get_block_hash(true_ancestor).ok()
-                                            == Some(peer_next.header.previous_hash)
-                                        {
-                                            info!("✓ Validated true common ancestor at height {} (corrected from {})", true_ancestor, candidate_ancestor);
-                                            return Ok(true_ancestor);
-                                        }
-                                    } else {
-                                        // Peer doesn't have next block in provided set
-                                        info!("✓ Found common ancestor at height {} (no next block to validate)", true_ancestor);
-                                        return Ok(true_ancestor);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Couldn't find common ancestor - chains diverged at or before peer_lowest
-                    if peer_lowest > 100 {
-                        return Err(format!(
-                            "Fork earlier than provided blocks: peer blocks start at {}, but common ancestor not found. \
-                            Need deeper block history.",
-                            peer_lowest
-                        ));
-                    }
-
-                    // Fork at genesis
-                    return Ok(0);
-                }
-            }
-        }
-
-        // CRITICAL FIX: If ancestor is 0 but peer_lowest is > 100,
-        // the blocks slice doesn't go back far enough to find the true common ancestor.
-        // Return an error to force the peer to send deeper block history.
-        if candidate_ancestor == 0 && peer_lowest > 100 {
-            return Err(format!(
-                "Insufficient block history: peer blocks only go back to height {}, \
-                but common ancestor was not found. Peer must provide blocks starting from a lower height \
-                (fork likely occurred between height 0 and {}).",
-                peer_lowest, peer_lowest
-            ));
-        }
-
-        info!("✓ Found common ancestor at height {}", candidate_ancestor);
-        Ok(candidate_ancestor)
+        // Create a closure that captures `self` for block hash lookups
+        let get_hash = |height: u64| -> Result<[u8; 32], String> {
+            self.get_block_hash(height)
+        };
+        crate::ai::fork_resolver::find_common_ancestor(our_height, competing_blocks, &get_hash)
     }
 
     /// Validate that our chain hasn't gotten ahead of the network time schedule
