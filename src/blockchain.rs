@@ -2209,7 +2209,11 @@ impl Blockchain {
         // SECURITY: Check reorg depth limit
         let fork_depth = our_height.saturating_sub(common_ancestor);
         crate::ai::fork_resolver::check_reorg_depth(
-            fork_depth, our_height, common_ancestor, our_height, peer_ip,
+            fork_depth,
+            our_height,
+            common_ancestor,
+            our_height,
+            peer_ip,
         )?;
 
         // CRITICAL FIX: If we're already at the common ancestor height, no rollback needed
@@ -6337,6 +6341,7 @@ impl Blockchain {
         // SCALABILITY: With 10,000+ masternodes, sampling is critical
         // Sample a representative subset instead of querying all peers
         // Statistical sampling: sqrt(N) provides good confidence with O(sqrt(N)) cost
+        // TIER-STRATIFIED: Ensure at least one peer from each tier is sampled
         const MAX_PEERS_TO_CHECK: usize = 100; // Hard cap for extreme cases
         let sample_size = if connected_peers.len() > MAX_PEERS_TO_CHECK {
             let sqrt_size = (connected_peers.len() as f64).sqrt().ceil() as usize;
@@ -6346,21 +6351,58 @@ impl Blockchain {
         };
 
         if sample_size < connected_peers.len() {
-            // Deterministic sampling based on current time for randomness
-            // This avoids Send issues with thread_rng in async context
-            let now_nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
-            // Use Fisher-Yates shuffle with time-based seed
-            for i in 0..sample_size {
-                let j = (now_nanos.wrapping_mul(i as u64 + 1).wrapping_add(i as u64)) as usize
-                    % (connected_peers.len() - i)
-                    + i;
-                connected_peers.swap(i, j);
+            // Tier-stratified sampling: guarantee at least one peer from each tier
+            // This prevents sampling bias where all Gold/Silver nodes are missed
+            let mut tier_buckets: std::collections::HashMap<u64, Vec<String>> =
+                std::collections::HashMap::new();
+            for peer_ip in &connected_peers {
+                let weight = match self.masternode_registry.get(peer_ip).await {
+                    Some(info) => info.masternode.tier.sampling_weight(),
+                    None => crate::types::MasternodeTier::Free.sampling_weight(),
+                };
+                tier_buckets.entry(weight).or_default().push(peer_ip.clone());
             }
-            connected_peers.truncate(sample_size);
+
+            let mut sampled: Vec<String> = Vec::with_capacity(sample_size);
+
+            // Phase 1: Take one peer from each tier (highest tiers first)
+            let mut tier_keys: Vec<u64> = tier_buckets.keys().cloned().collect();
+            tier_keys.sort_unstable_by(|a, b| b.cmp(a)); // Highest tier first
+            let now_nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) as u64;
+            for (idx, tier) in tier_keys.iter().enumerate() {
+                if sampled.len() >= sample_size {
+                    break;
+                }
+                if let Some(peers) = tier_buckets.get_mut(tier) {
+                    if !peers.is_empty() {
+                        // Deterministic selection within tier
+                        let pick = (now_nanos.wrapping_mul(idx as u64 + 1)) as usize % peers.len();
+                        sampled.push(peers.swap_remove(pick));
+                    }
+                }
+            }
+
+            // Phase 2: Fill remaining slots randomly from all remaining peers
+            let mut remaining: Vec<String> = tier_buckets
+                .into_values()
+                .flat_map(|v| v.into_iter())
+                .collect();
+            for i in 0..remaining.len().min(sample_size.saturating_sub(sampled.len())) {
+                let j = (now_nanos.wrapping_mul(i as u64 + 100).wrapping_add(i as u64)) as usize
+                    % (remaining.len() - i)
+                    + i;
+                remaining.swap(i, j);
+            }
+            let fill_count = sample_size.saturating_sub(sampled.len());
+            sampled.extend(remaining.into_iter().take(fill_count));
+
+            let total_before = connected_peers.len();
+            connected_peers = sampled;
             tracing::info!(
-                "🎲 Sampling {} of {} peers for consensus check (scalability optimization)",
-                sample_size,
-                registry.get_compatible_peers().await.len()
+                "🎲 Tier-stratified sampling: {} of {} peers ({} tiers represented)",
+                connected_peers.len(),
+                total_before,
+                tier_keys.len(),
             );
         }
 
@@ -6671,15 +6713,31 @@ impl Blockchain {
 
         if height_advantage == 0 {
             // Same-height fork — chain was selected by deterministic hash tiebreaker
-            // (lower hash wins). Use the tiebreaker directly — requiring weighted
-            // majority here causes deadlock when all nodes are on different chains
-            // since no single chain can reach >50%.
+            // (lower hash wins). Require weighted masternode stake majority to switch.
+            let weighted_ratio = consensus_weight as f64 / total_responding_weight as f64;
+            const WEIGHTED_CONSENSUS_THRESHOLD: f64 = 0.67; // 67% weighted stake required
+
+            if weighted_ratio < WEIGHTED_CONSENSUS_THRESHOLD {
+                tracing::info!(
+                    "🔀 Same-height fork at {}: weighted stake {:.1}% < {:.0}% threshold — \
+                    keeping our chain (consensus weight {}/{}, {} peers)",
+                    consensus_height,
+                    weighted_ratio * 100.0,
+                    WEIGHTED_CONSENSUS_THRESHOLD * 100.0,
+                    consensus_weight,
+                    total_responding_weight,
+                    consensus_peers.len(),
+                );
+                return None;
+            }
+
             tracing::info!(
-                "🔀 Same-height fork at {}: using deterministic hash tiebreaker ({}/{} weight, {:.1}%)",
+                "🔀 Same-height fork at {}: weighted stake {:.1}% ≥ {:.0}% — accepting consensus chain ({}/{})",
                 consensus_height,
+                weighted_ratio * 100.0,
+                WEIGHTED_CONSENSUS_THRESHOLD * 100.0,
                 consensus_weight,
                 total_responding_weight,
-                (consensus_weight as f64 / total_responding_weight as f64) * 100.0,
             );
         } else {
             // Longest chain is strictly taller — it wins by longest chain rule
@@ -7453,7 +7511,11 @@ impl Blockchain {
 
                 // CRITICAL SECURITY CHECK: Reject reorgs that are too deep
                 if let Err(reason) = crate::ai::fork_resolver::check_reorg_depth(
-                    fork_depth, our_height, common_ancestor, peer_tip_height, &peer_addr,
+                    fork_depth,
+                    our_height,
+                    common_ancestor,
+                    peer_tip_height,
+                    &peer_addr,
                 ) {
                     warn!("🛡️ SECURITY: {}", reason);
                     *self.fork_state.write().await = ForkResolutionState::None;
@@ -7488,6 +7550,49 @@ impl Blockchain {
                     info!("📊 Fork resolver rejected peer chain");
                     *self.fork_state.write().await = ForkResolutionState::None;
                     return Ok(());
+                }
+
+                // NETWORK CONSENSUS CROSS-CHECK: Verify the fork resolver's decision
+                // aligns with what other peers see. A single peer sending competing
+                // blocks should not force a reorg without broader network agreement.
+                const MIN_PEERS_FOR_ONDEMAND_FORK: usize = 3;
+                {
+                    let peer_registry = self.peer_registry.read().await;
+                    if let Some(registry) = peer_registry.as_ref() {
+                        let compatible_peers = registry.get_compatible_peers().await;
+                        let mut supporting_peers = 0usize;
+                        let mut total_checked = 0usize;
+                        for pip in &compatible_peers {
+                            if let Some((tip_height, tip_hash)) =
+                                registry.get_peer_chain_tip(pip).await
+                            {
+                                total_checked += 1;
+                                // Peer supports this fork if they're at peer_tip_height
+                                // with matching hash, OR they're ahead (longer chain)
+                                if (tip_height == peer_tip_height && tip_hash == peer_tip_hash)
+                                    || tip_height > our_height
+                                {
+                                    supporting_peers += 1;
+                                }
+                            }
+                        }
+                        if total_checked > 0 && supporting_peers < MIN_PEERS_FOR_ONDEMAND_FORK {
+                            info!(
+                                "🛡️ On-demand fork REJECTED: only {}/{} peers support peer tip \
+                                (need {}). Single-peer fork attempt from {}",
+                                supporting_peers, total_checked,
+                                MIN_PEERS_FOR_ONDEMAND_FORK, peer_addr
+                            );
+                            *self.fork_state.write().await = ForkResolutionState::None;
+                            return Ok(());
+                        }
+                        if total_checked > 0 {
+                            info!(
+                                "✅ On-demand fork consensus cross-check passed: {}/{} peers support",
+                                supporting_peers, total_checked
+                            );
+                        }
+                    }
                 }
 
                 // CRITICAL SAFETY CHECK: Common ancestor cannot be higher than our chain
@@ -8153,9 +8258,7 @@ impl Blockchain {
     async fn find_fork_common_ancestor(&self, competing_blocks: &[Block]) -> Result<u64, String> {
         let our_height = self.get_height();
         // Create a closure that captures `self` for block hash lookups
-        let get_hash = |height: u64| -> Result<[u8; 32], String> {
-            self.get_block_hash(height)
-        };
+        let get_hash = |height: u64| -> Result<[u8; 32], String> { self.get_block_hash(height) };
         crate::ai::fork_resolver::find_common_ancestor(our_height, competing_blocks, &get_hash)
     }
 
