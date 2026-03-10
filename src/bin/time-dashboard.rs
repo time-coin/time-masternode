@@ -247,6 +247,28 @@ struct MempoolTx {
     to: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct BlockDetail {
+    height: u64,
+    hash: String,
+    #[serde(default)]
+    previousblockhash: String,
+    time: u64,
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    merkleroot: String,
+    #[serde(default, rename = "nTx")]
+    n_tx: usize,
+    #[serde(default)]
+    tx: Vec<String>,
+    #[serde(default)]
+    confirmations: i64,
+    #[serde(default)]
+    block_reward: f64,
+}
+
 struct DashboardData {
     blockchain: Option<BlockchainInfo>,
     wallet: Option<WalletInfo>,
@@ -257,6 +279,7 @@ struct DashboardData {
     consensus: Option<ConsensusInfo>,
     mempool: Option<MempoolInfo>,
     mempool_txs: Vec<MempoolTx>,
+    recent_blocks: Vec<BlockDetail>,
     last_update: DateTime<Utc>,
     update_count: u64,
 }
@@ -273,6 +296,7 @@ impl Default for DashboardData {
             consensus: None,
             mempool: None,
             mempool_txs: Vec::new(),
+            recent_blocks: Vec::new(),
             last_update: Utc::now(),
             update_count: 0,
         }
@@ -291,6 +315,9 @@ struct App {
     mempool_scroll: usize,
     mempool_detail: Option<usize>,
     peer_scroll: usize,
+    block_scroll: usize,
+    block_detail: Option<usize>,
+    block_tx_scroll: usize,
 }
 
 impl App {
@@ -311,6 +338,9 @@ impl App {
             mempool_scroll: 0,
             mempool_detail: None,
             peer_scroll: 0,
+            block_scroll: 0,
+            block_detail: None,
+            block_tx_scroll: 0,
         }
     }
 
@@ -388,6 +418,39 @@ impl App {
             Err(_) => self.data.mempool_txs = Vec::new(),
         }
 
+        // Fetch recent blocks for block explorer
+        if let Some(bc) = &self.data.blockchain {
+            let current_height = bc.blocks;
+            let cached_top = self.data.recent_blocks.first().map(|b| b.height).unwrap_or(0);
+
+            if cached_top < current_height {
+                // Fetch only new blocks since last cached height
+                let fetch_from = if cached_top == 0 {
+                    current_height.saturating_sub(19) // initial: last 20 blocks
+                } else {
+                    cached_top + 1
+                };
+
+                let mut new_blocks = Vec::new();
+                for h in (fetch_from..=current_height).rev() {
+                    match self
+                        .rpc_call::<BlockDetail>("getblock", vec![serde_json::json!(h)])
+                        .await
+                    {
+                        Ok(block) => new_blocks.push(block),
+                        Err(_) => break,
+                    }
+                }
+
+                if !new_blocks.is_empty() {
+                    // Prepend new blocks (newest first) and cap at 50
+                    new_blocks.append(&mut self.data.recent_blocks);
+                    new_blocks.truncate(50);
+                    self.data.recent_blocks = new_blocks;
+                }
+            }
+        }
+
         self.data.last_update = Utc::now();
         self.data.update_count += 1;
     }
@@ -447,14 +510,14 @@ impl App {
     }
 
     fn next_tab(&mut self) {
-        self.current_tab = (self.current_tab + 1) % 4;
+        self.current_tab = (self.current_tab + 1) % 5;
     }
 
     fn previous_tab(&mut self) {
         if self.current_tab > 0 {
             self.current_tab -= 1;
         } else {
-            self.current_tab = 3;
+            self.current_tab = 4;
         }
     }
 }
@@ -482,6 +545,7 @@ fn ui(f: &mut Frame, app: &App) {
         1 => render_network(f, chunks[2], app),
         2 => render_masternode(f, chunks[2], app),
         3 => render_mempool(f, chunks[2], app),
+        4 => render_blocks(f, chunks[2], app),
         _ => {}
     }
 
@@ -541,7 +605,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let titles = vec!["Overview", "Network", "Masternode", "Mempool"];
+    let titles = vec!["Overview", "Network", "Masternode", "Mempool", "Blocks"];
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title("Navigation"))
         .select(app.current_tab)
@@ -1257,6 +1321,226 @@ fn render_mempool_detail(f: &mut Frame, area: Rect, tx: &MempoolTx) {
     f.render_widget(block, area);
 }
 
+fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
+    // Block detail view
+    if let Some(idx) = app.block_detail {
+        if let Some(block) = app.data.recent_blocks.get(idx) {
+            render_block_detail(f, area, block, app.block_tx_scroll);
+            return;
+        }
+    }
+
+    if app.data.recent_blocks.is_empty() {
+        let empty = Paragraph::new("No blocks available")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Block Explorer"),
+            )
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(empty, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("Height"),
+        Cell::from("Hash"),
+        Cell::from("Time (UTC)"),
+        Cell::from("Txs"),
+        Cell::from("Reward"),
+        Cell::from("Confirms"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let visible_height = area.height.saturating_sub(3) as usize;
+    let start = app.block_scroll;
+    let end = (start + visible_height).min(app.data.recent_blocks.len());
+
+    let rows: Vec<Row> = app.data.recent_blocks[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, blk)| {
+            let idx = start + i;
+            let selected = idx == app.block_scroll;
+            let short_hash = if blk.hash.len() > 16 {
+                format!("{}…", &blk.hash[..16])
+            } else {
+                blk.hash.clone()
+            };
+            let time_str = chrono::DateTime::from_timestamp(blk.time as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_else(|| "—".to_string());
+
+            let row = Row::new(vec![
+                Cell::from(format!("{}", blk.height)),
+                Cell::from(short_hash),
+                Cell::from(time_str),
+                Cell::from(format!("{}", blk.n_tx)),
+                Cell::from(format!("{:.2}", blk.block_reward)),
+                Cell::from(format!("{}", blk.confirmations)),
+            ]);
+            if selected {
+                row.style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                row
+            }
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(8),
+            Constraint::Length(18),
+            Constraint::Length(18),
+            Constraint::Length(5),
+            Constraint::Length(10),
+            Constraint::Min(8),
+        ],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "Block Explorer ({}/{})  ↑↓ Navigate  Enter: Details",
+        start + 1,
+        app.data.recent_blocks.len()
+    )));
+    f.render_widget(table, area);
+}
+
+fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: usize) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(12), Constraint::Min(6)])
+        .split(area);
+
+    let time_str = chrono::DateTime::from_timestamp(blk.time as i64, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| "—".to_string());
+
+    let short_merkle = if blk.merkleroot.len() > 32 {
+        format!("{}…", &blk.merkleroot[..32])
+    } else {
+        blk.merkleroot.clone()
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Height:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", blk.height),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Hash:      ", Style::default().fg(Color::Yellow)),
+            Span::styled(&blk.hash, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::styled("Prev Hash: ", Style::default().fg(Color::Yellow)),
+            Span::styled(&blk.previousblockhash, Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("Time:      ", Style::default().fg(Color::Yellow)),
+            Span::styled(time_str, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Merkle:    ", Style::default().fg(Color::Yellow)),
+            Span::styled(short_merkle, Style::default().fg(Color::Gray)),
+        ]),
+        Line::from(vec![
+            Span::styled("Txs:       ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}", blk.n_tx), Style::default().fg(Color::White)),
+            Span::raw("    "),
+            Span::styled("Reward: ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{:.8} TIME", blk.block_reward),
+                Style::default().fg(Color::Green),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Confirms:  ", Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}", blk.confirmations),
+                Style::default().fg(Color::White),
+            ),
+            Span::raw("    "),
+            Span::styled("Version: ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}", blk.version), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Esc or q to go back",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let detail = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!("Block #{}", blk.height)),
+    );
+    f.render_widget(detail, chunks[0]);
+
+    // Transaction list
+    if blk.tx.is_empty() {
+        let empty = Paragraph::new("No transactions in this block")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Transactions"),
+            )
+            .style(Style::default().fg(Color::DarkGray))
+            .alignment(Alignment::Center);
+        f.render_widget(empty, chunks[1]);
+        return;
+    }
+
+    let header = Row::new(vec![Cell::from(" # "), Cell::from("Transaction ID")])
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let visible = chunks[1].height.saturating_sub(3) as usize;
+    let start = tx_scroll;
+    let end = (start + visible).min(blk.tx.len());
+
+    let rows: Vec<Row> = blk.tx[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, txid)| {
+            Row::new(vec![
+                Cell::from(format!("{:>3}", start + i + 1)),
+                Cell::from(txid.as_str()),
+            ])
+        })
+        .collect();
+
+    let table = Table::new(
+        rows,
+        [Constraint::Length(5), Constraint::Min(40)],
+    )
+    .header(header)
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        "Transactions ({}/{})",
+        start + 1,
+        blk.tx.len()
+    )));
+    f.render_widget(table, chunks[1]);
+}
+
 fn format_age(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
@@ -1415,6 +1699,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('q') | KeyCode::Char('Q') => {
                             if app.mempool_detail.is_some() {
                                 app.mempool_detail = None;
+                            } else if app.block_detail.is_some() {
+                                app.block_detail = None;
+                                app.block_tx_scroll = 0;
                             } else {
                                 app.should_quit = true;
                             }
@@ -1431,13 +1718,13 @@ async fn run_app<B: ratatui::backend::Backend>(
                             last_update = Instant::now();
                         }
                         KeyCode::Tab | KeyCode::Right => {
-                            if app.mempool_detail.is_none() {
+                            if app.mempool_detail.is_none() && app.block_detail.is_none() {
                                 app.next_tab();
                                 app.mempool_scroll = 0;
                             }
                         }
                         KeyCode::Left => {
-                            if app.mempool_detail.is_none() {
+                            if app.mempool_detail.is_none() && app.block_detail.is_none() {
                                 app.previous_tab();
                                 app.mempool_scroll = 0;
                             }
@@ -1447,6 +1734,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.mempool_scroll = app.mempool_scroll.saturating_sub(1);
                             } else if app.current_tab == 1 {
                                 app.peer_scroll = app.peer_scroll.saturating_sub(1);
+                            } else if app.current_tab == 4 {
+                                if app.block_detail.is_some() {
+                                    app.block_tx_scroll = app.block_tx_scroll.saturating_sub(1);
+                                } else {
+                                    app.block_scroll = app.block_scroll.saturating_sub(1);
+                                }
                             }
                         }
                         KeyCode::Down => {
@@ -1460,6 +1753,24 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 if app.peer_scroll < max {
                                     app.peer_scroll += 1;
                                 }
+                            } else if app.current_tab == 4 {
+                                if let Some(detail_idx) = app.block_detail {
+                                    let max_tx = app
+                                        .data
+                                        .recent_blocks
+                                        .get(detail_idx)
+                                        .map(|b| b.tx.len())
+                                        .unwrap_or(0)
+                                        .saturating_sub(1);
+                                    if app.block_tx_scroll < max_tx {
+                                        app.block_tx_scroll += 1;
+                                    }
+                                } else {
+                                    let max = app.data.recent_blocks.len().saturating_sub(1);
+                                    if app.block_scroll < max {
+                                        app.block_scroll += 1;
+                                    }
+                                }
                             }
                         }
                         KeyCode::Enter => {
@@ -1469,11 +1780,22 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 } else if !app.data.mempool_txs.is_empty() {
                                     app.mempool_detail = Some(app.mempool_scroll);
                                 }
+                            } else if app.current_tab == 4 {
+                                if app.block_detail.is_some() {
+                                    app.block_detail = None;
+                                    app.block_tx_scroll = 0;
+                                } else if !app.data.recent_blocks.is_empty() {
+                                    app.block_detail = Some(app.block_scroll);
+                                    app.block_tx_scroll = 0;
+                                }
                             }
                         }
                         KeyCode::Esc => {
                             if app.mempool_detail.is_some() {
                                 app.mempool_detail = None;
+                            } else if app.block_detail.is_some() {
+                                app.block_detail = None;
+                                app.block_tx_scroll = 0;
                             }
                         }
                         _ => {}
