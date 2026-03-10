@@ -7407,17 +7407,19 @@ impl Blockchain {
         // The consensus chain was already selected by peer count (majority wins).
         // If our hash doesn't match, we're in the minority — switch, subject to guards below.
         if consensus_height == our_height && consensus_hash != our_hash {
-            // Guard 1: Require at least 2 peers supporting the alternate chain.
-            // A single peer with a different hash is more likely to be the minority fork
+            // Guard 1: Require at least 3 peers supporting the alternate chain.
+            // 1–2 peers with a different hash are more likely to be on a minority fork
             // (especially when other peers are temporarily unresponsive to chain-tip queries).
             // Returning None here lets the node count as a vote for its own chain so that
-            // the 1 disagreeing peer — not us — eventually gets the fork alert.
-            if consensus_peers.len() < 2 {
+            // the disagreeing peers — not us — eventually get the fork alert.
+            const MIN_PEERS_FOR_FORK_SWITCH: usize = 3;
+            if consensus_peers.len() < MIN_PEERS_FOR_FORK_SWITCH {
                 tracing::debug!(
                     "🔀 Same-height fork at {}: only {} peer(s) on alternate chain — \
-                     insufficient consensus to switch (our hash {}, theirs {})",
+                     need {} to switch (our hash {}, theirs {})",
                     consensus_height,
                     consensus_peers.len(),
+                    MIN_PEERS_FOR_FORK_SWITCH,
                     hex::encode(&our_hash[..8]),
                     hex::encode(&consensus_hash[..8]),
                 );
