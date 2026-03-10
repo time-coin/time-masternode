@@ -16,7 +16,7 @@
 #
 # Replay with:  ./scripts/mempool-restore.sh <backup-file>
 
-set -euo pipefail
+set -uo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 RPC_HOST="127.0.0.1"
@@ -80,10 +80,25 @@ check_jq
 echo "🔌  Connecting to TIME node at ${RPC_URL} ..."
 
 # Verify the node is reachable
-INFO=$(rpc getmempoolinfo) || { echo "❌  Cannot reach RPC at ${RPC_URL}"; exit 1; }
-PENDING=$(echo "$INFO"  | jq -r '.result.pending  // 0')
-FINALIZED=$(echo "$INFO" | jq -r '.result.finalized // 0')
-TOTAL=$(echo "$INFO"    | jq -r '.result.size      // 0')
+INFO=$(rpc getmempoolinfo)
+if [[ $? -ne 0 || -z "$INFO" ]]; then
+    echo "❌  Cannot reach RPC at ${RPC_URL}"
+    exit 1
+fi
+
+# Check for RPC error response
+RPC_ERR=$(echo "$INFO" | jq -r '.error // empty' 2>/dev/null)
+if [[ -n "$RPC_ERR" && "$RPC_ERR" != "null" ]]; then
+    echo "❌  RPC error: $RPC_ERR"
+    echo "    Raw response: $INFO"
+    exit 1
+fi
+
+echo "    Raw response: $INFO"
+
+PENDING=$(echo "$INFO"  | jq -r '.result.pending  // .pending  // 0')
+FINALIZED=$(echo "$INFO" | jq -r '.result.finalized // .finalized // 0')
+TOTAL=$(echo "$INFO"    | jq -r '.result.size      // .size      // 0')
 
 echo "📊  Mempool: ${PENDING} pending, ${FINALIZED} finalized  (${TOTAL} total)"
 
