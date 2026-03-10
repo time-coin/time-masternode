@@ -3850,62 +3850,69 @@ impl Blockchain {
         // Save block - but DON'T update chain height yet
         self.save_block_without_height_update(&block)?;
 
-        // CRITICAL: Immediately read back and verify hash BEFORE updating chain height
-        let retrieved_block = self.get_block_from_storage_only(block.header.height)?;
-        let post_storage_hash = retrieved_block.hash();
-        if post_storage_hash != pre_storage_hash {
-            tracing::error!(
-                "🔬 CRITICAL: POST-STORAGE HASH MISMATCH for block {}!",
-                block.header.height
-            );
-            tracing::error!(
-                "  Expected: {}, Got: {}",
-                hex::encode(&pre_storage_hash[..8]),
-                hex::encode(&post_storage_hash[..8])
-            );
-            tracing::error!("  This block will be REJECTED to prevent chain corruption");
-            // Remove the corrupted block from storage
-            let key = format!("block_{}", block.header.height);
-            let _ = self.storage.remove(key.as_bytes());
-            self.block_cache.invalidate(block.header.height);
+        let is_syncing = self.is_syncing.load(Ordering::Acquire);
 
-            return Err(format!(
-                "Block {} hash changed after storage (expected {}, got {}). Block rejected.",
+        // Read-back verification: confirm hash survived round-trip through sled.
+        // Skip during bulk sync — the serialization was already validated above
+        // and the read-back doubles sled I/O per block, which starves tokio
+        // worker threads and kills RPC responsiveness on low-CPU machines.
+        if !is_syncing {
+            let retrieved_block = self.get_block_from_storage_only(block.header.height)?;
+            let post_storage_hash = retrieved_block.hash();
+            if post_storage_hash != pre_storage_hash {
+                tracing::error!(
+                    "🔬 CRITICAL: POST-STORAGE HASH MISMATCH for block {}!",
+                    block.header.height
+                );
+                tracing::error!(
+                    "  Expected: {}, Got: {}",
+                    hex::encode(&pre_storage_hash[..8]),
+                    hex::encode(&post_storage_hash[..8])
+                );
+                tracing::error!("  This block will be REJECTED to prevent chain corruption");
+                // Remove the corrupted block from storage
+                let key = format!("block_{}", block.header.height);
+                let _ = self.storage.remove(key.as_bytes());
+                self.block_cache.invalidate(block.header.height);
+
+                return Err(format!(
+                    "Block {} hash changed after storage (expected {}, got {}). Block rejected.",
+                    block.header.height,
+                    hex::encode(&pre_storage_hash[..8]),
+                    hex::encode(&post_storage_hash[..8])
+                ));
+            }
+            tracing::debug!(
+                "✓ Block {} hash verified after storage: {}",
                 block.header.height,
-                hex::encode(&pre_storage_hash[..8]),
                 hex::encode(&post_storage_hash[..8])
-            ));
+            );
         }
 
-        // Hash verified - NOW update chain height
+        // Update chain height
         self.update_chain_height(block.header.height)?;
 
         // SCAN FORWARD: After filling a gap, check if blocks above already exist in storage.
-        // This handles the case where verify_and_fix_chain_height preserved blocks above a gap.
-        // When the gap is filled, we should advance the height past all already-stored blocks.
-        // Limit iterations to avoid blocking the tokio runtime during large catch-ups.
-        const MAX_SCAN_FORWARD: u64 = 100;
-        let mut scan_height = block.header.height + 1;
-        let mut advanced = 0u64;
-        while advanced < MAX_SCAN_FORWARD && self.get_block(scan_height).is_ok() {
-            self.update_chain_height(scan_height)?;
-            self.current_height.store(scan_height, Ordering::Release);
-            advanced += 1;
-            scan_height += 1;
+        // Skip during sync — blocks arrive sequentially so there are no gaps to fill,
+        // and each iteration does a sled read that blocks the thread.
+        if !is_syncing {
+            const MAX_SCAN_FORWARD: u64 = 100;
+            let mut scan_height = block.header.height + 1;
+            let mut advanced = 0u64;
+            while advanced < MAX_SCAN_FORWARD && self.get_block(scan_height).is_ok() {
+                self.update_chain_height(scan_height)?;
+                self.current_height.store(scan_height, Ordering::Release);
+                advanced += 1;
+                scan_height += 1;
+            }
+            if advanced > 0 {
+                tracing::info!(
+                    "📈 Gap fill: advanced chain height past {} pre-existing blocks (now at height {})",
+                    advanced,
+                    scan_height - 1
+                );
+            }
         }
-        if advanced > 0 {
-            tracing::info!(
-                "📈 Gap fill: advanced chain height past {} pre-existing blocks (now at height {})",
-                advanced,
-                scan_height - 1
-            );
-        }
-
-        tracing::debug!(
-            "✓ Block {} hash verified after storage: {}",
-            block.header.height,
-            hex::encode(&post_storage_hash[..8])
-        );
 
         // Update cumulative chain work
         let block_work = self.calculate_block_work(&block);
