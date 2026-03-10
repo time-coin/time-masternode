@@ -3930,6 +3930,38 @@ fn setup_logging(
 
     // Set up file appender writing to debug.log in the data directory
     std::fs::create_dir_all(data_dir).ok();
+
+    // Rotate log if it exceeds 50 MB
+    let log_path = data_dir.join("debug.log");
+    let max_log_bytes: u64 = 50 * 1024 * 1024; // 50 MB
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > max_log_bytes {
+            let rotated = data_dir.join("debug.log.1");
+            // Keep only one rotated copy — drop the older one if present
+            let _ = std::fs::remove_file(&rotated);
+            let _ = std::fs::rename(&log_path, &rotated);
+        }
+    }
+
+    // Write a visible restart separator directly to the file before tracing takes over
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
+            let _ = writeln!(f);
+            let _ = writeln!(f);
+            let _ = writeln!(f);
+            let _ = writeln!(f, "# ═══════════════════════════════════════════════════════════════");
+            let _ = writeln!(f, "# NODE RESTART  {}", now);
+            let _ = writeln!(f, "# ═══════════════════════════════════════════════════════════════");
+            let _ = writeln!(f);
+        }
+    }
+
     let file_appender = tracing_appender::rolling::never(data_dir, "debug.log");
     let (non_blocking_file, guard) = tracing_appender::non_blocking(file_appender);
 
