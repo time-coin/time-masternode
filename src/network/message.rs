@@ -106,6 +106,11 @@ pub enum NetworkMessage {
     },
     GetPendingTransactions,
     PendingTransactionsResponse(Vec<Transaction>),
+    /// Request full mempool state from a peer on connect (pending + finalized, with fees)
+    MempoolSyncRequest,
+    /// Full mempool state response: each entry carries the transaction, its fee, and whether
+    /// it has already been finalized by TimeVote consensus on the responding node.
+    MempoolSyncResponse(Vec<MempoolSyncEntry>),
     // Peer exchange
     GetPeers,
     PeersResponse(Vec<String>), // List of peer addresses (IP:port) — legacy, kept for compat
@@ -258,6 +263,16 @@ pub enum NetworkMessage {
     UnknownMessage,
 }
 
+/// A single mempool entry carried in a `MempoolSyncResponse`.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MempoolSyncEntry {
+    pub tx: Transaction,
+    /// Miner fee in satoshis (input_sum − output_sum)
+    pub fee: u64,
+    /// True when this transaction has already passed TimeVote finalization on the sending node
+    pub is_finalized: bool,
+}
+
 /// An entry in a PeerExchange message — a peer address with its current connection load
 /// and tier.  Recipients use tier to route connections up the pyramid (Free→Bronze→Silver→Gold)
 /// and use connection_count to prefer less-loaded peers within each tier.
@@ -354,6 +369,8 @@ impl NetworkMessage {
             NetworkMessage::Pong { .. } => "Pong",
             NetworkMessage::GetPendingTransactions => "GetPendingTransactions",
             NetworkMessage::PendingTransactionsResponse(_) => "PendingTransactionsResponse",
+            NetworkMessage::MempoolSyncRequest => "MempoolSyncRequest",
+            NetworkMessage::MempoolSyncResponse(_) => "MempoolSyncResponse",
             NetworkMessage::GetPeers => "GetPeers",
             NetworkMessage::PeersResponse(_) => "PeersResponse",
             NetworkMessage::GetBlockHash(_) => "GetBlockHash",
@@ -416,6 +433,7 @@ impl NetworkMessage {
                 | NetworkMessage::UTXOStateHashResponse { .. }
                 | NetworkMessage::MasternodesResponse(_)
                 | NetworkMessage::PendingTransactionsResponse(_)
+                | NetworkMessage::MempoolSyncResponse(_)
                 | NetworkMessage::PeersResponse(_)
                 | NetworkMessage::BlockHashResponse { .. }
                 | NetworkMessage::ConsensusQueryResponse { .. }

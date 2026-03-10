@@ -291,7 +291,11 @@ async fn main() {
         config.storage.data_dir = datadir.clone();
     }
 
-    setup_logging(&config.logging, args.verbose);
+    let _log_guard = setup_logging(
+        &config.logging,
+        args.verbose,
+        &config::get_network_data_dir(&config.node.network_type()),
+    );
 
     let mut shutdown_manager = ShutdownManager::new();
     let shutdown_token = shutdown_manager.token();
@@ -785,8 +789,19 @@ async fn main() {
     // Enable AI validation using the same db as block storage
     consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
 
+    // Restore mempool from the previous run so finalized and pending transactions
+    // survive daemon restarts. This runs before consensus is fully wired up, so
+    // pending entries are placed in the pool without triggering new TimeVote rounds.
+    let restored = consensus_engine.load_mempool_from_sled(&block_storage);
+    if restored > 0 {
+        tracing::info!("📂 Restored {} mempool transaction(s) from disk", restored);
+    }
+
     let consensus_engine = Arc::new(consensus_engine);
     tracing::info!("✓ Consensus engine initialized with AI validation and TimeLock voting");
+
+    // Keep a reference for persisting the mempool on clean shutdown
+    let consensus_for_shutdown = consensus_engine.clone();
 
     // Initialize blockchain
     let mut blockchain = Blockchain::new(
@@ -2433,6 +2448,10 @@ async fn main() {
                             if let Err(e) = block_blockchain.sync_from_peers(None).await {
                                 tracing::warn!("⚠️  Sync to majority failed: {}", e);
                             }
+                            // Yield for 5 seconds before re-checking. sync_from_peers() can
+                            // return Ok(()) immediately when no peers are ahead, causing a tight
+                            // busy-loop that starves the tokio runtime and hangs the RPC handler.
+                            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                             continue;
                         }
                         // None means all peers agree on our chain (same height, same hash).
@@ -2506,6 +2525,10 @@ async fn main() {
                         if let Err(e) = block_blockchain.sync_from_peers(None).await {
                             tracing::warn!("⚠️  Sync to majority failed: {}", e);
                         }
+                        // Yield for 5 seconds before re-checking. sync_from_peers() can
+                        // return Ok(()) immediately when no peers are ahead, causing a tight
+                        // busy-loop that starves the tokio runtime and hangs the RPC handler.
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                         continue;
                     }
                     // None = peers agree with us — safe to produce
@@ -3847,6 +3870,10 @@ async fn main() {
             // Wait for shutdown signal
             shutdown_manager.wait_for_shutdown().await;
 
+            // Persist the mempool so unconfirmed and finalized transactions survive the restart
+            tracing::info!("💾 Persisting mempool to disk...");
+            consensus_for_shutdown.save_mempool_to_sled(&block_storage_for_shutdown);
+
             // CRITICAL: Flush sled databases to disk before exit
             // Without this, in-memory dirty pages are lost on process termination,
             // causing block corruption ("unexpected end of file") on restart.
@@ -3865,8 +3892,12 @@ async fn main() {
     }
 }
 
-fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
-    use tracing_subscriber::{fmt, EnvFilter};
+fn setup_logging(
+    config: &config::LoggingConfig,
+    verbose: bool,
+    data_dir: &std::path::Path,
+) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
     let level = if verbose { "trace" } else { &config.level };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
@@ -3882,32 +3913,55 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
         .unwrap_or_else(|| "unknown".to_string());
     let short_hostname = hostname.split('.').next().unwrap_or(&hostname).to_string();
 
+    // Set up file appender writing to debug.log in the data directory
+    std::fs::create_dir_all(data_dir).ok();
+    let file_appender = tracing_appender::rolling::never(data_dir, "debug.log");
+    let (non_blocking_file, guard) = tracing_appender::non_blocking(file_appender);
+
+    // File layer: plain text, no ANSI colors, always includes timestamp
+    let file_layer = fmt::layer()
+        .with_writer(non_blocking_file)
+        .with_ansi(false)
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_timer(CustomTimer {
+            hostname: short_hostname.clone(),
+        });
+
+    // Stdout layer: matches previous behavior (json / systemd-compact / pretty)
     match config.format.as_str() {
         "json" => {
-            fmt()
+            let stdout_layer = fmt::layer()
                 .json()
-                .with_env_filter(filter)
-                .with_thread_ids(false)
+                .with_thread_ids(false);
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(file_layer)
+                .with(stdout_layer)
                 .init();
         }
         _ => {
             if is_systemd {
-                // When running under systemd, don't include timestamp/hostname
-                // (journald already adds them)
-                fmt()
-                    .with_env_filter(filter)
+                let stdout_layer = fmt::layer()
                     .with_target(false)
                     .with_thread_ids(false)
                     .with_thread_names(false)
                     .with_file(false)
                     .with_line_number(false)
                     .without_time()
-                    .compact()
+                    .compact();
+
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(file_layer)
+                    .with(stdout_layer)
                     .init();
             } else {
-                // When running manually, include custom timer with hostname
-                fmt()
-                    .with_env_filter(filter)
+                let stdout_layer = fmt::layer()
                     .with_target(false)
                     .with_thread_ids(false)
                     .with_thread_names(false)
@@ -3916,11 +3970,18 @@ fn setup_logging(config: &config::LoggingConfig, verbose: bool) {
                     .with_timer(CustomTimer {
                         hostname: short_hostname,
                     })
-                    .compact()
+                    .compact();
+
+                tracing_subscriber::registry()
+                    .with(filter)
+                    .with(file_layer)
+                    .with(stdout_layer)
                     .init();
             }
         }
     }
+
+    Some(guard)
 }
 
 // Custom timer that shows UTC time and hostname

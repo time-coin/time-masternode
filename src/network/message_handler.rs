@@ -367,6 +367,12 @@ impl MessageHandler {
             NetworkMessage::TransactionBroadcast(tx) => {
                 self.handle_transaction_broadcast(tx.clone(), context).await
             }
+            NetworkMessage::MempoolSyncRequest => {
+                self.handle_mempool_sync_request(context).await
+            }
+            NetworkMessage::MempoolSyncResponse(entries) => {
+                self.handle_mempool_sync_response(entries.clone(), context).await
+            }
 
             // === Peer Exchange Messages ===
             NetworkMessage::GetPeers => self.handle_get_peers(context).await,
@@ -1958,6 +1964,85 @@ impl MessageHandler {
             debug!(
                 "⚠️ [{}] No consensus engine to process transaction",
                 self.direction
+            );
+        }
+
+        Ok(None)
+    }
+
+    /// Serve a `MempoolSyncRequest` — respond with the full local mempool state so the
+    /// connecting peer can bootstrap its pending and finalized pools.
+    async fn handle_mempool_sync_request(
+        &self,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let entries = if let Some(consensus) = &context.consensus {
+            consensus.get_all_for_sync()
+        } else {
+            Vec::new()
+        };
+
+        tracing::debug!(
+            "📤 [{}] Serving mempool sync to {}: {} entries ({} finalized)",
+            self.direction,
+            self.peer_ip,
+            entries.len(),
+            entries.iter().filter(|e| e.is_finalized).count(),
+        );
+
+        Ok(Some(NetworkMessage::MempoolSyncResponse(entries)))
+    }
+
+    /// Handle a `MempoolSyncResponse` received from a peer on connect.
+    /// Pending entries are processed through the normal consensus path (starts TimeVote).
+    /// Finalized entries are added directly to the finalized pool to preserve their status.
+    async fn handle_mempool_sync_response(
+        &self,
+        entries: Vec<crate::network::message::MempoolSyncEntry>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        let pending_count = entries.iter().filter(|e| !e.is_finalized).count();
+        let finalized_count = entries.iter().filter(|e| e.is_finalized).count();
+
+        tracing::info!(
+            "📥 [{}] Mempool sync from {}: {} pending + {} finalized transaction(s)",
+            self.direction,
+            self.peer_ip,
+            pending_count,
+            finalized_count,
+        );
+
+        if let Some(consensus) = &context.consensus {
+            let mut added_pending = 0usize;
+            let mut added_finalized = 0usize;
+
+            for entry in entries {
+                let txid = entry.tx.txid();
+
+                if consensus.tx_pool.has_transaction(&txid) {
+                    continue;
+                }
+
+                if entry.is_finalized {
+                    consensus.add_finalized_direct(entry.tx, entry.fee);
+                    added_finalized += 1;
+                } else {
+                    // Route through consensus so TimeVote starts for this TX.
+                    // Ignore errors (duplicate, pool full, etc.).
+                    let _ = consensus.process_transaction(entry.tx).await;
+                    added_pending += 1;
+                }
+            }
+
+            tracing::info!(
+                "✅ Mempool sync from {} complete: +{} pending, +{} finalized",
+                self.peer_ip,
+                added_pending,
+                added_finalized,
             );
         }
 
