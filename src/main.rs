@@ -297,6 +297,13 @@ async fn main() {
         &config::get_network_data_dir(&config.node.network_type()),
     );
 
+    // Visual separator in log files so daemon restarts are easy to spot
+    tracing::info!("");
+    tracing::info!("════════════════════════════════════════════════════════════");
+    tracing::info!("  🚀 TIME COIN DAEMON STARTING");
+    tracing::info!("════════════════════════════════════════════════════════════");
+    tracing::info!("");
+
     let mut shutdown_manager = ShutdownManager::new();
     let shutdown_token = shutdown_manager.token();
 

@@ -1742,6 +1742,15 @@ impl Blockchain {
                 // Update current height for next iteration
                 current = self.current_height.load(Ordering::Acquire);
 
+                // Flush storage at batch boundary — per-block flushes are skipped during sync
+                if made_progress {
+                    if let Err(e) = self.flush_storage() {
+                        tracing::warn!("⚠️  Batch flush failed: {}", e);
+                    }
+                    // Yield so the tokio runtime can service RPC, timers, etc.
+                    tokio::task::yield_now().await;
+                }
+
                 // Log progress periodically
                 let elapsed = sync_start.elapsed().as_secs();
                 if elapsed > 0 && elapsed % 30 == 0 {
@@ -1758,6 +1767,12 @@ impl Blockchain {
         }
 
         let final_height = self.current_height.load(Ordering::Acquire);
+
+        // Final flush to ensure all synced data is persisted before clearing is_syncing
+        if let Err(e) = self.flush_storage() {
+            tracing::warn!("⚠️  Final sync flush failed: {}", e);
+        }
+
         if final_height >= time_expected {
             tracing::info!("✓ Sync complete at height {}", final_height);
             return Ok(());
@@ -3867,9 +3882,11 @@ impl Blockchain {
         // SCAN FORWARD: After filling a gap, check if blocks above already exist in storage.
         // This handles the case where verify_and_fix_chain_height preserved blocks above a gap.
         // When the gap is filled, we should advance the height past all already-stored blocks.
+        // Limit iterations to avoid blocking the tokio runtime during large catch-ups.
+        const MAX_SCAN_FORWARD: u64 = 100;
         let mut scan_height = block.header.height + 1;
         let mut advanced = 0u64;
-        while self.get_block(scan_height).is_ok() {
+        while advanced < MAX_SCAN_FORWARD && self.get_block(scan_height).is_ok() {
             self.update_chain_height(scan_height)?;
             self.current_height.store(scan_height, Ordering::Release);
             advanced += 1;
@@ -4057,6 +4074,14 @@ impl Blockchain {
     /// Check if currently syncing
     pub fn is_syncing(&self) -> bool {
         self.is_syncing.load(Ordering::Acquire)
+    }
+
+    /// Flush storage to disk. Call at batch boundaries during sync.
+    pub fn flush_storage(&self) -> Result<(), String> {
+        self.storage
+            .flush()
+            .map(|_| ())
+            .map_err(|e| format!("Storage flush failed: {}", e))
     }
 
     /// Check if genesis block exists
@@ -4534,17 +4559,20 @@ impl Blockchain {
             e.to_string()
         })?;
 
-        // CRITICAL: Flush EVERY block to ensure durability
-        // Previous optimization (flush every 10 blocks) was causing corruption
-        // when nodes restart between flushes. Data integrity > performance.
-        self.storage.flush().map_err(|e| {
-            tracing::error!(
-                "❌ Failed to flush block {} to disk: {}",
-                block.header.height,
-                e
-            );
-            e.to_string()
-        })?;
+        // Flush to ensure durability.
+        // During bulk sync (is_syncing), skip per-block flush to avoid blocking the
+        // tokio runtime with synchronous fsync. The caller (handle_blocks_response /
+        // sync_from_peers) flushes at batch boundaries instead.
+        if !self.is_syncing.load(Ordering::Acquire) {
+            self.storage.flush().map_err(|e| {
+                tracing::error!(
+                    "❌ Failed to flush block {} to disk: {}",
+                    block.header.height,
+                    e
+                );
+                e.to_string()
+            })?;
+        }
 
         // VERIFICATION: Read back and verify block was stored correctly
         // This catches storage corruption immediately instead of later
@@ -4652,16 +4680,17 @@ impl Blockchain {
         let block_arc = Arc::new(block.clone());
         self.block_cache.put(block.header.height, block_arc);
 
-        // CRITICAL: ALWAYS flush to disk after writing a block
-        // sled's flush() is synchronous and calls fsync - it should block until complete
-        self.storage.flush().map_err(|e| {
-            tracing::error!(
-                "❌ Failed to flush block {} to disk: {}",
-                block.header.height,
-                e
-            );
-            e.to_string()
-        })?;
+        // Flush to ensure durability (skip during bulk sync — caller flushes at batch boundaries)
+        if !self.is_syncing.load(Ordering::Acquire) {
+            self.storage.flush().map_err(|e| {
+                tracing::error!(
+                    "❌ Failed to flush block {} to disk: {}",
+                    block.header.height,
+                    e
+                );
+                e.to_string()
+            })?;
+        }
 
         // VERIFICATION: Read back immediately to ensure block was written completely
         let readback = self.storage.get(key.as_bytes()).map_err(|e| {
@@ -4750,10 +4779,12 @@ impl Blockchain {
         self.storage
             .insert(height_key, height_bytes)
             .map_err(|e| e.to_string())?;
-        // Flush to ensure height is persisted immediately
-        self.storage
-            .flush()
-            .map_err(|e| format!("Failed to flush chain_height: {}", e))?;
+        // Flush to ensure height is persisted (skip during bulk sync)
+        if !self.is_syncing.load(Ordering::Acquire) {
+            self.storage
+                .flush()
+                .map_err(|e| format!("Failed to flush chain_height: {}", e))?;
+        }
 
         // CRITICAL: Update in-memory atomic to keep current_height in sync with storage
         // Without this, blocks are saved to disk but current_height stays stale,

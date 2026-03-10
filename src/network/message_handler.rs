@@ -3147,7 +3147,12 @@ impl MessageHandler {
         let mut skipped = 0;
         let mut fork_detected = false;
 
-        for block in blocks.iter() {
+        for (i, block) in blocks.iter().enumerate() {
+            // Yield periodically so the tokio runtime can service other tasks
+            // (RPC handler, timers, network I/O) during large batch processing.
+            if i > 0 && i % 10 == 0 {
+                tokio::task::yield_now().await;
+            }
             // Validate block has non-zero previous_hash (except genesis at height 0)
             if block.header.height > 0 && block.header.previous_hash == [0u8; 32] {
                 warn!(
@@ -3278,6 +3283,12 @@ impl MessageHandler {
         }
 
         if added > 0 {
+            // Flush storage after processing the batch — during sync, per-block
+            // flushes are skipped to avoid blocking the tokio runtime with fsync.
+            if let Err(e) = context.blockchain.flush_storage() {
+                warn!("⚠️ [{}] Post-batch flush failed: {}", self.direction, e);
+            }
+
             info!(
                 "✅ [{}] Added {} blocks from {} (skipped {})",
                 self.direction, added, self.peer_ip, skipped
