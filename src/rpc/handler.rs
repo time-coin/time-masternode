@@ -2977,7 +2977,7 @@ impl RpcHandler {
         let txid = tx.txid();
 
         // Broadcast transaction to consensus engine
-        match self.consensus.process_transaction(tx).await {
+        match self.consensus.process_transaction(tx, None).await {
             Ok(_) => Ok(json!({
                 "txid": hex::encode(txid),
                 "merged_count": utxos.len(),
