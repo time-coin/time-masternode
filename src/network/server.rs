@@ -906,7 +906,7 @@ async fn handle_peer(
                                     tracing::info!("📥 Received new transaction {} from {}", hex::encode(txid), peer.addr);
 
                                     // Process transaction (validates and initiates voting if we're a masternode)
-                                    match consensus.process_transaction(tx.clone()).await {
+                                    match consensus.process_transaction(tx.clone(), None).await {
                                         Ok(_) => {
                                             tracing::debug!("✅ Transaction {} processed", hex::encode(txid));
 
@@ -986,7 +986,7 @@ async fn handle_peer(
                                         tracing::warn!("⚠️ Received TransactionFinalized but TX {} not in pool - adding it now", hex::encode(*txid));
 
                                         // Process the transaction to add it to pending pool
-                                        if let Err(e) = consensus.process_transaction(tx.clone()).await {
+                                        if let Err(e) = consensus.process_transaction(tx.clone(), None).await {
                                             tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
                                             continue;
                                         }

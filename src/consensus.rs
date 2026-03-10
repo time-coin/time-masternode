@@ -2265,15 +2265,18 @@ impl ConsensusEngine {
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
-        self.validate_transaction_with_locks(tx, tx.txid()).await
+        self.validate_transaction_with_locks(tx, tx.txid())
+            .await
+            .map(|_| ())
     }
 
     /// Validate transaction, allowing UTXOs locked by the specified txid
+    /// Returns the calculated fee on success.
     async fn validate_transaction_with_locks(
         &self,
         tx: &Transaction,
         our_txid: Hash256,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         // 0. AI-powered validation first (if enabled)
         if let Some(ai_validator) = &self.ai_validator {
             ai_validator.validate_with_ai(tx).await?;
@@ -2411,7 +2414,7 @@ impl ConsensusEngine {
             tx.outputs.len()
         );
 
-        Ok(())
+        Ok(actual_fee)
     }
 
     /// Create the message that should be signed for a transaction input
@@ -2543,14 +2546,16 @@ impl ConsensusEngine {
         Ok(())
     }
 
-    /// Submit a new transaction to the network with lock-based double-spend prevention
+    /// Submit a new transaction to the network with lock-based double-spend prevention.
+    /// Returns the validated fee on success.
+    ///
     /// This implements the instant finality protocol:
     /// 1. ATOMICALLY lock UTXOs and validate transaction
     /// 2. Broadcast to network
     /// 3. Collect votes from masternodes
     /// 4. Finalize (simple majority) or reject
     #[allow(dead_code)]
-    pub async fn lock_and_validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
+    pub async fn lock_and_validate_transaction(&self, tx: &Transaction) -> Result<u64, String> {
         let txid = tx.txid();
         let now = chrono::Utc::now().timestamp();
 
@@ -2563,14 +2568,17 @@ impl ConsensusEngine {
         }
 
         // Now validate knowing inputs are locked (pass txid so validation knows these locks are ours)
-        if let Err(e) = self.validate_transaction_with_locks(tx, txid).await {
-            // Validation failed - unlock everything
-            for input in &tx.inputs {
-                self.utxo_manager
-                    .update_state(&input.previous_output, UTXOState::Unspent);
+        let fee = match self.validate_transaction_with_locks(tx, txid).await {
+            Ok(fee) => fee,
+            Err(e) => {
+                // Validation failed - unlock everything
+                for input in &tx.inputs {
+                    self.utxo_manager
+                        .update_state(&input.previous_output, UTXOState::Unspent);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
+        };
 
         // Notify clients of locks
         for input in &tx.inputs {
@@ -2594,7 +2602,7 @@ impl ConsensusEngine {
             .await;
         }
 
-        Ok(())
+        Ok(fee)
     }
 
     /// Submit a new transaction to the network
@@ -2622,17 +2630,20 @@ impl ConsensusEngine {
             }
         }
 
-        // Step 1: Atomically lock and validate
-        if let Err(e) = self.lock_and_validate_transaction(&tx).await {
-            tracing::error!(
-                "❌ Transaction {} validation FAILED: {}",
-                &txid_hex[..16],
-                e
-            );
-            // If lock_and_validate fails, UTXOs may be locked - unlock them
-            self.unlock_transaction_inputs(&tx, &txid).await;
-            return Err(e);
-        }
+        // Step 1: Atomically lock and validate (returns the validated fee)
+        let validated_fee = match self.lock_and_validate_transaction(&tx).await {
+            Ok(fee) => fee,
+            Err(e) => {
+                tracing::error!(
+                    "❌ Transaction {} validation FAILED: {}",
+                    &txid_hex[..16],
+                    e
+                );
+                // If lock_and_validate fails, UTXOs may be locked - unlock them
+                self.unlock_transaction_inputs(&tx, &txid).await;
+                return Err(e);
+            }
+        };
 
         tracing::info!("✅ Transaction {} validation passed", &txid_hex[..16]);
 
@@ -2645,7 +2656,10 @@ impl ConsensusEngine {
         // Step 3: Process transaction through consensus locally (this adds to pool)
         // AND broadcasts vote request - validators will have received TX by now
         tracing::debug!("🗳️  Starting consensus for transaction {}", &txid_hex[..16]);
-        if let Err(e) = self.process_transaction(tx.clone()).await {
+        if let Err(e) = self
+            .process_transaction(tx.clone(), Some(validated_fee))
+            .await
+        {
             tracing::error!(
                 "❌ Transaction {} consensus processing FAILED: {}",
                 &txid_hex[..16],
@@ -2679,7 +2693,11 @@ impl ConsensusEngine {
         }
     }
 
-    pub async fn process_transaction(&self, tx: Transaction) -> Result<(), String> {
+    pub async fn process_transaction(
+        &self,
+        tx: Transaction,
+        validated_fee: Option<u64>,
+    ) -> Result<(), String> {
         let txid = tx.txid();
         let masternodes = self.get_masternodes();
         let n = masternodes.len() as u32;
@@ -2692,22 +2710,34 @@ impl ConsensusEngine {
         // UTXOs are already in Locked state - DO NOT transition to SpentPending here
         // That transition happens when voting actually starts (after broadcast)
 
-        // REMOVED: Duplicate UTXO state transition to SpentPending
-        // The UTXOs are already locked from lock_and_validate_transaction()
-        // They will transition to SpentPending when consensus voting begins
-
-        // Add to pending pool first
-        let input_sum: u64 = {
-            let mut sum = 0u64;
-            for input in &tx.inputs {
-                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
-                    sum += utxo.value;
+        // Use the validated fee if provided (from lock_and_validate_transaction),
+        // otherwise recalculate from UTXOs (network-received transactions).
+        let fee = if let Some(f) = validated_fee {
+            f
+        } else {
+            let input_sum: u64 = {
+                let mut sum = 0u64;
+                let mut missing = 0u32;
+                for input in &tx.inputs {
+                    if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                        sum += utxo.value;
+                    } else {
+                        missing += 1;
+                    }
                 }
-            }
-            sum
+                if missing > 0 {
+                    tracing::warn!(
+                        "⚠️ Fee calculation for TX {}: {} of {} input UTXOs not found",
+                        hex::encode(txid),
+                        missing,
+                        tx.inputs.len()
+                    );
+                }
+                sum
+            };
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            input_sum.saturating_sub(output_sum)
         };
-        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
-        let fee = input_sum.saturating_sub(output_sum);
 
         // Check mempool limits before adding
         let pending_count = self.tx_pool.pending_count();

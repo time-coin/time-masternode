@@ -1907,7 +1907,7 @@ impl MessageHandler {
 
         // Process transaction through consensus
         if let Some(consensus) = &context.consensus {
-            match consensus.process_transaction(tx.clone()).await {
+            match consensus.process_transaction(tx.clone(), None).await {
                 Ok(_) => {
                     debug!(
                         "✅ [{}] Transaction {} processed",
@@ -2034,7 +2034,9 @@ impl MessageHandler {
                 } else {
                     // Route through consensus so TimeVote starts for this TX.
                     // Ignore errors (duplicate, pool full, etc.).
-                    let _ = consensus.process_transaction(entry.tx).await;
+                    let _ = consensus
+                        .process_transaction(entry.tx, Some(entry.fee))
+                        .await;
                     added_pending += 1;
                 }
             }
