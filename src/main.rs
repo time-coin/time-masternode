@@ -2531,16 +2531,29 @@ async fn main() {
             //   capping relaxation to prevent every node becoming eligible at once
             if waiting_for_height != Some(next_height) {
                 waiting_for_height = Some(next_height);
-                // Pre-boost leader_attempt when significantly behind so paid tiers have
-                // immediate 2x VRF weight boost and we don't spend one full timeout cycle
-                // at normal strictness while trying to catch up.
-                leader_attempt = if blocks_behind > 50 { 1 } else { 0 };
+                // Pre-boost leader_attempt when behind so VRF threshold relaxes immediately.
+                // >50 blocks behind: start at attempt 3 (fully relaxed, fastest catch-up)
+                // >10 blocks behind: start at attempt 2 (2x weight boost + relaxation)
+                // Otherwise: start at attempt 0 (normal strictness)
+                leader_attempt = if blocks_behind > 50 {
+                    3
+                } else if blocks_behind > 10 {
+                    2
+                } else {
+                    0
+                };
                 height_first_seen = std::time::Instant::now();
             }
             let slot_elapsed_secs = time_past_scheduled.max(0) as u64;
             let wall_elapsed_secs = height_first_seen.elapsed().as_secs();
             let effective_elapsed = slot_elapsed_secs.min(wall_elapsed_secs);
-            let expected_attempt = effective_elapsed / LEADER_TIMEOUT_SECS;
+            // Use shorter timeout when catching up for faster block production
+            let timeout_secs = if blocks_behind > 50 {
+                2
+            } else {
+                LEADER_TIMEOUT_SECS
+            };
+            let expected_attempt = effective_elapsed / timeout_secs;
             if expected_attempt > leader_attempt {
                 leader_attempt = expected_attempt;
                 if leader_attempt > 0 {
@@ -2803,10 +2816,10 @@ async fn main() {
             }
 
             // Wait for majority peer consensus before producing (event-driven).
-            // After receiving a block from a peer, our height advances but peers
-            // may still report their old height. Instead of failing with "no majority
-            // consensus" and retrying every second, wait for peer chain tips to update.
-            if !block_blockchain.check_2_3_consensus_cached().await {
+            // During catch-up (far behind), skip this check — TimeLock consensus on
+            // each individual block already proves peer agreement. This check only
+            // matters at chain tip to prevent solo production.
+            if blocks_behind <= 10 && !block_blockchain.check_2_3_consensus_cached().await {
                 block_blockchain.invalidate_consensus_cache().await;
                 block_peer_registry
                     .broadcast(crate::network::message::NetworkMessage::GetChainTip)
@@ -3103,48 +3116,67 @@ async fn main() {
                     let new_expected = block_blockchain.calculate_expected_height();
                     let still_behind = new_expected.saturating_sub(new_height);
                     if still_behind > 0 {
-                        tracing::info!(
-                            "🔄 Still {} blocks behind expected height {}, waiting for peer sync",
-                            still_behind,
-                            new_expected
-                        );
-
                         // Invalidate consensus cache so next check uses fresh peer data
                         block_blockchain.invalidate_consensus_cache().await;
 
-                        // Request fresh chain tips from all peers
+                        // Check how many peers are at our height before continuing.
+                        // If slower peers have fallen behind, wait for them to catch up
+                        // so the network stays in consensus during catch-up.
                         block_peer_registry
                             .broadcast(crate::network::message::NetworkMessage::GetChainTip)
                             .await;
 
-                        // Event-driven wait: wait for peers to report our new height
-                        // before attempting to produce the next block
-                        let tip_signal = block_peer_registry.chain_tip_updated_signal();
-                        let wait_result =
-                            tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                                loop {
-                                    tip_signal.notified().await;
-                                    if block_blockchain.check_2_3_consensus_cached().await {
-                                        return true;
+                        let connected_count =
+                            block_peer_registry.get_connected_peers().await.len() as u32;
+                        let two_thirds = (connected_count * 2 / 3).max(1);
+
+                        let peers_at_our_height = {
+                            let mut count = 0u32;
+                            for peer_ip in &block_peer_registry.get_connected_peers().await {
+                                if let Some((h, _)) =
+                                    block_peer_registry.get_peer_chain_tip(peer_ip).await
+                                {
+                                    if h >= new_height {
+                                        count += 1;
                                     }
                                 }
-                            })
-                            .await;
+                            }
+                            count
+                        };
 
-                        match wait_result {
-                            Ok(true) => {
-                                tracing::debug!(
-                                    "✅ Peers confirmed height {} — continuing production",
-                                    new_height
-                                );
-                            }
-                            _ => {
-                                tracing::debug!(
-                                    "⏱️ Peer sync timeout at height {} — retrying",
-                                    new_height
-                                );
-                            }
+                        if peers_at_our_height < two_thirds {
+                            // Slower peers are behind — wait for 2/3 to catch up
+                            let tip_signal = block_peer_registry.chain_tip_updated_signal();
+                            let _ =
+                                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                                    loop {
+                                        tip_signal.notified().await;
+                                        let mut count = 0u32;
+                                        for peer_ip in
+                                            &block_peer_registry.get_connected_peers().await
+                                        {
+                                            if let Some((h, _)) = block_peer_registry
+                                                .get_peer_chain_tip(peer_ip)
+                                                .await
+                                            {
+                                                if h >= new_height {
+                                                    count += 1;
+                                                }
+                                            }
+                                        }
+                                        if count >= two_thirds {
+                                            return;
+                                        }
+                                    }
+                                })
+                                .await;
                         }
+
+                        tracing::debug!(
+                            "🔄 Still {} blocks behind expected height {} — continuing",
+                            still_behind,
+                            new_expected
+                        );
 
                         is_producing.store(false, Ordering::SeqCst);
                         interval.reset();

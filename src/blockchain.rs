@@ -1363,13 +1363,19 @@ impl Blockchain {
                             current,
                             peers_checked,
                         );
-                        // Request fresh chain tips and wait briefly for responses
+                        // Request fresh chain tips and wait for signal (event-driven)
                         if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                            let signal = peer_registry.chain_tip_updated_signal();
                             peer_registry
                                 .broadcast(crate::network::message::NetworkMessage::GetChainTip)
                                 .await;
+                            // Wait for first chain tip response or short timeout
+                            let _ = tokio::time::timeout(
+                                tokio::time::Duration::from_millis(500),
+                                signal.notified(),
+                            )
+                            .await;
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
 
                         // Re-check with refreshed data
                         let mut refreshed_max = current;
@@ -2301,8 +2307,10 @@ impl Blockchain {
                     }
                 }
 
-                // Wait for responses to arrive
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                // Wait for responses (event-driven via chain tip signal)
+                let signal = peer_registry.chain_tip_updated_signal();
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(1), signal.notified())
+                    .await;
 
                 // ALWAYS check for consensus fork first - this is critical for fork resolution
                 // Use the fresh chain tip data we just requested (already stored in peer registry)
