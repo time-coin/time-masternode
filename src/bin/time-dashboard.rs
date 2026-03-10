@@ -1381,7 +1381,7 @@ fn render_blocks(f: &mut Frame, area: Rect, app: &App) {
                 Cell::from(short_hash),
                 Cell::from(time_str),
                 Cell::from(format!("{}", blk.n_tx)),
-                Cell::from(format!("{:.2}", blk.block_reward)),
+                Cell::from(format!("{:.2}", blk.block_reward / 1e8)),
                 Cell::from(format!("{}", blk.confirmations)),
             ]);
             if selected {
@@ -1464,7 +1464,7 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
             Span::raw("    "),
             Span::styled("Reward: ", Style::default().fg(Color::Yellow)),
             Span::styled(
-                format!("{:.8} TIME", blk.block_reward),
+                format!("{:.8} TIME", blk.block_reward / 1e8),
                 Style::default().fg(Color::Green),
             ),
         ]),
