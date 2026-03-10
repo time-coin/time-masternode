@@ -762,6 +762,11 @@ async fn handle_peer(
                                         let get_mn_msg = NetworkMessage::GetMasternodes;
                                         let _ = peer_registry.send_to_peer(&ip_str, get_mn_msg).await;
 
+                                        // Request full mempool state so we can resume
+                                        // processing any transactions the peer already has
+                                        let mempool_req = NetworkMessage::MempoolSyncRequest;
+                                        let _ = peer_registry.send_to_peer(&ip_str, mempool_req).await;
+
                                         // CRITICAL: Verify genesis hash compatibility EARLY
                                         // This prevents nodes with different genesis from exchanging blocks
                                         if blockchain.has_genesis() {

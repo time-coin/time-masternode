@@ -3122,6 +3122,28 @@ impl ConsensusEngine {
         (pending, finalized)
     }
 
+    /// Collect all mempool entries (pending + finalized) for peer sync.
+    pub fn get_all_for_sync(&self) -> Vec<crate::network::message::MempoolSyncEntry> {
+        self.tx_pool.get_all_for_sync()
+    }
+
+    /// Add a pre-finalized transaction directly to the finalized pool.
+    /// Used when restoring from a peer's `MempoolSyncResponse` or from sled persistence.
+    pub fn add_finalized_direct(&self, tx: Transaction, fee: u64) {
+        self.tx_pool.add_finalized_direct(tx, fee);
+    }
+
+    /// Persist the mempool to sled so it survives restarts.
+    pub fn save_mempool_to_sled(&self, db: &sled::Db) {
+        self.tx_pool.save_to_sled(db);
+    }
+
+    /// Restore the mempool from sled written by `save_mempool_to_sled`.
+    /// Returns the number of entries restored.
+    pub fn load_mempool_from_sled(&self, db: &sled::Db) -> usize {
+        self.tx_pool.load_from_sled(db)
+    }
+
     #[allow(dead_code)]
     pub fn get_active_masternodes(&self) -> Vec<Masternode> {
         self.get_masternodes()

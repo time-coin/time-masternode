@@ -495,6 +495,172 @@ impl TransactionPool {
             max_bytes: MAX_POOL_BYTES,
         }
     }
+
+    /// Add a transaction directly to the finalized pool (used for mempool sync and persistence
+    /// restore). The caller is responsible for ensuring the transaction has already passed
+    /// TimeVote consensus. Does not start a new consensus round.
+    pub fn add_finalized_direct(&self, tx: Transaction, fee: u64) {
+        let txid = tx.txid();
+        if self.pending.contains_key(&txid) || self.finalized.contains_key(&txid) {
+            return;
+        }
+        let size = bincode::serialized_size(&tx).unwrap_or(0) as usize;
+        let entry = PoolEntry {
+            tx,
+            fee,
+            added_at: Instant::now(),
+            size,
+            submitter_ip: None,
+        };
+        self.finalized.insert(txid, entry);
+    }
+
+    /// Collect all pool entries for peer mempool sync.
+    /// Returns one `MempoolSyncEntry` per transaction (pending + finalized).
+    pub fn get_all_for_sync(&self) -> Vec<crate::network::message::MempoolSyncEntry> {
+        let mut entries = Vec::new();
+        for e in self.pending.iter() {
+            entries.push(crate::network::message::MempoolSyncEntry {
+                tx: e.value().tx.clone(),
+                fee: e.value().fee,
+                is_finalized: false,
+            });
+        }
+        for e in self.finalized.iter() {
+            entries.push(crate::network::message::MempoolSyncEntry {
+                tx: e.value().tx.clone(),
+                fee: e.value().fee,
+                is_finalized: true,
+            });
+        }
+        entries
+    }
+
+    /// Persist the mempool to a sled database tree so it survives daemon restarts.
+    /// Both pending and finalized entries are saved. The tree is keyed by txid.
+    pub fn save_to_sled(&self, db: &sled::Db) {
+        let tree = match db.open_tree("mempool") {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("❌ Failed to open mempool sled tree for save: {}", e);
+                return;
+            }
+        };
+
+        let mut saved = 0usize;
+        let mut errors = 0usize;
+
+        for e in self.pending.iter() {
+            let entry = serde_json::json!({
+                "tx": serde_json::to_value(&e.value().tx).unwrap_or_default(),
+                "fee": e.value().fee,
+                "is_finalized": false,
+            });
+            match serde_json::to_vec(&entry) {
+                Ok(bytes) => {
+                    if tree.insert(e.key().as_ref(), bytes).is_ok() {
+                        saved += 1;
+                    } else {
+                        errors += 1;
+                    }
+                }
+                Err(_) => errors += 1,
+            }
+        }
+
+        for e in self.finalized.iter() {
+            let entry = serde_json::json!({
+                "tx": serde_json::to_value(&e.value().tx).unwrap_or_default(),
+                "fee": e.value().fee,
+                "is_finalized": true,
+            });
+            match serde_json::to_vec(&entry) {
+                Ok(bytes) => {
+                    if tree.insert(e.key().as_ref(), bytes).is_ok() {
+                        saved += 1;
+                    } else {
+                        errors += 1;
+                    }
+                }
+                Err(_) => errors += 1,
+            }
+        }
+
+        if let Err(e) = tree.flush() {
+            tracing::error!("❌ Failed to flush mempool sled tree: {}", e);
+        }
+
+        tracing::info!(
+            "💾 Mempool persisted: {} transaction(s) saved ({} errors)",
+            saved,
+            errors
+        );
+    }
+
+    /// Restore the mempool from a sled database tree written by `save_to_sled`.
+    /// Finalized entries are restored directly to the finalized pool; pending entries
+    /// go through `add_pending` (skipping rejected / duplicate guard).
+    /// Returns the number of entries restored.
+    pub fn load_from_sled(&self, db: &sled::Db) -> usize {
+        let tree = match db.open_tree("mempool") {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("❌ Failed to open mempool sled tree for load: {}", e);
+                return 0;
+            }
+        };
+
+        let mut restored = 0usize;
+        let mut skipped = 0usize;
+
+        for item in tree.iter() {
+            let (_, value) = match item {
+                Ok(kv) => kv,
+                Err(_) => continue,
+            };
+
+            let parsed: serde_json::Value = match serde_json::from_slice(&value) {
+                Ok(v) => v,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+
+            let tx: crate::types::Transaction =
+                match serde_json::from_value(parsed["tx"].clone()) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+
+            let fee = parsed["fee"].as_u64().unwrap_or(0);
+            let is_finalized = parsed["is_finalized"].as_bool().unwrap_or(false);
+
+            if is_finalized {
+                self.add_finalized_direct(tx, fee);
+                restored += 1;
+            } else {
+                match self.add_pending(tx, fee) {
+                    Ok(()) => restored += 1,
+                    Err(PoolError::AlreadyExists) => skipped += 1,
+                    Err(_) => skipped += 1,
+                }
+            }
+        }
+
+        if restored > 0 || skipped > 0 {
+            tracing::info!(
+                "📂 Mempool restored: {} transaction(s) loaded, {} skipped",
+                restored,
+                skipped
+            );
+        }
+
+        restored
+    }
 }
 
 /// Phase 2.4: Memory pressure levels
