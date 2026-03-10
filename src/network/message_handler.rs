@@ -367,11 +367,10 @@ impl MessageHandler {
             NetworkMessage::TransactionBroadcast(tx) => {
                 self.handle_transaction_broadcast(tx.clone(), context).await
             }
-            NetworkMessage::MempoolSyncRequest => {
-                self.handle_mempool_sync_request(context).await
-            }
+            NetworkMessage::MempoolSyncRequest => self.handle_mempool_sync_request(context).await,
             NetworkMessage::MempoolSyncResponse(entries) => {
-                self.handle_mempool_sync_response(entries.clone(), context).await
+                self.handle_mempool_sync_response(entries.clone(), context)
+                    .await
             }
 
             // === Peer Exchange Messages ===
@@ -751,8 +750,10 @@ impl MessageHandler {
                     "🚨 [{}] Possible sync loop detected: {} sent {} similar GetBlocks requests in 30s (ranges near {}-{}). Ignoring this request.",
                     self.direction, self.peer_ip, similar_count, start, end
                 );
-                // Return empty response to break the loop
-                return Ok(Some(NetworkMessage::BlocksResponse(vec![])));
+                // Return no response — an empty BlocksResponse is indistinguishable from
+                // "no blocks in that range" and causes the peer to retry immediately,
+                // perpetuating the loop. Silence forces the peer to time out and back off.
+                return Ok(None);
             }
 
             // Record this request
