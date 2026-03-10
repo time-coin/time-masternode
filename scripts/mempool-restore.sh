@@ -48,7 +48,7 @@ fi
 # ── Auto-load credentials from time.conf if not provided ──────────────────────
 load_conf_creds() {
     local conf_file="$1"
-    [[ -f "$conf_file" ]] || return
+    [[ -f "$conf_file" ]] || return 0
     [[ -z "$RPC_USER" ]] && RPC_USER=$(grep -E '^rpcuser=' "$conf_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]') || true
     [[ -z "$RPC_PASS" ]] && RPC_PASS=$(grep -E '^rpcpassword=' "$conf_file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]') || true
 }
