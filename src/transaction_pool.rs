@@ -627,14 +627,13 @@ impl TransactionPool {
                 }
             };
 
-            let tx: crate::types::Transaction =
-                match serde_json::from_value(parsed["tx"].clone()) {
-                    Ok(t) => t,
-                    Err(_) => {
-                        skipped += 1;
-                        continue;
-                    }
-                };
+            let tx: crate::types::Transaction = match serde_json::from_value(parsed["tx"].clone()) {
+                Ok(t) => t,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
 
             let fee = parsed["fee"].as_u64().unwrap_or(0);
             let is_finalized = parsed["is_finalized"].as_bool().unwrap_or(false);
