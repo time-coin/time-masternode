@@ -64,7 +64,7 @@ rpc() {
     [[ -n "$RPC_USER" ]] && auth_args=(-u "${RPC_USER}:${RPC_PASS}")
     curl -s "${auth_args[@]}" -X POST "$RPC_URL" \
          -H 'Content-Type: application/json' \
-         --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"${method}\",\"params\":[${params}]}"
+         --data "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"${method}\",\"params\":[${params}]}"
 }
 
 check_jq() {
