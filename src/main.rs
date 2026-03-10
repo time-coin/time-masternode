@@ -3934,9 +3934,7 @@ fn setup_logging(
     // Stdout layer: matches previous behavior (json / systemd-compact / pretty)
     match config.format.as_str() {
         "json" => {
-            let stdout_layer = fmt::layer()
-                .json()
-                .with_thread_ids(false);
+            let stdout_layer = fmt::layer().json().with_thread_ids(false);
 
             tracing_subscriber::registry()
                 .with(filter)

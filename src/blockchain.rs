@@ -233,6 +233,12 @@ pub struct Blockchain {
     /// Last logged consensus result (height, hash) to suppress duplicate log lines
     #[allow(clippy::type_complexity)]
     last_consensus_log: Arc<RwLock<Option<(u64, [u8; 32])>>>,
+    /// Cooldown for same-height fork switch attempts: (height, consensus_hash, when_attempted).
+    /// Prevents a tight busy-loop when sync_from_peers() returns quickly without making progress.
+    /// After one attempt, subsequent calls to compare_chain_with_peers() return None for 30s
+    /// so the production loop can yield instead of spinning at full speed.
+    #[allow(clippy::type_complexity)]
+    same_height_fork_cooldown: Arc<RwLock<Option<(u64, [u8; 32], std::time::Instant)>>>,
     /// Tracks reward-distribution violations per block producer address.
     /// After REWARD_VIOLATION_THRESHOLD strikes the producer's proposals are rejected.
     reward_violations: Arc<DashMap<String, u64>>,
@@ -345,6 +351,7 @@ impl Blockchain {
             has_ever_had_peers: Arc::new(AtomicBool::new(false)),
             block_added_signal: Arc::new(tokio::sync::Notify::new()),
             last_consensus_log: Arc::new(RwLock::new(None)),
+            same_height_fork_cooldown: Arc::new(RwLock::new(None)),
             reward_violations: Arc::new(DashMap::new()),
             genesis_mismatch_detected: Arc::new(AtomicBool::new(false)),
             treasury_balance: Arc::new(AtomicU64::new(loaded_treasury)),
@@ -7398,8 +7405,67 @@ impl Blockchain {
 
         // Case 2: Same height but different hash - fork at same height!
         // The consensus chain was already selected by peer count (majority wins).
-        // If our hash doesn't match, we're in the minority — always switch.
+        // If our hash doesn't match, we're in the minority — switch, subject to guards below.
         if consensus_height == our_height && consensus_hash != our_hash {
+            // Guard 1: Require at least 2 peers supporting the alternate chain.
+            // A single peer with a different hash is more likely to be the minority fork
+            // (especially when other peers are temporarily unresponsive to chain-tip queries).
+            // Returning None here lets the node count as a vote for its own chain so that
+            // the 1 disagreeing peer — not us — eventually gets the fork alert.
+            if consensus_peers.len() < 2 {
+                tracing::debug!(
+                    "🔀 Same-height fork at {}: only {} peer(s) on alternate chain — \
+                     insufficient consensus to switch (our hash {}, theirs {})",
+                    consensus_height,
+                    consensus_peers.len(),
+                    hex::encode(&our_hash[..8]),
+                    hex::encode(&consensus_hash[..8]),
+                );
+                // Clear any stale FetchingChain state that may have been set by a prior
+                // handle_fork() call with this minority peer. If left in place it blocks
+                // future fork resolution even after the peer reconnects with a valid chain.
+                {
+                    let state = self.fork_state.read().await.clone();
+                    if matches!(state, ForkResolutionState::FetchingChain { .. }) {
+                        tracing::debug!(
+                            "🧹 Clearing stale FetchingChain state (minority peer guard)"
+                        );
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                    }
+                }
+                return None;
+            }
+
+            // Guard 2: 30-second cooldown between switch attempts for the same fork pair.
+            // sync_from_peers() may return immediately with Ok(()) when no peers are ahead,
+            // which causes the production loop to call compare_chain_with_peers() again right
+            // away, detect the same fork again, and spin at thousands of iterations/minute —
+            // starving the tokio runtime and making the RPC handler unresponsive.
+            const SAME_HEIGHT_FORK_COOLDOWN_SECS: u64 = 30;
+            {
+                let cooldown = self.same_height_fork_cooldown.read().await;
+                if let Some((cd_height, cd_hash, cd_time)) = &*cooldown {
+                    if *cd_height == consensus_height
+                        && *cd_hash == consensus_hash
+                        && cd_time.elapsed()
+                            < std::time::Duration::from_secs(SAME_HEIGHT_FORK_COOLDOWN_SECS)
+                    {
+                        tracing::debug!(
+                            "🔀 Same-height fork cooldown active for height {} hash {} \
+                             ({:.1}s ago, retry in {:.1}s)",
+                            consensus_height,
+                            hex::encode(&consensus_hash[..8]),
+                            cd_time.elapsed().as_secs_f32(),
+                            SAME_HEIGHT_FORK_COOLDOWN_SECS as f32 - cd_time.elapsed().as_secs_f32(),
+                        );
+                        return None;
+                    }
+                }
+            }
+            // Record this attempt so subsequent calls within the cooldown window return None.
+            *self.same_height_fork_cooldown.write().await =
+                Some((consensus_height, consensus_hash, std::time::Instant::now()));
+
             warn!(
                 "🔀 Same-height fork at {}: switching to consensus chain ({} peers). Our hash {} vs consensus {}",
                 consensus_height,
@@ -9209,6 +9275,7 @@ impl Clone for Blockchain {
             has_ever_had_peers: self.has_ever_had_peers.clone(),
             block_added_signal: self.block_added_signal.clone(),
             last_consensus_log: self.last_consensus_log.clone(),
+            same_height_fork_cooldown: self.same_height_fork_cooldown.clone(),
             reward_violations: self.reward_violations.clone(),
             genesis_mismatch_detected: self.genesis_mismatch_detected.clone(),
             treasury_balance: self.treasury_balance.clone(),
