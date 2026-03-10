@@ -800,6 +800,10 @@ async fn main() {
     // Enable AI validation using the same db as block storage
     consensus_engine.enable_ai_validation(Arc::new(block_storage.clone()));
 
+    // Enable write-through mempool persistence so transactions survive hard kills.
+    // Must be called before load_mempool_from_sled so the tree handle is ready.
+    consensus_engine.enable_mempool_persistence(&block_storage);
+
     // Restore mempool from the previous run so finalized and pending transactions
     // survive daemon restarts. This runs before consensus is fully wired up, so
     // pending entries are placed in the pool without triggering new TimeVote rounds.

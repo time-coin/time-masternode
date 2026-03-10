@@ -13,7 +13,8 @@
 
 use crate::types::*;
 use dashmap::DashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -57,6 +58,10 @@ pub struct TransactionPool {
     /// Track sizes
     pending_count: AtomicUsize,
     pending_bytes: AtomicUsize,
+    /// Write-through sled persistence (set once via enable_persistence)
+    sled_tree: OnceLock<sled::Tree>,
+    /// Suppress sled writes while loading from disk
+    loading: AtomicBool,
 }
 
 impl Default for TransactionPool {
@@ -73,6 +78,60 @@ impl TransactionPool {
             rejected: DashMap::new(),
             pending_count: AtomicUsize::new(0),
             pending_bytes: AtomicUsize::new(0),
+            sled_tree: OnceLock::new(),
+            loading: AtomicBool::new(false),
+        }
+    }
+
+    /// Enable write-through persistence to sled. After this call, every
+    /// add / remove / finalize operation is mirrored to the "mempool" sled tree
+    /// so the mempool survives hard kills and crashes.
+    pub fn enable_persistence(&self, db: &sled::Db) {
+        match db.open_tree("mempool") {
+            Ok(tree) => {
+                let _ = self.sled_tree.set(tree);
+                tracing::info!("💾 Mempool write-through persistence enabled");
+            }
+            Err(e) => {
+                tracing::error!("❌ Failed to open mempool sled tree: {}", e);
+            }
+        }
+    }
+
+    /// Persist a single entry to sled (no-op if persistence not enabled or loading)
+    fn sled_persist(&self, txid: &Hash256, tx: &Transaction, fee: u64, is_finalized: bool) {
+        if self.loading.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(tree) = self.sled_tree.get() {
+            let entry = serde_json::json!({
+                "tx": serde_json::to_value(tx).unwrap_or_default(),
+                "fee": fee,
+                "is_finalized": is_finalized,
+            });
+            if let Ok(bytes) = serde_json::to_vec(&entry) {
+                if let Err(e) = tree.insert(txid.as_ref(), bytes) {
+                    tracing::warn!("⚠️ Failed to persist mempool tx to sled: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Remove a single entry from sled (no-op if persistence not enabled)
+    fn sled_remove(&self, txid: &Hash256) {
+        if let Some(tree) = self.sled_tree.get() {
+            if let Err(e) = tree.remove(txid.as_ref()) {
+                tracing::warn!("⚠️ Failed to remove mempool tx from sled: {}", e);
+            }
+        }
+    }
+
+    /// Clear all entries from the sled mempool tree
+    fn sled_clear(&self) {
+        if let Some(tree) = self.sled_tree.get() {
+            if let Err(e) = tree.clear() {
+                tracing::warn!("⚠️ Failed to clear mempool sled tree: {}", e);
+            }
         }
     }
 
@@ -129,6 +188,7 @@ impl TransactionPool {
             submitter_ip,
         };
 
+        self.sled_persist(&txid, &entry.tx, entry.fee, false);
         self.pending.insert(txid, entry);
         self.pending_count.fetch_add(1, Ordering::Relaxed);
         self.pending_bytes.fetch_add(tx_size, Ordering::Relaxed);
@@ -140,6 +200,7 @@ impl TransactionPool {
     /// Returns true if the transaction was successfully finalized
     pub fn finalize_transaction(&self, txid: Hash256) -> bool {
         if let Some((_, entry)) = self.pending.remove(&txid) {
+            self.sled_persist(&txid, &entry.tx, entry.fee, true);
             self.finalized.insert(txid, entry.clone());
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
@@ -166,6 +227,7 @@ impl TransactionPool {
             self.pending_count.fetch_sub(1, Ordering::Relaxed);
             self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
         }
+        self.sled_remove(&txid);
         self.rejected.insert(txid, (reason, Instant::now()));
     }
 
@@ -214,6 +276,27 @@ impl TransactionPool {
     pub fn clear_finalized(&self) {
         let count = self.finalized.len();
         self.finalized.clear();
+        // Remove finalized entries from sled (pending entries remain)
+        if let Some(tree) = self.sled_tree.get() {
+            let mut removed = 0;
+            let keys: Vec<_> = tree.iter()
+                .filter_map(|r| r.ok())
+                .filter(|(_, v)| {
+                    serde_json::from_slice::<serde_json::Value>(v)
+                        .ok()
+                        .and_then(|j| j["is_finalized"].as_bool())
+                        .unwrap_or(false)
+                })
+                .map(|(k, _)| k)
+                .collect();
+            for key in keys {
+                let _ = tree.remove(&key);
+                removed += 1;
+            }
+            if removed > 0 {
+                tracing::debug!("💾 Removed {} finalized entries from sled mempool", removed);
+            }
+        }
         tracing::info!(
             "🧹 TxPool: Cleared {} finalized transactions after block inclusion",
             count
@@ -237,6 +320,7 @@ impl TransactionPool {
                 self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
                 cleared_pending += 1;
             }
+            self.sled_remove(txid);
         }
         if cleared_finalized > 0 || cleared_pending > 0 {
             tracing::info!(
@@ -273,6 +357,7 @@ impl TransactionPool {
             if let Some((_, entry)) = self.pending.remove(txid) {
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+                self.sled_remove(txid);
                 evicted.push(entry.tx);
             }
         }
@@ -456,6 +541,7 @@ impl TransactionPool {
             if let Some((_, entry)) = self.pending.remove(txid) {
                 self.pending_count.fetch_sub(1, Ordering::Relaxed);
                 self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+                self.sled_remove(txid);
                 evicted += 1;
 
                 tracing::debug!(
@@ -512,6 +598,7 @@ impl TransactionPool {
             size,
             submitter_ip: None,
         };
+        self.sled_persist(&txid, &entry.tx, entry.fee, true);
         self.finalized.insert(txid, entry);
     }
 
@@ -610,6 +697,9 @@ impl TransactionPool {
             }
         };
 
+        // Suppress sled writes while restoring — data is already on disk
+        self.loading.store(true, Ordering::Relaxed);
+
         let mut restored = 0usize;
         let mut skipped = 0usize;
 
@@ -658,6 +748,7 @@ impl TransactionPool {
             );
         }
 
+        self.loading.store(false, Ordering::Relaxed);
         restored
     }
 }

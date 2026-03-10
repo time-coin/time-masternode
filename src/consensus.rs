@@ -3138,6 +3138,12 @@ impl ConsensusEngine {
         self.tx_pool.save_to_sled(db);
     }
 
+    /// Enable write-through mempool persistence. After this call, every
+    /// transaction add/remove is mirrored to sled in real time.
+    pub fn enable_mempool_persistence(&self, db: &sled::Db) {
+        self.tx_pool.enable_persistence(db);
+    }
+
     /// Restore the mempool from sled written by `save_mempool_to_sled`.
     /// Returns the number of entries restored.
     pub fn load_mempool_from_sled(&self, db: &sled::Db) -> usize {
