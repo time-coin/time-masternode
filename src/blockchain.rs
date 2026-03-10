@@ -1744,11 +1744,12 @@ impl Blockchain {
 
                 // Flush storage at batch boundary — per-block flushes are skipped during sync
                 if made_progress {
-                    if let Err(e) = self.flush_storage() {
+                    if let Err(e) = self.flush_storage_async().await {
                         tracing::warn!("⚠️  Batch flush failed: {}", e);
                     }
-                    // Yield so the tokio runtime can service RPC, timers, etc.
-                    tokio::task::yield_now().await;
+                    // Sleep briefly so the tokio runtime can poll I/O and service
+                    // RPC, timers, etc. yield_now() is insufficient on 1-worker runtimes.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
 
                 // Log progress periodically
@@ -1769,7 +1770,7 @@ impl Blockchain {
         let final_height = self.current_height.load(Ordering::Acquire);
 
         // Final flush to ensure all synced data is persisted before clearing is_syncing
-        if let Err(e) = self.flush_storage() {
+        if let Err(e) = self.flush_storage_async().await {
             tracing::warn!("⚠️  Final sync flush failed: {}", e);
         }
 
@@ -4082,6 +4083,20 @@ impl Blockchain {
             .flush()
             .map(|_| ())
             .map_err(|e| format!("Storage flush failed: {}", e))
+    }
+
+    /// Async flush that runs on the blocking thread pool so it doesn't
+    /// starve the tokio worker threads (critical on 1-CPU machines).
+    pub async fn flush_storage_async(&self) -> Result<(), String> {
+        let storage = self.storage.clone();
+        tokio::task::spawn_blocking(move || {
+            storage
+                .flush()
+                .map(|_| ())
+                .map_err(|e| format!("Storage flush failed: {}", e))
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("flush task panicked: {}", e)))
     }
 
     /// Check if genesis block exists

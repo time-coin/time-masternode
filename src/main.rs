@@ -88,7 +88,11 @@ struct Args {
     generate_config: bool,
 }
 
-#[tokio::main]
+// Ensure at least 4 worker threads regardless of CPU count.
+// On 1-CPU VPS machines the default (num_cpus) gives only 1 worker,
+// which means any synchronous sled I/O during block sync starves
+// the RPC server, timers, and network I/O.
+#[tokio::main(worker_threads = 4)]
 async fn main() {
     // Install rustls crypto provider before any TLS usage
     rustls::crypto::ring::default_provider()
