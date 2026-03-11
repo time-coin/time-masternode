@@ -6360,7 +6360,10 @@ impl Blockchain {
                     Some(info) => info.masternode.tier.sampling_weight(),
                     None => crate::types::MasternodeTier::Free.sampling_weight(),
                 };
-                tier_buckets.entry(weight).or_default().push(peer_ip.clone());
+                tier_buckets
+                    .entry(weight)
+                    .or_default()
+                    .push(peer_ip.clone());
             }
 
             let mut sampled: Vec<String> = Vec::with_capacity(sample_size);
@@ -6387,8 +6390,13 @@ impl Blockchain {
                 .into_values()
                 .flat_map(|v| v.into_iter())
                 .collect();
-            for i in 0..remaining.len().min(sample_size.saturating_sub(sampled.len())) {
-                let j = (now_nanos.wrapping_mul(i as u64 + 100).wrapping_add(i as u64)) as usize
+            for i in 0..remaining
+                .len()
+                .min(sample_size.saturating_sub(sampled.len()))
+            {
+                let j = (now_nanos
+                    .wrapping_mul(i as u64 + 100)
+                    .wrapping_add(i as u64)) as usize
                     % (remaining.len() - i)
                     + i;
                 remaining.swap(i, j);
@@ -7580,8 +7588,10 @@ impl Blockchain {
                             info!(
                                 "🛡️ On-demand fork REJECTED: only {}/{} peers support peer tip \
                                 (need {}). Single-peer fork attempt from {}",
-                                supporting_peers, total_checked,
-                                MIN_PEERS_FOR_ONDEMAND_FORK, peer_addr
+                                supporting_peers,
+                                total_checked,
+                                MIN_PEERS_FOR_ONDEMAND_FORK,
+                                peer_addr
                             );
                             *self.fork_state.write().await = ForkResolutionState::None;
                             return Ok(());
