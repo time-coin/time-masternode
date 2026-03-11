@@ -279,7 +279,8 @@ impl TransactionPool {
         // Remove finalized entries from sled (pending entries remain)
         if let Some(tree) = self.sled_tree.get() {
             let mut removed = 0;
-            let keys: Vec<_> = tree.iter()
+            let keys: Vec<_> = tree
+                .iter()
                 .filter_map(|r| r.ok())
                 .filter(|(_, v)| {
                     serde_json::from_slice::<serde_json::Value>(v)

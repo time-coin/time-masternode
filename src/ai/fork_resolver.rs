@@ -288,8 +288,13 @@ pub fn check_reorg_depth(
             "REJECTED DEEP REORG from peer {} — fork depth {} exceeds maximum {} blocks \
             (our height: {}, common ancestor: {}, peer height: {}). \
             Blocks at depth >{} are considered FINAL.",
-            peer_addr, fork_depth, MAX_REORG_DEPTH, our_height, common_ancestor,
-            peer_height, MAX_REORG_DEPTH
+            peer_addr,
+            fork_depth,
+            MAX_REORG_DEPTH,
+            our_height,
+            common_ancestor,
+            peer_height,
+            MAX_REORG_DEPTH
         ))
     } else {
         Ok(())
