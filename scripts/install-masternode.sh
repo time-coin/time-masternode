@@ -98,6 +98,21 @@ check_root() {
         print_error "This script must be run as root (use sudo)"
         exit 1
     fi
+
+    # Fix HOME when running via sudo — sudo may preserve the calling
+    # user's HOME (e.g. /home/ubuntu) instead of setting it to /root.
+    # This causes rustup to install to the wrong directory.
+    local root_home
+    root_home=$(getent passwd root | cut -d: -f6)
+    if [[ "$HOME" != "$root_home" ]]; then
+        print_info "Fixing HOME: $HOME -> $root_home (sudo detected)"
+        export HOME="$root_home"
+    fi
+
+    # If cargo is already installed, ensure it's in PATH immediately
+    if [ -d "$HOME/.cargo/bin" ]; then
+        export PATH="$HOME/.cargo/bin:$PATH"
+    fi
 }
 
 detect_os() {
@@ -215,13 +230,30 @@ install_rust() {
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
     
-    # Ensure cargo is in PATH for future shell sessions
-    if ! grep -q 'cargo/env' "$HOME/.bashrc" 2>/dev/null; then
-        echo 'source "$HOME/.cargo/env"' >> "$HOME/.bashrc"
-        print_info "Added cargo to PATH in ~/.bashrc"
+    # Explicit PATH export — belt-and-suspenders in case source didn't work
+    export PATH="$HOME/.cargo/bin:$PATH"
+    
+    # Ensure cargo is in PATH for future shell sessions (.bashrc + .profile)
+    for rc_file in "$HOME/.bashrc" "$HOME/.profile"; do
+        if ! grep -q 'cargo/env' "$rc_file" 2>/dev/null; then
+            echo '. "$HOME/.cargo/env"' >> "$rc_file"
+            print_info "Added cargo to PATH in $(basename "$rc_file")"
+        fi
+    done
+    
+    # Verify cargo is actually accessible
+    if ! command -v cargo &> /dev/null; then
+        print_error "Cargo not found in PATH after installation"
+        if [ -x "$HOME/.cargo/bin/cargo" ]; then
+            print_info "Found cargo at $HOME/.cargo/bin/cargo — adding to PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+        else
+            print_error "Rust installation failed — cargo binary not found"
+            exit 1
+        fi
     fi
     
-    print_success "Rust installed"
+    print_success "Rust $(rustc --version | cut -d' ' -f2) installed"
 }
 
 check_nasm() {
@@ -373,6 +405,13 @@ build_binaries() {
     # Ensure Rust is in PATH
     if [ -f "$HOME/.cargo/env" ]; then
         source "$HOME/.cargo/env"
+    fi
+    export PATH="$HOME/.cargo/bin:$PATH"
+    
+    if ! command -v cargo &> /dev/null; then
+        print_error "Cargo not found in PATH — cannot build"
+        print_error "Try: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        exit 1
     fi
     
     # Build in release mode
