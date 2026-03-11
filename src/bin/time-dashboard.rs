@@ -421,7 +421,12 @@ impl App {
         // Fetch recent blocks for block explorer
         if let Some(bc) = &self.data.blockchain {
             let current_height = bc.blocks;
-            let cached_top = self.data.recent_blocks.first().map(|b| b.height).unwrap_or(0);
+            let cached_top = self
+                .data
+                .recent_blocks
+                .first()
+                .map(|b| b.height)
+                .unwrap_or(0);
 
             if cached_top < current_height {
                 // Fetch only new blocks since last cached height
@@ -1476,7 +1481,10 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
             ),
             Span::raw("    "),
             Span::styled("Version: ", Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{}", blk.version), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}", blk.version),
+                Style::default().fg(Color::White),
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
@@ -1495,23 +1503,18 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
     // Transaction list
     if blk.tx.is_empty() {
         let empty = Paragraph::new("No transactions in this block")
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title("Transactions"),
-            )
+            .block(Block::default().borders(Borders::ALL).title("Transactions"))
             .style(Style::default().fg(Color::DarkGray))
             .alignment(Alignment::Center);
         f.render_widget(empty, chunks[1]);
         return;
     }
 
-    let header = Row::new(vec![Cell::from(" # "), Cell::from("Transaction ID")])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
+    let header = Row::new(vec![Cell::from(" # "), Cell::from("Transaction ID")]).style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
 
     let visible = chunks[1].height.saturating_sub(3) as usize;
     let start = tx_scroll;
@@ -1528,16 +1531,13 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
         })
         .collect();
 
-    let table = Table::new(
-        rows,
-        [Constraint::Length(5), Constraint::Min(40)],
-    )
-    .header(header)
-    .block(Block::default().borders(Borders::ALL).title(format!(
-        "Transactions ({}/{})",
-        start + 1,
-        blk.tx.len()
-    )));
+    let table = Table::new(rows, [Constraint::Length(5), Constraint::Min(40)])
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "Transactions ({}/{})",
+            start + 1,
+            blk.tx.len()
+        )));
     f.render_widget(table, chunks[1]);
 }
 
