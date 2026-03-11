@@ -2488,14 +2488,26 @@ impl MessageHandler {
                 }
             }
 
-            let masternode = crate::types::Masternode::new_legacy(
-                mn_data.address.clone(),
-                mn_data.reward_address.clone(),
-                0,
-                mn_data.public_key,
-                mn_data.tier,
-                now,
-            );
+            let masternode = if let Some(outpoint) = mn_data.collateral_outpoint {
+                crate::types::Masternode::new_with_collateral(
+                    mn_data.address.clone(),
+                    mn_data.reward_address.clone(),
+                    mn_data.tier.collateral(),
+                    outpoint,
+                    mn_data.public_key,
+                    mn_data.tier,
+                    now,
+                )
+            } else {
+                crate::types::Masternode::new_legacy(
+                    mn_data.address.clone(),
+                    mn_data.reward_address.clone(),
+                    mn_data.tier.collateral(),
+                    mn_data.public_key,
+                    mn_data.tier,
+                    now,
+                )
+            };
 
             // BOOTSTRAP: Mark as active at genesis to allow block production
             // NORMAL: Register as inactive (will become active via direct P2P connection)
