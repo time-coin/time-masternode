@@ -353,10 +353,6 @@ impl NetworkClient {
                     if should_skip(ip) {
                         continue;
                     }
-                    // Skip masternodes — handled at startup (Phase 1) only
-                    if masternode_registry.get(ip).await.is_some() {
-                        continue;
-                    }
                     if !connection_manager.mark_connecting(ip) {
                         continue;
                     }
@@ -397,10 +393,12 @@ impl NetworkClient {
                 // Masternodes: ensure full mesh with all registered masternodes.
                 // Phase 1 handles initial connections, but masternodes that come
                 // online after our startup (or that we lost connection to) must
-                // be reconnected here. AI reconnection advice still applies to
-                // avoid hammering nodes that are legitimately offline.
+                // be reconnected here. Uses list_all() (not list_active) because
+                // masternodes marked inactive are exactly the ones we need to
+                // reconnect to. AI reconnection advice still applies to avoid
+                // hammering nodes that are legitimately offline.
                 {
-                    let all_masternodes = masternode_registry.list_active().await;
+                    let all_masternodes = masternode_registry.list_all().await;
                     let total_mn = all_masternodes.len();
                     let mut reconnected = 0usize;
 
@@ -417,7 +415,8 @@ impl NetworkClient {
                         if !advice.should_attempt {
                             tracing::debug!(
                                 "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
-                                mn_ip, advice.reasoning
+                                mn_ip,
+                                advice.reasoning
                             );
                             continue;
                         }
@@ -426,7 +425,8 @@ impl NetworkClient {
                         }
                         tracing::info!(
                             "🔗 [PHASE3-MN] Reconnecting to masternode {} (tier: {:?})",
-                            mn_ip, mn_info.masternode.tier
+                            mn_ip,
+                            mn_info.masternode.tier
                         );
                         res.spawn(mn_ip.clone(), true);
                         reconnected += 1;
@@ -435,8 +435,13 @@ impl NetworkClient {
 
                     if reconnected > 0 {
                         tracing::info!(
-                            "🔗 [PHASE3-MN] Initiated {} masternode reconnection(s) ({} total active)",
+                            "🔗 [PHASE3-MN] Initiated {} masternode reconnection(s) ({} registered)",
                             reconnected, total_mn
+                        );
+                    } else if total_mn > 1 {
+                        tracing::debug!(
+                            "🔗 [PHASE3-MN] All {} registered masternodes already connected or skipped",
+                            total_mn
                         );
                     }
                 }
@@ -453,7 +458,7 @@ impl NetworkClient {
                         if should_skip(ip) {
                             continue;
                         }
-                        // Skip masternodes — handled at startup (Phase 1) only
+                        // Skip masternodes — handled by Phase 3-MN block above
                         if masternode_registry.get(ip).await.is_some() {
                             continue;
                         }

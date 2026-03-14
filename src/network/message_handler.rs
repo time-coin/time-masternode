@@ -2911,10 +2911,7 @@ impl MessageHandler {
         );
 
         if let Err(e) = utxo_mgr.reconcile_utxo_state(to_remove, to_add).await {
-            error!(
-                "❌ [{}] UTXO reconciliation failed: {}",
-                self.direction, e
-            );
+            error!("❌ [{}] UTXO reconciliation failed: {}", self.direction, e);
         } else {
             let new_hash = context.blockchain.get_utxo_state_hash().await;
             info!(

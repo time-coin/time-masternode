@@ -1240,24 +1240,24 @@ async fn main() {
                             }
                         }
 
-                        // If unhealthy, attempt reconnection to inactive masternodes
+                        // If unhealthy, ensure inactive masternodes are in the peer
+                        // discovery list. Actual reconnection is handled by Phase 3-MN
+                        // in NetworkClient (runs every 30s, iterates all registered
+                        // masternodes and spawns connections to unconnected ones).
                         if health.active_masternodes < 5 {
                             let inactive_addresses = health_registry.get_inactive_masternode_addresses().await;
                             if !inactive_addresses.is_empty() {
                                 tracing::info!(
-                                    "🔄 Attempting to reconnect to {} inactive masternodes",
-                                    inactive_addresses.len()
+                                    "🔄 {} inactive masternodes pending reconnection (Phase 3-MN handles every 30s): {:?}",
+                                    inactive_addresses.len(),
+                                    &inactive_addresses
                                 );
 
                                 for address in &inactive_addresses {
                                     let pm = health_peer_manager.clone();
                                     let addr = address.clone();
                                     tokio::spawn(async move {
-                                        if pm.add_peer(addr.clone()).await {
-                                            tracing::info!("   ✓ Reconnection attempt to {}", addr);
-                                        } else {
-                                            tracing::debug!("   ⚠️ Failed to reconnect to {}", addr);
-                                        }
+                                        pm.add_peer(addr).await;
                                     });
                                 }
                             }
