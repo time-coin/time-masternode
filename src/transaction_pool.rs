@@ -603,6 +603,16 @@ impl TransactionPool {
         self.finalized.insert(txid, entry);
     }
 
+    /// Get finalized transactions that have been waiting longer than `min_age`.
+    /// Used to re-broadcast orphaned finalized TXs that peers may have missed.
+    pub fn get_stale_finalized(&self, min_age: std::time::Duration) -> Vec<(Hash256, Transaction)> {
+        self.finalized
+            .iter()
+            .filter(|e| e.value().added_at.elapsed() >= min_age)
+            .map(|e| (*e.key(), e.value().tx.clone()))
+            .collect()
+    }
+
     /// Collect all pool entries for peer mempool sync.
     /// Returns one `MempoolSyncEntry` per transaction (pending + finalized).
     pub fn get_all_for_sync(&self) -> Vec<crate::network::message::MempoolSyncEntry> {

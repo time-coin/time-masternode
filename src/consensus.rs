@@ -3135,6 +3135,11 @@ impl ConsensusEngine {
         self.tx_pool.get_finalized_transactions_with_fees()
     }
 
+    /// Get finalized transactions older than `min_age` for re-broadcast.
+    pub fn get_stale_finalized(&self, min_age: std::time::Duration) -> Vec<(Hash256, Transaction)> {
+        self.tx_pool.get_stale_finalized(min_age)
+    }
+
     #[allow(dead_code)]
     pub fn clear_finalized_transactions(&self) {
         self.tx_pool.clear_finalized();
