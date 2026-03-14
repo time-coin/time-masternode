@@ -114,6 +114,7 @@ impl DeterministicBlockGenerator {
             lock_time: 0,
             timestamp,
             special_data: None,
+            encrypted_memo: None,
         };
 
         let mut all_txs = vec![coinbase_tx];
@@ -226,6 +227,7 @@ mod tests {
             lock_time: 0,
             timestamp,
             special_data: None,
+            encrypted_memo: None,
         };
 
         let tx2 = Transaction {
@@ -245,6 +247,7 @@ mod tests {
             lock_time: 0,
             timestamp,
             special_data: None,
+            encrypted_memo: None,
         };
 
         let tx3 = Transaction {
@@ -264,6 +267,7 @@ mod tests {
             lock_time: 0,
             timestamp,
             special_data: None,
+            encrypted_memo: None,
         };
 
         // Create blocks with transactions in different orders

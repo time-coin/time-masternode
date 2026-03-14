@@ -2289,6 +2289,7 @@ mod tests {
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
             special_data: None,
+            encrypted_memo: None,
         };
 
         // Serialize with bincode and check size

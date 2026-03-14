@@ -2912,6 +2912,7 @@ impl Blockchain {
             lock_time: 0,
             timestamp: aligned_timestamp,
             special_data: None,
+            encrypted_memo: None,
         };
 
         // Reward distribution transaction spends coinbase and distributes to masternodes
@@ -2935,6 +2936,7 @@ impl Blockchain {
             lock_time: 0,
             timestamp: aligned_timestamp,
             special_data: None,
+            encrypted_memo: None,
         };
 
         // Count masternodes by tier

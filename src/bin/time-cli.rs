@@ -203,6 +203,9 @@ enum Commands {
         /// Return TXID immediately without waiting for finality
         #[arg(long, default_value = "false")]
         nowait: bool,
+        /// Encrypted memo (only sender and recipient can read it)
+        #[arg(long)]
+        memo: Option<String>,
     },
 
     /// Send TIME from a specific address
@@ -655,9 +658,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             amount,
             subtract_fee,
             nowait,
+            memo,
         } => (
             "sendtoaddress",
-            json!([address, amount, subtract_fee, nowait]),
+            json!([address, amount, subtract_fee, nowait, memo]),
         ),
         Commands::SendFrom {
             from_address,

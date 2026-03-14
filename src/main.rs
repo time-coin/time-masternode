@@ -14,6 +14,7 @@ pub mod finality_proof;
 pub mod masternode_authority;
 pub mod masternode_certificate;
 pub mod masternode_registry;
+pub mod memo;
 pub mod network;
 pub mod network_type;
 pub mod peer_manager;

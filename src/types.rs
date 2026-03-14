@@ -140,6 +140,10 @@ pub struct Transaction {
     /// `None` for regular transactions.
     #[serde(default)]
     pub special_data: Option<SpecialTransactionData>,
+    /// Optional encrypted memo. Encrypted with ECDH (sender+recipient X25519 keys)
+    /// so only the sender and recipient can decrypt it. Other nodes see ciphertext.
+    #[serde(default)]
+    pub encrypted_memo: Option<Vec<u8>>,
 }
 
 impl Transaction {
@@ -1094,6 +1098,7 @@ mod tests {
             lock_time: 0,
             timestamp: 1234567890,
             special_data: None,
+            encrypted_memo: None,
         }
     }
 

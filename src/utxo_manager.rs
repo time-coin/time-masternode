@@ -50,6 +50,9 @@ pub struct UTXOStateManager {
     collateral_db: Option<sled::Tree>,
     /// Per-address UTXO index for efficient lookups
     address_index: DashMap<String, DashSet<OutPoint>>,
+    /// Cache of address → Ed25519 public key, populated from transaction signatures.
+    /// Used for encrypted memo recipient key lookup.
+    pubkey_cache: DashMap<String, [u8; 32]>,
 }
 
 impl Default for UTXOStateManager {
@@ -67,6 +70,7 @@ impl UTXOStateManager {
             locked_collaterals: DashMap::new(),
             collateral_db: None,
             address_index: DashMap::new(),
+            pubkey_cache: DashMap::new(),
         }
     }
 
@@ -78,6 +82,7 @@ impl UTXOStateManager {
             locked_collaterals: DashMap::new(),
             collateral_db: None,
             address_index: DashMap::new(),
+            pubkey_cache: DashMap::new(),
         }
     }
 
@@ -89,6 +94,18 @@ impl UTXOStateManager {
             .map_err(|e| UtxoError::Storage(e.into()))?;
         self.collateral_db = Some(tree);
         Ok(())
+    }
+
+    /// Register a known Ed25519 public key for an address.
+    /// Called when processing transaction signatures (script_sig contains the pubkey).
+    pub fn register_pubkey(&self, address: &str, pubkey: [u8; 32]) {
+        self.pubkey_cache.insert(address.to_string(), pubkey);
+    }
+
+    /// Look up the Ed25519 public key for an address.
+    /// Returns None if the address has never signed a transaction we've seen.
+    pub fn find_pubkey_for_address(&self, address: &str) -> Option<[u8; 32]> {
+        self.pubkey_cache.get(address).map(|v| *v)
     }
 
     /// Load persisted collateral locks from sled into memory.
