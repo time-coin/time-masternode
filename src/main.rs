@@ -3458,6 +3458,57 @@ async fn main() {
     });
     shutdown_manager.register_task(cleanup_handle);
 
+    // Re-broadcast orphaned finalized transactions.
+    // When TXs are auto-finalized locally but peers miss the broadcast (e.g.,
+    // no peers connected at finalization time), those TXs sit in the finalized
+    // pool indefinitely — other block producers never include them. This task
+    // re-sends TransactionFinalized every 2 minutes for any finalized TX older
+    // than 60 seconds, ensuring peers eventually receive them.
+    let rebroadcast_consensus = consensus_engine.clone();
+    let rebroadcast_peers = peer_connection_registry.clone();
+    let rebroadcast_shutdown = shutdown_token.clone();
+    let rebroadcast_handle = tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
+        interval.tick().await; // consume first immediate tick
+        loop {
+            tokio::select! {
+                _ = rebroadcast_shutdown.cancelled() => {
+                    tracing::debug!("🛑 Finalized TX re-broadcast task shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let stale = rebroadcast_consensus
+                        .get_stale_finalized(std::time::Duration::from_secs(60));
+                    if stale.is_empty() {
+                        continue;
+                    }
+                    let peer_count = rebroadcast_peers.connected_count();
+                    if peer_count == 0 {
+                        tracing::warn!(
+                            "📡 {} orphaned finalized TX(s) but no peers to re-broadcast to",
+                            stale.len()
+                        );
+                        continue;
+                    }
+                    tracing::info!(
+                        "📡 Re-broadcasting {} orphaned finalized TX(s) to {} peer(s)",
+                        stale.len(),
+                        peer_count
+                    );
+                    for (txid, tx) in stale {
+                        let msg = crate::network::message::NetworkMessage::TransactionFinalized {
+                            txid,
+                            tx,
+                        };
+                        rebroadcast_peers.broadcast(msg).await;
+                    }
+                }
+            }
+        }
+    });
+    shutdown_manager.register_task(rebroadcast_handle);
+
     // Periodic UTXO consistency check — hash-first, inquire on divergence
     // Runs at the midpoint between block slots (on the 5's: :05, :15, :25, etc.)
     // to avoid colliding with block production. Only checks when the node is in
