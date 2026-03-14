@@ -394,10 +394,52 @@ impl NetworkClient {
                     max_peers
                 );
 
-                // Masternodes are servers — when they come back online they will
-                // initiate their own outbound connections (Phase 1 on startup).
-                // We do not actively reconnect to them here to avoid hammering
-                // nodes that are legitimately offline.
+                // Masternodes: ensure full mesh with all registered masternodes.
+                // Phase 1 handles initial connections, but masternodes that come
+                // online after our startup (or that we lost connection to) must
+                // be reconnected here. AI reconnection advice still applies to
+                // avoid hammering nodes that are legitimately offline.
+                {
+                    let all_masternodes = masternode_registry.list_active().await;
+                    let total_mn = all_masternodes.len();
+                    let mut reconnected = 0usize;
+
+                    for mn_info in &all_masternodes {
+                        let mn_ip = &mn_info.masternode.address;
+                        if should_skip(mn_ip) {
+                            continue;
+                        }
+                        if connection_manager.is_reconnecting(mn_ip) {
+                            continue;
+                        }
+                        // Respect AI advice to avoid hammering offline nodes
+                        let advice = res.reconnection_ai.get_reconnection_advice(mn_ip, true);
+                        if !advice.should_attempt {
+                            tracing::debug!(
+                                "⏭️  [PHASE3-MN] Skipping {} (AI cooldown: {})",
+                                mn_ip, advice.reasoning
+                            );
+                            continue;
+                        }
+                        if !connection_manager.mark_connecting(mn_ip) {
+                            continue;
+                        }
+                        tracing::info!(
+                            "🔗 [PHASE3-MN] Reconnecting to masternode {} (tier: {:?})",
+                            mn_ip, mn_info.masternode.tier
+                        );
+                        res.spawn(mn_ip.clone(), true);
+                        reconnected += 1;
+                        sleep(Duration::from_millis(100)).await;
+                    }
+
+                    if reconnected > 0 {
+                        tracing::info!(
+                            "🔗 [PHASE3-MN] Initiated {} masternode reconnection(s) ({} total active)",
+                            reconnected, total_mn
+                        );
+                    }
+                }
 
                 // Fill remaining slots with regular peers — prefer less-loaded ones
                 // so new nodes naturally spread connections across the network.
