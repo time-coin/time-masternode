@@ -574,6 +574,29 @@ impl MasternodeRegistry {
     /// Mark a masternode as inactive when connection is lost
     /// This ensures disconnected nodes don't receive rewards
     pub async fn mark_inactive_on_disconnect(&self, address: &str) -> Result<(), RegistryError> {
+        // SAFETY: Never remove or deactivate the local masternode on a peer
+        // disconnect event. The local node is always running and its entry
+        // must persist.
+        let is_local = self
+            .local_masternode_address
+            .read()
+            .await
+            .as_ref()
+            .map(|a| {
+                let local_ip = a.split(':').next().unwrap_or(a);
+                let addr_ip = address.split(':').next().unwrap_or(address);
+                local_ip == addr_ip
+            })
+            .unwrap_or(false);
+
+        if is_local {
+            tracing::debug!(
+                "🛡️ Ignoring disconnect event for local masternode {}",
+                address
+            );
+            return Ok(());
+        }
+
         let now = Self::now();
         let mut masternodes = self.masternodes.write().await;
 
@@ -1565,6 +1588,12 @@ impl MasternodeRegistry {
             .into_iter()
             .collect();
 
+        // Read local address once to protect local node from gossip-based deactivation.
+        let local_addr = self.local_masternode_address.read().await.clone();
+        let local_ip = local_addr
+            .as_ref()
+            .map(|a| a.split(':').next().unwrap_or(a).to_string());
+
         let mut status_changes = 0;
         let mut total_active = 0;
 
@@ -1585,6 +1614,17 @@ impl MasternodeRegistry {
         };
 
         for (addr, info) in masternodes.iter_mut() {
+            // Never deactivate the local masternode via gossip — it is always
+            // running and doesn't report on itself, so it would always have
+            // zero peer reports and be incorrectly deactivated.
+            let addr_ip = addr.split(':').next().unwrap_or(addr);
+            if local_ip.as_deref() == Some(addr_ip) {
+                if info.is_active {
+                    total_active += 1;
+                }
+                continue;
+            }
+
             // Handshake nodes' lifecycle is owned by TCP connect/disconnect events.
             // Their presence in the registry already means they ARE directly connected —
             // never let gossip-based report counts flip them inactive.
@@ -1671,6 +1711,11 @@ impl MasternodeRegistry {
             for (address, info) in masternodes.iter() {
                 // Handshake nodes are removed immediately on TCP disconnect — never auto-remove.
                 if info.registration_source == RegistrationSource::Handshake {
+                    continue;
+                }
+                // Never auto-remove the local masternode.
+                let addr_ip = address.split(':').next().unwrap_or(address);
+                if local_ip.as_deref() == Some(addr_ip) {
                     continue;
                 }
                 if info.peer_reports.is_empty() {
