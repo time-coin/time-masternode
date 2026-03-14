@@ -264,6 +264,27 @@ time-cli mergeutxos --min-count 5 --max-count 50
 ```
 Merge multiple UTXOs into one to reduce UTXO set size.
 
+#### Request Payment
+```bash
+time-cli request-payment 50.0
+time-cli request-payment 50.0 --memo "Invoice #42" --label "Alice's Shop"
+```
+Generate a payment request URI that you can share via email, text, or QR code. The URI includes your address, public key (for encrypted memos), requested amount, and an optional description.
+
+Example output:
+```
+timecoin:TIME0AsqaMhk...?amount=50&pubkey=a1b2c3...&memo=Invoice%20%2342&label=Alice%27s%20Shop
+```
+
+The payer's wallet will automatically cache your public key, enabling encrypted memo support for this and future transactions.
+
+#### Pay a Payment Request
+```bash
+time-cli pay-request "timecoin:TIME0AsqaMhk...?amount=50&pubkey=a1b2c3...&memo=Invoice%20%2342"
+time-cli pay-request "timecoin:TIME0AsqaMhk...?amount=50&pubkey=a1b2c3..." --memo "Custom note"
+```
+Parse a payment request URI and send the specified amount with an encrypted memo. If the URI contains a memo, it is used automatically. Use `--memo` to override with your own message.
+
 #### Wallet Notes
 
 - All amounts are in TIME (the base unit)

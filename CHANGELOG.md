@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Wallet display**: `listtransactions` decrypts and displays memos when the wallet holds the sender or recipient key.
 - **Pubkey cache**: `UTXOStateManager` maintains a cache of Ed25519 public keys observed during signature verification, enabling memo encryption for any address that has signed an on-chain transaction.
 
+### Added — Payment Request URIs
+- **`requestpayment` CLI command**: Generate a `timecoin:` URI containing the recipient's address, Ed25519 public key, requested amount, and optional memo/label. Share via email, text, or QR code.
+- **`payrequest` CLI command**: Parse a payment request URI and send funds with an encrypted memo in one step. The recipient's public key is automatically cached from the URI, solving the pubkey discovery problem for new addresses.
+- **URI format**: `timecoin:ADDRESS?amount=X&pubkey=HEX&memo=TEXT&label=NAME` — compatible with future GUI/mobile wallets.
+
 ### Fixed — Transaction Safety
 - **Re-broadcast loop prevention**: Re-broadcast task now validates input UTXO states before re-broadcasting; evicts transactions with reverted/missing inputs instead of re-sending them.
 - **TransactionFinalized handler hardening**: Rejects transactions with missing input UTXOs, prevents double-finalization, short-circuits if transaction already finalized.

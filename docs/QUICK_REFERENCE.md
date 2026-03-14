@@ -57,6 +57,22 @@ Key derivation:
 Max plaintext: 256 bytes
 ```
 
+### Payment Request URI
+
+```
+timecoin:<ADDRESS>?amount=<TIME>&pubkey=<HEX>[&memo=<TEXT>][&label=<TEXT>]
+
+Example:
+  timecoin:TIME0AsqaMhk...?amount=50&pubkey=a1b2c3...&memo=Invoice%20%2342
+
+Parameters:
+  address  — Recipient's TIME address (required, in URI path)
+  amount   — Requested amount in TIME (required)
+  pubkey   — Recipient's Ed25519 public key, hex-encoded (enables encrypted memos)
+  memo     — Payment description, URL-encoded (optional)
+  label    — Requester label/name, URL-encoded (optional)
+```
+
 ---
 
 ## Staking Script
