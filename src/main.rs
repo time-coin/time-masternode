@@ -1074,6 +1074,19 @@ async fn main() {
                 // Mark this as our local masternode
                 registry.set_local_masternode(mn.address.clone()).await;
 
+                // Local masternode must be OnChain so it persists across
+                // peer disconnects (Handshake nodes are removed on disconnect).
+                if mn.tier != types::MasternodeTier::Free {
+                    let _ = registry
+                        .set_registration_source(
+                            &mn.address,
+                            crate::masternode_registry::RegistrationSource::OnChain(
+                                blockchain.get_height(),
+                            ),
+                        )
+                        .await;
+                }
+
                 // Store empty certificate in registry (certificate system removed)
                 registry.set_local_certificate([0u8; 64]).await;
 
