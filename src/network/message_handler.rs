@@ -47,6 +47,13 @@ fn peer_utxo_hash_cache() -> &'static dashmap::DashMap<String, PeerUtxoHashEntry
     INSTANCE.get_or_init(dashmap::DashMap::new)
 }
 
+/// Tracks consecutive UTXO consistency check rounds where we remain diverged.
+/// Used for liveness-adjusted threshold: 2/3 → simple majority → plurality.
+fn utxo_divergence_rounds() -> &'static std::sync::atomic::AtomicU32 {
+    static INSTANCE: std::sync::OnceLock<std::sync::atomic::AtomicU32> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| std::sync::atomic::AtomicU32::new(0))
+}
+
 /// Max age for cached peer UTXO hashes (10 minutes = 2 sync check cycles).
 const UTXO_HASH_CACHE_TTL: Duration = Duration::from_secs(600);
 
@@ -2790,9 +2797,10 @@ impl MessageHandler {
     }
 
     /// Handle UTXOStateHashResponse — compare peer's UTXO hash with ours.
-    /// Caches the peer's hash and checks for majority consensus. If we're in the
-    /// minority (most peers report a different hash at the same height), requests
+    /// Caches the peer's hash and checks for 2/3 supermajority consensus.
+    /// If 2/3+ of voters report a different hash at the same height, requests
     /// the full UTXO set from a majority peer for reconciliation.
+    /// Fully event-driven: re-evaluates on every response received.
     async fn handle_utxo_state_hash_response(
         &self,
         peer_hash: [u8; 32],
@@ -2804,7 +2812,7 @@ impl MessageHandler {
         let our_hash = context.blockchain.get_utxo_state_hash().await;
         let our_count = context.blockchain.get_utxo_count().await;
 
-        // Always cache the peer's response for majority analysis
+        // Always cache the peer's response
         peer_utxo_hash_cache().insert(
             self.peer_ip.clone(),
             PeerUtxoHashEntry {
@@ -2832,10 +2840,12 @@ impl MessageHandler {
                 our_count,
                 hex::encode(&our_hash[..8])
             );
+            // Reset divergence counter — we match this peer
+            utxo_divergence_rounds().store(0, std::sync::atomic::Ordering::Relaxed);
             return Ok(None);
         }
 
-        // Divergence detected — count votes from cached peer hashes
+        // Divergence detected — tally ALL cached votes at this height
         warn!(
             "⚠️  [{}] UTXO DIVERGENCE with {} at height {}: ours {}({} utxos) vs theirs {}({} utxos)",
             self.direction,
@@ -2847,14 +2857,12 @@ impl MessageHandler {
             peer_utxo_count,
         );
 
-        let mut our_hash_votes = 1u32; // Count ourselves
-        let mut peer_hash_votes = 0u32;
-        let mut other_votes = 0u32;
-        let mut majority_utxo_count = 0usize;
         let now = Instant::now();
+        let mut our_hash_votes = 1u32; // Count ourselves
+        let mut hash_counts: std::collections::HashMap<[u8; 32], (u32, String)> =
+            std::collections::HashMap::new();
 
         for entry in peer_utxo_hash_cache().iter() {
-            // Skip stale entries and entries at a different height
             if now.duration_since(entry.received_at) > UTXO_HASH_CACHE_TTL {
                 continue;
             }
@@ -2863,35 +2871,70 @@ impl MessageHandler {
             }
             if entry.hash == our_hash {
                 our_hash_votes += 1;
-            } else if entry.hash == peer_hash {
-                peer_hash_votes += 1;
-                majority_utxo_count = entry.utxo_count;
             } else {
-                other_votes += 1;
+                let counter = hash_counts
+                    .entry(entry.hash)
+                    .or_insert((0, entry.key().clone()));
+                counter.0 += 1;
             }
         }
 
-        let total_votes = our_hash_votes + peer_hash_votes + other_votes;
+        // Find the most popular alternative hash
+        let mut best_alt_votes = 0u32;
+        let mut best_alt_peer: Option<String> = None;
+        for (count, peer) in hash_counts.values() {
+            if *count > best_alt_votes {
+                best_alt_votes = *count;
+                best_alt_peer = Some(peer.clone());
+            }
+        }
+
+        let total_votes = our_hash_votes + hash_counts.values().map(|(c, _)| c).sum::<u32>();
+
+        // Liveness-adjusted threshold:
+        //   Round 0 (first divergence): 2/3 supermajority required
+        //   Round 1 (still diverged):   simple majority (>50%)
+        //   Round 2+ (persistent):      plurality (largest group wins)
+        let rounds = utxo_divergence_rounds().load(std::sync::atomic::Ordering::Relaxed);
+        let (threshold_name, should_reconcile) = if rounds == 0 {
+            // 2/3 supermajority: alt_votes * 3 >= total * 2
+            ("2/3 supermajority", best_alt_votes * 3 >= total_votes * 2)
+        } else if rounds == 1 {
+            // Simple majority: alt_votes > total / 2
+            ("simple majority", best_alt_votes * 2 > total_votes)
+        } else {
+            // Plurality: alt has more votes than us
+            ("plurality", best_alt_votes > our_hash_votes)
+        };
+
         info!(
-            "🗳️  [{}] UTXO hash votes at height {}: ours={}({} utxos), theirs={}({} utxos), other={} (total={})",
-            self.direction, our_height, our_hash_votes, our_count,
-            peer_hash_votes, majority_utxo_count, other_votes, total_votes
+            "🗳️  [{}] UTXO hash votes at height {}: ours={}, best_alt={}, total={}, threshold={} (round {})",
+            self.direction, our_height, our_hash_votes, best_alt_votes, total_votes,
+            threshold_name, rounds,
         );
 
-        // Only reconcile if the peer's hash has strict majority over ours
-        if peer_hash_votes > our_hash_votes {
-            warn!(
-                "📥 [{}] We are in the MINORITY ({} vs {} votes) — requesting UTXO set from {} for reconciliation",
-                self.direction, our_hash_votes, peer_hash_votes, self.peer_ip
-            );
-            Ok(Some(NetworkMessage::GetUTXOSet))
-        } else {
-            info!(
-                "📊 [{}] We have majority or tie ({} vs {} votes) — peer {} may be out of sync",
-                self.direction, our_hash_votes, peer_hash_votes, self.peer_ip
-            );
-            Ok(None)
+        if should_reconcile {
+            if let Some(alt_peer) = best_alt_peer {
+                warn!(
+                    "📥 [{}] We are in the MINORITY ({}/{} votes, threshold={}, round {}) — requesting UTXO set from {} for reconciliation",
+                    self.direction, our_hash_votes, total_votes,
+                    threshold_name, rounds, alt_peer
+                );
+                return Ok(Some(NetworkMessage::GetUTXOSet));
+            }
         }
+
+        // Still diverged but threshold not met — increment round for next check
+        utxo_divergence_rounds().fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        info!(
+            "📊 [{}] Threshold not met ({}) — relaxing for next round ({}→{})",
+            self.direction,
+            threshold_name,
+            rounds,
+            rounds + 1
+        );
+        Ok(None)
     }
 
     /// Handle UTXOSetResponse — diff against our local set and reconcile.
@@ -2906,6 +2949,8 @@ impl MessageHandler {
         let (to_remove, to_add) = utxo_mgr.get_utxo_diff(&remote_utxos).await;
 
         if to_remove.is_empty() && to_add.is_empty() {
+            // Reconciliation succeeded — reset divergence counter
+            utxo_divergence_rounds().store(0, std::sync::atomic::Ordering::Relaxed);
             info!(
                 "✅ [{}] UTXO set from {} matches — no diff",
                 self.direction, self.peer_ip
@@ -2924,6 +2969,8 @@ impl MessageHandler {
         if let Err(e) = utxo_mgr.reconcile_utxo_state(to_remove, to_add).await {
             error!("❌ [{}] UTXO reconciliation failed: {}", self.direction, e);
         } else {
+            // Reconciliation succeeded — reset divergence counter
+            utxo_divergence_rounds().store(0, std::sync::atomic::Ordering::Relaxed);
             let new_hash = context.blockchain.get_utxo_state_hash().await;
             info!(
                 "✅ [{}] UTXO reconciliation complete. New state hash: {}",
