@@ -2357,6 +2357,17 @@ impl MessageHandler {
                 .await
             {
                 Ok(()) => {
+                    // Collateral was verified on-chain above — mark as OnChain so the
+                    // node is NOT removed as a "transient Free-tier" on disconnect.
+                    let lock_h = context.blockchain.get_height();
+                    let _ = context
+                        .masternode_registry
+                        .set_registration_source(
+                            &peer_ip,
+                            crate::masternode_registry::RegistrationSource::OnChain(lock_h),
+                        )
+                        .await;
+
                     let count = context.masternode_registry.total_count().await;
                     debug!(
                         "✅ [{}] Registered {:?} masternode {} (total: {})",
