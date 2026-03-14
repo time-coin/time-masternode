@@ -88,6 +88,7 @@ impl RpcHandler {
             "getconsensusinfo" => self.get_consensus_info().await,
             "gettimevotestatus" => self.get_timevote_status().await,
             "validateaddress" => self.validate_address(&params_array).await,
+            "getaddresspubkey" => self.get_address_pubkey(&params_array).await,
             "stop" => self.stop().await,
             "uptime" => self.uptime().await,
             "getinfo" => self.get_info().await,
@@ -123,6 +124,8 @@ impl RpcHandler {
             "masternodereginfo" => self.masternode_reg_info().await,
             "masternoderegstatus" => self.masternode_reg_status(&params_array).await,
             "clearstucktransactions" => self.clear_stuck_transactions().await,
+            "createpaymentrequest" => self.create_payment_request(&params_array).await,
+            "paypaymentrequest" => self.pay_payment_request(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -2104,6 +2107,30 @@ impl RpcHandler {
         }))
     }
 
+    /// Return the Ed25519 public key for a TIME address (if known).
+    /// The pubkey is learned when the address signs a transaction on-chain.
+    async fn get_address_pubkey(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected address".to_string(),
+            })?;
+
+        let pubkey_hex = self
+            .consensus
+            .utxo_manager
+            .find_pubkey_for_address(address)
+            .map(hex::encode)
+            .unwrap_or_default();
+
+        Ok(json!({
+            "address": address,
+            "pubkey": pubkey_hex,
+        }))
+    }
+
     async fn stop(&self) -> Result<Value, RpcError> {
         // Graceful shutdown via RPC
         //
@@ -3983,5 +4010,197 @@ impl RpcHandler {
         }
 
         Ok(json!({ "transactions": results }))
+    }
+
+    /// Create a payment request URI that can be shared with the payer.
+    /// The URI includes the recipient's address, public key, amount, and optional memo.
+    async fn create_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // createpaymentrequest amount [memo] [label]
+        let amount = params
+            .first()
+            .and_then(|v| v.as_f64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected amount (in TIME)".to_string(),
+            })?;
+
+        if amount <= 0.0 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Amount must be positive".to_string(),
+            });
+        }
+
+        let memo = params.get(1).and_then(|v| v.as_str()).unwrap_or("");
+        let label = params.get(2).and_then(|v| v.as_str()).unwrap_or("");
+
+        // Get our wallet address
+        let wallet_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address)
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode - no wallet address".to_string(),
+            })?;
+
+        // Get our Ed25519 public key
+        let signing_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "No signing key available".to_string(),
+            })?;
+        let pubkey_hex = hex::encode(signing_key.verifying_key().to_bytes());
+
+        // Build URI: timecoin:ADDRESS?amount=X&pubkey=HEX[&memo=TEXT][&label=TEXT]
+        let mut uri = format!(
+            "timecoin:{}?amount={}&pubkey={}",
+            wallet_address, amount, pubkey_hex
+        );
+        if !memo.is_empty() {
+            uri.push_str(&format!("&memo={}", urlencoding::encode(memo)));
+        }
+        if !label.is_empty() {
+            uri.push_str(&format!("&label={}", urlencoding::encode(label)));
+        }
+
+        Ok(json!({
+            "uri": uri,
+            "address": wallet_address,
+            "pubkey": pubkey_hex,
+            "amount": amount,
+            "memo": memo,
+            "label": label,
+        }))
+    }
+
+    /// Pay a payment request URI. Parses the URI, caches the recipient's pubkey,
+    /// and sends funds with an encrypted memo.
+    async fn pay_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
+        // paypaymentrequest "timecoin:ADDRESS?amount=X&pubkey=HEX&memo=TEXT" [memo_override]
+        let uri = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected payment request URI".to_string(),
+            })?;
+
+        // Parse the URI
+        let stripped = uri.strip_prefix("timecoin:").ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Invalid URI: must start with 'timecoin:'".to_string(),
+        })?;
+
+        // Split address from query params
+        let (address, query) = stripped.split_once('?').ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Invalid URI: missing parameters (expected ?amount=&pubkey=)".to_string(),
+        })?;
+
+        // Parse query parameters
+        let mut amount: Option<f64> = None;
+        let mut pubkey_hex: Option<String> = None;
+        let mut memo: Option<String> = None;
+        let mut label: Option<String> = None;
+
+        for param in query.split('&') {
+            if let Some((key, value)) = param.split_once('=') {
+                match key {
+                    "amount" => {
+                        amount = value.parse().ok();
+                    }
+                    "pubkey" => {
+                        pubkey_hex = Some(value.to_string());
+                    }
+                    "memo" => {
+                        let decoded = urlencoding::decode(value).unwrap_or(value.into());
+                        memo = Some(decoded.into_owned());
+                    }
+                    "label" => {
+                        let decoded = urlencoding::decode(value).unwrap_or(value.into());
+                        label = Some(decoded.into_owned());
+                    }
+                    _ => {} // ignore unknown params for forward compatibility
+                }
+            }
+        }
+
+        let amount = amount.ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Invalid URI: missing or invalid 'amount' parameter".to_string(),
+        })?;
+
+        // Cache the recipient's pubkey if provided (enables memo encryption)
+        if let Some(ref pk_hex) = pubkey_hex {
+            if let Ok(pk_bytes) = hex::decode(pk_hex) {
+                if pk_bytes.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&pk_bytes);
+                    self.consensus.utxo_manager.register_pubkey(address, arr);
+                    tracing::info!(
+                        address = address,
+                        "Cached recipient pubkey from payment request"
+                    );
+                }
+            }
+        }
+
+        // Allow the payer to override the memo
+        let memo_override = params.get(1).and_then(|v| v.as_str());
+        let final_memo = memo_override.map(|s| s.to_string()).or(memo);
+
+        // Display what we're paying
+        let label_display = label.as_deref().unwrap_or("");
+        tracing::info!(
+            address = address,
+            amount = amount,
+            memo = final_memo.as_deref().unwrap_or(""),
+            label = label_display,
+            "Paying payment request"
+        );
+
+        // Get wallet address
+        let wallet_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address)
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode - no wallet address".to_string(),
+            })?;
+
+        // Send the coins with the memo
+        let result = self
+            .send_coins(
+                &wallet_address,
+                address,
+                amount,
+                false,
+                false,
+                final_memo.as_deref(),
+            )
+            .await?;
+
+        // Augment the response with payment request info
+        let mut response = result.clone();
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "payment_request".to_string(),
+                json!({
+                    "address": address,
+                    "amount": amount,
+                    "memo": final_memo,
+                    "label": label,
+                    "pubkey_cached": pubkey_hex.is_some(),
+                }),
+            );
+        }
+
+        Ok(response)
     }
 }

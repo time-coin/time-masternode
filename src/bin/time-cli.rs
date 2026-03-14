@@ -239,6 +239,29 @@ enum Commands {
         address: Option<String>,
     },
 
+    /// Create a payment request URI to share with a payer
+    #[command(next_help_heading = "Wallet")]
+    RequestPayment {
+        /// Amount to request (in TIME)
+        amount: f64,
+        /// Description / memo for the payment
+        #[arg(long)]
+        memo: Option<String>,
+        /// Label for the requester (e.g. merchant name)
+        #[arg(long)]
+        label: Option<String>,
+    },
+
+    /// Pay a payment request URI
+    #[command(next_help_heading = "Wallet")]
+    PayRequest {
+        /// Payment request URI (timecoin:ADDRESS?amount=X&pubkey=HEX&memo=TEXT)
+        uri: String,
+        /// Override the memo with a custom message
+        #[arg(long)]
+        memo: Option<String>,
+    },
+
     // ============================================================
     // TRANSACTION COMMANDS
     // ============================================================
@@ -678,6 +701,12 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             max_count,
             address,
         } => ("mergeutxos", json!([min_count, max_count, address])),
+        Commands::RequestPayment {
+            amount,
+            memo,
+            label,
+        } => ("createpaymentrequest", json!([amount, memo, label])),
+        Commands::PayRequest { uri, memo } => ("paypaymentrequest", json!([uri, memo])),
     };
 
     let request = RpcRequest {
