@@ -980,53 +980,83 @@ async fn handle_peer(
                                     tracing::info!("✅ Transaction {} finalized (from {})",
                                         hex::encode(*txid), peer.addr);
 
-                                    // CRITICAL: Ensure we have the transaction in pending pool first
-                                    // If not, add it now (this handles the race where finalization arrives before TX broadcast)
-                                    if !consensus.tx_pool.has_transaction(txid) {
-                                        tracing::warn!("⚠️ Received TransactionFinalized but TX {} not in pool - adding it now", hex::encode(*txid));
+                                    // If the TX is already in the finalized pool, skip entirely
+                                    if consensus.tx_pool.is_finalized(txid) {
+                                        tracing::debug!("📦 TX {} already in finalized pool, skipping", hex::encode(*txid));
+                                        // Still gossip so other peers learn about it
+                                        let _ = broadcast_tx.send(msg.clone());
+                                        continue;
+                                    }
 
-                                        // Process the transaction to add it to pending pool
+                                    // Validate input UTXOs exist in storage before accepting.
+                                    // If inputs are missing, this TX references spent/unknown UTXOs
+                                    // and accepting it would cause coin loss.
+                                    let mut inputs_exist = true;
+                                    for input in &tx.inputs {
+                                        if consensus.utxo_manager.get_utxo(&input.previous_output).await.is_err() {
+                                            tracing::warn!(
+                                                "⚠️ Rejecting TransactionFinalized {} from {}: input {} not in storage",
+                                                hex::encode(*txid), peer.addr, input.previous_output
+                                            );
+                                            inputs_exist = false;
+                                            break;
+                                        }
+                                    }
+                                    if !inputs_exist {
+                                        continue;
+                                    }
+
+                                    // Add to pool if not present. process_transaction may auto-finalize
+                                    // (when <3 validators), which handles UTXO state transitions internally.
+                                    let auto_finalized = if !consensus.tx_pool.has_transaction(txid) {
+                                        tracing::warn!("⚠️ Received TransactionFinalized but TX {} not in pool - adding it now", hex::encode(*txid));
                                         if let Err(e) = consensus.process_transaction(tx.clone(), None).await {
                                             tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
                                             continue;
                                         }
-                                    }
-
-                                    // Move from pending → finalized pool so block producers can include it
-                                    if consensus.tx_pool.finalize_transaction(*txid) {
-                                        tracing::info!("📦 Moved TX {} to finalized pool on this node", hex::encode(*txid));
-
-                                        // CRITICAL: Transition UTXOs from Locked → SpentFinalized
-                                        // Without this, block validation rejects the TX ("UTXO not unspent: Locked")
-                                        for input in &tx.inputs {
-                                            let new_state = crate::types::UTXOState::SpentFinalized {
-                                                txid: *txid,
-                                                finalized_at: chrono::Utc::now().timestamp(),
-                                                votes: 0,
-                                            };
-                                            consensus.utxo_manager.update_state(&input.previous_output, new_state);
-                                        }
-
-                                        // Create new UTXOs from transaction outputs
-                                        for (idx, output) in tx.outputs.iter().enumerate() {
-                                            let outpoint = crate::types::OutPoint {
-                                                txid: *txid,
-                                                vout: idx as u32,
-                                            };
-                                            let utxo = crate::types::UTXO {
-                                                outpoint: outpoint.clone(),
-                                                value: output.value,
-                                                script_pubkey: output.script_pubkey.clone(),
-                                                address: String::from_utf8(output.script_pubkey.clone())
-                                                    .unwrap_or_default(),
-                                            };
-                                            if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
-                                                tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
-                                            }
-                                            consensus.utxo_manager.update_state(&outpoint, crate::types::UTXOState::Unspent);
-                                        }
+                                        // Check if process_transaction already finalized it
+                                        consensus.tx_pool.is_finalized(txid)
                                     } else {
-                                        tracing::debug!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
+                                        false
+                                    };
+
+                                    // Only do manual finalization if process_transaction didn't already do it.
+                                    // This prevents double-finalization (creating output UTXOs twice).
+                                    if !auto_finalized {
+                                        if consensus.tx_pool.finalize_transaction(*txid) {
+                                            tracing::info!("📦 Moved TX {} to finalized pool on this node", hex::encode(*txid));
+
+                                            // Transition input UTXOs → SpentFinalized
+                                            for input in &tx.inputs {
+                                                let new_state = crate::types::UTXOState::SpentFinalized {
+                                                    txid: *txid,
+                                                    finalized_at: chrono::Utc::now().timestamp(),
+                                                    votes: 0,
+                                                };
+                                                consensus.utxo_manager.update_state(&input.previous_output, new_state);
+                                            }
+
+                                            // Create output UTXOs
+                                            for (idx, output) in tx.outputs.iter().enumerate() {
+                                                let outpoint = crate::types::OutPoint {
+                                                    txid: *txid,
+                                                    vout: idx as u32,
+                                                };
+                                                let utxo = crate::types::UTXO {
+                                                    outpoint: outpoint.clone(),
+                                                    value: output.value,
+                                                    script_pubkey: output.script_pubkey.clone(),
+                                                    address: String::from_utf8(output.script_pubkey.clone())
+                                                        .unwrap_or_default(),
+                                                };
+                                                if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
+                                                    tracing::warn!("Failed to add output UTXO vout={}: {}", idx, e);
+                                                }
+                                                consensus.utxo_manager.update_state(&outpoint, crate::types::UTXOState::Unspent);
+                                            }
+                                        } else {
+                                            tracing::debug!("⚠️ Could not finalize TX {} (not in pending pool)", hex::encode(*txid));
+                                        }
                                     }
 
                                     // Notify WS subscribers on this node that the transaction is finalized

@@ -1,0 +1,292 @@
+================================================================================
+EXECUTIVE SUMMARY: FINALIZED TRANSACTIONS STUCK IN MEMPOOL
+================================================================================
+
+ISSUE: Network stalled at height 14879. After running clearstucktransactions 
+on some nodes, blocks are producing again but other nodes still have finalized 
+transactions stuck in mempool.
+
+ROOT CAUSE: Multi-layered bug involving:
+1. No transaction re-validation during block production
+2. Silent skipping of invalid transactions
+3. Split-brain UTXO state after clearstucktransactions
+4. Infinite re-broadcast loop between nodes with divergent states
+
+================================================================================
+KEY FILES AND LINE NUMBERS
+================================================================================
+
+1. src/blockchain.rs:2618-2683  - produce_block_at_height() TX selection
+   - Gets finalized TXs from pool
+   - Filters double-spends but doesn't re-validate UTXOs
+   - Silently skips invalid TXs without removing them
+
+2. src/blockchain.rs:3891-3908  - add_block() mempool clearing
+   - Only removes TXs actually included in block
+   - Skipped TXs remain in finalized pool forever
+
+3. src/consensus.rs:3130-3151   - get_finalized_transactions_for_block()
+   - Returns ALL finalized TXs without any validation
+   - No TTL, no staleness check, no UTXO state verification
+
+4. src/transaction_pool.rs:235-333  - TX pool methods
+   - get_finalized_transactions_with_fees() - Returns all without validation
+   - clear_finalized_txs() - Only removes specified TXs
+
+5. src/consensus.rs:2267-2330   - validate_transaction()
+   - DOES check UTXO state when TX is received
+   - But is NOT called during block production!
+
+6. src/consensus.rs:2800-2831   - Auto-finalization logic
+   - Transitions UTXOs to SpentFinalized state
+   - Creates new UTXOs from outputs
+   - Broadcasts to network
+
+7. src/rpc/handler.rs:3681-3750  - clearstucktransactions RPC
+   - Restores input UTXOs: SpentFinalized → Unspent
+   - Removes all output UTXOs
+   - Clears from mempool
+   - NOT coordinated across network!
+
+8. src/main.rs:3474-3523   - Re-broadcast task
+   - Runs every 120 seconds
+   - Sends TransactionFinalized to all peers
+   - Doesn't validate state before rebroadcasting
+
+================================================================================
+THE BUG IN DETAIL
+================================================================================
+
+SCENARIO 1: TX Gets Finalized Locally
+----
+
+Node A:
+  1. TX submitted → validate_transaction() ✅ PASSES (Unspent UTXOs)
+  2. TX auto-finalized → Locked → SpentFinalized UTXOs
+  3. Create new UTXOs from TX outputs
+  4. Broadcast TransactionFinalized to peers
+
+Node B (Producer):
+  5. Receive TransactionFinalized → add TX to finalized pool
+  6. Next block: produce_block_at_height()
+  7. Get finalized TXs from pool (no validation!)
+  8. Check for double-spends only
+  9. Include in block → Block submitted
+
+SCENARIO 2: TX Can't Be Included (THE BUG)
+----
+
+Node C (Producer):
+  1. Receives TX via gossip → validate_transaction() ✅ PASSES
+  2. TX auto-finalized → Locked → SpentFinalized UTXOs
+  3. Create new UTXOs
+  4. Next block: produce_block_at_height()
+  5. Get finalized TXs from pool
+  6. Check for double-spends against OTHER TXs in this block
+  7. If TX A and TX B spend the same UTXO:
+     - Both are in finalized pool (valid locally)
+     - Only one can be in a single block
+     - One gets SKIPPED silently (line 2662 in blockchain.rs)
+     - TX gets SKIPPED but left in pool!
+  8. Block produced without this TX
+  9. Next block: Same TX fetched again
+  10. Same UTXO conflict → Skipped again
+  11. TX STUCK FOREVER in finalized pool
+
+SCENARIO 3: Split-Brain After clearstucktransactions
+----
+
+Node A (runs clearstucktransactions RPC):
+  1. Restore all input UTXOs: SpentFinalized → Unspent
+  2. Remove all output UTXOs (delete from state)
+  3. Clear finalized TXs from pool
+  4. UTXO state: Clean (back to Unspent)
+  5. Can now produce blocks normally
+
+Node B (doesn't run clearstucktransactions):
+  1. Still has finalized TXs in pool
+  2. Input UTXOs still in SpentFinalized state
+  3. Output UTXOs still exist
+  4. Try to produce blocks
+  5. Fetch finalized TXs
+  6. Try to validate during UTXO processing
+  7. Inputs are SpentFinalized but outputs don't exist locally?
+  8. OR: Inputs can't be re-spent (already finalized)
+  9. Can't build valid blocks → STALLED
+
+Node C's Re-broadcast Task:
+  1. Find TXs older than 60 seconds (any stuck finalized TX)
+  2. Send TransactionFinalized to Node A
+  3. Node A receives it
+  4. Inputs are now Unspent (not Locked)
+  5. Outputs don't exist (were removed)
+  6. Transaction state is INCOHERENT
+  7. Can't be accepted
+  8. Node B keeps re-broadcasting every 120 seconds
+  9. INFINITE LOOP
+
+================================================================================
+WHY HEIGHT 14879 STALLED
+================================================================================
+
+1. Multiple TXs were auto-finalized but couldn't be included in blocks
+   (possibly due to double-spend conflicts or UTXO state issues)
+
+2. Nodes tried to produce blocks from finalized pool
+   - Every attempt skipped stuck TXs silently
+   - Couldn't build blocks fast enough
+   - Network fell behind schedule
+
+3. Administrators ran clearstucktransactions on SOME nodes
+   - Those nodes cleared stuck TXs
+   - UTXOs back to Unspent
+   - Can now produce blocks
+
+4. Other nodes (didn't run clear command) still have stuck TXs
+   - Their finalized pools still contain invalid TXs
+   - Their UTXO states diverged from cleared nodes
+   - Can't produce blocks because every finalized TX fails
+   - Network has split brain
+
+5. Result: Network partially recovered but split-brain persists
+
+================================================================================
+REQUIRED FIXES (IN PRIORITY ORDER)
+================================================================================
+
+CRITICAL (Fix Height 14879 immediately):
+
+1. VALIDATE TXS BEFORE BLOCK INCLUSION
+   Location: src/blockchain.rs, produce_block_at_height() line 2618-2683
+   
+   Change from:
+     - Get finalized TXs
+     - Filter duplicates and double-spends only
+     - Include in block
+   
+   To:
+     - Get finalized TXs
+     - For each TX:
+       a) Call validate_transaction() to check UTXO state
+       b) If validation fails:
+          - REMOVE from finalized pool (don't just skip!)
+          - Log with error reason
+          - Continue to next TX
+       c) If passes, add to block
+   
+   This prevents stuck TXs from staying in pool.
+
+2. FIX clearstucktransactions COORDINATION
+   Location: src/rpc/handler.rs line 3681-3750
+   
+   Options:
+   a) Make RPC require governance vote (coordination)
+   b) Broadcast UTXO state reset to all peers after clearing
+   c) Add "revert_finalized_txs" RPC that rebroadcasts cleared TXs 
+      so other nodes can accept them
+   
+   Currently it's unsafe because it can cause split-brain.
+
+3. ADD TTL TO FINALIZED TRANSACTIONS
+   Location: src/transaction_pool.rs
+   
+   Change from:
+     - TX stays in finalized pool until block inclusion
+   
+   To:
+     - TX has TTL (e.g., 30 minutes)
+     - If not included in block after TTL, auto-remove
+     - Prevent unbounded accumulation
+   
+   Add method: cleanup_stale_finalized(max_age)
+   Call from periodic task in main.rs
+
+IMPORTANT (Fix before next incident):
+
+4. VALIDATE BEFORE REBROADCAST
+   Location: src/main.rs line 3474-3523
+   
+   Before sending TransactionFinalized:
+   - Check that input UTXOs are in valid state (Unspent or SpentFinalized with txid match)
+   - Check that output UTXOs exist
+   - Skip if state is incoherent
+   
+   This prevents sending invalid TXs to nodes with divergent state.
+
+5. LOG ALL SKIPPED TRANSACTIONS
+   Location: src/blockchain.rs line 2650-2663
+   
+   When a double-spend is detected:
+   - Log the specific UTXO(s) in conflict
+   - Log which TXs are competing for same UTXO
+   - Alert if same TX skipped >3 blocks in a row
+   
+   Helps diagnose stuck TXs.
+
+6. ADD MEMPOOL DIAGNOSTICS RPC
+   Location: src/rpc/handler.rs
+   
+   New RPC: getmempoolstuckstats
+   Returns:
+     - TXs in finalized pool
+     - Age of each TX
+     - Reason why each is stuck (if known)
+     - UTXO state of inputs
+     - Output UTXOs that exist
+   
+   Helps identify and debug stuck transactions.
+
+================================================================================
+IMMEDIATE RECOVERY FOR HEIGHT 14879
+================================================================================
+
+Option 1 (Risky but faster):
+  - Run clearstucktransactions on ALL nodes simultaneously (coordinated)
+  - All nodes get same clean state
+  - Network resumes normally
+
+Option 2 (Safer):
+  - Implement fix #1 (validate before inclusion)
+  - Deploy to all nodes
+  - Restart nodes
+  - They'll detect invalid TXs and remove them
+  - Network state converges automatically
+  - No manual intervention needed
+
+Option 3 (If stuck again):
+  - Add new RPC: clearstucktransactions_with_rebroadcast
+  - Clear stuck TXs
+  - Rebroadcast the TX data to all peers
+  - Peers can re-accept or auto-reject
+  - Coordinates state without split-brain
+
+================================================================================
+TESTING RECOMMENDATIONS
+================================================================================
+
+1. Simulate double-spend in mempool:
+   - Create 2 TXs that spend same UTXO
+   - Finalize both
+   - Try to produce block
+   - Verify only one included
+   - Verify other one removed from pool (not stuck!)
+
+2. Test clearstucktransactions:
+   - Create stuck TX scenario
+   - Run clear on 1 node while others keep running
+   - Monitor for split-brain symptoms
+   - Verify eventually consistent
+
+3. Test re-broadcast:
+   - Create stuck TX
+   - Monitor re-broadcast task
+   - Verify cleared nodes reject or handle gracefully
+   - No infinite loops
+
+4. Load test:
+   - Produce many TXs
+   - Finalize with conflicts
+   - Monitor for accumulation in finalized pool
+   - Verify TTL cleanup removes stale TXs
+
+================================================================================

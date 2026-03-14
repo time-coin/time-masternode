@@ -11,7 +11,7 @@ use crate::masternode_registry::MasternodeRegistry;
 
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
-use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXO};
+use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXOState, UTXO};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
 use chrono::Utc;
@@ -2627,6 +2627,7 @@ impl Blockchain {
         // otherwise block_reward will be inflated and fail validation.
         let mut valid_finalized_with_fees = Vec::new();
         let mut ds_invalid_count = 0;
+        let mut evict_txids: Vec<Hash256> = Vec::new();
         let mut spent_outpoints = std::collections::HashSet::new();
         let mut seen_txids = std::collections::HashSet::new();
         for (tx, fee) in raw_finalized {
@@ -2638,6 +2639,33 @@ impl Blockchain {
                     next_height,
                     hex::encode(txid)
                 );
+                ds_invalid_count += 1;
+                continue;
+            }
+
+            // Validate input UTXOs exist and are in a spent state (SpentFinalized/SpentPending/Locked).
+            // If inputs are Unspent or missing, the TX was cleared/reverted — evict from pool.
+            let mut inputs_valid = true;
+            for input in &tx.inputs {
+                match self.utxo_manager.get_state(&input.previous_output) {
+                    Some(UTXOState::SpentFinalized { .. })
+                    | Some(UTXOState::SpentPending { .. })
+                    | Some(UTXOState::Locked { .. }) => {}
+                    other => {
+                        tracing::warn!(
+                            "⚠️  Block {}: Evicting TX {} - input {} is {:?} (expected spent state)",
+                            next_height,
+                            hex::encode(txid),
+                            input.previous_output,
+                            other.as_ref().map(|s| format!("{}", s)).unwrap_or_else(|| "missing".to_string())
+                        );
+                        inputs_valid = false;
+                        break;
+                    }
+                }
+            }
+            if !inputs_valid {
+                evict_txids.push(txid);
                 ds_invalid_count += 1;
                 continue;
             }
@@ -2669,9 +2697,19 @@ impl Blockchain {
             valid_finalized_with_fees.push((tx, fee));
         }
 
+        // Evict TXs with invalid inputs from the finalized pool
+        if !evict_txids.is_empty() {
+            tracing::warn!(
+                "🧹 Block {}: Evicting {} TX(s) with invalid input UTXOs from finalized pool",
+                next_height,
+                evict_txids.len()
+            );
+            self.consensus.clear_finalized_txs(&evict_txids);
+        }
+
         if ds_invalid_count > 0 {
             tracing::warn!(
-                "⚠️  Block {}: Excluded {} double-spend/duplicate transaction(s) before fee calculation",
+                "⚠️  Block {}: Excluded {} invalid/double-spend/duplicate transaction(s) before fee calculation",
                 next_height,
                 ds_invalid_count
             );

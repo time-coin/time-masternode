@@ -62,6 +62,7 @@ fn bench_block_validation_with_txs(c: &mut Criterion) {
             }],
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
+            special_data: None,
         };
         block.transactions.push(tx);
     }

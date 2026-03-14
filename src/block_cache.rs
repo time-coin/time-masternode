@@ -229,10 +229,12 @@ mod tests {
     use super::*;
     use crate::block::types::{Block, BlockHeader};
 
+    #[allow(dead_code)]
     fn create_test_block(height: u64) -> Arc<Block> {
         Arc::new(create_test_block_inner(height))
     }
 
+    #[allow(dead_code)]
     fn create_test_block_inner(height: u64) -> Block {
         Block {
             header: BlockHeader {

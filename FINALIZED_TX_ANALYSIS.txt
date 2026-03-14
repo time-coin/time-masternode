@@ -1,0 +1,372 @@
+# FINALIZED TRANSACTION STUCK IN MEMPOOL - ROOT CAUSE ANALYSIS
+
+## CRITICAL FINDINGS
+
+You've discovered a **critical race condition and state machine bug** in the transaction pipeline.
+
+---
+
+## 1. BLOCK PRODUCTION: How Transactions Are Selected
+
+**File:** src/blockchain.rs, lines 2618-2683
+
+The produce_block_at_height() function gets finalized transactions for inclusion:
+
+\\\ust
+// Line 2618-2623: Get finalized transactions with fees
+let raw_finalized = self
+    .consensus
+    .get_finalized_transactions_with_fees_for_block();
+
+// Line 2625-2678: Filter double-spends BEFORE including in block
+let mut valid_finalized_with_fees = Vec::new();
+let mut spent_outpoints = std::collections::HashSet::new();
+let mut seen_txids = std::collections::HashSet::new();
+
+for (tx, fee) in raw_finalized {
+    let txid = tx.txid();
+    
+    // Prevent duplicate transactions
+    if !seen_txids.insert(txid) {
+        tracing::warn!("Block {}: Skipping duplicate TX {}", next_height, hex::encode(txid));
+        ds_invalid_count += 1;
+        continue;
+    }
+    
+    // Prevent double-spend on same UTXO
+    let mut has_double_spend = false;
+    for input in &tx.inputs {
+        let outpoint_key = (input.previous_output.txid, input.previous_output.vout);
+        if spent_outpoints.contains(&outpoint_key) {
+            tracing::warn!("Block {}: Excluding TX {} - double-spend on UTXO", next_height, hex::encode(txid));
+            has_double_spend = true;
+            break;
+        }
+    }
+    
+    if has_double_spend {
+        ds_invalid_count += 1;
+        continue;  // <-- TX IS SKIPPED BUT LEFT IN MEMPOOL!
+    }
+    
+    for input in &tx.inputs {
+        spent_outpoints.insert((input.previous_output.txid, input.previous_output.vout));
+    }
+    valid_finalized_with_fees.push((tx, fee));
+}
+\\\
+
+**KEY PROBLEM:** Transactions are **skipped silently** during block production with NO error, NO removal from mempool, and NO way to recover.
+
+---
+
+## 2. TRANSACTION POOL: get_finalized_transactions_for_block() Returns ALL
+
+**File:** src/consensus.rs, line 3130
+
+\\\ust
+pub fn get_finalized_transactions_for_block(&self) -> Vec<Transaction> {
+    self.tx_pool.get_finalized_transactions()
+}
+\\\
+
+**File:** src/transaction_pool.rs, line 243
+
+\\\ust
+pub fn get_finalized_transactions(&self) -> Vec<Transaction> {
+    self.finalized
+        .iter()
+        .map(|e| e.value().tx.clone())
+        .collect()
+}
+\\\
+
+**KEY OBSERVATION:** 
+- No filtering, no staleness check, no TTL, no state validation
+- Returns transactions **AS-IS** from the finalized map
+- **Does NOT validate that input UTXOs still exist or are in valid state**
+
+---
+
+## 3. VALIDATION DURING BLOCK PRODUCTION: NO UTXO CHECK
+
+**File:** src/blockchain.rs, lines 2618-2708
+
+**CRITICAL GAP:** When producing a block, the code:
+1. Gets finalized transactions
+2. Checks for duplicates and double-spends (line 2625-2678)
+3. **BUT DOES NOT VALIDATE THAT INPUT UTXOs STILL EXIST IN CORRECT STATE**
+4. Does NOT call alidate_transaction() which would catch missing/wrong-state UTXOs
+
+**Compare to:** src/consensus.rs, line 2267-2330
+
+When a transaction is RECEIVED, it's validated (pseudo-code):
+\\\ust
+pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
+    for input in &tx.inputs {
+        match self.utxo_manager.get_state(&input.previous_output) {
+            Some(UTXOState::Unspent) => {}  // OK
+            Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {}  // OK
+            Some(UTXOState::SpentPending { txid, .. }) if txid == our_txid => {}  // OK  
+            Some(UTXOState::SpentFinalized { txid, .. }) if txid == our_txid => {}  // OK
+            Some(state) => return Err(format!("UTXO not unspent: {}", state)),  // REJECT
+            None => return Err("UTXO not found".to_string()),  // REJECT
+        }
+    }
+}
+\\\
+
+**THE BUG:** During block production, transactions are NOT re-validated. If a transaction's inputs changed state since finalization, it's still included in the block construction attempt, then silently skipped.
+
+---
+
+## 4. clearstucktransactions RPC: CHANGES UTXO STATE GLOBALLY
+
+**File:** src/rpc/handler.rs, lines 3681-3750
+
+\\\ust
+async fn clear_stuck_transactions(&self) -> Result<Value, RpcError> {
+    let finalized_txs = self.consensus.get_finalized_transactions_for_block();
+    
+    for tx in &finalized_txs {
+        // Restore input UTXOs: SpentFinalized → Unspent
+        for input in &tx.inputs {
+            let outpoint = &input.previous_output;
+            if matches!(
+                self.utxo_manager.get_state(outpoint),
+                Some(
+                    crate::types::UTXOState::SpentFinalized { .. }
+                        | crate::types::UTXOState::SpentPending { .. }
+                        | crate::types::UTXOState::Locked { .. }
+                )
+            ) {
+                self.utxo_manager
+                    .update_state(outpoint, crate::types::UTXOState::Unspent);  // <-- UTXO STATE CHANGED!
+                inputs_restored += 1;
+            }
+        }
+        
+        // Remove output UTXOs that were created by auto-finalization
+        for (idx, _output) in tx.outputs.iter().enumerate() {
+            let outpoint = OutPoint { txid, vout: idx as u32 };
+            if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
+                tracing::warn!("Failed to remove output UTXO {}", outpoint);
+            } else {
+                outputs_removed += 1;
+            }
+        }
+    }
+    
+    // Clear from pools
+    let txids: Vec<Hash256> = finalized_txs.iter().map(|tx| tx.txid()).collect();
+    self.consensus.clear_finalized_txs(&txids);
+}
+\\\
+
+**WHAT THIS DOES:**
+1. Takes ALL finalized transactions from the pool
+2. Changes their input UTXOs from SpentFinalized → Unspent
+3. Removes their output UTXOs (which were created during auto-finalization)
+4. Clears the transactions from the mempool
+
+**THE SPLIT-BRAIN PROBLEM:**
+- Some nodes run clearstucktransactions → UTXOs back to Unspent
+- Other nodes DON'T run it → UTXOs still in SpentFinalized
+- Now the network has **divergent UTXO state**
+- Transactions can't be re-included because their inputs are in wrong state
+
+---
+
+## 5. AUTO-FINALIZATION: Creates SpentFinalized UTXOs
+
+**File:** src/consensus.rs, lines 2795-2831
+
+When a transaction auto-finalizes (e.g., producer sends it):
+
+\\\ust
+if self.tx_pool.is_finalized(&txid) {
+    tracing::info!("✅ TX {} auto-finalized", hex::encode(txid));
+    
+    // CRITICAL: Transition UTXOs from Locked → SpentFinalized
+    // Without this, other nodes reject blocks containing this TX
+    // because the UTXOs are still in Locked state
+    for input in &tx.inputs {
+        let new_state = UTXOState::SpentFinalized {
+            txid,
+            finalized_at: chrono::Utc::now().timestamp(),
+            votes: 0,
+        };
+        self.utxo_manager
+            .update_state(&input.previous_output, new_state);
+    }
+    
+    // Create new UTXOs from transaction outputs
+    for (idx, output) in tx.outputs.iter().enumerate() {
+        let outpoint = OutPoint { txid, vout: idx as u32 };
+        let utxo = UTXO { ... };
+        self.utxo_manager.add_utxo(utxo).await;
+        self.utxo_manager.update_state(&outpoint, UTXOState::Unspent);
+    }
+}
+\\\
+
+**UTXO State Flow:**
+`
+Unspent → Locked (during vote init)
+   ↓
+SpentFinalized (if producer finalizes the TX)
+   ↓
+[TX should be included in a block]
+   ↓
+[If block production skips it, stays in SpentFinalized with outputs existing]
+`
+
+---
+
+## 6. add_block(): Only Clears TXs Actually In Block
+
+**File:** src/blockchain.rs, lines 3891-3908
+
+\\\ust
+// Clear only finalized transactions that were in THIS block
+// Extract non-coinbase, non-reward transaction IDs from the block
+// Skip first 2 transactions (coinbase + reward distribution)
+let block_txids: Vec<Hash256> = block
+    .transactions
+    .iter()
+    .skip(2)
+    .map(|tx| tx.txid())
+    .collect();
+
+if !block_txids.is_empty() {
+    tracing::debug!(
+        "🔍 Block {}: Clearing {} finalized transaction(s) from pool",
+        block.header.height,
+        block_txids.len()
+    );
+    self.consensus.clear_finalized_txs(&block_txids);  // <-- Only these TXs removed from pool
+}
+\\\
+
+**KEY INSIGHT:** Only transactions **actually included** in the block are removed from mempool.
+
+If a finalized transaction was **skipped** during block production (due to double-spend detection or UTXO state issue):
+- It **stays in the finalized pool**
+- Its input UTXOs stay in SpentFinalized state
+- It will be fetched again next block
+- It will be skipped again (double-spend still detected OR UTXO still in wrong state)
+- **INFINITE LOOP: Transaction stuck forever**
+
+---
+
+## 7. RE-BROADCAST MECHANISM
+
+**File:** src/main.rs, lines 3474-3523
+
+\\\ust
+// Re-broadcast orphaned finalized transactions.
+// When TXs are auto-finalized locally but peers miss the broadcast,
+// those TXs sit in the finalized pool indefinitely — other block
+// producers never include them. This task re-sends TransactionFinalized
+// every 2 minutes for any finalized TX older than 60 seconds.
+
+let rebroadcast_handle = tokio::spawn(async move {
+    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(120));
+    interval.tick().await;
+    
+    loop {
+        let stale = rebroadcast_consensus
+            .get_stale_finalized(std::time::Duration::from_secs(60));
+        
+        if stale.is_empty() { continue; }
+        
+        let peer_count = rebroadcast_peers.connected_count();
+        if peer_count == 0 { continue; }
+        
+        tracing::info!("📡 Re-broadcasting {} orphaned finalized TX(s) to {} peer(s)",
+            stale.len(), peer_count);
+        
+        for (txid, tx) in stale {
+            let msg = crate::network::message::NetworkMessage::TransactionFinalized {
+                txid,
+                tx,
+            };
+            rebroadcast_peers.broadcast(msg).await;  // <-- Sends to cleared nodes!
+        }
+    }
+});
+\\\
+
+**THE PROBLEM:**
+- If clearstucktransactions was run on **node A**, its UTXOs are back to Unspent
+- But **node B** (where TX was first finalized) still has the TX in finalized pool
+- Node B's re-broadcast task sends TransactionFinalized to node A
+- Node A receives it, **but cannot accept it** because:
+  - The inputs are now Unspent (not Locked)
+  - The outputs no longer exist (were removed by clearstucktransactions)
+  - **The transaction is incoherent with current UTXO state**
+
+---
+
+## ROOT CAUSE SUMMARY
+
+### The Bug Chain:
+
+1. **No UTXO re-validation during block production**
+   - Finalized TXs fetched without checking if inputs still exist/are in correct state
+   - Transactions silently skipped if they can't be included
+   - Mempool not updated when transactions are skipped
+
+2. **Split-brain on clearstucktransactions**
+   - Some nodes clear UTXOs → Unspent
+   - Other nodes don't → still SpentFinalized
+   - Network diverges on UTXO state
+   - Can't re-broadcast because state is incoherent
+
+3. **No staleness or TTL on finalized transactions**
+   - Transaction_pool has NO timeout mechanism
+   - Transactions can sit in finalized pool forever
+   - No automatic cleanup or detection of stuck state
+
+4. **Re-broadcast sends to incompatible state**
+   - Cleared nodes reject re-broadcast (wrong UTXO state)
+   - Original nodes keep re-broadcasting forever
+   - Creates infinite re-broadcast loop
+
+---
+
+## WHY HEIGHT 14879 STALLED
+
+When clearstucktransactions was run:
+1. Some nodes cleared finalized TXs, reset UTXO states
+2. Those nodes can now produce blocks (clean state)
+3. Other nodes still have finalized TXs stuck with SpentFinalized UTXOs
+4. Those nodes:
+   - Try to produce blocks from finalized pool
+   - Every TX gets skipped (inputs in SpentFinalized, but no matching outputs)
+   - Can't build valid blocks
+   - Network stalls
+
+---
+
+## SOLUTIONS NEEDED
+
+1. **During block production:**
+   - Call alidate_transaction() on each finalized TX before including
+   - If validation fails, REMOVE from finalized pool (don't just skip)
+   - Log skipped transactions with reason
+
+2. **clearstucktransactions:**
+   - Must be coordinated across all nodes (use governance vote)
+   - Or make it idempotent (safe to call multiple times)
+   - Should sync UTXO state broadcast to all peers
+
+3. **Add TTL to finalized transactions:**
+   - If not included in a block after N minutes, auto-remove
+   - Prevent unbounded accumulation
+
+4. **Safe re-broadcast:**
+   - Validate TX state matches current UTXO state before rebroadcasting
+   - Don't rebroadcast if inputs don't exist
+
