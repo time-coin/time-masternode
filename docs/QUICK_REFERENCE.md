@@ -11,6 +11,7 @@ Hash:       BLAKE3-256
 Signature:  Ed25519
 VRF:        ECVRF-Edwards25519-SHA512-TAI (RFC 9381)
 Address:    bech32m (BIP 350)
+Memo:       ECDH (X25519) + AES-256-GCM (encrypted per-transaction memos)
 ```
 
 ---
@@ -29,8 +30,31 @@ Address:    bech32m (BIP 350)
   [script_length: varint]
   [script: bytes]
 [lock_time: u64_le]
+[encrypted_memo: Option<bytes>]   # ECDH-encrypted memo (see below)
 
 txid = BLAKE3(serialized_bytes)
+```
+
+### Encrypted Memo Format
+
+Optional field. When present, encrypted using ECDH key exchange so only sender and recipient can decrypt.
+
+```
+Wire format (encrypted_memo bytes):
+[0]       version byte (0x01)
+[1..33]   sender's Ed25519 public key (32 bytes)
+[33..65]  recipient's Ed25519 public key (32 bytes)
+[65..77]  AES-GCM nonce (12 bytes)
+[77..]    AES-GCM ciphertext + 16-byte auth tag
+
+Key derivation:
+  1. Ed25519 signing key → X25519 secret (via SHA-512 of seed)
+  2. Ed25519 public key → X25519 public (Edwards → Montgomery birational map)
+  3. shared_secret = X25519(our_secret, their_public)
+  4. aes_key = SHA-256(shared_secret || "TIME-memo-v1")
+  5. Encrypt/decrypt with AES-256-GCM
+
+Max plaintext: 256 bytes
 ```
 
 ---
