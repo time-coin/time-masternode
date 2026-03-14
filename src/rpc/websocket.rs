@@ -45,6 +45,13 @@ pub enum TxEventStatus {
     Finalized,
     /// Transaction was declined during finality
     Declined(String),
+    /// A payment request targeting this address
+    PaymentRequest {
+        from_address: String,
+        memo: String,
+        pubkey_hex: String,
+        expires: i64,
+    },
 }
 
 /// Event emitted for transaction lifecycle (mempool entry, finalization, or decline)
@@ -129,6 +136,7 @@ impl SubscriptionManager {
             TxEventStatus::Finalized => "utxo_finalized",
             TxEventStatus::Pending => "tx_notification",
             TxEventStatus::Declined(_) => "tx_declined",
+            TxEventStatus::PaymentRequest { .. } => "payment_request",
         };
 
         let sub_count = self.total_subscriptions();
@@ -177,6 +185,23 @@ impl SubscriptionManager {
                             "output_index": output.index,
                             "timestamp": event.timestamp,
                             "reason": reason,
+                        })
+                    }
+                    TxEventStatus::PaymentRequest {
+                        from_address,
+                        memo,
+                        pubkey_hex,
+                        expires,
+                    } => {
+                        serde_json::json!({
+                            "id": event.txid.strip_prefix("pr:").unwrap_or(&event.txid),
+                            "from_address": from_address,
+                            "to_address": output.address,
+                            "amount": output.amount,
+                            "memo": memo,
+                            "pubkey": pubkey_hex,
+                            "timestamp": event.timestamp,
+                            "expires": expires,
                         })
                     }
                 };
@@ -303,6 +328,7 @@ pub async fn start_ws_server(
                                 TxEventStatus::Pending => "pending",
                                 TxEventStatus::Finalized => "finalized",
                                 TxEventStatus::Declined(_) => "declined",
+                                TxEventStatus::PaymentRequest { .. } => "payment_request",
                             };
                             tracing::info!(
                                 "📡 WS dispatcher received event: txid={}..., status={}",
