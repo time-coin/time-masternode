@@ -3690,13 +3690,45 @@ impl RpcHandler {
             }));
         }
 
-        let tx_count = finalized_txs.len();
         let mut inputs_restored = 0u64;
         let mut outputs_removed = 0u64;
         let mut cleared_txids = Vec::new();
+        let mut total_input_value = 0u64;
+        let mut total_output_value = 0u64;
+        let mut skipped_txids = Vec::new();
 
         for tx in &finalized_txs {
             let txid = tx.txid();
+
+            // Pre-flight: verify all input UTXOs exist in storage before touching anything.
+            // If any input is missing, the TX can't be safely reversed (coins would be lost).
+            let mut tx_input_value = 0u64;
+            let mut inputs_ok = true;
+            for input in &tx.inputs {
+                match self.utxo_manager.get_utxo(&input.previous_output).await {
+                    Ok(utxo) => {
+                        tx_input_value += utxo.value;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            "⚠️ Skipping TX {}: input UTXO {} missing from storage (unsafe to clear)",
+                            hex::encode(txid),
+                            input.previous_output
+                        );
+                        inputs_ok = false;
+                        break;
+                    }
+                }
+            }
+
+            if !inputs_ok {
+                skipped_txids.push(hex::encode(txid));
+                continue;
+            }
+
+            let tx_output_value: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            total_input_value += tx_input_value;
+            total_output_value += tx_output_value;
 
             // Restore input UTXOs: SpentFinalized → Unspent
             for input in &tx.inputs {
@@ -3745,24 +3777,50 @@ impl RpcHandler {
         }
 
         // Clear from finalized and pending pools
-        let txids: Vec<crate::types::Hash256> = finalized_txs.iter().map(|tx| tx.txid()).collect();
+        let txids: Vec<crate::types::Hash256> = finalized_txs
+            .iter()
+            .filter(|tx| {
+                let txid_hex = hex::encode(tx.txid());
+                cleared_txids.contains(&txid_hex)
+            })
+            .map(|tx| tx.txid())
+            .collect();
         self.consensus.clear_finalized_txs(&txids);
 
+        let fee_value = total_input_value.saturating_sub(total_output_value);
+
         tracing::warn!(
-            "🧹 Cleared {} stuck finalized transactions: restored {} input UTXOs, removed {} output UTXOs",
-            tx_count,
+            "🧹 Cleared {} stuck finalized transactions: restored {} input UTXOs, removed {} output UTXOs \
+             (input_value={}, output_value={}, fees={})",
+            cleared_txids.len(),
             inputs_restored,
-            outputs_removed
+            outputs_removed,
+            total_input_value,
+            total_output_value,
+            fee_value
         );
 
+        if !skipped_txids.is_empty() {
+            tracing::warn!(
+                "⚠️ Skipped {} TX(s) with missing input UTXOs (unsafe to clear): {:?}",
+                skipped_txids.len(),
+                skipped_txids
+            );
+        }
+
         Ok(json!({
-            "cleared": tx_count,
+            "cleared": cleared_txids.len(),
+            "skipped": skipped_txids.len(),
             "inputs_restored": inputs_restored,
             "outputs_removed": outputs_removed,
+            "total_input_value": total_input_value,
+            "total_output_value": total_output_value,
+            "fees_returned": fee_value,
             "transactions": cleared_txids,
+            "skipped_transactions": skipped_txids,
             "message": format!(
-                "Cleared {} stuck transactions, restored {} inputs, removed {} outputs",
-                tx_count, inputs_restored, outputs_removed
+                "Cleared {} stuck transactions (skipped {}), restored {} inputs (value: {}), removed {} outputs (value: {})",
+                cleared_txids.len(), skipped_txids.len(), inputs_restored, total_input_value, outputs_removed, total_output_value
             )
         }))
     }

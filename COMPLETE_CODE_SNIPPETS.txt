@@ -1,0 +1,278 @@
+================================================================================
+                    COMPLETE CODE SNIPPETS
+================================================================================
+
+FILE 1: src/blockchain.rs (Lines 2618-2683)
+================================================================================
+
+[Line 2618-2623] GET FINALIZED TRANSACTIONS WITH FEES
+let raw_finalized = self
+    .consensus
+    .get_finalized_transactions_with_fees_for_block();
+
+[Line 2625-2678] DOUBLE-SPEND FILTERING (NO UTXO RE-VALIDATION!)
+let mut valid_finalized_with_fees = Vec::new();
+let mut spent_outpoints = std::collections::HashSet::new();
+let mut seen_txids = std::collections::HashSet::new();
+
+for (tx, fee) in raw_finalized {
+    let txid = tx.txid();
+    
+    // Check for duplicate TXs
+    if !seen_txids.insert(txid) {
+        tracing::warn!(
+            "Block {}: Skipping duplicate TX {}",
+            next_height,
+            hex::encode(txid)
+        );
+        ds_invalid_count += 1;
+        continue;  // SILENTLY SKIPPED WITHOUT REMOVING FROM MEMPOOL!
+    }
+    
+    // Check for double-spend
+    let mut has_double_spend = false;
+    for input in tx.inputs {
+        let outpoint_key = (input.previous_output.txid, input.previous_output.vout);
+        if spent_outpoints.contains(&outpoint_key) {
+            tracing::warn!(
+                "Block {}: Excluding TX {} - double-spend",
+                next_height,
+                hex::encode(txid)
+            );
+            has_double_spend = true;
+            break;
+        }
+    }
+    
+    if has_double_spend {
+        ds_invalid_count += 1;
+        continue;  // SILENTLY SKIPPED WITHOUT REMOVING FROM MEMPOOL!
+    }
+    
+    for input in tx.inputs {
+        spent_outpoints.insert((input.previous_output.txid, input.previous_output.vout));
+    }
+    valid_finalized_with_fees.push((tx, fee));
+}
+
+
+================================================================================
+FILE 2: src/blockchain.rs (Lines 3891-3908)
+================================================================================
+
+[Line 3891-3908] CLEAR FINALIZED TRANSACTIONS (ONLY THOSE IN BLOCK)
+let block_txids: Vec<Hash256> = block
+    .transactions
+    .iter()
+    .skip(2)  // Skip coinbase + reward
+    .map(|tx| tx.txid())
+    .collect();
+
+if !block_txids.is_empty() {
+    tracing::debug!(
+        "Block {}: Clearing {} finalized transaction(s) from pool",
+        block.header.height,
+        block_txids.len()
+    );
+    self.consensus.clear_finalized_txs(&block_txids);  // ONLY these removed
+}
+
+// KEY INSIGHT: Skipped TXs remain in finalized pool!
+
+
+================================================================================
+FILE 3: src/consensus.rs (Lines 3130-3151)
+================================================================================
+
+[Line 3130] pub fn get_finalized_transactions_for_block(&self) -> Vec<Transaction> {
+    self.tx_pool.get_finalized_transactions()
+}
+
+[Line 3134] pub fn get_finalized_transactions_with_fees_for_block(&self) -> Vec<(Transaction, u64)> {
+    self.tx_pool.get_finalized_transactions_with_fees()
+}
+
+[Line 3138] pub fn get_stale_finalized(&self, min_age: std::time::Duration) -> Vec<(Hash256, Transaction)> {
+    self.tx_pool.get_stale_finalized(min_age)
+}
+
+[Line 3149] pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
+    self.tx_pool.clear_finalized_txs(txids);
+}
+
+
+================================================================================
+FILE 4: src/transaction_pool.rs (Lines 235-333)
+================================================================================
+
+[Line 235] pub fn get_finalized_transactions_with_fees(&self) -> Vec<(Transaction, u64)> {
+    self.finalized
+        .iter()
+        .map(|e| (e.value().tx.clone(), e.value().fee))
+        .collect()  // RETURNS ALL WITHOUT FILTERING OR VALIDATION!
+}
+
+[Line 243] pub fn get_finalized_transactions(&self) -> Vec<Transaction> {
+    self.finalized
+        .iter()
+        .map(|e| e.value().tx.clone())
+        .collect()  // RETURNS ALL WITHOUT VALIDATION!
+}
+
+[Line 309] pub fn clear_finalized_txs(&self, txids: &[Hash256]) {
+    let mut cleared_finalized = 0;
+    let mut cleared_pending = 0;
+    for txid in txids {
+        if self.finalized.remove(txid).is_some() {
+            cleared_finalized += 1;
+        }
+        if let Some((_, entry)) = self.pending.remove(txid) {
+            self.pending_count.fetch_sub(1, Ordering::Relaxed);
+            self.pending_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+            cleared_pending += 1;
+        }
+        self.sled_remove(txid);
+    }
+    if cleared_finalized > 0 || cleared_pending > 0 {
+        tracing::info!(
+            "Cleared {} finalized + {} pending(s) in block",
+            cleared_finalized,
+            cleared_pending
+        );
+    }
+}
+
+
+================================================================================
+FILE 5: src/consensus.rs (Lines 2267-2330)
+================================================================================
+
+[Line 2267] pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
+    self.validate_transaction_with_locks(tx, tx.txid()).await.map(|_| ())
+}
+
+[Line 2297-2329] CHECK INPUTS EXIST AND ARE UNSPENT
+
+for input in tx.inputs {
+    match self.utxo_manager.get_state(&input.previous_output) {
+        Some(UTXOState::Unspent) => {}  // OK
+        Some(UTXOState::Locked { txid, .. }) if txid == our_txid => {}  // OK
+        Some(UTXOState::SpentPending { txid, .. }) if txid == our_txid => {}  // OK  
+        Some(UTXOState::SpentFinalized { txid, .. }) if txid == our_txid => {}  // OK
+        Some(state) => return Err(format!("UTXO not unspent: {}", state)),  // REJECT
+        None => return Err("UTXO not found".to_string()),  // REJECT
+    }
+}
+
+// NOTE: This validation IS NOT CALLED during block production!
+// Only called when TX is initially received.
+
+
+================================================================================
+FILE 6: src/consensus.rs (Lines 2800-2831)
+================================================================================
+
+[Line 2800-2810] CRITICAL: Transition UTXOs from Locked → SpentFinalized
+
+for input in tx.inputs {
+    let new_state = UTXOState::SpentFinalized {
+        txid,
+        finalized_at: chrono::Utc::now().timestamp(),
+        votes: 0,
+    };
+    self.utxo_manager
+        .update_state(&input.previous_output, new_state);  // UTXO STATE CHANGED!
+}
+
+[Line 2813-2831] Create new UTXOs from transaction outputs
+
+for (idx, output) in tx.outputs.iter().enumerate() {
+    let outpoint = OutPoint { txid, vout: idx as u32 };
+    let utxo = UTXO { ... };
+    self.utxo_manager.add_utxo(utxo).await;
+    self.utxo_manager.update_state(&outpoint, UTXOState::Unspent);
+}
+
+// Broadcast finalization to all nodes
+self.broadcast(NetworkMessage::TransactionFinalized { txid, tx })
+
+
+================================================================================
+FILE 7: src/rpc/handler.rs (Lines 3681-3750)
+================================================================================
+
+[Line 3681] async fn clear_stuck_transactions(&self) -> Result<Value, RpcError> {
+    let finalized_txs = self.consensus.get_finalized_transactions_for_block();
+    
+    for tx in finalized_txs {
+        // Restore input UTXOs: SpentFinalized → Unspent
+        for input in tx.inputs {
+            let outpoint = &input.previous_output;
+            if matches!(
+                self.utxo_manager.get_state(outpoint),
+                Some(UTXOState::SpentFinalized { .. }
+                    | UTXOState::SpentPending { .. }
+                    | UTXOState::Locked { .. })
+            ) {
+                self.utxo_manager
+                    .update_state(outpoint, crate::types::UTXOState::Unspent);
+                inputs_restored += 1;
+            }
+        }
+        
+        // Remove output UTXOs
+        for (idx, _output) in tx.outputs.iter().enumerate() {
+            let outpoint = OutPoint { txid, vout: idx as u32 };
+            if self.utxo_manager.get_state(&outpoint).is_some() {
+                self.utxo_manager.remove_utxo(&outpoint).await;
+                outputs_removed += 1;
+            }
+        }
+    }
+    
+    // Clear from pools
+    let txids = finalized_txs.iter().map(|tx| tx.txid()).collect();
+    self.consensus.clear_finalized_txs(&txids);
+}
+
+
+================================================================================
+FILE 8: src/main.rs (Lines 3474-3523)
+================================================================================
+
+[Line 3474-3523] RE-BROADCAST TASK (Runs every 120 seconds)
+
+let rebroadcast_handle = tokio::spawn(async move {
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    let mut interval = tokio::time::interval(Duration::from_secs(120));
+    
+    loop {
+        let stale = rebroadcast_consensus
+            .get_stale_finalized(Duration::from_secs(60));
+        
+        if stale.is_empty() { continue; }
+        
+        let peer_count = rebroadcast_peers.connected_count();
+        if peer_count == 0 { continue; }
+        
+        tracing::info!(
+            "Re-broadcasting {} orphaned finalized TX(s) to {} peers",
+            stale.len(), peer_count
+        );
+        
+        for (txid, tx) in stale {
+            let msg = NetworkMessage::TransactionFinalized { txid, tx };
+            rebroadcast_peers.broadcast(msg).await;
+        }
+    }
+});
+
+// THE PROBLEM:
+// If clearstucktransactions was run on node A:
+//   - Node A UTXOs are Unspent (cleared)
+//   - Node A cannot accept re-broadcast (inputs not in Locked/SpentFinalized)
+// If clearstucktransactions was NOT run on node B:
+//   - Node B UTXOs are SpentFinalized (original state)
+//   - Node B keeps re-broadcasting to node A
+//   - Infinite re-broadcast loop
+

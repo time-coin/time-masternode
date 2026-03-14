@@ -113,10 +113,11 @@ async fn test_competing_timeproofs_detected_as_anomaly() {
     let txid = create_dummy_hash(100);
 
     // First proof: 51% from validators 1,2,3 (weight: 3000)
-    let mut votes_a = vec![];
-    votes_a.push(create_test_vote("v1", 1000, txid, VoteDecision::Accept));
-    votes_a.push(create_test_vote("v2", 1000, txid, VoteDecision::Accept));
-    votes_a.push(create_test_vote("v3", 1000, txid, VoteDecision::Accept));
+    let votes_a = vec![
+        create_test_vote("v1", 1000, txid, VoteDecision::Accept),
+        create_test_vote("v2", 1000, txid, VoteDecision::Accept),
+        create_test_vote("v3", 1000, txid, VoteDecision::Accept),
+    ];
     let proof_a = create_test_timeproof(txid, votes_a, 5);
 
     // This should be the ONLY finalized proof
@@ -126,9 +127,10 @@ async fn test_competing_timeproofs_detected_as_anomaly() {
 
     // If a SECOND proof appears, it indicates a problem
     // (Stale from partition, or implementation bug)
-    let mut votes_b = vec![];
-    votes_b.push(create_test_vote("v4", 1000, txid, VoteDecision::Accept));
-    votes_b.push(create_test_vote("v5", 1000, txid, VoteDecision::Accept));
+    let votes_b = vec![
+        create_test_vote("v4", 1000, txid, VoteDecision::Accept),
+        create_test_vote("v5", 1000, txid, VoteDecision::Accept),
+    ];
     let proof_b = create_test_timeproof(txid, votes_b, 5);
 
     let result2 = consensus.detect_competing_timeproof(proof_b, 2000);
@@ -159,19 +161,10 @@ async fn test_stale_proof_detection_from_partition() {
     let txid = create_dummy_hash(101);
 
     // Canonical proof from majority partition (2000 weight)
-    let mut canonical_votes = vec![];
-    canonical_votes.push(create_test_vote(
-        "majority_v1",
-        1000,
-        txid,
-        VoteDecision::Accept,
-    ));
-    canonical_votes.push(create_test_vote(
-        "majority_v2",
-        1000,
-        txid,
-        VoteDecision::Accept,
-    ));
+    let canonical_votes = vec![
+        create_test_vote("majority_v1", 1000, txid, VoteDecision::Accept),
+        create_test_vote("majority_v2", 1000, txid, VoteDecision::Accept),
+    ];
     let canonical = create_test_timeproof(txid, canonical_votes, 10);
 
     consensus
@@ -179,19 +172,10 @@ async fn test_stale_proof_detection_from_partition() {
         .ok();
 
     // Stale proof from minority partition (800 weight) now arrives
-    let mut stale_votes = vec![];
-    stale_votes.push(create_test_vote(
-        "minority_v1",
-        400,
-        txid,
-        VoteDecision::Accept,
-    ));
-    stale_votes.push(create_test_vote(
-        "minority_v2",
-        400,
-        txid,
-        VoteDecision::Accept,
-    ));
+    let stale_votes = vec![
+        create_test_vote("minority_v1", 400, txid, VoteDecision::Accept),
+        create_test_vote("minority_v2", 400, txid, VoteDecision::Accept),
+    ];
     let stale = create_test_timeproof(txid, stale_votes, 10);
 
     let winning = consensus
@@ -295,7 +279,7 @@ async fn test_fork_resolution_selects_canonical() {
     let txid = create_dummy_hash(230);
 
     // Create competing proofs
-    let weights = vec![500, 1500, 800];
+    let weights: [u64; 3] = [500, 1500, 800];
 
     for (i, weight) in weights.iter().enumerate() {
         let vote = create_test_vote(&format!("v{}", i), *weight, txid, VoteDecision::Accept);
@@ -340,6 +324,6 @@ async fn test_competing_proofs_should_never_happen_normally() {
         tracing::error!(
             "⚠️  PROTOCOL VIOLATION: Multiple proofs for single TX! UTXO state corruption?"
         );
-        assert!(false, "Multiple proofs indicates UTXO state bug");
+        panic!("Multiple proofs indicates UTXO state bug");
     }
 }

@@ -3477,6 +3477,11 @@ async fn main() {
     // pool indefinitely — other block producers never include them. This task
     // re-sends TransactionFinalized every 2 minutes for any finalized TX older
     // than 60 seconds, ensuring peers eventually receive them.
+    //
+    // SAFETY: Before re-broadcasting, validates that each TX's input UTXOs are
+    // still in SpentFinalized state. If inputs were restored (e.g., by
+    // clearstucktransactions or UTXO reconciliation), the TX is evicted from
+    // the finalized pool instead of re-broadcast, preventing infinite loops.
     let rebroadcast_consensus = consensus_engine.clone();
     let rebroadcast_peers = peer_connection_registry.clone();
     let rebroadcast_shutdown = shutdown_token.clone();
@@ -3504,12 +3509,57 @@ async fn main() {
                         );
                         continue;
                     }
+
+                    // Validate each TX before re-broadcasting: ensure input UTXOs
+                    // are still SpentFinalized. If not, the TX was cleared/reverted
+                    // and should be evicted, not re-broadcast.
+                    let mut valid_txs = Vec::new();
+                    let mut evict_txids = Vec::new();
+                    for (txid, tx) in &stale {
+                        let mut inputs_valid = true;
+                        for input in &tx.inputs {
+                            match rebroadcast_consensus.utxo_manager.get_state(&input.previous_output) {
+                                Some(crate::types::UTXOState::SpentFinalized { .. }) => {}
+                                Some(crate::types::UTXOState::SpentPending { .. }) => {}
+                                Some(crate::types::UTXOState::Locked { .. }) => {}
+                                other => {
+                                    tracing::warn!(
+                                        "🧹 Evicting finalized TX {} from pool: input {} is {:?} (expected SpentFinalized)",
+                                        hex::encode(txid),
+                                        input.previous_output,
+                                        other.as_ref().map(|s| format!("{}", s)).unwrap_or_else(|| "missing".to_string())
+                                    );
+                                    inputs_valid = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if inputs_valid {
+                            valid_txs.push((*txid, tx.clone()));
+                        } else {
+                            evict_txids.push(*txid);
+                        }
+                    }
+
+                    // Evict invalid TXs from the finalized pool
+                    if !evict_txids.is_empty() {
+                        tracing::warn!(
+                            "🧹 Evicting {} finalized TX(s) with invalid input UTXOs",
+                            evict_txids.len()
+                        );
+                        rebroadcast_consensus.clear_finalized_txs(&evict_txids);
+                    }
+
+                    if valid_txs.is_empty() {
+                        continue;
+                    }
+
                     tracing::info!(
                         "📡 Re-broadcasting {} orphaned finalized TX(s) to {} peer(s)",
-                        stale.len(),
+                        valid_txs.len(),
                         peer_count
                     );
-                    for (txid, tx) in stale {
+                    for (txid, tx) in valid_txs {
                         let msg = crate::network::message::NetworkMessage::TransactionFinalized {
                             txid,
                             tx,

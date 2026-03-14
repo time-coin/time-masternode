@@ -1,0 +1,210 @@
+================================================================================
+VISUAL: THE BUG FLOW - WHY TRANSACTIONS GET STUCK
+================================================================================
+
+[TX LIFECYCLE - NORMAL CASE]
+
+  Submitted by user
+         |
+         v
+  validate_transaction() [FULL CHECK]
+         |
+  ✅ Passes (UTXO: Unspent)
+         |
+         v
+  Locked state (vote starts)
+         |
+         v
+  Auto-finalize (weight threshold reached)
+         |
+  ✅ Finalize → SpentFinalized [UTXO STATE CHANGED!]
+  ✅ Create output UTXOs
+  ✅ Broadcast TransactionFinalized
+         |
+         v
+  In finalized pool, waiting for block inclusion
+         |
+         v
+  Next block: produce_block_at_height()
+  - Get finalized TXs
+  - Filter double-spends
+  - (NO VALIDATION CALLED HERE!)
+         |
+         v
+  ✅ Included in block [UTXO state: SpentFinalized → Spent]
+  ✅ add_block() removes from finalized pool
+  
+  RESULT: TX SUCCESS ✅
+
+
+[TX LIFECYCLE - STUCK CASE (THE BUG)]
+
+  2 TXs finalized with same input UTXO (both auto-finalized independently)
+         |
+         v
+  Block 1: produce_block_at_height()
+  - Get finalized TXs: [TX_A (spends UTXO:123), TX_B (spends UTXO:123)]
+  - Filter: TX_A included, TX_B skipped (double-spend detected)
+  - (TX_B not validated! Not removed from pool!)
+         |
+         v
+  Block 1 produced with TX_A only
+  - add_block() removes only TX_A from finalized pool
+  - TX_B STAYS in finalized pool (silently skipped!)
+  - UTXO:123 spent by TX_A now
+  - TX_B's input UTXO in SpentFinalized state (from TX_B)
+  
+  PROBLEM: TX_B's UTXO state incoherent with chain!
+         |
+         v
+  Block 2: produce_block_at_height()
+  - Get finalized TXs: Still has TX_B
+  - Try to include TX_B
+  - Same input UTXO conflict (now really spent by TX_A!)
+  - TX_B skipped again (not removed!)
+         |
+         v
+  Block 3, 4, 5, ... same as Block 2
+  
+  RESULT: TX_B STUCK FOREVER in finalized pool ❌
+
+
+[SPLIT-BRAIN SCENARIO - THE NETWORK STALL]
+
+  Node A: Runs clearstucktransactions RPC
+         |
+         v
+  - Get finalized TXs (including TX_B)
+  - Restore inputs: SpentFinalized → Unspent
+  - Remove outputs: Delete from UTXO state
+  - Clear from finalized pool
+         |
+         v
+  Node A UTXO state: TX_B inputs = Unspent, outputs = don't exist
+  Node A finalized pool: TX_B removed
+  Node A can now produce blocks! ✅
+  
+  BUT:
+  
+  Node B: Didn't run clearstucktransactions
+         |
+         v
+  Node B UTXO state: TX_B inputs = SpentFinalized, outputs = exist
+  Node B finalized pool: TX_B still there
+  Node B tries to produce block
+         |
+         v
+  Block production:
+  - Get finalized TXs (still has TX_B)
+  - Try to include TX_B
+  - Is this checked by validate_transaction()? NO! (not called!)
+  - Try to process_block_utxos()
+  - Try to spend UTXO:123 (already SpentFinalized)
+  - Spending fails or state is incoherent
+  - Block production fails
+  
+  RESULT: Node B STALLS (can't produce blocks) ❌
+         |
+         v
+  Node B's Rebroadcast Task (runs every 120 seconds):
+  - Find TX_B (older than 60 seconds, stuck)
+  - Send TransactionFinalized { txid: B, tx: B }
+  - Broadcast to Node A
+         |
+         v
+  Node A receives TransactionFinalized for TX_B:
+  - Tries to add to finalized pool
+  - But wait... Node A already cleared this!
+  - Tries to validate_transaction():
+    - Inputs (Unspent) ✅
+    - Outputs (don't exist) ❌ 
+    - UTXO state coherency check fails
+  - Can't accept TX_B
+         |
+         v
+  Node B keeps rebroadcasting every 120 seconds
+  Node A keeps rejecting
+  
+  RESULT: INFINITE REBROADCAST LOOP ❌
+
+
+[UTXO STATE DIAGRAM - WHY SPLIT-BRAIN OCCURS]
+
+  ORIGINAL STATE (Both nodes same):
+  
+  Node A & B:
+    UTXO:123 → SpentFinalized {txid: B, ...}
+    Output from TX_B → Unspent
+  
+  
+  AFTER clearstucktransactions on Node A:
+  
+  Node A:
+    UTXO:123 → Unspent [CHANGED!]
+    Output from TX_B → [DELETED!]
+  
+  Node B:
+    UTXO:123 → SpentFinalized {txid: B, ...} [UNCHANGED]
+    Output from TX_B → Unspent [UNCHANGED]
+  
+  
+  TRYING TO RESYNC:
+  
+  Node B (re)broadcasts: "TX_B is finalized!"
+  Node A receives, tries to accept TX_B
+  
+  Validation check:
+    Input UTXO:123 is Unspent ← From Node A's state
+    Output doesn't exist ← Removed by clearstucktransactions
+    State is INCOHERENT!
+    REJECT ❌
+  
+  
+  RESULT: Network split-brain, can't recover without manual intervention
+
+
+[KEY LOCATIONS WHERE BUG MANIFESTS]
+
+1. Silent Skip (MOST CRITICAL)
+   ├─ Location: src/blockchain.rs:2662
+   ├─ Action: continue; (skip TX, don't remove from pool)
+   └─ Result: TX stuck forever
+
+2. No Re-Validation
+   ├─ Location: src/blockchain.rs:2618-2678
+   ├─ Missing: validate_transaction() call
+   └─ Result: Invalid TXs not detected
+
+3. No TTL
+   ├─ Location: src/transaction_pool.rs
+   ├─ Missing: Automatic removal after N minutes
+   └─ Result: Unbounded pool growth
+
+4. No Network Coordination
+   ├─ Location: src/rpc/handler.rs:3681-3750
+   ├─ Missing: Broadcast state change to peers
+   └─ Result: Split-brain possible
+
+5. No Rebroadcast Validation
+   ├─ Location: src/main.rs:3512-3517
+   ├─ Missing: State coherency check before send
+   └─ Result: Infinite rebroadcast loops
+
+
+[FIX PRIORITY]
+
+CRITICAL:
+  1. Add validate_transaction() call in produce_block_at_height()
+  2. Remove stuck TX from finalized pool when validation fails
+  3. Add logging for every skipped TX
+  
+IMPORTANT:
+  4. Add TTL to finalized transactions
+  5. Add re-validation before rebroadcast
+  6. Add mempool diagnostics RPC
+  
+NICE-TO-HAVE:
+  7. Coordinate clearstucktransactions via governance
+  8. Add health monitoring for stuck TXs
+
+================================================================================

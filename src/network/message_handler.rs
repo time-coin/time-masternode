@@ -34,7 +34,7 @@ fn fork_alert_rate_limit() -> &'static dashmap::DashMap<String, Instant> {
 struct PeerUtxoHashEntry {
     hash: [u8; 32],
     height: u64,
-    utxo_count: usize,
+    _utxo_count: usize,
     received_at: Instant,
 }
 
@@ -2818,7 +2818,7 @@ impl MessageHandler {
             PeerUtxoHashEntry {
                 hash: peer_hash,
                 height: peer_height,
-                utxo_count: peer_utxo_count,
+                _utxo_count: peer_utxo_count,
                 received_at: Instant::now(),
             },
         );
