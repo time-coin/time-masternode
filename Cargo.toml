@@ -60,6 +60,7 @@ tokio-util = "0.7"
 aes-gcm = "0.10"                                    # AES-256-GCM encryption
 argon2 = "0.5"                                       # Password-based key derivation
 x25519-dalek = { version = "2.0", features = ["static_secrets"] }  # ECDH key exchange for encrypted memos
+urlencoding = "2.1"                                  # URI percent-encoding for payment requests
 
 # Critical security enhancements
 zeroize = { version = "1.7", features = ["derive"] }  # Secure memory cleanup
