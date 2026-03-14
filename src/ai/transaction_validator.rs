@@ -216,6 +216,7 @@ mod tests {
             lock_time: 0,
             timestamp: 0,
             special_data: None,
+            encrypted_memo: None,
         };
 
         // Should detect dust but may not reject if other indicators are ok
@@ -243,6 +244,7 @@ mod tests {
             lock_time: 0,
             timestamp: 0,
             special_data: None,
+            encrypted_memo: None,
         };
 
         let result = validator.validate_with_ai(&tx).await;

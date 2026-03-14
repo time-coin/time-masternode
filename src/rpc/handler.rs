@@ -931,6 +931,7 @@ impl RpcHandler {
                 .as_secs() as i64,
             lock_time: 0,
             special_data: None,
+            encrypted_memo: None,
         };
 
         // Serialize and return hex
@@ -1472,6 +1473,12 @@ impl RpcHandler {
                             .iter()
                             .all(|o| String::from_utf8_lossy(&o.script_pubkey) == local_address);
 
+                    // Try to decrypt encrypted memo if present
+                    let memo = tx
+                        .encrypted_memo
+                        .as_ref()
+                        .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
+
                     // Skip coinbase (tx_idx 0) and reward distribution (tx_idx 1) for "send"
                     // They are always "receive" type
                     let category = if tx_idx <= 1 {
@@ -1526,6 +1533,10 @@ impl RpcHandler {
                         entry["fee"] = json!(f);
                     }
 
+                    if let Some(ref m) = memo {
+                        entry["memo"] = json!(m);
+                    }
+
                     transactions.push(entry);
                 }
             }
@@ -1578,18 +1589,26 @@ impl RpcHandler {
                     received as f64 / 100_000_000.0
                 };
 
-                transactions.insert(
-                    0,
-                    json!({
-                        "txid": txid,
-                        "category": category,
-                        "amount": net_amount,
-                        "confirmations": 0,
-                        "finalized": true,
-                        "time": tx.timestamp,
-                        "blocktime": tx.timestamp,
-                    }),
-                );
+                let memo = tx
+                    .encrypted_memo
+                    .as_ref()
+                    .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
+
+                let mut entry = json!({
+                    "txid": txid,
+                    "category": category,
+                    "amount": net_amount,
+                    "confirmations": 0,
+                    "finalized": true,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                });
+
+                if let Some(ref m) = memo {
+                    entry["memo"] = json!(m);
+                }
+
+                transactions.insert(0, entry);
             }
         }
 
@@ -2377,7 +2396,7 @@ impl RpcHandler {
     }
 
     async fn send_to_address(&self, params: &[Value]) -> Result<Value, RpcError> {
-        // sendtoaddress "to_address" amount [subtract_fee] [nowait]
+        // sendtoaddress "to_address" amount [subtract_fee] [nowait] [memo]
         let to_address = params
             .first()
             .and_then(|v| v.as_str())
@@ -2396,6 +2415,7 @@ impl RpcHandler {
 
         let subtract_fee = params.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
         let nowait = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
+        let memo = params.get(4).and_then(|v| v.as_str());
 
         // Use default wallet address
         let wallet_address = self
@@ -2408,12 +2428,19 @@ impl RpcHandler {
                 message: "Node is not configured as a masternode - no wallet address".to_string(),
             })?;
 
-        self.send_coins(&wallet_address, to_address, amount, subtract_fee, nowait)
-            .await
+        self.send_coins(
+            &wallet_address,
+            to_address,
+            amount,
+            subtract_fee,
+            nowait,
+            memo,
+        )
+        .await
     }
 
     async fn send_from(&self, params: &[Value]) -> Result<Value, RpcError> {
-        // sendfrom "from_address" "to_address" amount [subtract_fee] [nowait]
+        // sendfrom "from_address" "to_address" amount [subtract_fee] [nowait] [memo]
         let from_address = params
             .first()
             .and_then(|v| v.as_str())
@@ -2440,8 +2467,9 @@ impl RpcHandler {
 
         let subtract_fee = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
         let nowait = params.get(4).and_then(|v| v.as_bool()).unwrap_or(false);
+        let memo = params.get(5).and_then(|v| v.as_str());
 
-        self.send_coins(from_address, to_address, amount, subtract_fee, nowait)
+        self.send_coins(from_address, to_address, amount, subtract_fee, nowait, memo)
             .await
     }
 
@@ -2452,6 +2480,7 @@ impl RpcHandler {
         amount: f64,
         subtract_fee: bool,
         nowait: bool,
+        memo: Option<&str>,
     ) -> Result<Value, RpcError> {
         // Maximum inputs per transaction (~9000 would hit 1MB TX size limit;
         // cap lower to leave headroom and prevent excessive memory use)
@@ -2586,6 +2615,12 @@ impl RpcHandler {
                     script_pubkey: from_address.as_bytes().to_vec(),
                 }];
 
+                // Encrypt consolidation memo
+                let consolidation_memo = self
+                    .consensus
+                    .encrypt_memo_for_self("UTXO Consolidation")
+                    .ok();
+
                 let mut cons_tx = Transaction {
                     version: 1,
                     inputs: cons_inputs,
@@ -2593,6 +2628,7 @@ impl RpcHandler {
                     lock_time: 0,
                     timestamp: chrono::Utc::now().timestamp(),
                     special_data: None,
+                    encrypted_memo: consolidation_memo,
                 };
 
                 self.consensus
@@ -2706,6 +2742,20 @@ impl RpcHandler {
                 });
             }
 
+            // Encrypt memo if provided
+            let encrypted_memo = if let Some(memo_text) = memo {
+                // Get recipient's Ed25519 pubkey from their address
+                self.consensus
+                    .encrypt_memo_for_address(memo_text, to_address)
+                    .map_err(|e| RpcError {
+                        code: -4,
+                        message: format!("Failed to encrypt memo: {}", e),
+                    })
+                    .ok()
+            } else {
+                None
+            };
+
             let mut tx = Transaction {
                 version: 1,
                 inputs,
@@ -2713,6 +2763,7 @@ impl RpcHandler {
                 lock_time: 0,
                 timestamp: chrono::Utc::now().timestamp(),
                 special_data: None,
+                encrypted_memo,
             };
 
             // Sign all inputs with wallet key
@@ -2958,6 +3009,9 @@ impl RpcHandler {
             script_pubkey: output_address.as_bytes().to_vec(),
         }];
 
+        // Encrypt consolidation memo
+        let merge_memo = self.consensus.encrypt_memo_for_self("UTXO Merge").ok();
+
         let mut tx = Transaction {
             version: 1,
             inputs,
@@ -2965,6 +3019,7 @@ impl RpcHandler {
             lock_time: 0,
             timestamp: chrono::Utc::now().timestamp(),
             special_data: None,
+            encrypted_memo: merge_memo,
         };
 
         // Sign all inputs with wallet key

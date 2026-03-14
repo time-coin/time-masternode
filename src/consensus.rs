@@ -2136,6 +2136,64 @@ impl ConsensusEngine {
         Ok(())
     }
 
+    /// Get the wallet signing key (for memo encryption/decryption).
+    pub fn get_wallet_signing_key(&self) -> Option<ed25519_dalek::SigningKey> {
+        self.wallet_signing_key
+            .get()
+            .cloned()
+            .or_else(|| self.get_signing_key())
+    }
+
+    /// Encrypt a memo for a self-send (consolidation, merge).
+    /// Uses the wallet's own public key as the recipient.
+    pub fn encrypt_memo_for_self(&self, plaintext: &str) -> Result<Vec<u8>, String> {
+        let signing_key = self
+            .get_wallet_signing_key()
+            .ok_or("No signing key available")?;
+        let pubkey = signing_key.verifying_key().to_bytes();
+        crate::memo::encrypt_memo(&signing_key, &pubkey, plaintext)
+            .map_err(|e| format!("Memo encryption failed: {}", e))
+    }
+
+    /// Encrypt a memo for a send to another address.
+    /// Looks up the recipient's Ed25519 public key from on-chain data.
+    pub fn encrypt_memo_for_address(
+        &self,
+        plaintext: &str,
+        recipient_address: &str,
+    ) -> Result<Vec<u8>, String> {
+        let signing_key = self
+            .get_wallet_signing_key()
+            .ok_or("No signing key available")?;
+
+        // Look up recipient's Ed25519 pubkey from script_sig of a TX they signed
+        let recipient_pubkey = self
+            .utxo_manager
+            .find_pubkey_for_address(recipient_address)
+            .ok_or_else(|| {
+                format!(
+                    "Cannot encrypt memo: no known public key for address {}. \
+                     The recipient must have at least one on-chain transaction.",
+                    recipient_address
+                )
+            })?;
+
+        crate::memo::encrypt_memo(&signing_key, &recipient_pubkey, plaintext)
+            .map_err(|e| format!("Memo encryption failed: {}", e))
+    }
+
+    /// Try to decrypt a memo from a transaction. Returns None if we don't hold the key.
+    pub fn decrypt_memo(&self, encrypted: &[u8]) -> Option<String> {
+        let signing_key = self.get_wallet_signing_key()?;
+        match crate::memo::decrypt_memo(&signing_key, encrypted) {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::debug!("Memo decryption failed: {}", e);
+                None
+            }
+        }
+    }
+
     // ========================================================================
     // FINALITY VOTE GENERATION (Per Protocol §8.5)
     // ========================================================================
@@ -2540,6 +2598,17 @@ impl ConsensusEngine {
             );
             e
         })?;
+
+        // Cache the verified pubkey for memo encryption lookup
+        let input = &tx.inputs[input_idx];
+        if input.script_sig.len() >= 32 {
+            let pubkey_bytes: [u8; 32] = input.script_sig[..32].try_into().unwrap_or([0u8; 32]);
+            let utxo = self.utxo_manager.get_utxo(&input.previous_output).await;
+            if let Ok(utxo) = utxo {
+                self.utxo_manager
+                    .register_pubkey(&utxo.address, pubkey_bytes);
+            }
+        }
 
         tracing::debug!("✅ Signature verified for input {}", input_idx);
 

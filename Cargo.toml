@@ -35,6 +35,7 @@ bincode = "1.3"
 sha2 = "0.10"
 hmac = "0.12"
 ed25519-dalek = { version = "2.0", features = ["serde"] }
+curve25519-dalek = "4.1"
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 sled = "0.34"
@@ -58,6 +59,7 @@ tokio-util = "0.7"
 # Wallet encryption (Phase 2 Critical Security)
 aes-gcm = "0.10"                                    # AES-256-GCM encryption
 argon2 = "0.5"                                       # Password-based key derivation
+x25519-dalek = { version = "2.0", features = ["static_secrets"] }  # ECDH key exchange for encrypted memos
 
 # Critical security enhancements
 zeroize = { version = "1.7", features = ["derive"] }  # Secure memory cleanup
