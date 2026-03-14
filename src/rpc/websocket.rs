@@ -469,7 +469,7 @@ where
                                             data: Some(serde_json::json!({"address": addr})),
                                         };
                                         let json = serde_json::to_string(&resp)?;
-                                        ws_sender.send(Message::Text(json)).await?;
+                                        ws_sender.send(Message::Text(json.into())).await?;
                                     }
                                 }
                                 "unsubscribe" => {
@@ -481,7 +481,7 @@ where
                                             data: Some(serde_json::json!({"address": addr})),
                                         };
                                         let json = serde_json::to_string(&resp)?;
-                                        ws_sender.send(Message::Text(json)).await?;
+                                        ws_sender.send(Message::Text(json.into())).await?;
                                     }
                                 }
                                 "ping" => {
@@ -490,7 +490,7 @@ where
                                         data: None,
                                     };
                                     let json = serde_json::to_string(&resp)?;
-                                    ws_sender.send(Message::Text(json)).await?;
+                                    ws_sender.send(Message::Text(json.into())).await?;
                                 }
                                 _ => {
                                     tracing::debug!("Unknown WebSocket method: {}", client_msg.method);
@@ -513,14 +513,14 @@ where
             // Outgoing notification to client
             Some(notification) = notif_rx.recv() => {
                 let json = serde_json::to_string(&notification)?;
-                if ws_sender.send(Message::Text(json)).await.is_err() {
+                if ws_sender.send(Message::Text(json.into())).await.is_err() {
                     break;
                 }
             }
 
             // Heartbeat ping
             _ = heartbeat.tick() => {
-                if ws_sender.send(Message::Ping(vec![])).await.is_err() {
+                if ws_sender.send(Message::Ping(vec![].into())).await.is_err() {
                     break;
                 }
             }

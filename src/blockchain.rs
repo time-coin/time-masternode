@@ -7600,11 +7600,21 @@ impl Blockchain {
                     return Ok(());
                 }
 
-                // NETWORK CONSENSUS CROSS-CHECK: Verify the fork resolver's decision
-                // aligns with what other peers see. A single peer sending competing
-                // blocks should not force a reorg without broader network agreement.
-                const MIN_PEERS_FOR_ONDEMAND_FORK: usize = 3;
-                {
+                // NETWORK CONSENSUS CROSS-CHECK: For same-height forks, verify that
+                // the fork resolver's decision aligns with what other peers see.
+                // A single peer sending competing blocks at the SAME height should
+                // not force a reorg without broader network agreement.
+                //
+                // CRITICAL: Skip this check for LONGER chains. The longest-chain
+                // rule is the canonical consensus rule — a valid longer chain must
+                // always be accepted regardless of how many peers currently support
+                // it. Requiring peer support for longer chains creates a deadlock:
+                // the majority won't switch because not enough peers support the
+                // longer chain, and the minority can't produce because the majority
+                // disagrees. Block validation (signatures, timestamps, chain
+                // integrity) already protects against fabricated chains.
+                if peer_tip_height <= our_height {
+                    const MIN_PEERS_FOR_ONDEMAND_FORK: usize = 3;
                     let peer_registry = self.peer_registry.read().await;
                     if let Some(registry) = peer_registry.as_ref() {
                         let compatible_peers = registry.get_compatible_peers().await;
@@ -7615,8 +7625,6 @@ impl Blockchain {
                                 registry.get_peer_chain_tip(pip).await
                             {
                                 total_checked += 1;
-                                // Peer supports this fork if they're at peer_tip_height
-                                // with matching hash, OR they're ahead (longer chain)
                                 if (tip_height == peer_tip_height && tip_hash == peer_tip_hash)
                                     || tip_height > our_height
                                 {
@@ -7643,6 +7651,12 @@ impl Blockchain {
                             );
                         }
                     }
+                } else {
+                    info!(
+                        "✅ Skipping peer support check: peer chain is longer ({} > {}). \
+                         Longest-chain rule applies — blocks will be validated individually.",
+                        peer_tip_height, our_height
+                    );
                 }
 
                 // CRITICAL SAFETY CHECK: Common ancestor cannot be higher than our chain

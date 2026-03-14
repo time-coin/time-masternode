@@ -39,7 +39,7 @@ curve25519-dalek = "4.1"
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 sled = "0.34"
-thiserror = "1.0"
+thiserror = "2.0"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"], default-features = false }
 hex = "0.4"
@@ -81,10 +81,10 @@ scopeguard = "1.2"                                  # RAII guards for cleanup
 zstd = "0.13"                                       # Fast compression for block storage
 
 # Network
-socket2 = "0.5"                                     # Socket configuration
+socket2 = "0.6"                                     # Socket configuration
 
 # WebSocket support for real-time wallet notifications
-tokio-tungstenite = "0.24"                          # WebSocket server
+tokio-tungstenite = "0.26"                          # WebSocket server
 futures-util = "0.3"                                # Stream utilities for WebSocket
 
 # TUI dashboard dependencies
