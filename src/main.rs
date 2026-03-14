@@ -3459,9 +3459,9 @@ async fn main() {
     shutdown_manager.register_task(cleanup_handle);
 
     // Periodic UTXO consistency check — hash-first, inquire on divergence
-    // Broadcasts GetUTXOStateHash to all peers every 5 minutes.
-    // If a peer returns a different hash at the same height, requests the full
-    // UTXO set to compute a diff (handled in message_handler).
+    // Runs at the midpoint between block slots (on the 5's: :05, :15, :25, etc.)
+    // to avoid colliding with block production. Only checks when the node is in
+    // sync (not behind expected height).
     let utxo_sync_blockchain = blockchain_server.clone();
     let utxo_sync_peer_registry = peer_connection_registry.clone();
     let utxo_sync_shutdown = shutdown_token.clone();
@@ -3469,8 +3469,11 @@ async fn main() {
         // Wait for initial sync to complete before checking consistency
         tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
 
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
+        // Check every 30 seconds whether it's time for a UTXO consistency check.
+        // The actual check only fires at block-slot midpoints (300s offset from genesis).
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut last_check_slot = 0i64;
 
         loop {
             tokio::select! {
@@ -3479,13 +3482,45 @@ async fn main() {
                     break;
                 }
                 _ = interval.tick() => {
+                    let genesis_ts = utxo_sync_blockchain.genesis_timestamp();
+                    if genesis_ts == 0 {
+                        continue; // No genesis yet
+                    }
+
+                    // Compute which 600s block slot we're in and how far into it
+                    let now_ts = chrono::Utc::now().timestamp();
+                    let elapsed = now_ts - genesis_ts;
+                    let current_slot = elapsed / 600;
+                    let offset_in_slot = elapsed % 600;
+
+                    // Fire at the midpoint (270–330s into each slot, i.e. "on the 5's")
+                    if !(270..=330).contains(&offset_in_slot) {
+                        continue;
+                    }
+
+                    // Don't fire twice in the same slot
+                    if current_slot == last_check_slot {
+                        continue;
+                    }
+                    last_check_slot = current_slot;
+
+                    // Only check when node is in sync
+                    let our_height = utxo_sync_blockchain.get_height();
+                    let expected_height = utxo_sync_blockchain.calculate_expected_height();
+                    if expected_height > our_height + 1 {
+                        tracing::debug!(
+                            "🔄 Skipping UTXO consistency check — still syncing (height {} vs expected {})",
+                            our_height, expected_height
+                        );
+                        continue;
+                    }
+
                     let connected = utxo_sync_peer_registry.get_connected_peers().await;
                     if connected.is_empty() {
                         continue;
                     }
 
                     let our_hash = utxo_sync_blockchain.get_utxo_state_hash().await;
-                    let our_height = utxo_sync_blockchain.get_height();
                     let our_count = utxo_sync_blockchain.get_utxo_count().await;
 
                     tracing::info!(
