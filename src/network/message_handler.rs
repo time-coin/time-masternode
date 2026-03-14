@@ -30,6 +30,26 @@ fn fork_alert_rate_limit() -> &'static dashmap::DashMap<String, Instant> {
     INSTANCE.get_or_init(dashmap::DashMap::new)
 }
 
+/// Cached UTXO state hash received from a peer.
+struct PeerUtxoHashEntry {
+    hash: [u8; 32],
+    height: u64,
+    utxo_count: usize,
+    received_at: Instant,
+}
+
+/// Global cache of peer UTXO state hashes for majority-based reconciliation.
+/// Populated when peers respond to our GetUTXOStateHash broadcasts.
+/// Entries older than 10 minutes are ignored during vote counting.
+fn peer_utxo_hash_cache() -> &'static dashmap::DashMap<String, PeerUtxoHashEntry> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, PeerUtxoHashEntry>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
+/// Max age for cached peer UTXO hashes (10 minutes = 2 sync check cycles).
+const UTXO_HASH_CACHE_TTL: Duration = Duration::from_secs(600);
+
 /// Direction of the network connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionDirection {
@@ -609,12 +629,23 @@ impl MessageHandler {
                 self.handle_blocks_response(blocks.clone(), context).await
             }
 
+            // === UTXO Sync Response Messages ===
+            NetworkMessage::UTXOStateHashResponse {
+                hash,
+                height,
+                utxo_count,
+            } => {
+                self.handle_utxo_state_hash_response(*hash, *height, *utxo_count, context)
+                    .await
+            }
+            NetworkMessage::UTXOSetResponse(utxos) => {
+                self.handle_utxo_set_response(utxos.clone(), context).await
+            }
+
             // === Other Response Messages (handled by caller) ===
             NetworkMessage::BlockHeightResponse(_)
             | NetworkMessage::BlockHashResponse { .. }
             | NetworkMessage::UTXOStateResponse(_)
-            | NetworkMessage::UTXOSetResponse(_)
-            | NetworkMessage::UTXOStateHashResponse { .. }
             | NetworkMessage::ConsensusQueryResponse { .. }
             | NetworkMessage::ChainWorkResponse { .. }
             | NetworkMessage::ChainWorkAtResponse { .. }
@@ -2745,6 +2776,155 @@ impl MessageHandler {
             self.peer_ip
         );
         Ok(Some(NetworkMessage::UTXOSetResponse(utxos)))
+    }
+
+    /// Handle UTXOStateHashResponse — compare peer's UTXO hash with ours.
+    /// Caches the peer's hash and checks for majority consensus. If we're in the
+    /// minority (most peers report a different hash at the same height), requests
+    /// the full UTXO set from a majority peer for reconciliation.
+    async fn handle_utxo_state_hash_response(
+        &self,
+        peer_hash: [u8; 32],
+        peer_height: u64,
+        peer_utxo_count: usize,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let our_height = context.blockchain.get_height();
+        let our_hash = context.blockchain.get_utxo_state_hash().await;
+        let our_count = context.blockchain.get_utxo_count().await;
+
+        // Always cache the peer's response for majority analysis
+        peer_utxo_hash_cache().insert(
+            self.peer_ip.clone(),
+            PeerUtxoHashEntry {
+                hash: peer_hash,
+                height: peer_height,
+                utxo_count: peer_utxo_count,
+                received_at: Instant::now(),
+            },
+        );
+
+        if our_height != peer_height {
+            debug!(
+                "🔄 [{}] UTXO hash from {} at height {} (we're at {}) — skipping (height mismatch)",
+                self.direction, self.peer_ip, peer_height, our_height
+            );
+            return Ok(None);
+        }
+
+        if peer_hash == our_hash {
+            debug!(
+                "✅ [{}] UTXO state matches {} at height {} ({} UTXOs, hash {})",
+                self.direction,
+                self.peer_ip,
+                our_height,
+                our_count,
+                hex::encode(&our_hash[..8])
+            );
+            return Ok(None);
+        }
+
+        // Divergence detected — count votes from cached peer hashes
+        warn!(
+            "⚠️  [{}] UTXO DIVERGENCE with {} at height {}: ours {}({} utxos) vs theirs {}({} utxos)",
+            self.direction,
+            self.peer_ip,
+            our_height,
+            hex::encode(&our_hash[..8]),
+            our_count,
+            hex::encode(&peer_hash[..8]),
+            peer_utxo_count,
+        );
+
+        let mut our_hash_votes = 1u32; // Count ourselves
+        let mut peer_hash_votes = 0u32;
+        let mut other_votes = 0u32;
+        let mut majority_utxo_count = 0usize;
+        let now = Instant::now();
+
+        for entry in peer_utxo_hash_cache().iter() {
+            // Skip stale entries and entries at a different height
+            if now.duration_since(entry.received_at) > UTXO_HASH_CACHE_TTL {
+                continue;
+            }
+            if entry.height != our_height {
+                continue;
+            }
+            if entry.hash == our_hash {
+                our_hash_votes += 1;
+            } else if entry.hash == peer_hash {
+                peer_hash_votes += 1;
+                majority_utxo_count = entry.utxo_count;
+            } else {
+                other_votes += 1;
+            }
+        }
+
+        let total_votes = our_hash_votes + peer_hash_votes + other_votes;
+        info!(
+            "🗳️  [{}] UTXO hash votes at height {}: ours={}({} utxos), theirs={}({} utxos), other={} (total={})",
+            self.direction, our_height, our_hash_votes, our_count,
+            peer_hash_votes, majority_utxo_count, other_votes, total_votes
+        );
+
+        // Only reconcile if the peer's hash has strict majority over ours
+        if peer_hash_votes > our_hash_votes {
+            warn!(
+                "📥 [{}] We are in the MINORITY ({} vs {} votes) — requesting UTXO set from {} for reconciliation",
+                self.direction, our_hash_votes, peer_hash_votes, self.peer_ip
+            );
+            Ok(Some(NetworkMessage::GetUTXOSet))
+        } else {
+            info!(
+                "📊 [{}] We have majority or tie ({} vs {} votes) — peer {} may be out of sync",
+                self.direction, our_hash_votes, peer_hash_votes, self.peer_ip
+            );
+            Ok(None)
+        }
+    }
+
+    /// Handle UTXOSetResponse — diff against our local set and reconcile.
+    /// This is only requested when we've already determined we're in the minority,
+    /// so we proceed with reconciliation.
+    async fn handle_utxo_set_response(
+        &self,
+        remote_utxos: Vec<crate::types::UTXO>,
+        context: &MessageContext,
+    ) -> Result<Option<NetworkMessage>, String> {
+        let utxo_mgr = &context.blockchain.utxo_manager;
+        let (to_remove, to_add) = utxo_mgr.get_utxo_diff(&remote_utxos).await;
+
+        if to_remove.is_empty() && to_add.is_empty() {
+            info!(
+                "✅ [{}] UTXO set from {} matches — no diff",
+                self.direction, self.peer_ip
+            );
+            return Ok(None);
+        }
+
+        info!(
+            "🔧 [{}] Reconciling UTXO set from {} ({} removals, {} additions)",
+            self.direction,
+            self.peer_ip,
+            to_remove.len(),
+            to_add.len()
+        );
+
+        if let Err(e) = utxo_mgr.reconcile_utxo_state(to_remove, to_add).await {
+            error!(
+                "❌ [{}] UTXO reconciliation failed: {}",
+                self.direction, e
+            );
+        } else {
+            let new_hash = context.blockchain.get_utxo_state_hash().await;
+            info!(
+                "✅ [{}] UTXO reconciliation complete. New state hash: {}",
+                self.direction,
+                hex::encode(&new_hash[..8])
+            );
+        }
+
+        Ok(None)
     }
 
     /// Handle ConsensusQuery
