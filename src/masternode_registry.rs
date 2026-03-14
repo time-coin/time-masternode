@@ -350,7 +350,14 @@ impl MasternodeRegistry {
         let now = Self::now();
 
         // Check for duplicate collateral: if another masternode uses this outpoint,
-        // treat it as an IP migration — unregister the old entry and allow the new one
+        // treat it as an IP migration — unregister the old entry and allow the new one.
+        // NEVER migrate away the local masternode's collateral — reject the remote claim.
+        let local_addr_guard = self.local_masternode_address.read().await;
+        let local_ip = local_addr_guard
+            .as_ref()
+            .map(|a| a.split(':').next().unwrap_or(a).to_string());
+        drop(local_addr_guard);
+
         if let Some(ref outpoint) = masternode.collateral_outpoint {
             let mut old_addr_to_remove = None;
             for (addr, info) in nodes.iter() {
@@ -364,6 +371,16 @@ impl MasternodeRegistry {
                 }
             }
             if let Some(old_addr) = old_addr_to_remove {
+                // Never let a remote peer steal the local masternode's collateral
+                let old_ip = old_addr.split(':').next().unwrap_or(&old_addr);
+                if local_ip.as_deref() == Some(old_ip) {
+                    tracing::warn!(
+                        "🛡️ Rejected collateral migration: remote {} tried to claim local collateral {}",
+                        masternode.address,
+                        outpoint
+                    );
+                    return Err(RegistryError::InvalidCollateral);
+                }
                 tracing::info!(
                     "🔄 Masternode IP migration: collateral {} moving from {} to {}",
                     outpoint,
@@ -1031,6 +1048,20 @@ impl MasternodeRegistry {
         tx: tokio::sync::broadcast::Sender<crate::network::message::NetworkMessage>,
     ) {
         *self.broadcast_tx.write().await = Some(tx);
+    }
+
+    /// Mark a masternode's registration source (e.g., after on-chain collateral verification).
+    pub async fn set_registration_source(
+        &self,
+        address: &str,
+        source: RegistrationSource,
+    ) -> Result<(), RegistryError> {
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(address) {
+            info.registration_source = source;
+            self.store_masternode(address, info)?;
+        }
+        Ok(())
     }
 
     pub async fn get_local_masternode(&self) -> Option<MasternodeInfo> {
