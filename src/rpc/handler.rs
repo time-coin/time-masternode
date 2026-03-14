@@ -122,6 +122,7 @@ impl RpcHandler {
             "getfeeschedule" => self.get_fee_schedule().await,
             "masternodereginfo" => self.masternode_reg_info().await,
             "masternoderegstatus" => self.masternode_reg_status(&params_array).await,
+            "clearstucktransactions" => self.clear_stuck_transactions().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -3666,6 +3667,103 @@ impl RpcHandler {
         Ok(json!({
             "unlocked": unlocked_count,
             "message": format!("Force unlocked all {} UTXOs", unlocked_count)
+        }))
+    }
+
+    /// Clear stuck finalized transactions from the mempool and revert their UTXO
+    /// changes. This is a recovery tool for when nodes have divergent UTXO states
+    /// and cannot accept each other's blocks.
+    ///
+    /// For each stuck finalized TX:
+    /// 1. Input UTXOs are restored from SpentFinalized → Unspent
+    /// 2. Output UTXOs created by the TX are removed from storage
+    /// 3. The TX is removed from both finalized and pending pools
+    async fn clear_stuck_transactions(&self) -> Result<Value, RpcError> {
+        let finalized_txs = self.consensus.get_finalized_transactions_for_block();
+
+        if finalized_txs.is_empty() {
+            return Ok(json!({
+                "cleared": 0,
+                "inputs_restored": 0,
+                "outputs_removed": 0,
+                "message": "No finalized transactions in mempool"
+            }));
+        }
+
+        let tx_count = finalized_txs.len();
+        let mut inputs_restored = 0u64;
+        let mut outputs_removed = 0u64;
+        let mut cleared_txids = Vec::new();
+
+        for tx in &finalized_txs {
+            let txid = tx.txid();
+
+            // Restore input UTXOs: SpentFinalized → Unspent
+            for input in &tx.inputs {
+                let outpoint = &input.previous_output;
+                if matches!(
+                    self.utxo_manager.get_state(outpoint),
+                    Some(
+                        crate::types::UTXOState::SpentFinalized { .. }
+                            | crate::types::UTXOState::SpentPending { .. }
+                            | crate::types::UTXOState::Locked { .. }
+                    )
+                ) {
+                    if self.utxo_manager.is_collateral_locked(outpoint) {
+                        tracing::warn!(
+                            "⚠️ Skipping collateral UTXO {} during stuck TX cleanup",
+                            outpoint
+                        );
+                        continue;
+                    }
+                    self.utxo_manager
+                        .update_state(outpoint, crate::types::UTXOState::Unspent);
+                    inputs_restored += 1;
+                }
+            }
+
+            // Remove output UTXOs that were created when this TX was auto-finalized
+            for (idx, _output) in tx.outputs.iter().enumerate() {
+                let outpoint = OutPoint {
+                    txid,
+                    vout: idx as u32,
+                };
+                if self.utxo_manager.get_state(&outpoint).is_some() {
+                    if let Err(e) = self.utxo_manager.remove_utxo(&outpoint).await {
+                        tracing::warn!(
+                            "⚠️ Failed to remove output UTXO {} from stuck TX: {}",
+                            outpoint,
+                            e
+                        );
+                    } else {
+                        outputs_removed += 1;
+                    }
+                }
+            }
+
+            cleared_txids.push(hex::encode(txid));
+        }
+
+        // Clear from finalized and pending pools
+        let txids: Vec<crate::types::Hash256> = finalized_txs.iter().map(|tx| tx.txid()).collect();
+        self.consensus.clear_finalized_txs(&txids);
+
+        tracing::warn!(
+            "🧹 Cleared {} stuck finalized transactions: restored {} input UTXOs, removed {} output UTXOs",
+            tx_count,
+            inputs_restored,
+            outputs_removed
+        );
+
+        Ok(json!({
+            "cleared": tx_count,
+            "inputs_restored": inputs_restored,
+            "outputs_removed": outputs_removed,
+            "transactions": cleared_txids,
+            "message": format!(
+                "Cleared {} stuck transactions, restored {} inputs, removed {} outputs",
+                tx_count, inputs_restored, outputs_removed
+            )
         }))
     }
 
