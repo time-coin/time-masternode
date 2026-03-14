@@ -126,6 +126,9 @@ impl RpcHandler {
             "clearstucktransactions" => self.clear_stuck_transactions().await,
             "createpaymentrequest" => self.create_payment_request(&params_array).await,
             "paypaymentrequest" => self.pay_payment_request(&params_array).await,
+            "sendpaymentrequest" => self.send_payment_request(&params_array).await,
+            "getpaymentrequests" => self.get_payment_requests(&params_array).await,
+            "acknowledgepaymentrequest" => self.acknowledge_payment_request(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -4202,5 +4205,228 @@ impl RpcHandler {
         }
 
         Ok(response)
+    }
+
+    /// Accept a signed payment request from a wallet, store it, and broadcast to peers.
+    /// Params: [from_address, to_address, amount, memo, pubkey_hex, signature_hex, timestamp]
+    async fn send_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let from_address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing from_address".to_string(),
+            })?;
+        let to_address = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing to_address".to_string(),
+            })?;
+        let amount = params
+            .get(2)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing or invalid amount".to_string(),
+            })?;
+        let memo = params.get(3).and_then(|v| v.as_str()).unwrap_or("");
+        let pubkey_hex = params
+            .get(4)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing pubkey".to_string(),
+            })?;
+        let signature_hex = params
+            .get(5)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing signature".to_string(),
+            })?;
+        let timestamp = params
+            .get(6)
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing timestamp".to_string(),
+            })?;
+
+        // Decode pubkey
+        let pubkey_bytes = hex::decode(pubkey_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid pubkey hex".to_string(),
+        })?;
+        if pubkey_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Pubkey must be 32 bytes".to_string(),
+            });
+        }
+        let mut pubkey = [0u8; 32];
+        pubkey.copy_from_slice(&pubkey_bytes);
+
+        // Decode signature
+        let sig_bytes = hex::decode(signature_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid signature hex".to_string(),
+        })?;
+        if sig_bytes.len() != 64 {
+            return Err(RpcError {
+                code: -32602,
+                message: "Signature must be 64 bytes".to_string(),
+            });
+        }
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&sig_bytes);
+
+        // Compute deterministic ID
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(from_address.as_bytes());
+        hasher.update(to_address.as_bytes());
+        hasher.update(amount.to_le_bytes());
+        hasher.update(timestamp.to_le_bytes());
+        let id = hex::encode(hasher.finalize());
+
+        // Verify Ed25519 signature over (id || from || to || amount || memo || timestamp)
+        let verifying_key =
+            ed25519_dalek::VerifyingKey::from_bytes(&pubkey).map_err(|_| RpcError {
+                code: -32602,
+                message: "Invalid Ed25519 public key".to_string(),
+            })?;
+        let ed_signature = ed25519_dalek::Signature::from_bytes(&signature);
+        let mut sign_data = Vec::new();
+        sign_data.extend_from_slice(id.as_bytes());
+        sign_data.extend_from_slice(from_address.as_bytes());
+        sign_data.extend_from_slice(to_address.as_bytes());
+        sign_data.extend_from_slice(&amount.to_le_bytes());
+        sign_data.extend_from_slice(memo.as_bytes());
+        sign_data.extend_from_slice(&timestamp.to_le_bytes());
+        verifying_key
+            .verify_strict(&sign_data, &ed_signature)
+            .map_err(|_| RpcError {
+                code: -1,
+                message: "Invalid signature — request may be spoofed".to_string(),
+            })?;
+
+        let expires = timestamp + 86400; // 24 hours
+
+        let request = crate::network::message::PaymentRequest {
+            id: id.clone(),
+            from_address: from_address.to_string(),
+            to_address: to_address.to_string(),
+            amount,
+            memo: memo.to_string(),
+            pubkey_hex: pubkey_hex.to_string(),
+            signature_hex: signature_hex.to_string(),
+            timestamp,
+            expires,
+        };
+
+        // Cache the requester's pubkey for future memo encryption
+        self.consensus
+            .utxo_manager
+            .register_pubkey(from_address, pubkey);
+
+        // Store locally
+        let stored = self.consensus.store_payment_request(request.clone());
+        if !stored {
+            return Err(RpcError {
+                code: -1,
+                message: "Request already exists, expired, or address limit reached".to_string(),
+            });
+        }
+
+        // Broadcast to peers
+        self.consensus.broadcast_payment_request(request).await;
+
+        // Push WS notification to payer if subscribed
+        if let Some(ref tx_sender) = self.tx_event_sender {
+            let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                txid: format!("pr:{}", id),
+                outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                    address: to_address.to_string(),
+                    amount: amount as f64 / 100_000_000.0,
+                    index: 0,
+                }],
+                timestamp,
+                status: crate::rpc::websocket::TxEventStatus::PaymentRequest {
+                    from_address: from_address.to_string(),
+                    memo: memo.to_string(),
+                    pubkey_hex: pubkey_hex.to_string(),
+                    expires,
+                },
+            });
+        }
+
+        Ok(json!({
+            "id": id,
+            "status": "sent",
+            "expires": expires,
+        }))
+    }
+
+    /// Return pending payment requests for a set of addresses.
+    /// Params: [addresses[]]
+    async fn get_payment_requests(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let addresses: Vec<String> = params
+            .first()
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected array of addresses".to_string(),
+            })?;
+
+        let requests = self.consensus.get_payment_requests_for(&addresses);
+
+        let results: Vec<Value> = requests
+            .iter()
+            .map(|r| {
+                json!({
+                    "id": r.id,
+                    "from_address": r.from_address,
+                    "to_address": r.to_address,
+                    "amount": r.amount,
+                    "memo": r.memo,
+                    "pubkey": r.pubkey_hex,
+                    "timestamp": r.timestamp,
+                    "expires": r.expires,
+                })
+            })
+            .collect();
+
+        Ok(json!(results))
+    }
+
+    /// Acknowledge (remove) a payment request by id.
+    /// Params: [request_id, status]  (status = "paid" or "declined")
+    async fn acknowledge_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let request_id = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing request_id".to_string(),
+            })?;
+        let status = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .unwrap_or("acknowledged");
+
+        let removed = self.consensus.remove_payment_request(request_id);
+
+        Ok(json!({
+            "id": request_id,
+            "status": status,
+            "removed": removed,
+        }))
     }
 }

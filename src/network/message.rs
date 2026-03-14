@@ -259,6 +259,8 @@ pub enum NetworkMessage {
         #[serde(default)]
         started_at: u64,
     },
+    /// A payment request relayed between masternodes (24h TTL, signed by requester)
+    PaymentRequestRelay(PaymentRequest),
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -321,6 +323,31 @@ pub struct LockedCollateralData {
     pub lock_height: u64,
     pub locked_at: u64,
     pub amount: u64,
+}
+
+/// A signed payment request relayed via the P2P network.
+/// The requester signs the request with their Ed25519 key; masternodes validate
+/// the signature before storing/relaying. Requests expire after 24 hours.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PaymentRequest {
+    /// Deterministic ID: hex(SHA-256(from_address || to_address || amount || timestamp))
+    pub id: String,
+    /// Address of the requester (who wants to be paid)
+    pub from_address: String,
+    /// Address of the payer (who should pay)
+    pub to_address: String,
+    /// Amount in smallest units (satoshis)
+    pub amount: u64,
+    /// Plaintext memo describing what the payment is for
+    pub memo: String,
+    /// Requester's Ed25519 public key as hex (enables encrypted memo when paying)
+    pub pubkey_hex: String,
+    /// Ed25519 signature as hex over (id || from_address || to_address || amount || memo || timestamp)
+    pub signature_hex: String,
+    /// Unix timestamp when the request was created
+    pub timestamp: i64,
+    /// Unix timestamp when the request expires (timestamp + 86400)
+    pub expires: i64,
 }
 
 impl NetworkMessage {
@@ -402,6 +429,7 @@ impl NetworkMessage {
             NetworkMessage::MasternodeStatusGossip { .. } => "MasternodeStatusGossip",
             NetworkMessage::MasternodeAnnouncementV2 { .. } => "MasternodeAnnouncementV2",
             NetworkMessage::MasternodeAnnouncementV3 { .. } => "MasternodeAnnouncementV3",
+            NetworkMessage::PaymentRequestRelay(_) => "PaymentRequestRelay",
             NetworkMessage::UnknownMessage => "UnknownMessage",
             NetworkMessage::PeerExchange(_) => "PeerExchange",
         }

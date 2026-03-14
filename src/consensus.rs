@@ -1647,6 +1647,9 @@ pub struct ConsensusEngine {
     /// Subscribers (e.g. WebSocket server) receive the txid so they can look up the
     /// transaction and notify wallet clients.
     tx_finalized_sender: tokio::sync::broadcast::Sender<Hash256>,
+    /// In-memory payment request store: to_address → Vec<PaymentRequest>
+    /// Requests expire after 24 hours and are cleaned up periodically.
+    pub payment_requests: Arc<DashMap<String, Vec<crate::network::message::PaymentRequest>>>,
 }
 
 impl ConsensusEngine {
@@ -1673,6 +1676,7 @@ impl ConsensusEngine {
             avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
             prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
             tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
+            payment_requests: Arc::new(DashMap::new()),
         }
     }
 
@@ -1703,6 +1707,7 @@ impl ConsensusEngine {
             avg_finality_ms: Arc::new(parking_lot::RwLock::new(Vec::new())),
             prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
             tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
+            payment_requests: Arc::new(DashMap::new()),
         }
     }
 
@@ -2320,6 +2325,106 @@ impl ConsensusEngine {
         );
         self.broadcast(NetworkMessage::TimeProofBroadcast { proof })
             .await;
+    }
+
+    /// Broadcast a payment request to all peers
+    pub async fn broadcast_payment_request(
+        &self,
+        request: crate::network::message::PaymentRequest,
+    ) {
+        tracing::info!(
+            "📡 Broadcasting PaymentRequest {} from {} to {}",
+            &request.id[..std::cmp::min(16, request.id.len())],
+            request.from_address,
+            request.to_address,
+        );
+        self.broadcast(NetworkMessage::PaymentRequestRelay(request))
+            .await;
+    }
+
+    /// Store a payment request, enforcing per-address limits and dedup.
+    /// Returns true if stored (new), false if duplicate or limit reached.
+    pub fn store_payment_request(&self, request: crate::network::message::PaymentRequest) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        // Reject expired requests
+        if request.expires <= now {
+            return false;
+        }
+
+        let mut entry = self
+            .payment_requests
+            .entry(request.to_address.clone())
+            .or_default();
+
+        // Dedup by id
+        if entry.iter().any(|r| r.id == request.id) {
+            return false;
+        }
+
+        // Max 100 pending requests per address
+        if entry.len() >= 100 {
+            return false;
+        }
+
+        entry.push(request);
+        true
+    }
+
+    /// Remove expired payment requests from the store
+    pub fn cleanup_expired_payment_requests(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let mut empty_keys = Vec::new();
+        for mut entry in self.payment_requests.iter_mut() {
+            entry.value_mut().retain(|r| r.expires > now);
+            if entry.value().is_empty() {
+                empty_keys.push(entry.key().clone());
+            }
+        }
+        for key in empty_keys {
+            self.payment_requests.remove(&key);
+        }
+    }
+
+    /// Get pending payment requests for a set of addresses
+    pub fn get_payment_requests_for(
+        &self,
+        addresses: &[String],
+    ) -> Vec<crate::network::message::PaymentRequest> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        let mut results = Vec::new();
+        for addr in addresses {
+            if let Some(reqs) = self.payment_requests.get(addr) {
+                for r in reqs.iter() {
+                    if r.expires > now {
+                        results.push(r.clone());
+                    }
+                }
+            }
+        }
+        results
+    }
+
+    /// Remove a payment request by id
+    pub fn remove_payment_request(&self, request_id: &str) -> bool {
+        for mut entry in self.payment_requests.iter_mut() {
+            if let Some(pos) = entry.value().iter().position(|r| r.id == request_id) {
+                entry.value_mut().remove(pos);
+                return true;
+            }
+        }
+        false
     }
 
     pub async fn validate_transaction(&self, tx: &Transaction) -> Result<(), String> {
@@ -2990,6 +3095,7 @@ impl ConsensusEngine {
             avg_finality_ms: self.avg_finality_ms.clone(),
             prev_block_hash: self.prev_block_hash.clone(),
             tx_finalized_sender: self.tx_finalized_sender.clone(),
+            payment_requests: self.payment_requests.clone(),
         });
         let tx_status_map = self.timevote.tx_status.clone();
         let finalized_signal = self.tx_finalized_sender.clone();

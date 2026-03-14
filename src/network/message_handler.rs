@@ -661,6 +661,85 @@ impl MessageHandler {
                 Ok(None)
             }
 
+            // === Payment Request Relay ===
+            NetworkMessage::PaymentRequestRelay(request) => {
+                // Validate signature before storing
+                let pubkey_bytes = hex::decode(&request.pubkey_hex).unwrap_or_default();
+                let sig_bytes = hex::decode(&request.signature_hex).unwrap_or_default();
+                if pubkey_bytes.len() == 32 && sig_bytes.len() == 64 {
+                    let mut pubkey = [0u8; 32];
+                    pubkey.copy_from_slice(&pubkey_bytes);
+                    let mut sig = [0u8; 64];
+                    sig.copy_from_slice(&sig_bytes);
+                    if let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) {
+                        let ed_signature = ed25519_dalek::Signature::from_bytes(&sig);
+                        let mut sign_data = Vec::new();
+                        sign_data.extend_from_slice(request.id.as_bytes());
+                        sign_data.extend_from_slice(request.from_address.as_bytes());
+                        sign_data.extend_from_slice(request.to_address.as_bytes());
+                        sign_data.extend_from_slice(&request.amount.to_le_bytes());
+                        sign_data.extend_from_slice(request.memo.as_bytes());
+                        sign_data.extend_from_slice(&request.timestamp.to_le_bytes());
+                        if verifying_key
+                            .verify_strict(&sign_data, &ed_signature)
+                            .is_ok()
+                        {
+                            if let Some(ref consensus) = context.consensus {
+                                // Cache requester pubkey
+                                if let Some(ref um) = context.utxo_manager {
+                                    um.register_pubkey(&request.from_address, pubkey);
+                                }
+                                let stored = consensus.store_payment_request(request.clone());
+                                if stored {
+                                    tracing::info!(
+                                        "📬 Stored payment request {} from {} to {}",
+                                        &request.id[..std::cmp::min(16, request.id.len())],
+                                        request.from_address,
+                                        request.to_address,
+                                    );
+                                    // Push WS notification to payer if subscribed
+                                    if let Some(ref tx_sender) = context.tx_event_sender {
+                                        let _ = tx_sender.send(
+                                            crate::rpc::websocket::TransactionEvent {
+                                                txid: format!("pr:{}", request.id),
+                                                outputs: vec![
+                                                    crate::rpc::websocket::TxOutputInfo {
+                                                        address: request
+                                                            .to_address
+                                                            .clone(),
+                                                        amount: request.amount as f64
+                                                            / 100_000_000.0,
+                                                        index: 0,
+                                                    },
+                                                ],
+                                                timestamp: request.timestamp,
+                                                status:
+                                                    crate::rpc::websocket::TxEventStatus::PaymentRequest {
+                                                        from_address: request
+                                                            .from_address
+                                                            .clone(),
+                                                        memo: request.memo.clone(),
+                                                        pubkey_hex: request
+                                                            .pubkey_hex
+                                                            .clone(),
+                                                        expires: request.expires,
+                                                    },
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::warn!(
+                                "⚠️ Rejected payment request with invalid signature from {}",
+                                self.peer_ip
+                            );
+                        }
+                    }
+                }
+                Ok(None)
+            }
+
             // === Messages not handled here ===
             _ => {
                 debug!(
