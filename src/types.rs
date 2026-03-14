@@ -59,10 +59,16 @@ pub const SATOSHIS_PER_TIME: u64 = 100_000_000; // 1 TIME = 10^8 satoshis
 
 // NetworkType is defined in network_type.rs module
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct OutPoint {
     pub txid: Hash256,
     pub vout: u32,
+}
+
+impl std::fmt::Debug for OutPoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", hex::encode(self.txid), self.vout)
+    }
 }
 
 impl std::fmt::Display for OutPoint {
