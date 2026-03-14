@@ -687,6 +687,29 @@ async fn main() {
         );
     }
 
+    // Release stale local collateral if the config changed (e.g., user commented
+    // out their collateral line and restarted).  Compare the previously saved
+    // outpoint with the current config so the UTXO becomes spendable again.
+    {
+        let current_local_outpoint = masternode_info
+            .as_ref()
+            .filter(|mn| mn.tier != types::MasternodeTier::Free)
+            .and_then(|mn| mn.collateral_outpoint.clone());
+
+        if let Some(prev) = utxo_mgr.load_local_collateral_outpoint() {
+            let should_release = match &current_local_outpoint {
+                Some(cur) => cur != &prev, // collateral changed
+                None => true,              // collateral removed
+            };
+            if should_release {
+                utxo_mgr.release_stale_local_collateral(&prev);
+            }
+        }
+
+        // Persist the current config for next restart
+        utxo_mgr.save_local_collateral_outpoint(current_local_outpoint.as_ref());
+    }
+
     // Auto-detect masternode tier from collateral UTXO value
     if let Some(ref mut mn) = masternode_info {
         if let (types::MasternodeTier::Free, Some(outpoint)) =
@@ -3434,6 +3457,53 @@ async fn main() {
         }
     });
     shutdown_manager.register_task(cleanup_handle);
+
+    // Periodic UTXO consistency check — hash-first, inquire on divergence
+    // Broadcasts GetUTXOStateHash to all peers every 5 minutes.
+    // If a peer returns a different hash at the same height, requests the full
+    // UTXO set to compute a diff (handled in message_handler).
+    let utxo_sync_blockchain = blockchain_server.clone();
+    let utxo_sync_peer_registry = peer_connection_registry.clone();
+    let utxo_sync_shutdown = shutdown_token.clone();
+    let utxo_sync_handle = tokio::spawn(async move {
+        // Wait for initial sync to complete before checking consistency
+        tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // Every 5 minutes
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = utxo_sync_shutdown.cancelled() => {
+                    tracing::debug!("🛑 UTXO consistency check shutting down gracefully");
+                    break;
+                }
+                _ = interval.tick() => {
+                    let connected = utxo_sync_peer_registry.get_connected_peers().await;
+                    if connected.is_empty() {
+                        continue;
+                    }
+
+                    let our_hash = utxo_sync_blockchain.get_utxo_state_hash().await;
+                    let our_height = utxo_sync_blockchain.get_height();
+                    let our_count = utxo_sync_blockchain.get_utxo_count().await;
+
+                    tracing::info!(
+                        "🔍 UTXO consistency check: broadcasting hash {} ({} UTXOs at height {}) to {} peer(s)",
+                        hex::encode(&our_hash[..8]),
+                        our_count,
+                        our_height,
+                        connected.len(),
+                    );
+
+                    utxo_sync_peer_registry
+                        .broadcast(crate::network::message::NetworkMessage::GetUTXOStateHash)
+                        .await;
+                }
+            }
+        }
+    });
+    shutdown_manager.register_task(utxo_sync_handle);
 
     // Prepare combined whitelist BEFORE creating server
     // This ensures masternodes are whitelisted before any connections are accepted

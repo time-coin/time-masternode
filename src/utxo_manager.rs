@@ -127,6 +127,47 @@ impl UTXOStateManager {
         loaded
     }
 
+    /// Persist the local masternode's collateral outpoint so we can detect
+    /// config changes across restarts (e.g. user comments out collateral).
+    pub fn save_local_collateral_outpoint(&self, outpoint: Option<&OutPoint>) {
+        let Some(tree) = &self.collateral_db else {
+            return;
+        };
+        let key = b"__local_collateral_outpoint__";
+        match outpoint {
+            Some(op) => {
+                let value = bincode::serialize(op).unwrap_or_default();
+                let _ = tree.insert(key.as_ref(), value);
+            }
+            None => {
+                let _ = tree.remove(key.as_ref());
+            }
+        }
+    }
+
+    /// Load the previously saved local collateral outpoint.
+    pub fn load_local_collateral_outpoint(&self) -> Option<OutPoint> {
+        let tree = self.collateral_db.as_ref()?;
+        let value = tree.get(b"__local_collateral_outpoint__").ok()??;
+        bincode::deserialize(&value).ok()
+    }
+
+    /// Release a collateral lock that no longer matches the current config.
+    /// Returns true if a lock was released.
+    pub fn release_stale_local_collateral(&self, old_outpoint: &OutPoint) -> bool {
+        if self.locked_collaterals.contains_key(old_outpoint) {
+            if let Ok(()) = self.unlock_collateral(old_outpoint) {
+                tracing::info!(
+                    "🔓 Released previous local collateral {}:{} (config changed)",
+                    hex::encode(old_outpoint.txid),
+                    old_outpoint.vout
+                );
+                return true;
+            }
+        }
+        false
+    }
+
     /// Initialize UTXO states from storage (call after creating with new_with_storage)
     /// This ensures in-memory state map is synchronized with persistent storage
     pub async fn initialize_states(&self) -> Result<usize, UtxoError> {
@@ -591,7 +632,6 @@ impl UTXOStateManager {
     }
 
     /// Calculate hash of entire UTXO set for state comparison
-    #[allow(dead_code)]
     pub async fn calculate_utxo_set_hash(&self) -> [u8; 32] {
         use sha2::{Digest, Sha256};
 
@@ -611,7 +651,6 @@ impl UTXOStateManager {
         hasher.finalize().into()
     }
 
-    #[allow(dead_code)]
     pub async fn get_utxo_diff(&self, remote_utxos: &[UTXO]) -> (Vec<OutPoint>, Vec<UTXO>) {
         let local_utxos = self.list_all_utxos().await;
 
@@ -639,7 +678,6 @@ impl UTXOStateManager {
         (to_remove, to_add)
     }
 
-    #[allow(dead_code)]
     pub async fn reconcile_utxo_state(
         &self,
         to_remove: Vec<OutPoint>,
