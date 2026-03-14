@@ -154,6 +154,25 @@ time-cli listunspent 6 9999
 ```
 Lists unspent transaction outputs.
 
+#### List Transactions
+```bash
+time-cli listtransactions
+time-cli listtransactions 20
+```
+Lists recent wallet transactions (default 10, max specified by count argument). Each entry includes `txid`, `category` (send/receive/consolidation), `amount`, `confirmations`, and `time`. If the transaction contains an encrypted memo that this wallet can decrypt, a `"memo"` field is included in the output.
+
+Example output entry with memo:
+```json
+{
+  "txid": "7ce5821a2faf...",
+  "category": "consolidation",
+  "amount": -2.59,
+  "confirmations": 5,
+  "time": 1710441600,
+  "memo": "UTXO Consolidation"
+}
+```
+
 ---
 
 ### Masternode Operations
@@ -221,8 +240,16 @@ Returns wallet balance.
 ```bash
 time-cli sendtoaddress <address> <amount>
 time-cli sendtoaddress <address> <amount> --subtract-fee
+time-cli sendtoaddress <address> <amount> --memo "Payment for invoice #42"
 ```
 Send TIME to an address. Fee is 0.1% of input value (min 0.00001 TIME), added on top by default. Use `--subtract-fee` to deduct the fee from the send amount instead.
+
+**Options:**
+- `--subtract-fee` — Deduct fee from the send amount (recipient gets amount minus fee)
+- `--nowait` — Return TXID immediately without waiting for finality
+- `--memo <text>` — Attach an encrypted memo (max 256 chars). The memo is encrypted using ECDH (X25519) + AES-256-GCM so that only the sender and recipient can read it. Other nodes see only ciphertext on-chain.
+
+**Memo notes:** The recipient must have at least one prior on-chain transaction for their public key to be known. If the key is unavailable, the transaction sends without a memo. Memos appear in `listtransactions` output when decryptable.
 
 #### Validate Address
 ```bash

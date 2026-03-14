@@ -5,6 +5,23 @@ All notable changes to TimeCoin will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - 2026-03-14
+
+### Added — Encrypted Transaction Memos
+- **Native encrypted memo field**: Transactions now support an optional `encrypted_memo` field (max 256 chars plaintext) encrypted using ECDH (Ed25519 → X25519) + AES-256-GCM. Only the sender and recipient can decrypt the memo; other nodes see only ciphertext on-chain.
+- **Wire format**: Version byte + sender pubkey (32B) + recipient pubkey (32B) + AES-GCM nonce (12B) + ciphertext with auth tag. Both public keys stored so either party can reconstruct the ECDH shared secret.
+- **Automatic consolidation memos**: UTXO consolidation and merge transactions automatically attach an encrypted "UTXO Consolidation" or "UTXO Merge" memo.
+- **CLI `--memo` flag**: `time-cli sendtoaddress <addr> <amount> --memo "text"` attaches an encrypted memo.
+- **RPC memo parameter**: `sendtoaddress` and `sendfrom` RPC methods accept an optional memo as the 5th/6th parameter.
+- **Wallet display**: `listtransactions` decrypts and displays memos when the wallet holds the sender or recipient key.
+- **Pubkey cache**: `UTXOStateManager` maintains a cache of Ed25519 public keys observed during signature verification, enabling memo encryption for any address that has signed an on-chain transaction.
+
+### Fixed — Transaction Safety
+- **Re-broadcast loop prevention**: Re-broadcast task now validates input UTXO states before re-broadcasting; evicts transactions with reverted/missing inputs instead of re-sending them.
+- **TransactionFinalized handler hardening**: Rejects transactions with missing input UTXOs, prevents double-finalization, short-circuits if transaction already finalized.
+- **Block production TX validation**: Validates input UTXO states before including transactions in blocks; evicts invalid ones from the pool.
+- **Safe `clearstucktransactions`**: Pre-flight check verifies all input UTXOs exist before clearing; skips unsafe transactions and reports values/fees.
+
 ## [1.2.2] - 2026-03-09
 
 ### Fixed — Solo Block Production & Fork Prevention

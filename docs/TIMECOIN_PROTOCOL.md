@@ -96,6 +96,34 @@ All signed objects MUST include `chain_id` to prevent replay across networks.
 - VRF scheme MUST provide `(vrf_output, vrf_proof)` verifiable under a public key.
 - VRF input MUST bind to `"TIMECOIN_VRF_V2" || height || prev_block_hash`.
 
+### 4.5 Encrypted Memos
+Transactions MAY include an `encrypted_memo` field containing an ECDH-encrypted message readable only by the sender and recipient.
+
+**Key conversion:**
+- Ed25519 signing key → X25519 static secret via `SHA-512(seed)[0..32]` (same scalar as Ed25519)
+- Ed25519 public key → X25519 public key via Edwards-to-Montgomery birational map
+
+**Encryption:**
+1. `shared_secret = X25519(sender_x25519_secret, recipient_x25519_public)`
+2. `aes_key = SHA-256(shared_secret || "TIME-memo-v1")` (domain separation)
+3. `ciphertext = AES-256-GCM(aes_key, random_nonce, plaintext)`
+
+**Wire format:**
+```
+[0]       version (0x01)
+[1..33]   sender Ed25519 pubkey (32 bytes)
+[33..65]  recipient Ed25519 pubkey (32 bytes)
+[65..77]  AES-GCM nonce (12 bytes)
+[77..]    ciphertext + 16-byte auth tag
+```
+
+**Constraints:**
+- Plaintext MUST NOT exceed 256 bytes
+- Recipient pubkey MUST be known (from prior on-chain transaction signatures)
+- If recipient pubkey is unavailable, the transaction MUST be sent without a memo
+- Nodes MUST NOT reject transactions based on memo content or presence
+- The `encrypted_memo` field is included in `txid` computation
+
 ---
 
 ## 5. Masternodes, Weight, and Active Validator Set (AVS)
@@ -189,6 +217,9 @@ A node MUST treat a Tx as **invalid** (and vote `Invalid`) if:
 3. Any input outpoint is unknown or not `Unspent` locally (or known `Spent/Archived`)
 4. Fee < `MIN_FEE`
 5. Fails policy limits (size, etc., if enabled)
+6. `encrypted_memo` present but plaintext exceeds 256 bytes (if decryptable)
+
+Note: A transaction with an `encrypted_memo` that cannot be decrypted by the validating node MUST still be accepted (the memo may be for a different party).
 
 ### 6.3 Conflict Sets
 For each input outpoint `o`, define a conflict set `C(o)` containing all txids spending `o`.

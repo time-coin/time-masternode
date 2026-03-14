@@ -944,16 +944,19 @@ Block {
 
 ```
 Transaction {
-    inputs:    Vec<TxInput>,
-    outputs:   Vec<TxOutput>,
-    lock_time: u64,
-    tx_type:   TransactionType,
+    inputs:         Vec<TxInput>,
+    outputs:        Vec<TxOutput>,
+    lock_time:      u64,
+    tx_type:        TransactionType,
+    encrypted_memo: Option<Vec<u8>>,   // ECDH + AES-256-GCM encrypted memo
 }
 
 TransactionType: Standard, CoinbaseReward, MasternodeReward,
                  MasternodeLock, MasternodeUnlock, GovernanceVote,
                  TimeProof, SmartContract
 ```
+
+**Encrypted Memo:** Transactions may carry an optional encrypted memo (max 256 chars plaintext). The memo is encrypted using ECDH key exchange (Ed25519 → X25519 conversion) + AES-256-GCM so that only the sender and recipient can decrypt it. The wire format stores both sender and recipient Ed25519 public keys, a random nonce, and the ciphertext. Wallet-generated consolidation and merge transactions automatically attach descriptive memos (e.g., "UTXO Consolidation"). See §4.5 in the protocol spec for details.
 
 #### Transaction Processing Steps
 
