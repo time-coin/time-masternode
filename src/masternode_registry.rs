@@ -12,6 +12,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+/// Queued collateral lock request: (outpoint, masternode_address, lock_height, amount)
+type PendingCollateralLock = (OutPoint, String, u64, u64);
+
 const MIN_COLLATERAL_CONFIRMATIONS: u64 = 3; // Minimum confirmations for collateral UTXO (30 minutes at 10 min/block)
 
 // Gossip-based status tracking constants
@@ -132,6 +135,8 @@ pub struct MasternodeRegistry {
     current_height: Arc<std::sync::atomic::AtomicU64>,
     /// Collateral outpoints pending unlock (drained by periodic task with utxo_manager access)
     pending_collateral_unlocks: Arc<parking_lot::Mutex<Vec<OutPoint>>>,
+    /// Collateral outpoints pending lock after a collateral change
+    pending_collateral_locks: Arc<parking_lot::Mutex<Vec<PendingCollateralLock>>>,
 }
 
 impl MasternodeRegistry {
@@ -214,6 +219,7 @@ impl MasternodeRegistry {
             started_at: now,
             current_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_collateral_unlocks: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_collateral_locks: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
@@ -231,14 +237,17 @@ impl MasternodeRegistry {
             .store(height, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Drain pending collateral unlock requests. Call this periodically with
-    /// access to the UTXOStateManager to actually unlock the collateral UTXOs.
+    /// Drain pending collateral unlock and lock requests. Call this periodically with
+    /// access to the UTXOStateManager to actually unlock/lock the collateral UTXOs.
     pub fn drain_pending_unlocks(
         &self,
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> usize {
         let outpoints: Vec<OutPoint> = self.pending_collateral_unlocks.lock().drain(..).collect();
-        let count = outpoints.len();
+        let locks: Vec<PendingCollateralLock> =
+            self.pending_collateral_locks.lock().drain(..).collect();
+        let count = outpoints.len() + locks.len();
+
         for outpoint in outpoints {
             if let Err(e) = utxo_manager.unlock_collateral(&outpoint) {
                 tracing::debug!(
@@ -249,6 +258,35 @@ impl MasternodeRegistry {
                 );
             }
         }
+
+        // Lock new collateral outpoints queued during collateral changes
+        for (outpoint, mn_address, lock_height, amount) in locks {
+            match utxo_manager.lock_collateral(
+                outpoint.clone(),
+                mn_address.clone(),
+                lock_height,
+                amount,
+            ) {
+                Ok(()) => {
+                    tracing::info!(
+                        "🔒 Locked new collateral {}:{} for {}",
+                        hex::encode(outpoint.txid),
+                        outpoint.vout,
+                        mn_address
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Could not lock new collateral {}:{} for {}: {:?} (will retry via auto-lock)",
+                        hex::encode(outpoint.txid),
+                        outpoint.vout,
+                        mn_address,
+                        e
+                    );
+                }
+            }
+        }
+
         count
     }
 
@@ -385,6 +423,18 @@ impl MasternodeRegistry {
                                 masternode.address
                             );
                             self.pending_collateral_unlocks.lock().push(old_op);
+                        }
+                        // Queue the new collateral for immediate locking
+                        if let Some(ref new_op) = new_outpoint {
+                            let lock_height = self
+                                .current_height
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            self.pending_collateral_locks.lock().push((
+                                new_op.clone(),
+                                masternode.address.clone(),
+                                lock_height,
+                                masternode.tier.collateral(),
+                            ));
                         }
                     }
                     new_outpoint
@@ -2179,6 +2229,7 @@ impl Clone for MasternodeRegistry {
             started_at: self.started_at,
             current_height: self.current_height.clone(),
             pending_collateral_unlocks: self.pending_collateral_unlocks.clone(),
+            pending_collateral_locks: self.pending_collateral_locks.clone(),
         }
     }
 }

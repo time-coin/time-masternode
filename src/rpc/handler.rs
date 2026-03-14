@@ -3304,17 +3304,13 @@ impl RpcHandler {
                     Some(crate::types::UTXOState::Unspent) => {
                         spendable_balance += u.value;
                     }
-                    Some(
-                        crate::types::UTXOState::Locked { .. }
-                        | crate::types::UTXOState::SpentPending { .. },
-                    ) => {
+                    Some(crate::types::UTXOState::Locked { .. }) => {
                         pending_balance += u.value;
                     }
-                    _ => {
-                        // SpentFinalized, Confirmed, etc. — shouldn't be in storage
-                        // but count them as non-spendable if present
-                        pending_balance += u.value;
-                    }
+                    Some(crate::types::UTXOState::SpentPending { .. }) => {} // being spent, don't count
+                    Some(crate::types::UTXOState::SpentFinalized { .. }) => {} // spent, don't count
+                    Some(crate::types::UTXOState::Archived { .. }) => {}     // spent & archived
+                    None => {}                                               // unknown state
                 }
             }
 

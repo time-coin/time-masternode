@@ -234,6 +234,16 @@ impl UTXOStateManager {
         }
         self.storage.remove_utxo(outpoint).await?;
         self.utxo_states.remove(outpoint);
+
+        // Clean up collateral lock if present
+        if self.locked_collaterals.remove(outpoint).is_some() {
+            if let Some(tree) = &self.collateral_db {
+                let key = bincode::serialize(outpoint).unwrap_or_default();
+                let _ = tree.remove(key);
+            }
+            tracing::debug!("🔓 Removed collateral lock for deleted UTXO {:?}", outpoint);
+        }
+
         Ok(())
     }
 
@@ -742,12 +752,33 @@ impl UTXOStateManager {
             .map(|r| r.value().clone())
     }
 
-    /// List all locked collaterals
+    /// List all locked collaterals, filtering out stale entries whose UTXOs no longer exist
     pub fn list_locked_collaterals(&self) -> Vec<LockedCollateral> {
-        self.locked_collaterals
+        let mut stale_keys = Vec::new();
+        let result: Vec<LockedCollateral> = self
+            .locked_collaterals
             .iter()
+            .filter(|entry| {
+                let exists = self.utxo_states.contains_key(entry.key());
+                if !exists {
+                    stale_keys.push(entry.key().clone());
+                }
+                exists
+            })
             .map(|entry| entry.value().clone())
-            .collect()
+            .collect();
+
+        // Clean up stale entries
+        for key in &stale_keys {
+            self.locked_collaterals.remove(key);
+            if let Some(tree) = &self.collateral_db {
+                let serialized = bincode::serialize(key).unwrap_or_default();
+                let _ = tree.remove(serialized);
+            }
+            tracing::debug!("🧹 Cleaned stale collateral lock for {:?}", key);
+        }
+
+        result
     }
 
     /// List locked collaterals for a specific masternode
