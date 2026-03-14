@@ -392,6 +392,10 @@ enum Commands {
     /// Force unlock ALL UTXOs (nuclear option - use only for recovery)
     #[command(next_help_heading = "Utility")]
     ForceUnlockAll,
+
+    /// Clear stuck finalized transactions and revert their UTXO changes
+    #[command(next_help_heading = "Utility")]
+    ClearStuckTransactions,
 }
 
 #[derive(Subcommand, Debug)]
@@ -642,6 +646,7 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::UnlockUTXO { txid, vout } => ("unlockutxo", json!([txid, vout])),
         Commands::UnlockOrphanedUTXOs => ("unlockorphanedutxos", json!([])),
         Commands::ForceUnlockAll => ("forceunlockall", json!([])),
+        Commands::ClearStuckTransactions => ("clearstucktransactions", json!([])),
         Commands::GetMempoolInfo => ("getmempoolinfo", json!([])),
         Commands::GetRawMempool { verbose } => ("getrawmempool", json!([verbose])),
         Commands::GetMempoolVerbose => ("getmempoolverbose", json!([])),
@@ -1210,6 +1215,36 @@ fn print_human_readable(
             println!("⚠️  {}", message);
             if unlocked > 0 {
                 println!("   All {} UTXOs have been reset to Unspent state", unlocked);
+            }
+        }
+        Commands::ClearStuckTransactions => {
+            let cleared = result.get("cleared").and_then(|v| v.as_u64()).unwrap_or(0);
+            let inputs = result
+                .get("inputs_restored")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let outputs = result
+                .get("outputs_removed")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let message = result
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Done");
+
+            println!("🧹 {}", message);
+            if cleared > 0 {
+                println!("   Transactions cleared: {}", cleared);
+                println!("   Input UTXOs restored:  {}", inputs);
+                println!("   Output UTXOs removed:  {}", outputs);
+                if let Some(txs) = result.get("transactions").and_then(|v| v.as_array()) {
+                    println!("   Transaction IDs:");
+                    for tx in txs {
+                        if let Some(txid) = tx.as_str() {
+                            println!("     • {}…", &txid[..16.min(txid.len())]);
+                        }
+                    }
+                }
             }
         }
         Commands::MasternodeStatus => {
