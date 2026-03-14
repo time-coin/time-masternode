@@ -685,8 +685,18 @@ impl UTXOStateManager {
     ) -> Result<(), UtxoError> {
         let remove_count = to_remove.len();
         let add_count = to_add.len();
+        let mut skipped_collateral = 0;
 
         for outpoint in to_remove {
+            // Never remove collateral-locked UTXOs during reconciliation
+            if self.is_collateral_locked(&outpoint) {
+                tracing::warn!(
+                    "🚫 Skipping collateral UTXO {} during reconciliation",
+                    outpoint
+                );
+                skipped_collateral += 1;
+                continue;
+            }
             if let Err(e) = self.storage.remove_utxo(&outpoint).await {
                 tracing::warn!("Failed to remove UTXO during reconciliation: {}", e);
             }
@@ -698,9 +708,10 @@ impl UTXOStateManager {
         }
 
         tracing::info!(
-            "🔄 Reconciled UTXO state: removed {}, added {}",
-            remove_count,
-            add_count
+            "🔄 Reconciled UTXO state: removed {}, added {}, skipped {} collateral",
+            remove_count - skipped_collateral,
+            add_count,
+            skipped_collateral,
         );
         Ok(())
     }

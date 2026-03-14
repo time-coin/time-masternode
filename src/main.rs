@@ -3524,8 +3524,8 @@ async fn main() {
 
     // Periodic UTXO consistency check — hash-first, inquire on divergence
     // Runs at the midpoint between block slots (on the 5's: :05, :15, :25, etc.)
-    // to avoid colliding with block production. Only checks when the node is in
-    // sync (not behind expected height).
+    // to avoid colliding with block production. Also runs when the network is
+    // stalled (no new blocks) to help diagnose and recover from UTXO divergence.
     let utxo_sync_blockchain = blockchain_server.clone();
     let utxo_sync_peer_registry = peer_connection_registry.clone();
     let utxo_sync_shutdown = shutdown_token.clone();
@@ -3538,6 +3538,7 @@ async fn main() {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_check_slot = 0i64;
+        let mut last_stall_check = std::time::Instant::now();
 
         loop {
             tokio::select! {
@@ -3557,25 +3558,34 @@ async fn main() {
                     let current_slot = elapsed / 600;
                     let offset_in_slot = elapsed % 600;
 
-                    // Fire at the midpoint (270–330s into each slot, i.e. "on the 5's")
-                    if !(270..=330).contains(&offset_in_slot) {
-                        continue;
-                    }
-
-                    // Don't fire twice in the same slot
-                    if current_slot == last_check_slot {
-                        continue;
-                    }
-                    last_check_slot = current_slot;
-
-                    // Only check when node is in sync
                     let our_height = utxo_sync_blockchain.get_height();
                     let expected_height = utxo_sync_blockchain.calculate_expected_height();
-                    if expected_height > our_height + 1 {
-                        tracing::debug!(
-                            "🔄 Skipping UTXO consistency check — still syncing (height {} vs expected {})",
-                            our_height, expected_height
-                        );
+                    let is_stalled = expected_height > our_height + 3;
+
+                    // Determine if we should fire:
+                    // Normal mode: fire at midpoint (270-330s into slot) when in sync
+                    // Stall mode: fire every 5 minutes regardless of slot timing
+                    let should_fire = if is_stalled {
+                        // Network is stalled — run every 5 minutes to help diagnose
+                        if last_stall_check.elapsed() >= std::time::Duration::from_secs(300) {
+                            last_stall_check = std::time::Instant::now();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        // Normal mode: fire at the midpoint (270–330s into each slot)
+                        if !(270..=330).contains(&offset_in_slot) {
+                            continue;
+                        }
+                        if current_slot == last_check_slot {
+                            continue;
+                        }
+                        last_check_slot = current_slot;
+                        true
+                    };
+
+                    if !should_fire {
                         continue;
                     }
 
@@ -3588,10 +3598,11 @@ async fn main() {
                     let our_count = utxo_sync_blockchain.get_utxo_count().await;
 
                     tracing::info!(
-                        "🔍 UTXO consistency check: broadcasting hash {} ({} UTXOs at height {}) to {} peer(s)",
+                        "🔍 UTXO consistency check: broadcasting hash {} ({} UTXOs at height {}{}) to {} peer(s)",
                         hex::encode(&our_hash[..8]),
                         our_count,
                         our_height,
+                        if is_stalled { " ⚠️ STALLED" } else { "" },
                         connected.len(),
                     );
 
