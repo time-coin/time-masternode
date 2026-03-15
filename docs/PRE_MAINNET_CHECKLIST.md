@@ -36,7 +36,7 @@
 - **6. Genesis block** - Dynamically generated on masternode registration
 - **8. Mempool eviction/fees** - Transaction pool with fee-based eviction
 - **11. Address format & RPC** - Ed25519 addresses, full RPC API implemented
-- **13. Block size limits** - 4MB base block size enforced
+- **13. Block size limits** - 2MB base block size enforced (`MAX_BLOCK_SIZE = 2_000_000`)
 - **14. Crypto test vectors** - BLAKE3, Ed25519 test vectors included
 
 ### ⚠️ Partial (4 items)

@@ -1,7 +1,7 @@
 # TimeCoin Architecture Overview
 
 **Last Updated:** 2026-03-09  
-**Version:** 1.6.0 (Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections)
+**Version:** 1.2.3 (Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections, Encrypted Memos, Payment Request URIs)
 
 ---
 

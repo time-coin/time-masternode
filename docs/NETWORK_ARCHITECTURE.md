@@ -568,8 +568,8 @@ bootstrap_peers = ["seed1.time-coin.io:24100", "seed2.time-coin.io:24100"]
 
 | Network | P2P Port | RPC Port | Address Prefix | Magic Bytes |
 |---------|----------|----------|----------------|-------------|
-| **Mainnet** | 24000 | 24001 | time1 | 0xC01D7E4D ("COLD TIME") |
-| **Testnet** | 24100 | 24101 | time1 | 0x7E577E4D ("TEST TIME") |
+| **Mainnet** | 24000 | 24001 | TIME1 | 0xC01D7E4D ("COLD TIME") |
+| **Testnet** | 24100 | 24101 | TIME0 | 0x54494D45 ("TIME" ASCII) |
 
 ### Configuration Files
 
@@ -606,16 +606,16 @@ Ports are automatically selected based on network type. Override in `time.conf` 
 
 ### Address Prefixes
 
-TIME Coin addresses use the `time1` prefix for both networks:
+TIME Coin addresses use distinct prefixes per network (38 chars total):
 
-- **Mainnet**: `time1abc...`
-- **Testnet**: `time1xyz...`
+- **Mainnet**: `TIME1<payload>` (e.g. `TIME1abc...`)
+- **Testnet**: `TIME0<payload>` (e.g. `TIME0abc...`)
 
-Both networks use the same address format, but transactions are network-isolated through magic bytes. Nodes on different networks will reject each other's messages.
+Transactions are also network-isolated through magic bytes. Nodes on different networks will reject each other's messages.
 
 ```rust
-NetworkType::Mainnet.magic_bytes() // [0xC0, 0x1D, 0x7E, 0x4D]
-NetworkType::Testnet.magic_bytes() // [0x7E, 0x57, 0x7E, 0x4D]
+NetworkType::Mainnet.magic_bytes() // [0xC0, 0x1D, 0x7E, 0x4D]  "COLD TIME"
+NetworkType::Testnet.magic_bytes() // [0x54, 0x49, 0x4D, 0x45]  "TIME" ASCII
 ```
 
 ### Running Different Networks
@@ -631,8 +631,8 @@ NetworkType::Testnet.magic_bytes() // [0x7E, 0x57, 0x7E, 0x4D]
 Output will show:
 ```
 📡 Network: Testnet
-  └─ Magic Bytes: [126, 87, 126, 77]
-  └─ Address Prefix: time1
+  └─ Magic Bytes: [84, 73, 77, 69]  ("TIME" ASCII)
+  └─ Address Prefix: TIME0 (testnet) / TIME1 (mainnet)
 ```
 
 **Mainnet**:
@@ -645,7 +645,7 @@ Output will show:
 ```
 📡 Network: Mainnet
   └─ Magic Bytes: [192, 29, 126, 77]
-  └─ Address Prefix: time1
+  └─ Address Prefix: TIME0 (testnet) / TIME1 (mainnet)
 ```
 
 ### Masternode Configuration
@@ -671,12 +671,14 @@ Tier is auto-detected from the collateral UTXO value.
 
 ### Reward Weights
 
-| Tier | Collateral | Reward Weight | Can Vote |
-|------|------------|---------------|----------|
-| Free | 0 TIME | 1 | ❌ No |
-| Bronze | 1,000 TIME | 1,000 | ✅ Yes (1x) |
-| Silver | 10,000 TIME | 10,000 | ✅ Yes (10x) |
-| Gold | 100,000 TIME | 100,000 | ✅ Yes (100x) |
+| Tier | Collateral | Sampling Weight | Reward Weight | Governance Weight |
+|------|------------|-----------------|---------------|-------------------|
+| Free | 0 TIME | 1 | 1 | ❌ No vote |
+| Bronze | 1,000 TIME | 10 | 5 | 1x |
+| Silver | 10,000 TIME | 100 | 20 | 10x |
+| Gold | 100,000 TIME | 1,000 | 60 | 100x |
+
+*Sampling weight: VRF selection probability. Reward weight: block reward share. Governance weight: proposal voting power.*
 
 ### Peer Discovery Configuration
 
@@ -726,7 +728,7 @@ data_dir = "./data/mainnet"  # Mainnet
 
 **Address prefix mismatch**  
 *Error*: Invalid address format  
-*Solution*: Verify address starts with `time1` on both mainnet and testnet.
+*Solution*: Verify address starts with `TIME1` (mainnet) or `TIME0` (testnet).
 
 ### Network Configuration Best Practices
 
