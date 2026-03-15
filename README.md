@@ -4,7 +4,7 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)
 ![Protocol](https://img.shields.io/badge/protocol-v6.2-green.svg)
-![Version](https://img.shields.io/badge/version-1.2.0-brightgreen.svg)
+![Version](https://img.shields.io/badge/version-1.2.3-brightgreen.svg)
 ![Security](https://img.shields.io/badge/security-audited-success.svg)
 
 **TIME Coin** is a next-generation cryptocurrency built from the ground up in Rust, featuring AI-powered optimizations and sub-second transaction finality.
@@ -46,6 +46,11 @@
 - **Light Client Support**: Merkle proofs and SPV verification
 - **Dual Networks**: Separate Mainnet and Testnet configurations
 - **Modern Crypto**: Ed25519 signatures, BLAKE3 hashing, ECVRF sortition
+
+### 🔒 Encrypted Memos & Payment Requests
+- **Encrypted transaction memos**: Optional per-transaction messages encrypted with ECDH (Ed25519 → X25519) + AES-256-GCM — only sender and recipient can decrypt; other nodes see only ciphertext on-chain
+- **Payment request URIs**: `timecoin:ADDRESS?amount=X&pubkey=HEX&memo=TEXT&label=NAME` — shareable via email, text, or QR code; solves public-key discovery for new addresses
+- **CLI integration**: `--memo` flag on `sendtoaddress`, `request-payment` / `pay-request` commands
 
 ### 🔌 Developer-Friendly
 - **JSON-RPC 2.0 API**: Bitcoin-compatible interface
@@ -169,6 +174,15 @@ for operational details (tiers, collateral, rewards, deregistration).
 
 # Check uptime
 ./target/release/time-cli uptime
+
+# Generate a payment request URI (shareable via email/QR)
+./target/release/time-cli request-payment 50.0 --memo "Invoice #42"
+
+# Pay a payment request URI
+./target/release/time-cli pay-request "timecoin:TIME0...?amount=50&pubkey=..."
+
+# Send with an encrypted memo
+./target/release/time-cli sendtoaddress <address> <amount> --memo "Payment note"
 ```
 
 ### Masternode Dashboard (time-dashboard)
@@ -211,77 +225,80 @@ See **[docs/CLI_GUIDE.md](docs/CLI_GUIDE.md)** for complete command reference.
 ```
 time-masternode/
 ├── src/
-│   ├── main.rs              # Entry point
-│   ├── lib.rs               # Library exports
-│   ├── config.rs            # Configuration management
+│   ├── main.rs              # Entry point + all pub mod declarations
+│   ├── lib.rs               # include!(main.rs) for integration test access
+│   ├── config.rs            # Configuration management (time.conf + legacy TOML)
+│   ├── constants.rs         # Protocol constants (block time, rewards, limits)
 │   ├── types.rs             # Core types (Block, Transaction, UTXO, etc.)
-│   ├── consensus.rs         # TimeVote + TimeLock consensus
-│   ├── avalanche.rs         # TimeVote protocol implementation
-│   ├── tsdc.rs              # TimeLock block production
-│   ├── blockchain.rs        # Blockchain storage and validation
-│   ├── storage.rs           # Sled database abstraction layer
+│   ├── consensus.rs         # TimeVote + TimeLock consensus engine
+│   ├── timevote.rs          # TimeVote protocol handler bridge
+│   ├── timelock.rs          # TimeLock block production
+│   ├── blockchain.rs        # Blockchain storage, validation, reorg logic
+│   ├── blockchain_validation.rs # Block validation rules (extracted)
+│   ├── blockchain_error.rs  # Typed blockchain error variants
+│   ├── storage.rs           # Sled DB abstraction, zstd compression
 │   ├── utxo_manager.rs      # UTXO state machine
 │   ├── transaction_pool.rs  # Mempool management
-│   ├── masternode_registry.rs # Masternode tracking
-│   ├── heartbeat_attestation.rs # Uptime verification
+│   ├── tx_index.rs          # Transaction index for history queries
+│   ├── masternode_registry.rs  # Masternode tracking & gossip liveness
+│   ├── masternode_authority.rs # Collateral slashing & authority checks
+│   ├── masternode_certificate.rs # Masternode certificate generation
 │   ├── finality_proof.rs    # TimeProof (Verifiable Finality)
-│   ├── wallet.rs            # Wallet functionality
+│   ├── wallet.rs            # Wallet (AES-256-GCM + Argon2 + Ed25519)
+│   ├── memo.rs              # Encrypted memo (ECDH X25519 + AES-256-GCM)
 │   ├── address.rs           # Address encoding/decoding
 │   ├── peer_manager.rs      # High-level peer management
+│   ├── block_cache.rs       # In-memory recent block cache
 │   ├── time_sync.rs         # Network time synchronization
 │   ├── state_notifier.rs    # State change notifications
 │   ├── shutdown.rs          # Graceful shutdown handler
 │   ├── error.rs             # Error types
 │   ├── network_type.rs      # Mainnet/Testnet enum
-│   ├── ai/                  # 🤖 AI Systems (NEW in v1.0.0)
-│   │   ├── mod.rs
-│   │   ├── peer_selector.rs     # AI-powered peer selection
-│   │   ├── fork_resolver.rs     # Multi-factor fork resolution
-│   │   ├── anomaly_detector.rs  # Security anomaly detection
-│   │   ├── predictive_sync.rs   # Block arrival prediction
-│   │   ├── transaction_analyzer.rs  # Transaction pattern analysis
-│   │   ├── transaction_validator.rs # AI validation rules
+│   ├── ai/                  # 🤖 AI Systems
+│   │   ├── adaptive_reconnection.rs # Exponential backoff with per-peer learning
+│   │   ├── anomaly_detector.rs      # Z-score anomaly detection
+│   │   ├── attack_detector.rs       # Sybil/eclipse/fork-bomb detection
+│   │   ├── consensus_health.rs      # Consensus health monitoring
+│   │   ├── fork_resolver.rs         # Multi-factor fork resolution
+│   │   ├── metrics_dashboard.rs     # AI metrics aggregation
 │   │   ├── network_optimizer.rs     # Dynamic network tuning
-│   │   └── resource_manager.rs      # Resource allocation
-│   ├── block/               # Block generation & validation
-│   │   ├── mod.rs
-│   │   ├── types.rs         # Block structures
-│   │   ├── producer.rs      # Block production
-│   │   ├── validator.rs     # Block validation
-│   │   └── merkle.rs        # Merkle tree implementation
+│   │   ├── peer_selector.rs         # AI-powered peer selection
+│   │   ├── predictive_sync.rs       # Block arrival prediction
+│   │   └── transaction_validator.rs # AI validation rules
+│   ├── block/               # Block generation & types
+│   │   ├── types.rs         # Block & BlockHeader structures
+│   │   ├── generator.rs     # Block production
+│   │   ├── genesis.rs       # Genesis block
+│   │   └── vrf.rs           # ECVRF implementation
 │   ├── crypto/              # Cryptographic primitives
-│   │   ├── mod.rs
-│   │   ├── keys.rs          # Ed25519 key management
-│   │   ├── vrf.rs           # ECVRF implementation
-│   │   └── hash.rs          # BLAKE3 hashing
+│   │   └── ecvrf.rs         # EC-VRF (RFC 9381)
 │   ├── network/             # P2P networking
-│   │   ├── mod.rs
-│   │   ├── server.rs        # TCP server
-│   │   ├── client.rs        # Network client
+│   │   ├── server.rs        # Inbound TCP listener (TLS auto-detect)
+│   │   ├── client.rs        # Outbound connection manager (currently unused)
 │   │   ├── message.rs       # Network message types
-│   │   ├── message_handler.rs   # Message processing logic
-│   │   ├── peer_connection.rs   # Individual peer connection
-│   │   ├── peer_connection_registry.rs # Peer registry & messaging
-│   │   ├── connection_manager.rs    # Lock-free connection tracking
-│   │   ├── connection_state.rs      # Connection state machine
-│   │   ├── peer_discovery.rs        # Bootstrap peer service
-│   │   ├── peer_scoring.rs          # Peer reputation system
-│   │   ├── state_sync.rs    # State synchronization
-│   │   ├── blacklist.rs     # IP blacklisting
-│   │   ├── rate_limiter.rs  # Rate limiting
-│   │   ├── dedup_filter.rs  # Message deduplication
-│   │   ├── anomaly_detection.rs # Network anomaly detection
-│   │   ├── block_optimization.rs # Block propagation optimization
-│   │   ├── tls.rs           # TLS encryption (infrastructure ready)
-│   │   ├── signed_message.rs    # Ed25519 message signing
-│   │   └── secure_transport.rs  # Secure transport layer (future)
+│   │   ├── message_handler.rs          # Message processing logic
+│   │   ├── peer_connection.rs          # Per-peer message loop & ping/pong
+│   │   ├── peer_connection_registry.rs # Lock-free active peer registry
+│   │   ├── connection_manager.rs       # Outbound connection state machine
+│   │   ├── sync_coordinator.rs         # Chain sync coordination
+│   │   ├── peer_discovery.rs           # Bootstrap peer service
+│   │   ├── peer_scoring.rs             # Peer reputation system
+│   │   ├── partition_detector.rs       # Network partition detection
+│   │   ├── blacklist.rs                # IP blacklisting
+│   │   ├── rate_limiter.rs             # Rate limiting
+│   │   ├── dedup_filter.rs             # Message deduplication
+│   │   ├── block_cache.rs              # Block propagation cache
+│   │   ├── tls.rs                      # rustls TLS (self-signed, Ed25519 auth)
+│   │   ├── signed_message.rs           # Ed25519 message signing
+│   │   ├── wire.rs                     # Message framing
+│   │   └── secure_transport.rs         # Signed transport layer
 │   ├── rpc/                 # JSON-RPC server
-│   │   ├── mod.rs
-│   │   ├── server.rs        # RPC HTTP server
-│   │   └── methods.rs       # RPC method handlers
+│   │   ├── server.rs        # HTTP/HTTPS RPC server (TLS auto-detect)
+│   │   ├── handler.rs       # RPC method implementations
+│   │   └── websocket.rs     # WebSocket notification server
 │   └── bin/
-│       ├── timed.rs         # Main daemon binary
-│       └── time-cli.rs      # CLI tool binary
+│       ├── time-cli.rs      # CLI tool
+│       └── time-dashboard.rs # TUI dashboard
 ├── docs/                    # 📚 Complete documentation
 │   ├── INDEX.md             # Documentation index (START HERE)
 │   ├── TIMECOIN_PROTOCOL.md # Protocol v6 specification
@@ -398,12 +415,13 @@ Transactions achieve **deterministic finality** during the Voting phase via Time
 
 ### Block Rewards
 
-- **Base Reward**: 100 × (1 + ln(n)) TIME per block
-  - Scales logarithmically with masternode count
-  - Example: 10 nodes = ~330 TIME, 100 nodes = ~560 TIME
-- **Distribution**: Proportional to masternode weight
-- **Transaction Fees**: Added to block reward
-- **All rewards** distributed to masternodes (no treasury/governance allocations)
+- **Base Reward**: 100 TIME per block, split as:
+  - 30 TIME → block producer (leader bonus)
+  - 5 TIME → treasury pool (on-chain state, not a UTXO)
+  - 65 TIME → per-tier pools (Gold 25 / Silver 18 / Bronze 14 / Free 8)
+- **Tier pool winner**: Paid tiers award their full pool to one VRF-selected winner; Free tier splits among up to 25 recipients
+- **Transaction Fees**: Added to block reward pool
+- **Fairness bonus**: Nodes that haven't recently received a reward get a linearly increasing selection weight (`blocks_without_reward / 10`)
 
 See [docs/TIMECOIN_PROTOCOL.md#253-reward-distribution](docs/TIMECOIN_PROTOCOL.md#253-reward-distribution) for detailed examples.
 
@@ -436,7 +454,7 @@ for the full configuration reference.
 
 ## 🛣️ Development Status
 
-**Current Status:** ✅ **v1.2.0 Production Release** (February 2026)
+**Current Status:** ✅ **v1.2.3 Production Release** (March 2026)
 
 ### ✅ Completed Features
 
@@ -484,13 +502,14 @@ for the full configuration reference.
 
 ### 🔮 Future Roadmap
 
-**v1.2.0** (Q2 2026):
+**v1.2.x** (completed):
 - [x] Config-based masternode management (auto-registration from time.conf + masternode.conf)
 - [x] Network-aware CLI and dashboard (--testnet flag)
-- [ ] TLS encryption for P2P (infrastructure ready)
-- [ ] Hot/cold wallet separation
-- [ ] Enhanced monitoring dashboard
-- [ ] Performance benchmarking suite
+- [x] TLS encryption for P2P and RPC (rustls, self-signed certs)
+- [x] Encrypted transaction memos (ECDH X25519 + AES-256-GCM)
+- [x] Payment request URIs (`timecoin:` scheme)
+- [x] Transaction index for full history queries
+- [x] Fork resolution fixes (deadlock, infinite loop, batch fetching)
 
 **v2.0.0** (Q3-Q4 2026):
 - [ ] Hardware wallet support (Ledger, Trezor)
