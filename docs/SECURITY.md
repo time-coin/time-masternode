@@ -84,9 +84,13 @@ TimeCoin implements several security measures:
    - Amount overflow checks
    - Reward address network validation (prevents testnet/mainnet mismatch)
 
+### Implemented (v1.2.x)
+
+- **TLS encryption**: Both P2P and RPC support TLS (rustls, self-signed certs, `AcceptAnyCertVerifier` — message-level auth via Ed25519 signatures). Enable with `rpctls=1` in `time.conf`.
+- **Encrypted transaction memos**: ECDH (X25519) + AES-256-GCM; only sender/recipient can decrypt
+
 ### Planned Security Enhancements
 
-- TLS encryption for all P2P connections
 - Hardware wallet support
 - Multi-signature transactions
 - `walletpassphrase` / `encryptwallet` RPC commands
@@ -147,7 +151,7 @@ TimeCoin implements several security measures:
 
 ### Current Limitations
 
-1. **P2P Encryption**: TLS code exists but is not yet integrated into the wire protocol
+1. **P2P TLS**: Implemented and available; not enforced as mandatory (nodes negotiate TLS on connect)
 2. **Eclipse Attacks**: Partial mitigation through peer diversity and reputation
 3. **Sybil Attacks**: Mitigated by masternode collateral requirements and whitelisting
 4. **51% Attacks**: TimeVote finality requires 51% stake threshold

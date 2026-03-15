@@ -153,15 +153,16 @@ Base Reward = 100 TIME (fixed per block)
 Total Reward = 100 TIME + transaction_fees
 
 Distribution (§10.4):
-  Block Producer:  35 TIME + fees  (VRF-selected leader bonus)
+  Block Producer:  30 TIME + fees  (VRF-selected leader bonus)
+  Treasury pool:    5 TIME         (on-chain state, not a UTXO)
   Per-Tier Pools:  65 TIME total
-    Gold pool:     25 TIME  (shared equally within tier)
+    Gold pool:     25 TIME  (full pool → 1 VRF-selected winner)
     Silver pool:   18 TIME
     Bronze pool:   14 TIME
-    Free pool:      8 TIME
+    Free pool:      8 TIME  (split among up to 25 recipients)
 
-  Max 25 recipients per tier per block.
-  Fairness rotation: longest-waiting nodes selected first.
+  Max 25 Free-tier recipients per block.
+  Fairness bonus: blocks_without_reward / 10 (linear, unbounded).
   Empty tier's pool → block producer.
 ```
 
@@ -170,10 +171,8 @@ Distribution (§10.4):
 ## Address Format
 
 ```
-Mainnet:  time1<bech32m_payload>
-Testnet:  timet<bech32m_payload>
-
-Example: time1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx
+Mainnet:  TIME1<payload>   (38 chars total)
+Testnet:  TIME0<payload>   (38 chars total)
 ```
 
 ---
