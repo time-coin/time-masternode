@@ -1823,6 +1823,14 @@ impl RpcHandler {
                         entry["fee"] = json!(f);
                     }
 
+                    let memo = tx
+                        .encrypted_memo
+                        .as_ref()
+                        .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
+                    if let Some(ref m) = memo {
+                        entry["memo"] = json!(m);
+                    }
+
                     transactions.push(entry);
                 }
             }
@@ -1889,19 +1897,26 @@ impl RpcHandler {
                     &send_address
                 };
 
-                transactions.insert(
-                    0,
-                    json!({
-                        "txid": txid,
-                        "address": address,
-                        "category": category,
-                        "amount": net_amount,
-                        "confirmations": 0,
-                        "finalized": true,
-                        "time": tx.timestamp,
-                        "blocktime": tx.timestamp,
-                    }),
-                );
+                let mut entry = json!({
+                    "txid": txid,
+                    "address": address,
+                    "category": category,
+                    "amount": net_amount,
+                    "confirmations": 0,
+                    "finalized": true,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                });
+
+                let memo = tx
+                    .encrypted_memo
+                    .as_ref()
+                    .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
+                if let Some(ref m) = memo {
+                    entry["memo"] = json!(m);
+                }
+
+                transactions.insert(0, entry);
             }
         }
 
@@ -1935,19 +1950,26 @@ impl RpcHandler {
             }
 
             if received > 0 {
-                transactions.insert(
-                    0,
-                    json!({
-                        "txid": txid,
-                        "address": recv_address,
-                        "category": "receive",
-                        "amount": received as f64 / 100_000_000.0,
-                        "confirmations": 0,
-                        "finalized": false,
-                        "time": tx.timestamp,
-                        "blocktime": tx.timestamp,
-                    }),
-                );
+                let mut entry = json!({
+                    "txid": txid,
+                    "address": recv_address,
+                    "category": "receive",
+                    "amount": received as f64 / 100_000_000.0,
+                    "confirmations": 0,
+                    "finalized": false,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                });
+
+                let memo = tx
+                    .encrypted_memo
+                    .as_ref()
+                    .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
+                if let Some(ref m) = memo {
+                    entry["memo"] = json!(m);
+                }
+
+                transactions.insert(0, entry);
             }
         }
 
