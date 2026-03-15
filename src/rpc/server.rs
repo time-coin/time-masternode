@@ -360,7 +360,14 @@ impl RpcServer {
                                     if let Err(e) =
                                         Self::handle_connection(tls_stream, handler, &auth).await
                                     {
-                                        eprintln!("RPC TLS connection error: {}", e);
+                                        // Suppress the rustls "peer closed without close_notify"
+                                        // noise — this is benign and fired by clients/proxies that
+                                        // don't send a TLS close_notify before dropping the TCP
+                                        // connection (browsers, curl, health checks, etc.).
+                                        let msg = e.to_string();
+                                        if !msg.contains("close_notify") {
+                                            eprintln!("RPC TLS connection error: {}", e);
+                                        }
                                     }
                                 }
                                 Err(_e) => {
