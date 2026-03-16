@@ -1,7 +1,7 @@
 # Network Architecture - TIME Coin Protocol v6.2
 
-**Document Version:** 1.3  
-**Last Updated:** March 9, 2026  
+**Document Version:** 1.4
+**Last Updated:** March 16, 2026
 **Status:** Production-Ready
 
 ---
@@ -17,6 +17,26 @@ The TIME Coin network layer implements a production-ready P2P system with:
 - Peer discovery and bootstrap
 - State synchronization
 - Fork alert chain tip propagation (v1.2.2)
+
+---
+
+## Recent Changes (v1.2.4 - March 2026)
+
+### TLS I/O Race Condition Fix
+The inbound and outbound TLS paths previously used a single `tokio::select!` loop to interleave reads and writes on the same `TlsStream`. When both branches became ready simultaneously, Tokio would cancel the in-progress `read_message` future and process the write — silently discarding bytes already pulled from the TCP kernel buffer. The next `read_message` started at the wrong offset and interpreted mid-payload bytes as a frame length header, producing garbage multi-gigabyte values. This occurred at 30-second intervals (matching `PING_INTERVAL_SECS`) whenever an outbound ping coincided with incoming data.
+
+**Fix:** Both TLS paths now use `tokio::io::split()` to obtain independent read and write halves, each run in a separate spawned task — identical to the existing non-TLS path. The shared-stream `select!` bridge is removed entirely.
+
+### Block Size: Dual Constants
+`MAX_BLOCK_SIZE` (validation, 4 MB) and `MAX_BLOCK_ASSEMBLY_SIZE` (producer cap, 1.9 MB) are now separate constants. The block producer truncates its transaction set at `MAX_BLOCK_ASSEMBLY_SIZE`; the validator accepts legacy blocks up to `MAX_BLOCK_SIZE`.
+
+### Ping/Pong Soft Rate Limit
+Excess pings are now dropped silently (`check_rate_limit_soft!`) rather than recording blacklist violations. Previously, connection-churn during sync failures accumulated ping violations and triggered hour-long bans on legitimate masternodes.
+
+### Reduced Ban Escalation (Non-Severe Violations)
+- 3rd violation: 5 min → **1 min**
+- 5th violation: 1 hr → **5 min**
+- Severe violations (`record_severe_violation`): unchanged (1-hour ban, then permanent)
 
 ---
 
@@ -102,6 +122,9 @@ Fallback: Use configured bootstrap peers if service unavailable
 - `PeerStateManager`: Tracks peer connection states
 - Health monitoring (ping/pong)
 - Graceful connection closure
+
+**I/O Architecture:**
+All connections (TLS and plain TCP) use `tokio::io::split()` to obtain independent read and write halves. Each half runs in its own spawned task, preventing write operations from cancelling in-progress reads. The reader task feeds a `mpsc::UnboundedSender<Result<Option<NetworkMessage>>>` channel; the writer task drains a `mpsc::UnboundedSender<Vec<u8>>` channel of pre-serialized frames.
 
 **State Transitions:**
 ```
@@ -260,7 +283,7 @@ pub fn is_timestamp_valid(&self, max_age_seconds) -> bool
 | `subscribe` | 60s | 10 |
 | `general` | 1s | 100 |
 
-> **Note:** `ping` and `pong` use separate buckets so pong replies don't count against the inbound ping quota. Previously they shared one bucket (limit 2/10s), which caused false bans of legitimate peers during normal keepalive exchanges.
+> **Note:** `ping` and `pong` use a *soft* rate limit (`check_rate_limit_soft!`) — excess messages are dropped silently without recording a blacklist violation. Pings burst during connection churn (e.g. sync retries) and should not penalise legitimate peers.
 
 ---
 
@@ -268,17 +291,32 @@ pub fn is_timestamp_valid(&self, max_age_seconds) -> bool
 **Purpose:** IP blacklisting with TTL expiration
 
 **Features:**
-- Temporary blacklist entries
+- Temporary and permanent blacklist entries
+- Whitelist (masternodes exempt from minor violations)
 - Automatic cleanup (TTL-based)
-- Batch operations
 - Thread-safe operations
+
+**Violation escalation (normal violations):**
+
+| Count | Action |
+|-------|--------|
+| 1–2 | Warning only |
+| 3 | 1-minute temp ban |
+| 5 | 5-minute temp ban |
+| 10 | Permanent ban |
+
+**Severe violations** (`record_severe_violation` — corrupted blocks, reorg attacks): immediate 1-hour ban; permanent ban if effective count reaches 10. Applies even to whitelisted peers.
+
+**Ping/pong rate limit violations** do **not** go through this path — they use `check_rate_limit_soft!` and are dropped silently.
 
 **Implementation:**
 ```rust
-pub fn add(&mut self, ip: &str, ttl: Duration)
-pub fn is_blacklisted(&self, ip: &str) -> bool
-pub fn remove(&mut self, ip: &str)
-pub fn cleanup_expired()
+pub fn record_violation(&mut self, ip: IpAddr, reason: &str) -> bool
+pub fn record_severe_violation(&mut self, ip: IpAddr, reason: &str) -> bool
+pub fn add_temp_ban(&mut self, ip: IpAddr, duration: Duration, reason: &str)
+pub fn is_blacklisted(&mut self, ip: IpAddr) -> Option<String>
+pub fn add_to_whitelist(&mut self, ip: IpAddr, reason: &str)
+pub fn cleanup(&mut self)
 ```
 
 ---
