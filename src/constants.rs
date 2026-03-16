@@ -47,8 +47,14 @@ pub mod blockchain {
     /// Only enforced on mainnet (testnet = 0 for rapid development iteration).
     pub const FREE_MATURITY_BLOCKS: u64 = 72; // ~12 hours at 10 min/block
 
-    /// Maximum block size in bytes (2 MB)
-    pub const MAX_BLOCK_SIZE: usize = 2_000_000;
+    /// Maximum block size for validation — blocks from peers up to this size are accepted.
+    /// Set to 4 MB to accommodate blocks produced before the assembly cap was enforced.
+    pub const MAX_BLOCK_SIZE: usize = 4_000_000;
+
+    /// Maximum block size when assembling a new block to broadcast.
+    /// Kept below MAX_BLOCK_SIZE to leave room for serialization variance and overhead.
+    /// This is enforced in the block producer; peers may still send larger legacy blocks.
+    pub const MAX_BLOCK_ASSEMBLY_SIZE: usize = 1_900_000;
 
     /// Maximum timestamp tolerance for future blocks (5 seconds for clock drift)
     /// Blocks should be produced on time — this only covers minor NTP drift.
