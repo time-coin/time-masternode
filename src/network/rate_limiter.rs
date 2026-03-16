@@ -45,8 +45,9 @@ impl RateLimiter {
                     "masternode_announce".to_string(),
                     (Duration::from_secs(60), 3),
                 ), // 3 announcements/min - allows reconnection scenarios
-                ("ping".to_string(), (Duration::from_secs(10), 2)),         // 2 pings/10sec
-                ("general".to_string(), (Duration::from_secs(1), 100)),     // 100 general msgs/sec
+                ("ping".to_string(), (Duration::from_secs(10), 6)),         // 6 pings/10sec
+                ("pong".to_string(), (Duration::from_secs(10), 6)), // 6 pongs/10sec (replies to our pings)
+                ("general".to_string(), (Duration::from_secs(1), 100)), // 100 general msgs/sec
             ]
             .into(),
             counters: HashMap::new(),

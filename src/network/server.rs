@@ -1597,7 +1597,10 @@ async fn handle_peer(
                                 }
                                 // Health Check Messages
                                 NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
-                                    check_rate_limit!("ping");
+                                    match &msg {
+                                        NetworkMessage::Ping { .. } => check_rate_limit!("ping"),
+                                        _ => check_rate_limit!("pong"),
+                                    }
 
                                     // Use unified message handler
                                     let peer_ip = peer.addr.split(':').next().unwrap_or("").to_string();
