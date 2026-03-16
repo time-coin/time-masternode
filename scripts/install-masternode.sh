@@ -38,7 +38,7 @@ fi
 
 # Configuration
 if [[ "$NETWORK" == "testnet" ]]; then
-    SERVICE_NAME="timed-testnet"
+    SERVICE_NAME="timetd"
 else
     SERVICE_NAME="timed"
 fi
