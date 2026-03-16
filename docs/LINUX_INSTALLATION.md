@@ -1,7 +1,7 @@
 # TIME Coin — Linux Installation Guide
 
-**Version**: 1.2.0  
-**Last Updated**: 2026-03-03
+**Version**: 1.2.0
+**Last Updated**: 2026-03-15
 
 This guide walks you through installing and running a TIME Coin masternode on a
 fresh Linux server. Follow it from top to bottom for a production-ready node.
@@ -93,20 +93,28 @@ The installer will ask two questions:
 ### Step 4 — Verify
 
 ```bash
+# Mainnet
 systemctl status timed
 journalctl -u timed -f          # watch logs (Ctrl+C to stop)
+
+# Testnet
+systemctl status timetd
+journalctl -u timetd -f
+
 time-cli getblockchaininfo       # query the node
 ```
 
 ### What gets installed
 
-| Component | Location |
-|-----------|----------|
-| Binaries  | `/usr/local/bin/timed`, `/usr/local/bin/time-cli` |
-| Config    | `~/.timecoin/time.conf` (mainnet) or `~/.timecoin/testnet/time.conf` (testnet) |
-| Collateral conf | Same directory as `time.conf` → `masternode.conf` |
-| Blockchain data | `~/.timecoin/` or `~/.timecoin/testnet/` |
-| Systemd service | `/etc/systemd/system/timed.service` |
+| Component | Mainnet | Testnet |
+|-----------|---------|---------|
+| Binaries  | `/usr/local/bin/timed`, `/usr/local/bin/time-cli` | (same binaries) |
+| Config    | `~/.timecoin/time.conf` | `~/.timecoin/testnet/time.conf` |
+| Collateral conf | `~/.timecoin/masternode.conf` | `~/.timecoin/testnet/masternode.conf` |
+| Blockchain data | `~/.timecoin/` | `~/.timecoin/testnet/` |
+| Systemd service | `/etc/systemd/system/timed.service` | `/etc/systemd/system/timetd.service` |
+
+Both networks can run simultaneously on the same host — the ports and data directories are non-overlapping.
 
 That's it — your masternode is running. By default it starts as a **Free tier**
 node (no collateral required) and begins earning rewards immediately.
@@ -183,10 +191,11 @@ nano ~/.timecoin/testnet/time.conf  # testnet
 
 ### 3.6 Create a systemd service
 
+**Mainnet (`timed`):**
 ```bash
 sudo tee /etc/systemd/system/timed.service > /dev/null <<EOF
 [Unit]
-Description=TIME Coin Daemon
+Description=TIME Coin Daemon (Mainnet)
 After=network.target
 
 [Service]
@@ -199,15 +208,33 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-```
 
-> For testnet, change the `--conf` path to
-> `/home/$USER/.timecoin/testnet/time.conf`.
-
-```bash
 sudo systemctl daemon-reload
 sudo systemctl enable timed
 sudo systemctl start timed
+```
+
+**Testnet (`timetd`):**
+```bash
+sudo tee /etc/systemd/system/timetd.service > /dev/null <<EOF
+[Unit]
+Description=TIME Coin Daemon (Testnet)
+After=network.target
+
+[Service]
+Type=simple
+User=$USER
+ExecStart=/usr/local/bin/timed --conf /home/$USER/.timecoin/testnet/time.conf --testnet
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable timetd
+sudo systemctl start timetd
 ```
 
 ### 3.7 Open the P2P port
@@ -229,8 +256,9 @@ sudo firewall-cmd --permanent --add-port=24000/tcp && sudo firewall-cmd --reload
 ## 4. Verify Your Node
 
 ```bash
-# Service running?
+# Service running? (use timed for mainnet, timetd for testnet)
 systemctl status timed
+systemctl status timetd
 
 # Blockchain info
 time-cli getblockchaininfo
@@ -247,8 +275,10 @@ time-cli masternodelist
 
 **Watch logs:**
 ```bash
-journalctl -u timed -f              # live stream
-journalctl -u timed -n 100 --no-pager  # last 100 lines
+journalctl -u timed -f                 # mainnet live stream
+journalctl -u timetd -f                # testnet live stream
+journalctl -u timed -n 100 --no-pager  # mainnet last 100 lines
+journalctl -u timetd -n 100 --no-pager # testnet last 100 lines
 ```
 
 You should see lines like:
@@ -286,7 +316,8 @@ reward_address=TIME1xyz789...   # mainnet
 
 Restart the service:
 ```bash
-sudo systemctl restart timed
+sudo systemctl restart timed    # mainnet
+sudo systemctl restart timetd   # testnet
 ```
 
 The daemon validates the address on startup. If it is malformed or on the
@@ -333,7 +364,8 @@ Staked tiers earn higher rewards and gain governance voting rights.
 
 6. **Restart:**
    ```bash
-   sudo systemctl restart timed
+   sudo systemctl restart timed    # mainnet
+   sudo systemctl restart timetd   # testnet
    ```
 
 7. **Verify:**
@@ -410,7 +442,8 @@ details (reward distribution, collateral validation, rotation, FAQ).
   ```
 - **Monitor logs** — Watch for `WARN` and `ERROR` entries:
   ```bash
-  journalctl -u timed -p warning --no-pager -n 50
+  journalctl -u timed -p warning --no-pager -n 50    # mainnet
+  journalctl -u timetd -p warning --no-pager -n 50   # testnet
   ```
 
 ### Add swap (low-memory servers)
@@ -440,7 +473,8 @@ The script detects an existing installation and upgrades in place.
 ### Manual upgrade
 
 ```bash
-sudo systemctl stop timed
+sudo systemctl stop timed    # mainnet
+sudo systemctl stop timetd   # testnet (if running)
 
 # Back up wallet first!
 cp ~/.timecoin/time-wallet.dat ~/time-wallet-backup.dat
@@ -453,6 +487,7 @@ sudo cp target/release/timed /usr/local/bin/
 sudo cp target/release/time-cli /usr/local/bin/
 
 sudo systemctl start timed
+sudo systemctl start timetd   # if testnet was running
 systemctl status timed
 ```
 
@@ -470,11 +505,17 @@ sudo ./scripts/uninstall-masternode.sh mainnet   # or testnet
 ### Manual uninstall
 
 ```bash
+# Mainnet
 sudo systemctl stop timed
 sudo systemctl disable timed
 sudo rm /etc/systemd/system/timed.service
-sudo systemctl daemon-reload
 
+# Testnet (if installed)
+sudo systemctl stop timetd
+sudo systemctl disable timetd
+sudo rm /etc/systemd/system/timetd.service
+
+sudo systemctl daemon-reload
 sudo rm /usr/local/bin/timed /usr/local/bin/time-cli
 
 # ⚠️ DANGER — this deletes your wallet and all blockchain data
@@ -709,12 +750,21 @@ journalctl -u timed.service -f
 ### Service management quick reference
 
 ```bash
-systemctl status timed           # check status
-sudo systemctl start timed       # start
-sudo systemctl stop timed        # stop
-sudo systemctl restart timed     # restart
-journalctl -u timed -f           # live logs
-journalctl -u timed -n 100 --no-pager  # last 100 lines
+# Mainnet (timed)
+systemctl status timed
+sudo systemctl start timed
+sudo systemctl stop timed
+sudo systemctl restart timed
+journalctl -u timed -f
+journalctl -u timed -n 100 --no-pager
+
+# Testnet (timetd)
+systemctl status timetd
+sudo systemctl start timetd
+sudo systemctl stop timetd
+sudo systemctl restart timetd
+journalctl -u timetd -f
+journalctl -u timetd -n 100 --no-pager
 ```
 
 ---
@@ -728,5 +778,5 @@ journalctl -u timed -n 100 --no-pager  # last 100 lines
 
 ---
 
-**Version**: 1.2.0  
-**Last Updated**: 2026-03-03
+**Version**: 1.2.0
+**Last Updated**: 2026-03-15

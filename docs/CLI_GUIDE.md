@@ -161,6 +161,8 @@ time-cli listtransactions 20
 ```
 Lists recent wallet transactions (default 10, max specified by count argument). Each entry includes `txid`, `category` (send/receive/consolidation), `amount`, `confirmations`, and `time`. If the transaction contains an encrypted memo that this wallet can decrypt, a `"memo"` field is included in the output.
 
+Block reward distributions include an encrypted `"Block Reward"` memo (self-send encrypted, visible only to the block-producing node).
+
 Example output entry with memo:
 ```json
 {
@@ -242,7 +244,9 @@ time-cli sendtoaddress <address> <amount>
 time-cli sendtoaddress <address> <amount> --subtract-fee
 time-cli sendtoaddress <address> <amount> --memo "Payment for invoice #42"
 ```
-Send TIME to an address. Fee is 0.1% of input value (min 0.00001 TIME), added on top by default. Use `--subtract-fee` to deduct the fee from the send amount instead.
+Send TIME to an address. Fee is tiered (1% for amounts under 100 TIME, 0.5% under 1,000 TIME, 0.25% under 10,000 TIME, 0.1% above), with a flat minimum of 0.01 TIME. Added on top by default. Use `--subtract-fee` to deduct the fee from the send amount instead.
+
+**Minimum send amount: 1 TIME.** Amounts below 1 TIME are rejected at the protocol level (the 0.01 TIME flat fee would represent ≥1% of the amount). Self-sends (UTXO consolidation) are exempt from this minimum.
 
 **Options:**
 - `--subtract-fee` — Deduct fee from the send amount (recipient gets amount minus fee)
@@ -289,7 +293,8 @@ Parse a payment request URI and send the specified amount with an encrypted memo
 
 - All amounts are in TIME (the base unit)
 - Transactions achieve instant finality via TimeVote consensus
-- Minimum transaction fee: 0.00001 TIME (0.1% of input value)
+- Minimum transaction fee: 0.01 TIME (flat floor; tiered % applies for larger amounts)
+- Minimum send amount: 1 TIME (non-self-sends only)
 - UTXOs are locked during transaction processing; rejected transactions unlock UTXOs automatically
 - Testnet addresses start with `TIME0`; mainnet addresses start with `TIME1`
 

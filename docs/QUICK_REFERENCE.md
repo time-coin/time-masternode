@@ -185,7 +185,8 @@ Max block entries:  10,000
 Max block size:     2 MB
 Eviction:           lowest_fee_rate_first
 TX expiry:          72 hours
-Min fee:            0.001 TIME/tx
+Min fee:            0.01 TIME/tx (flat floor; tiered % for larger amounts)
+Min send amount:    1 TIME (non-self-sends; enforced at consensus layer)
 ```
 
 ---
