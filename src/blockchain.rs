@@ -2715,6 +2715,35 @@ impl Blockchain {
             );
         }
 
+        // Size-cap: ensure the assembled block fits within MAX_BLOCK_SIZE.
+        // Reserve 32KB for block header, masternode rewards, coinbase tx, and bincode framing.
+        // Transactions are already sorted by canonical order, so we simply truncate the tail.
+        {
+            const BLOCK_OVERHEAD_BYTES: usize = 32_768; // 32KB for non-tx block fields
+            let tx_size_budget = MAX_BLOCK_SIZE.saturating_sub(BLOCK_OVERHEAD_BYTES);
+            let mut accumulated_tx_bytes: usize = 0;
+            let mut cap_at: Option<usize> = None;
+            for (i, (tx, _)) in valid_finalized_with_fees.iter().enumerate() {
+                let tx_bytes = bincode::serialized_size(tx).unwrap_or(u64::MAX) as usize;
+                if accumulated_tx_bytes + tx_bytes > tx_size_budget {
+                    cap_at = Some(i);
+                    break;
+                }
+                accumulated_tx_bytes += tx_bytes;
+            }
+            if let Some(cap) = cap_at {
+                tracing::warn!(
+                    "✂️  Block {}: Size cap hit — truncating from {} to {} txs ({} KB tx data, budget {} KB). Excess txs remain in pool for next block.",
+                    next_height,
+                    valid_finalized_with_fees.len(),
+                    cap,
+                    accumulated_tx_bytes / 1024,
+                    tx_size_budget / 1024,
+                );
+                valid_finalized_with_fees.truncate(cap);
+            }
+        }
+
         let finalized_txs: Vec<Transaction> = valid_finalized_with_fees
             .iter()
             .map(|(tx, _)| tx.clone())

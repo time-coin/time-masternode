@@ -104,15 +104,15 @@ impl IPBlacklist {
         // Auto-ban based on violation count
         match *count {
             3 => {
-                // 3rd violation: 5 minute ban
-                self.add_temp_ban(ip, Duration::from_secs(300), reason);
-                tracing::warn!("🚫 Auto-banned {} for 5 minutes (3 violations)", ip);
+                // 3rd violation: 1 minute ban
+                self.add_temp_ban(ip, Duration::from_secs(60), reason);
+                tracing::warn!("🚫 Auto-banned {} for 1 minute (3 violations)", ip);
                 true
             }
             5 => {
-                // 5th violation: 1 hour ban
-                self.add_temp_ban(ip, Duration::from_secs(3600), reason);
-                tracing::warn!("🚫 Auto-banned {} for 1 hour (5 violations)", ip);
+                // 5th violation: 5 minute ban
+                self.add_temp_ban(ip, Duration::from_secs(300), reason);
+                tracing::warn!("🚫 Auto-banned {} for 5 minutes (5 violations)", ip);
                 true
             }
             10 => {

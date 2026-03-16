@@ -827,6 +827,20 @@ async fn handle_peer(
                                 }};
                             }
 
+                            // Soft rate limit: drop excess messages silently without recording
+                            // blacklist violations. Used for benign high-frequency messages like
+                            // ping/pong where bursts occur during normal reconnection churn.
+                            macro_rules! check_rate_limit_soft {
+                                ($msg_type:expr) => {{
+                                    let mut limiter = rate_limiter.write().await;
+                                    if !limiter.check($msg_type, &ip_str) {
+                                        tracing::debug!("⚡ Soft rate limit: dropping excess {} from {}", $msg_type, peer.addr);
+                                        continue;
+                                    }
+                                    drop(limiter);
+                                }};
+                            }
+
                             // Size validation handled by wire protocol (4MB max frame)
                             macro_rules! check_message_size {
                                 ($max_size:expr, $msg_type:expr) => {{}};
@@ -1598,8 +1612,8 @@ async fn handle_peer(
                                 // Health Check Messages
                                 NetworkMessage::Ping { .. } | NetworkMessage::Pong { .. } => {
                                     match &msg {
-                                        NetworkMessage::Ping { .. } => check_rate_limit!("ping"),
-                                        _ => check_rate_limit!("pong"),
+                                        NetworkMessage::Ping { .. } => check_rate_limit_soft!("ping"),
+                                        _ => check_rate_limit_soft!("pong"),
                                     }
 
                                     // Use unified message handler
