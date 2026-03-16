@@ -2526,6 +2526,19 @@ impl ConsensusEngine {
             }
         }
 
+        // 4b. Minimum send amount: 1 TIME (100_000_000 satoshis).
+        // Sending less than 1 TIME is uneconomical — the 0.01 TIME flat fee
+        // would represent ≥1% of the amount. Self-sends (consolidations) are exempt.
+        if !is_self_send {
+            let send_amount = output_sum;
+            if send_amount < SATOSHIS_PER_TIME {
+                return Err(format!(
+                    "Send amount too small: {} satoshis (minimum 1 TIME = {} satoshis)",
+                    send_amount, SATOSHIS_PER_TIME
+                ));
+            }
+        }
+
         // 5. Calculate and validate fee
         let actual_fee = input_sum.saturating_sub(output_sum);
 
