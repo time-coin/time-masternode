@@ -2916,6 +2916,7 @@ impl Blockchain {
         };
 
         // Reward distribution transaction spends coinbase and distributes to masternodes
+        let block_reward_memo = self.consensus.encrypt_memo_for_self("Block Reward").ok();
         let reward_distribution = Transaction {
             version: 1,
             inputs: vec![TxInput {
@@ -2936,7 +2937,7 @@ impl Blockchain {
             lock_time: 0,
             timestamp: aligned_timestamp,
             special_data: None,
-            encrypted_memo: None,
+            encrypted_memo: block_reward_memo,
         };
 
         // Count masternodes by tier
