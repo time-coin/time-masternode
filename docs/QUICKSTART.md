@@ -133,11 +133,13 @@ txindex=1
 ### Logs
 
 ```bash
-# If running as systemd service
+# If running as systemd service (mainnet=timed, testnet=timetd)
 journalctl -u timed -f
+journalctl -u timetd -f
 
 # Filter for warnings/errors
 journalctl -u timed -p warning --no-pager -n 50
+journalctl -u timetd -p warning --no-pager -n 50
 ```
 
 ---

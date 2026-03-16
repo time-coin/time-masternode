@@ -237,19 +237,30 @@ pub fn is_timestamp_valid(&self, max_age_seconds) -> bool
 ### Utility Modules
 
 #### `rate_limiter.rs`
-**Purpose:** Token bucket rate limiting per peer
+**Purpose:** Per-peer message rate limiting
 
 **Features:**
-- Per-peer rate limits
-- Token bucket algorithm
-- Configurable rates
-- Adaptive limits based on masternode count
+- Per-peer, per-message-type rate limits
+- Configurable windows and counts
+- Emergency + periodic cleanup to bound memory usage
 
-**Implementation:**
-```rust
-pub fn check_limit(&mut self, peer_ip: &str, tokens: u32) -> bool
-pub fn reset_limit(&mut self, peer_ip: &str)
-```
+**Current limits (per peer):**
+
+| Message type | Window | Max |
+|---|---|---|
+| `tx` | 1s | 50 |
+| `block` | 1s | 10 |
+| `vote` | 1s | 100 |
+| `utxo_query` | 1s | 100 |
+| `get_blocks` | 10s | 100 |
+| `ping` | 10s | 6 |
+| `pong` | 10s | 6 |
+| `get_peers` | 60s | 5 |
+| `masternode_announce` | 60s | 3 |
+| `subscribe` | 60s | 10 |
+| `general` | 1s | 100 |
+
+> **Note:** `ping` and `pong` use separate buckets so pong replies don't count against the inbound ping quota. Previously they shared one bucket (limit 2/10s), which caused false bans of legitimate peers during normal keepalive exchanges.
 
 ---
 
@@ -506,6 +517,13 @@ RPC Ports:
 
 Min Masternodes: 3 (quorum)
 MAX_INBOUND:     100
+```
+
+**Running both networks on the same host** is supported. The install script creates separate systemd units — `timed` (mainnet) and `timetd` (testnet) — with non-overlapping ports and data directories:
+
+```bash
+sudo ./scripts/install-masternode.sh mainnet   # → timed.service
+sudo ./scripts/install-masternode.sh testnet   # → timetd.service
 ```
 
 ### Recommended Configuration
