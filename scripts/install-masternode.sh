@@ -37,7 +37,11 @@ else
 fi
 
 # Configuration
-SERVICE_NAME="timed"
+if [[ "$NETWORK" == "testnet" ]]; then
+    SERVICE_NAME="timed-testnet"
+else
+    SERVICE_NAME="timed"
+fi
 INSTALL_DIR="/opt/timecoin"
 BIN_DIR="/usr/local/bin"
 
@@ -636,7 +640,12 @@ EOF
 
 create_systemd_service() {
     print_step "Creating systemd service..."
-    
+
+    local EXECSTART_CMD="$BIN_DIR/timed --conf $CONFIG_DIR/time.conf"
+    if [[ "$NETWORK" == "testnet" ]]; then
+        EXECSTART_CMD="$EXECSTART_CMD --testnet"
+    fi
+
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=TIME Coin Masternode
@@ -649,7 +658,7 @@ User=root
 Group=root
 
 # Binary location — uses time.conf from data dir automatically
-ExecStart=$BIN_DIR/timed --conf $CONFIG_DIR/time.conf
+ExecStart=$EXECSTART_CMD
 
 # Working directory
 WorkingDirectory=$DATA_DIR
@@ -668,7 +677,7 @@ Environment="RUST_BACKTRACE=1"
 # Logging
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=timed
+SyslogIdentifier=${SERVICE_NAME}
 
 [Install]
 WantedBy=multi-user.target
