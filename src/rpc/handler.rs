@@ -1681,6 +1681,10 @@ impl RpcHandler {
         }
 
         let count = params.get(1).and_then(|v| v.as_u64()).unwrap_or(1000) as usize;
+        // Optional: only scan blocks >= from_height (default 0 = full history).
+        // Enables incremental polling: the wallet passes its last-known block
+        // height so only new blocks are scanned on subsequent polls.
+        let from_height = params.get(2).and_then(|v| v.as_u64()).unwrap_or(0);
 
         // Build a set of addresses for fast lookup
         let addr_set: std::collections::HashSet<String> = addresses
@@ -1689,13 +1693,13 @@ impl RpcHandler {
             .collect();
 
         if addr_set.is_empty() {
-            return Ok(json!([]));
+            return Ok(json!({"transactions": [], "chain_height": self.blockchain.get_height()}));
         }
 
         let chain_height = self.blockchain.get_height();
         let mut transactions: Vec<Value> = Vec::new();
 
-        for height in (0..=chain_height).rev() {
+        for height in (from_height..=chain_height).rev() {
             if count > 0 && transactions.len() >= count {
                 break;
             }
@@ -1973,7 +1977,10 @@ impl RpcHandler {
             }
         }
 
-        Ok(json!(transactions))
+        Ok(json!({
+            "transactions": transactions,
+            "chain_height": chain_height,
+        }))
     }
 
     async fn masternode_status(&self) -> Result<Value, RpcError> {
