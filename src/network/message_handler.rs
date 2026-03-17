@@ -740,6 +740,94 @@ impl MessageHandler {
                 Ok(None)
             }
 
+            // === Governance messages ===
+            NetworkMessage::GovernanceProposal(proposal) => {
+                let gov = match context.blockchain.governance() {
+                    Some(g) => g.clone(),
+                    None => return Ok(None),
+                };
+                let treasury = context.blockchain.get_treasury_balance();
+                match gov
+                    .submit_proposal(proposal.clone(), &context.masternode_registry, treasury)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            "🏛️  [{}] Governance proposal {} accepted, gossiping",
+                            self.peer_ip,
+                            hex::encode(&proposal.id[..6])
+                        );
+                        if let Some(ref tx) = context.broadcast_tx {
+                            let _ = tx.send(NetworkMessage::GovernanceProposal(proposal.clone()));
+                        }
+                    }
+                    Err(e) if e.contains("already") => {} // idempotent duplicate
+                    Err(e) => tracing::warn!("🏛️  Governance proposal rejected: {e}"),
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::GovernanceVote(vote) => {
+                let gov = match context.blockchain.governance() {
+                    Some(g) => g.clone(),
+                    None => return Ok(None),
+                };
+                match gov
+                    .record_vote(vote.clone(), &context.masternode_registry)
+                    .await
+                {
+                    Ok(true) => {
+                        tracing::info!(
+                            "🏛️  [{}] Governance vote recorded for {}, gossiping",
+                            self.peer_ip,
+                            hex::encode(&vote.proposal_id[..6])
+                        );
+                        if let Some(ref tx) = context.broadcast_tx {
+                            let _ = tx.send(NetworkMessage::GovernanceVote(vote.clone()));
+                        }
+                    }
+                    Ok(false) => {} // duplicate
+                    Err(e) => tracing::warn!("🏛️  Governance vote rejected: {e}"),
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::GetGovernanceState => {
+                if let Some(gov) = context.blockchain.governance() {
+                    let proposals = gov.list_proposals().await;
+                    let mut all_votes = Vec::new();
+                    for p in &proposals {
+                        all_votes.extend(gov.get_votes_for(&p.id).await);
+                    }
+                    return Ok(Some(NetworkMessage::GovernanceStateResponse {
+                        proposals,
+                        votes: all_votes,
+                    }));
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::GovernanceStateResponse { proposals, votes } => {
+                if let Some(gov) = context.blockchain.governance() {
+                    let treasury = context.blockchain.get_treasury_balance();
+                    for proposal in proposals {
+                        let _ = gov
+                            .submit_proposal(
+                                proposal.clone(),
+                                &context.masternode_registry,
+                                treasury,
+                            )
+                            .await;
+                    }
+                    for vote in votes {
+                        let _ = gov
+                            .record_vote(vote.clone(), &context.masternode_registry)
+                            .await;
+                    }
+                }
+                Ok(None)
+            }
+
             // === Messages not handled here ===
             _ => {
                 debug!(

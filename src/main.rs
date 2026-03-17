@@ -11,6 +11,7 @@ pub mod constants;
 pub mod crypto;
 pub mod error;
 pub mod finality_proof;
+pub mod governance;
 pub mod masternode_authority;
 pub mod masternode_certificate;
 pub mod masternode_registry;
@@ -842,7 +843,8 @@ async fn main() {
     // Keep a reference for persisting the mempool on clean shutdown
     let consensus_for_shutdown = consensus_engine.clone();
 
-    // Initialize blockchain
+    // Initialize blockchain (clone sled handle so governance can share the same DB)
+    let gov_storage = block_storage.clone();
     let mut blockchain = Blockchain::new(
         block_storage,
         consensus_engine.clone(),
@@ -856,6 +858,15 @@ async fn main() {
 
     // Set AI system on blockchain for intelligent decision making
     blockchain.set_ai_system(ai_system.clone());
+
+    // Initialize on-chain governance subsystem
+    match governance::GovernanceState::new(gov_storage) {
+        Ok(gov) => {
+            blockchain.set_governance(Arc::new(gov));
+            tracing::info!("🏛️  Governance subsystem initialized");
+        }
+        Err(e) => tracing::warn!("🏛️  Governance init failed (non-fatal): {e}"),
+    }
 
     // Initialize transaction index for O(1) lookups
     tracing::info!("🔧 Initializing transaction index...");

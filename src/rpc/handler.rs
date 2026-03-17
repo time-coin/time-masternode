@@ -129,6 +129,10 @@ impl RpcHandler {
             "sendpaymentrequest" => self.send_payment_request(&params_array).await,
             "getpaymentrequests" => self.get_payment_requests(&params_array).await,
             "acknowledgepaymentrequest" => self.acknowledge_payment_request(&params_array).await,
+            "submitproposal" => self.submit_proposal(&params_array).await,
+            "voteproposal" => self.vote_proposal(&params_array).await,
+            "listproposals" => self.list_proposals(&params_array).await,
+            "getproposal" => self.get_proposal(&params_array).await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -4456,6 +4460,376 @@ impl RpcHandler {
             "id": request_id,
             "status": status,
             "removed": removed,
+        }))
+    }
+
+    // ── Governance RPCs ───────────────────────────────────────────────────────
+
+    async fn submit_proposal(&self, params: &[Value]) -> Result<Value, RpcError> {
+        use crate::governance::{GovernanceProposal, ProposalPayload, VOTING_PERIOD_BLOCKS};
+
+        let obj = params
+            .first()
+            .and_then(Value::as_object)
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected object: {type, ...}".to_string(),
+            })?;
+
+        let prop_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+        let payload = match prop_type {
+            "treasury_spend" => {
+                let recipient = obj
+                    .get("recipient")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "Missing recipient".into(),
+                    })?
+                    .to_string();
+                let amount = obj
+                    .get("amount")
+                    .and_then(Value::as_f64)
+                    .map(|a| (a * 100_000_000.0) as u64)
+                    .ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "Missing amount".into(),
+                    })?;
+                let description = obj
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                ProposalPayload::TreasurySpend {
+                    recipient,
+                    amount,
+                    description,
+                }
+            }
+            "fee_schedule_change" => {
+                let new_min_fee = obj
+                    .get("new_min_fee")
+                    .and_then(Value::as_f64)
+                    .map(|f| (f * 100_000_000.0) as u64)
+                    .ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "Missing new_min_fee".into(),
+                    })?;
+                let raw_tiers =
+                    obj.get("new_tiers")
+                        .and_then(Value::as_array)
+                        .ok_or_else(|| RpcError {
+                            code: -32602,
+                            message: "Missing new_tiers".into(),
+                        })?;
+                let mut new_tiers: Vec<(u64, u64)> = Vec::new();
+                for t in raw_tiers {
+                    let arr = t.as_array().ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "Each tier must be [upper_bound_TIME, rate_bps]".into(),
+                    })?;
+                    if arr.len() != 2 {
+                        return Err(RpcError {
+                            code: -32602,
+                            message: "Tier must have 2 elements".into(),
+                        });
+                    }
+                    let upper = (arr[0].as_f64().unwrap_or(0.0) * 100_000_000.0) as u64;
+                    let bps = arr[1].as_u64().unwrap_or(0);
+                    new_tiers.push((upper, bps));
+                }
+                ProposalPayload::FeeScheduleChange {
+                    new_min_fee,
+                    new_tiers,
+                }
+            }
+            other => {
+                return Err(RpcError {
+                    code: -32602,
+                    message: format!("Unknown proposal type: {other}"),
+                })
+            }
+        };
+
+        let signing_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -32001,
+                message: "No signing key available — wallet not unlocked".to_string(),
+            })?;
+        let pubkey = signing_key.verifying_key().to_bytes();
+
+        let payload_bytes = bincode::serialize(&payload).map_err(|e| RpcError {
+            code: -32603,
+            message: format!("Serialization error: {e}"),
+        })?;
+
+        let height = self.blockchain.get_height();
+        let id = GovernanceProposal::compute_id(&payload_bytes, &pubkey, height);
+
+        let mut proposal = GovernanceProposal {
+            id,
+            payload,
+            submitter_address: self.registry.get_local_address().await.unwrap_or_default(),
+            submitter_pubkey: pubkey,
+            submitter_signature: [0u8; 64],
+            submit_height: height,
+            vote_end_height: height + VOTING_PERIOD_BLOCKS,
+            status: crate::governance::ProposalStatus::Active,
+        };
+        proposal.sign(&signing_key);
+
+        let gov = self.blockchain.governance().ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Governance subsystem not initialized".to_string(),
+        })?;
+
+        let treasury = self.blockchain.get_treasury_balance();
+        gov.submit_proposal(proposal.clone(), &self.registry, treasury)
+            .await
+            .map_err(|e| RpcError {
+                code: -32603,
+                message: e,
+            })?;
+
+        // Broadcast to peers
+        if let Some(registry) = self.blockchain.get_peer_registry().await {
+            let _ = registry
+                .broadcast(crate::network::message::NetworkMessage::GovernanceProposal(
+                    proposal.clone(),
+                ))
+                .await;
+        }
+
+        Ok(json!({
+            "proposal_id": hex::encode(proposal.id),
+            "vote_end_height": proposal.vote_end_height,
+            "status": "active",
+        }))
+    }
+
+    async fn vote_proposal(&self, params: &[Value]) -> Result<Value, RpcError> {
+        use crate::governance::GovernanceVote;
+
+        let id_hex = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected [proposal_id_hex, approve_bool]".to_string(),
+            })?;
+        let approve = params
+            .get(1)
+            .and_then(Value::as_bool)
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected approve parameter (true/false)".to_string(),
+            })?;
+
+        let id_bytes = hex::decode(id_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid proposal_id hex".to_string(),
+        })?;
+        if id_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "proposal_id must be 32 bytes".into(),
+            });
+        }
+        let mut proposal_id = [0u8; 32];
+        proposal_id.copy_from_slice(&id_bytes);
+
+        let signing_key = self
+            .consensus
+            .get_wallet_signing_key()
+            .ok_or_else(|| RpcError {
+                code: -32001,
+                message: "No signing key available — wallet not unlocked".to_string(),
+            })?;
+        let pubkey = signing_key.verifying_key().to_bytes();
+        let height = self.blockchain.get_height();
+        let voter_address = self.registry.get_local_address().await.unwrap_or_default();
+
+        let mut vote = GovernanceVote {
+            proposal_id,
+            voter_address,
+            voter_pubkey: pubkey,
+            approve,
+            vote_height: height,
+            signature: [0u8; 64],
+        };
+        vote.sign(&signing_key);
+
+        let gov = self.blockchain.governance().ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Governance subsystem not initialized".to_string(),
+        })?;
+
+        gov.record_vote(vote.clone(), &self.registry)
+            .await
+            .map_err(|e| RpcError {
+                code: -32603,
+                message: e,
+            })?;
+
+        if let Some(registry) = self.blockchain.get_peer_registry().await {
+            let _ = registry
+                .broadcast(crate::network::message::NetworkMessage::GovernanceVote(
+                    vote,
+                ))
+                .await;
+        }
+
+        Ok(json!({
+            "proposal_id": id_hex,
+            "approve": approve,
+            "status": "recorded",
+        }))
+    }
+
+    async fn list_proposals(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let filter = params.first().and_then(Value::as_str);
+
+        let gov = self.blockchain.governance().ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Governance subsystem not initialized".to_string(),
+        })?;
+
+        let proposals = gov.list_proposals().await;
+        let total_weight = crate::governance::GovernanceState::total_weight(&self.registry).await;
+
+        let filtered: Vec<Value> = proposals
+            .iter()
+            .filter(|p| match filter {
+                Some("active") => p.status == crate::governance::ProposalStatus::Active,
+                Some("failed") => p.status == crate::governance::ProposalStatus::Failed,
+                Some("executed") => p.status == crate::governance::ProposalStatus::Executed,
+                Some("passed") => {
+                    matches!(p.status, crate::governance::ProposalStatus::Passed { .. })
+                }
+                _ => true,
+            })
+            .map(|p| {
+                let type_str = match &p.payload {
+                    crate::governance::ProposalPayload::TreasurySpend { .. } => "treasury_spend",
+                    crate::governance::ProposalPayload::FeeScheduleChange { .. } => {
+                        "fee_schedule_change"
+                    }
+                };
+                let status_str = match &p.status {
+                    crate::governance::ProposalStatus::Active => "active".to_string(),
+                    crate::governance::ProposalStatus::Passed { execute_at_height } => {
+                        format!("passed (executes at {})", execute_at_height)
+                    }
+                    crate::governance::ProposalStatus::Failed => "failed".to_string(),
+                    crate::governance::ProposalStatus::Executed => "executed".to_string(),
+                };
+                json!({
+                    "id": hex::encode(p.id),
+                    "type": type_str,
+                    "submitter": p.submitter_address,
+                    "submit_height": p.submit_height,
+                    "vote_end_height": p.vote_end_height,
+                    "status": status_str,
+                    "total_weight": total_weight,
+                })
+            })
+            .collect();
+
+        Ok(Value::Array(filtered))
+    }
+
+    async fn get_proposal(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let id_hex = params
+            .first()
+            .and_then(Value::as_str)
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected proposal_id_hex".to_string(),
+            })?;
+
+        let id_bytes = hex::decode(id_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid hex".to_string(),
+        })?;
+        if id_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: "proposal_id must be 32 bytes".into(),
+            });
+        }
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&id_bytes);
+
+        let gov = self.blockchain.governance().ok_or_else(|| RpcError {
+            code: -32603,
+            message: "Governance subsystem not initialized".to_string(),
+        })?;
+
+        let proposal = gov.get_proposal(&id).await.ok_or_else(|| RpcError {
+            code: -32602,
+            message: format!("Proposal {id_hex} not found"),
+        })?;
+
+        let votes = gov.get_votes_for(&id).await;
+        let yes_weight = gov.yes_weight(&id, &self.registry).await;
+        let total_weight = crate::governance::GovernanceState::total_weight(&self.registry).await;
+
+        let payload_json = match &proposal.payload {
+            crate::governance::ProposalPayload::TreasurySpend {
+                recipient,
+                amount,
+                description,
+            } => json!({
+                "type": "treasury_spend",
+                "recipient": recipient,
+                "amount": *amount as f64 / 100_000_000.0,
+                "amount_satoshis": amount,
+                "description": description,
+            }),
+            crate::governance::ProposalPayload::FeeScheduleChange {
+                new_min_fee,
+                new_tiers,
+            } => json!({
+                "type": "fee_schedule_change",
+                "new_min_fee": *new_min_fee as f64 / 100_000_000.0,
+                "new_min_fee_satoshis": new_min_fee,
+                "new_tiers": new_tiers,
+            }),
+        };
+
+        let status_str = match &proposal.status {
+            crate::governance::ProposalStatus::Active => "active".to_string(),
+            crate::governance::ProposalStatus::Passed { execute_at_height } => {
+                format!("passed (executes at {})", execute_at_height)
+            }
+            crate::governance::ProposalStatus::Failed => "failed".to_string(),
+            crate::governance::ProposalStatus::Executed => "executed".to_string(),
+        };
+
+        let votes_json: Vec<Value> = votes
+            .iter()
+            .map(|v| {
+                json!({
+                    "voter": v.voter_address,
+                    "approve": v.approve,
+                    "vote_height": v.vote_height,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "id": id_hex,
+            "payload": payload_json,
+            "submitter": proposal.submitter_address,
+            "submit_height": proposal.submit_height,
+            "vote_end_height": proposal.vote_end_height,
+            "status": status_str,
+            "yes_weight": yes_weight,
+            "total_weight": total_weight,
+            "quorum_pct": if total_weight > 0 { yes_weight * 100 / total_weight } else { 0 },
+            "votes": votes_json,
         }))
     }
 }

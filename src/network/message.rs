@@ -261,6 +261,17 @@ pub enum NetworkMessage {
     },
     /// A payment request relayed between masternodes (24h TTL, signed by requester)
     PaymentRequestRelay(PaymentRequest),
+    /// Gossip a new governance proposal to peers.
+    GovernanceProposal(crate::governance::GovernanceProposal),
+    /// Gossip a governance vote to peers.
+    GovernanceVote(crate::governance::GovernanceVote),
+    /// Request all active governance proposals and votes from a peer.
+    GetGovernanceState,
+    /// Response: all known proposals and votes.
+    GovernanceStateResponse {
+        proposals: Vec<crate::governance::GovernanceProposal>,
+        votes: Vec<crate::governance::GovernanceVote>,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -432,6 +443,10 @@ impl NetworkMessage {
             NetworkMessage::PaymentRequestRelay(_) => "PaymentRequestRelay",
             NetworkMessage::UnknownMessage => "UnknownMessage",
             NetworkMessage::PeerExchange(_) => "PeerExchange",
+            NetworkMessage::GovernanceProposal(_) => "GovernanceProposal",
+            NetworkMessage::GovernanceVote(_) => "GovernanceVote",
+            NetworkMessage::GetGovernanceState => "GetGovernanceState",
+            NetworkMessage::GovernanceStateResponse { .. } => "GovernanceStateResponse",
         }
     }
 

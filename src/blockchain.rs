@@ -208,6 +208,8 @@ pub struct Blockchain {
     /// On-chain treasury balance in satoshis. Funded by slashed collateral,
     /// disbursed via governance-approved coinbase outputs. Not a UTXO — pure state.
     treasury_balance: Arc<AtomicU64>,
+    /// On-chain governance subsystem (proposals + votes).
+    governance: Option<Arc<crate::governance::GovernanceState>>,
 }
 
 impl Blockchain {
@@ -315,6 +317,7 @@ impl Blockchain {
             reward_violations: Arc::new(DashMap::new()),
             genesis_mismatch_detected: Arc::new(AtomicBool::new(false)),
             treasury_balance: Arc::new(AtomicU64::new(loaded_treasury)),
+            governance: None,
         }
     }
 
@@ -330,6 +333,78 @@ impl Blockchain {
         // Re-enable after root cause is found
         self.compress_blocks = false;
         tracing::info!("📦 Block compression disabled (forced off for debugging)");
+    }
+
+    /// Set the governance subsystem (called from main.rs after blockchain init).
+    pub fn set_governance(&mut self, governance: Arc<crate::governance::GovernanceState>) {
+        self.governance = Some(governance);
+    }
+
+    /// Access the governance subsystem.
+    pub fn governance(&self) -> Option<&Arc<crate::governance::GovernanceState>> {
+        self.governance.as_ref()
+    }
+
+    /// Execute a passed TreasurySpend proposal: debit treasury and create a spendable UTXO.
+    async fn execute_treasury_spend(
+        &self,
+        recipient: &str,
+        amount: u64,
+        proposal_id: &crate::types::Hash256,
+    ) -> Result<(), String> {
+        // Debit treasury first (so we can't overspend if UTXO creation fails)
+        let current = self
+            .treasury_balance
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if amount > current {
+            return Err(format!(
+                "TreasurySpend: amount {amount} exceeds treasury balance {current}"
+            ));
+        }
+        self.treasury_balance
+            .fetch_sub(amount, std::sync::atomic::Ordering::SeqCst);
+        let new_bal = self
+            .treasury_balance
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let _ = self
+            .storage
+            .insert("treasury_balance", &new_bal.to_le_bytes());
+
+        // Create a UTXO payable to the recipient, using proposal_id as the synthetic txid
+        let utxo = crate::types::UTXO {
+            outpoint: crate::types::OutPoint {
+                txid: *proposal_id,
+                vout: 0,
+            },
+            value: amount,
+            script_pubkey: recipient.as_bytes().to_vec(),
+            address: recipient.to_string(),
+        };
+        self.utxo_manager
+            .add_utxo(utxo)
+            .await
+            .map_err(|e| format!("add_utxo: {e:?}"))?;
+
+        tracing::info!(
+            "🏛️  Governance TreasurySpend executed: {} satoshis → {} (treasury remaining: {})",
+            amount,
+            recipient,
+            new_bal
+        );
+        Ok(())
+    }
+
+    /// Execute a passed FeeScheduleChange proposal.
+    fn execute_fee_schedule_change(
+        &self,
+        new_min_fee: u64,
+        new_tiers: Vec<(u64, u64)>,
+    ) -> Result<(), String> {
+        let schedule = crate::consensus::FeeSchedule {
+            min_fee: new_min_fee,
+            tiers: new_tiers,
+        };
+        self.consensus.apply_fee_schedule(schedule)
     }
 
     /// Set transaction index (called from main.rs after blockchain init)
@@ -2720,7 +2795,8 @@ impl Blockchain {
         // Transactions are already sorted by canonical order, so we simply truncate the tail.
         {
             const BLOCK_OVERHEAD_BYTES: usize = 32_768; // 32KB for non-tx block fields
-            let tx_size_budget = constants::blockchain::MAX_BLOCK_ASSEMBLY_SIZE.saturating_sub(BLOCK_OVERHEAD_BYTES);
+            let tx_size_budget =
+                constants::blockchain::MAX_BLOCK_ASSEMBLY_SIZE.saturating_sub(BLOCK_OVERHEAD_BYTES);
             let mut accumulated_tx_bytes: usize = 0;
             let mut cap_at: Option<usize> = None;
             for (i, (tx, _)) in valid_finalized_with_fees.iter().enumerate() {
@@ -3839,6 +3915,46 @@ impl Blockchain {
         // Deposit treasury allocation for this block (5 TIME per block)
         if !is_genesis {
             self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
+        }
+
+        // Check for governance proposals whose voting window closes at this height.
+        // Skip during initial sync to avoid executing proposals against a partially-built
+        // masternode registry.
+        if !is_genesis && !self.is_syncing.load(std::sync::atomic::Ordering::Acquire) {
+            if let Some(gov) = &self.governance {
+                let passed = gov
+                    .check_and_execute_proposals(block.header.height, &self.masternode_registry)
+                    .await;
+                for proposal in passed {
+                    use crate::governance::ProposalPayload;
+                    match &proposal.payload {
+                        ProposalPayload::TreasurySpend {
+                            recipient, amount, ..
+                        } => {
+                            if let Err(e) = self
+                                .execute_treasury_spend(recipient, *amount, &proposal.id)
+                                .await
+                            {
+                                tracing::error!("🏛️  TreasurySpend execution failed: {e}");
+                            } else {
+                                gov.mark_executed(&proposal.id).await;
+                            }
+                        }
+                        ProposalPayload::FeeScheduleChange {
+                            new_min_fee,
+                            new_tiers,
+                        } => {
+                            if let Err(e) =
+                                self.execute_fee_schedule_change(*new_min_fee, new_tiers.clone())
+                            {
+                                tracing::error!("🏛️  FeeScheduleChange execution failed: {e}");
+                            } else {
+                                gov.mark_executed(&proposal.id).await;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Save undo log for rollback support
@@ -8689,6 +8805,7 @@ impl Clone for Blockchain {
             reward_violations: self.reward_violations.clone(),
             genesis_mismatch_detected: self.genesis_mismatch_detected.clone(),
             treasury_balance: self.treasury_balance.clone(),
+            governance: self.governance.clone(),
         }
     }
 }
