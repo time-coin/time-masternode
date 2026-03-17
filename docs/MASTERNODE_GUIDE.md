@@ -88,8 +88,49 @@ TIME Coin has four masternode tiers with different collateral requirements and d
 ### Tier Benefits
 
 - **Pool Allocation**: Each tier has a dedicated reward pool shared equally among active nodes in that tier (max 25 per block, fairness rotation for overflow)
-- **Voting Power**: Weight in governance decisions
+- **Voting Power**: Weight in on-chain governance decisions (Bronze=1, Silver=10, Gold=100)
 - **Sampling Weight**: Probability of being selected for consensus voting and VRF block production
+
+---
+
+## On-Chain Governance
+
+Bronze, Silver, and Gold masternodes can submit proposals and vote on protocol changes. Free-tier nodes have no governance access.
+
+### Voting Weights
+
+| Tier | Governance Weight |
+|------|------------------:|
+| Free | 0 (no access) |
+| Bronze | 1 |
+| Silver | 10 |
+| Gold | 100 |
+
+A proposal passes when **YES weight ≥ 67%** of total active governance weight at the end of the 1,008-block (~1 week) voting window.
+
+### Common Governance Operations
+
+```bash
+# See all active proposals
+time-cli listproposals active
+
+# Vote YES on a proposal
+time-cli voteproposal <proposal_id> yes
+
+# Vote NO on a proposal
+time-cli voteproposal <proposal_id> no
+
+# Get proposal details and current tally
+time-cli getproposal <proposal_id>
+
+# Submit a treasury spend proposal (Bronze/Silver/Gold only)
+time-cli submitproposal treasury <recipient_address> <amount_TIME> "<description>"
+
+# Submit a fee schedule change
+time-cli submitproposal feeschedule <new_min_fee_TIME> '<[{"upper":100,"rate_bps":100},...]>'
+```
+
+See [GOVERNANCE.md](GOVERNANCE.md) for the full governance reference.
 
 ---
 

@@ -230,6 +230,51 @@ Returns information about the TimeVote consensus:
 
 ---
 
+### Governance
+
+On-chain governance allows Bronze/Silver/Gold masternodes to submit proposals and vote on protocol changes. See [GOVERNANCE.md](GOVERNANCE.md) for the full reference.
+
+#### Submit a Proposal
+
+```bash
+# Treasury disbursement
+time-cli submitproposal treasury <recipient_address> <amount_TIME> "<description>"
+
+# Fee schedule change
+time-cli submitproposal feeschedule <new_min_fee_TIME> '<[{"upper":100,"rate_bps":100},...]>'
+```
+
+Returns `{"proposal_id":"<64-hex>"}`. The proposal is broadcast to all peers immediately. Requires an unlocked wallet and an active Bronze/Silver/Gold masternode.
+
+#### Vote on a Proposal
+
+```bash
+time-cli voteproposal <proposal_id> yes
+time-cli voteproposal <proposal_id> no
+```
+
+Votes are stake-weighted (Bronze=1, Silver=10, Gold=100). A proposal passes when YES weight ≥ 67% of total active governance weight at the end of the 1,008-block voting window (~1 week).
+
+#### List Proposals
+
+```bash
+# All proposals
+time-cli listproposals
+
+# Filter by status: active, passed, failed, executed
+time-cli listproposals active
+```
+
+#### Get Proposal Detail
+
+```bash
+time-cli getproposal <proposal_id>
+```
+
+Returns full proposal detail including current vote tally, yes/total weight, and quorum percentage.
+
+---
+
 ### Wallet Operations
 
 #### Get Balance

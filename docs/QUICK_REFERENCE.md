@@ -139,9 +139,25 @@ Fork Resolution:
 
 ```yaml
 Free:   0 TIME          → sampling weight 1, no governance
-Bronze: 1,000 TIME      → sampling weight 10  (exact collateral)
-Silver: 10,000 TIME     → sampling weight 100 (exact collateral)
-Gold:   100,000 TIME    → sampling weight 1,000 (exact collateral)
+Bronze: 1,000 TIME      → sampling weight 10,   governance weight 1   (exact collateral)
+Silver: 10,000 TIME     → sampling weight 100,  governance weight 10  (exact collateral)
+Gold:   100,000 TIME    → sampling weight 1,000 governance weight 100 (exact collateral)
+```
+
+---
+
+## On-Chain Governance
+
+```yaml
+Voting period:       1,008 blocks (~1 week at 10 min/block)
+Quorum threshold:    67% of total active governance weight (YES votes only)
+Eligible voters:     Bronze, Silver, Gold masternodes (Free cannot vote)
+Proposal types:      TreasurySpend | FeeScheduleChange
+Treasury source:     5 TIME/block (accumulated in on-chain state)
+Max description:     256 bytes
+Storage keys:        gov_proposal_<64-hex>
+                     gov_vote_<64-hex>_<voter_address>
+Execution:           Atomic in the same block the voting window closes
 ```
 
 ---
