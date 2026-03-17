@@ -1650,6 +1650,8 @@ pub struct ConsensusEngine {
     /// In-memory payment request store: to_address → Vec<PaymentRequest>
     /// Requests expire after 24 hours and are cleaned up periodically.
     pub payment_requests: Arc<DashMap<String, Vec<crate::network::message::PaymentRequest>>>,
+    /// Live fee schedule — may be replaced by governance proposals.
+    fee_schedule: Arc<parking_lot::RwLock<FeeSchedule>>,
 }
 
 impl ConsensusEngine {
@@ -1677,7 +1679,20 @@ impl ConsensusEngine {
             prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
             tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
             payment_requests: Arc::new(DashMap::new()),
+            fee_schedule: Arc::new(parking_lot::RwLock::new(FeeSchedule::default())),
         }
+    }
+
+    /// Return the currently active fee schedule (may have been updated by governance).
+    pub fn current_fee_schedule(&self) -> FeeSchedule {
+        self.fee_schedule.read().clone()
+    }
+
+    /// Replace the active fee schedule (called by governance execution path).
+    pub fn apply_fee_schedule(&self, new_schedule: FeeSchedule) -> Result<(), String> {
+        *self.fee_schedule.write() = new_schedule;
+        tracing::info!("🏛️  Governance: fee schedule updated");
+        Ok(())
     }
 
     /// Create a test instance without UTXO manager (for unit tests)
@@ -1708,6 +1723,7 @@ impl ConsensusEngine {
             prev_block_hash: Arc::new(parking_lot::RwLock::new([0u8; 32])),
             tx_finalized_sender: tokio::sync::broadcast::channel(1000).0,
             payment_requests: Arc::new(DashMap::new()),
+            fee_schedule: Arc::new(parking_lot::RwLock::new(FeeSchedule::default())),
         }
     }
 
@@ -2553,7 +2569,7 @@ impl ConsensusEngine {
         // Check tiered proportional fee (governance-adjustable schedule)
         // Self-sends (consolidations) only need MIN_TX_FEE — no value transfer occurs
         if !is_self_send {
-            let fee_schedule = FeeSchedule::default();
+            let fee_schedule = self.current_fee_schedule();
             let send_amount = tx.outputs.first().map(|o| o.value).unwrap_or(output_sum);
             let min_proportional_fee = fee_schedule.required_fee(send_amount);
 
@@ -3109,6 +3125,7 @@ impl ConsensusEngine {
             prev_block_hash: self.prev_block_hash.clone(),
             tx_finalized_sender: self.tx_finalized_sender.clone(),
             payment_requests: self.payment_requests.clone(),
+            fee_schedule: self.fee_schedule.clone(),
         });
         let tx_status_map = self.timevote.tx_status.clone();
         let finalized_signal = self.tx_finalized_sender.clone();

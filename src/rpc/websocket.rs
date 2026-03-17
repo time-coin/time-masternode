@@ -300,13 +300,13 @@ pub async fn start_ws_server(
 
     println!("  ✅ WebSocket server listening on {}://{}", scheme, addr);
 
-    // Spawn cleanup task (every 60s, remove dead connections)
+    // Spawn cleanup task (every 15s, remove dead connections)
     let cleanup_mgr = sub_manager.clone();
     let cleanup_shutdown = shutdown.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(60)) => {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {
                     cleanup_mgr.cleanup_dead();
                 }
                 _ = cleanup_shutdown.cancelled() => break,
