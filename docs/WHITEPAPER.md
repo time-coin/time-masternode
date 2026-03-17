@@ -27,10 +27,11 @@ This design separates the concerns of *state finality* (which must be fast) from
 9. [TimeGuard — Liveness Fallback Protocol](#9-timeguard--liveness-fallback-protocol)
 10. [UTXO State Machine](#10-utxo-state-machine)
 11. [Reward Model and Economics](#11-reward-model-and-economics)
-12. [Network Architecture](#12-network-architecture)
-13. [Security Model](#13-security-model)
-14. [Roadmap](#14-roadmap)
-15. [Conclusion](#15-conclusion)
+12. [On-Chain Governance](#12-on-chain-governance)
+13. [Network Architecture](#13-network-architecture)
+14. [Security Model](#14-security-model)
+15. [Roadmap](#15-roadmap)
+16. [Conclusion](#16-conclusion)
 
 ---
 
@@ -401,16 +402,58 @@ A masternode is only eligible for pool rewards if it appeared in the `consensus_
 
 ---
 
-## 12. Network Architecture
+## 12. On-Chain Governance
 
-### 12.1 Ports
+TIME Coin includes a fully on-chain governance system that allows the masternode network to collectively modify protocol parameters and disburse treasury funds without requiring a hard fork.
+
+### 12.1 Governance Actors
+
+Only **active Bronze, Silver, and Gold masternodes** may submit proposals or cast votes. Free-tier nodes participate in consensus and block production but have no governance access, consistent with their zero-collateral status.
+
+Votes are **stake-weighted** rather than node-count-weighted:
+
+| Tier | Governance Weight |
+|------|-----------------:|
+| Bronze | 1 |
+| Silver | 10 |
+| Gold | 100 |
+
+This weighting means operators with more economic skin-in-the-game exert proportionally more influence over governance outcomes, while still preserving the voice of smaller Bronze operators.
+
+### 12.2 Proposal Lifecycle
+
+1. **Submit** — A Bronze/Silver/Gold masternode signs a `GovernanceProposal` with its Ed25519 key and broadcasts it to the network via the `submitproposal` RPC.
+2. **Voting window** — A 1,008-block window (~1 week) opens. Eligible masternodes vote YES or NO via the `voteproposal` RPC. Votes are signed and gossiped to all peers.
+3. **Tally** — At the block where `vote_end_height` is reached, the node tallies YES weight. If YES weight ≥ **67% of total active governance weight**, the proposal passes.
+4. **Execute** — Passing proposals execute atomically in the same block they mature. There is no delay between "passed" and "applied."
+
+Proposals that fail to reach quorum are marked Failed and have no effect. A revised proposal may be submitted in the next voting cycle.
+
+### 12.3 Proposal Types
+
+**TreasurySpend** — Disburses satoshis from the on-chain treasury to a recipient address. The treasury accumulates 5 TIME per block and can only be disbursed through a passing governance proposal. The amount must not exceed the current treasury balance at the time of proposal submission.
+
+**FeeScheduleChange** — Replaces the active fee schedule (minimum fee floor + tiered rate table) immediately upon execution. This allows the network to adjust fees in response to market conditions without any code change or restart.
+
+### 12.4 Security Properties
+
+- All proposals and votes carry Ed25519 signatures; invalid or unsigned messages are rejected at the network layer.
+- Gossip is idempotent — duplicate proposals and votes converge to the same state regardless of delivery order.
+- State is persisted in the sled database and reloaded at startup, surviving daemon restarts.
+- Treasury execution is atomic — the balance debit and UTXO creation happen in a single block state transition.
+
+---
+
+## 13. Network Architecture
+
+### 13.1 Ports
 
 | Network | P2P Port | RPC Port | WebSocket |
 |---------|:--------:|:--------:|:---------:|
 | Mainnet | 24000 | 24001 | 24002 |
 | Testnet | 24100 | 24101 | 24102 |
 
-### 12.2 Connection Model
+### 13.2 Connection Model
 
 TIME Coin uses a hybrid connection model:
 
@@ -418,7 +461,7 @@ TIME Coin uses a hybrid connection model:
 - **Regular peers** fill remaining connection slots and are used for blockchain sync and transaction propagation.
 - **Inbound connections** are accepted from any peer that passes rate limiting; known masternodes are automatically whitelisted.
 
-### 12.3 Message Propagation
+### 13.3 Message Propagation
 
 The primary gossip primitives are:
 
@@ -427,7 +470,7 @@ The primary gossip primitives are:
 - **`MasternodeStatusGossip`** — periodic (every 30 seconds) broadcast listing currently-connected peer IPs, used for uptime attestation.
 - **`BlockAnnouncement` / `BlockInventory`** — new blocks are announced by hash; peers request the full block only if they don't already have it, reducing bandwidth.
 
-### 12.4 Protocol Magic Bytes
+### 13.4 Protocol Magic Bytes
 
 | Network | Magic |
 |---------|-------|
@@ -436,7 +479,7 @@ The primary gossip primitives are:
 
 Incoming messages are rejected if their magic bytes do not match, providing network-level partition between mainnet and testnet.
 
-### 12.5 Rate Limiting and Blacklisting
+### 13.5 Rate Limiting and Blacklisting
 
 - Per-peer rate limiting: 100 requests per 60-second window
 - Automatic IP blacklisting after repeated invalid block submissions (≥5)
@@ -444,37 +487,37 @@ Incoming messages are rejected if their magic bytes do not match, providing netw
 
 ---
 
-## 13. Security Model
+## 14. Security Model
 
-### 13.1 51% / Sybil Attacks
+### 14.1 51% / Sybil Attacks
 
 Because finality requires **67% of stake weight** (not 51% of node count), an attacker controlling a large number of low-stake Free-tier nodes gains little influence. To meaningfully threaten finality, an attacker must control more than 33% of total staked TIME, which requires acquiring a substantial fraction of the circulating supply.
 
 The 72-block maturity gate on mainnet ensures that a sudden flood of new Free nodes cannot immediately inflate the AVS and dilute honest voting weight.
 
-### 13.2 Long-Range Attacks
+### 14.2 Long-Range Attacks
 
 Blocks deeper than **100 from the chain tip** are considered irreversible. The node rejects any reorganization attempt that would modify blocks older than this threshold, regardless of the attacker's claimed chain length. Additionally, `MAX_FORK_SEARCH_DEPTH = 2,000` caps how far back fork resolution searches for a common ancestor.
 
-### 13.3 Double-Spend Prevention
+### 14.3 Double-Spend Prevention
 
 Input UTXOs are locked (`SpentPending`) before voting begins. A second transaction attempting to spend the same UTXO is rejected immediately at the validation stage — it does not need to wait for the first transaction's vote to complete.
 
-### 13.4 Eclipse Attacks
+### 14.4 Eclipse Attacks
 
 The connection manager maintains separate reserved slots for registered masternodes and actively reconnects to them via the Phase 3 discovery loop. An attacker attempting to eclipse a node by filling all its connection slots with malicious peers would need to also occupy all the reserved masternode slots, requiring control of registered masternodes with locked collateral.
 
-### 13.5 VRF Grinding
+### 14.5 VRF Grinding
 
 A node cannot predict or manipulate its VRF output for a future block without solving SHA-256 preimage problems, because the VRF input is bound to the previous block hash. Block producers cannot selectively withhold blocks to improve their future VRF score without sacrificing their current block reward.
 
-### 13.6 Equivocation
+### 14.6 Equivocation
 
 Both Accept and Reject votes must be cryptographically signed. A masternode cannot cast different votes for the same transaction to different peers without producing conflicting signed messages, which are detectable evidence of misbehavior.
 
 ---
 
-## 14. Roadmap
+## 15. Roadmap
 
 ### Phase 1 — Network Stability (Q1 2026)
 
@@ -503,16 +546,16 @@ Both Accept and Reject votes must be cryptographically signed. A masternode cann
 
 ### Phase 4 — Advanced Features (Q4 2026)
 
-- On-chain governance with tier-weighted voting
-- Treasury proposal and disbursement system
 - Zero-knowledge proofs for private transactions
 - Quantum-resistant signature research
+
+> **On-chain governance** (tier-weighted voting, treasury disbursement, fee schedule changes) shipped ahead of schedule in v1.2 — see §12.
 
 ### Mainnet Launch (Target: Q4 2026)
 
 ---
 
-## 15. Conclusion
+## 16. Conclusion
 
 TIME Coin demonstrates that instant, provable transaction finality and a robust archival blockchain are not mutually exclusive. By separating the concern of *when a transaction is final* (answered in under a second by the TimeVote quorum) from the concern of *where transactions are permanently recorded* (answered every 10 minutes by TimeLock blocks), the protocol achieves properties that neither pure proof-of-work nor traditional BFT consensus can offer alone.
 

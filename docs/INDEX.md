@@ -1,6 +1,6 @@
 # 📚 TIME Coin Documentation Index
 
-**Last Updated:** March 6, 2026  
+**Last Updated:** March 17, 2026
 **Status:** ✅ Production Ready (v1.2.0)
 
 ---
@@ -20,6 +20,7 @@
 | Manage masternode operations     | [MASTERNODE_GUIDE.md](MASTERNODE_GUIDE.md)                 |
 | Build & test locally (developer) | [QUICKSTART.md](QUICKSTART.md)                             |
 | Use the CLI                      | [CLI_GUIDE.md](CLI_GUIDE.md)                               |
+| Vote or submit a governance proposal | [GOVERNANCE.md](GOVERNANCE.md)                         |
 | Understand the protocol          | [TIMECOIN_PROTOCOL.md](TIMECOIN_PROTOCOL.md)               |
 | Review security                  | [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) |
 | Configure networking             | [NETWORK_ARCHITECTURE.md](NETWORK_ARCHITECTURE.md)         |
@@ -52,6 +53,12 @@
 |----------|---------|----------|
 | [COMPREHENSIVE_SECURITY_AUDIT.md](COMPREHENSIVE_SECURITY_AUDIT.md) | Full attack-vector analysis (30+ vectors) | Security Reviewers |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy, threat analysis, UTXO attack vectors | Security Researchers |
+
+### Governance
+
+| Document | Purpose | Audience |
+|----------|---------|----------|
+| [GOVERNANCE.md](GOVERNANCE.md) | Proposal lifecycle, voting weights, RPC reference, security properties | Masternode Operators |
 
 ### Reference
 
@@ -114,4 +121,4 @@
 
 ---
 
-*Last Updated: March 6, 2026*
+*Last Updated: March 17, 2026*
