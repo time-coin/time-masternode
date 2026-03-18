@@ -572,6 +572,19 @@ impl App {
             self.current_tab = 5;
         }
     }
+
+    /// Returns true if this node is eligible to participate in governance
+    /// (Gold, Silver, or Bronze masternode). Free tier and non-masternodes
+    /// are excluded.
+    fn can_govern(&self) -> bool {
+        match &self.data.masternode {
+            None => false,
+            Some(mn) => {
+                let tier = mn.tier.to_lowercase();
+                matches!(tier.as_str(), "gold" | "silver" | "bronze")
+            }
+        }
+    }
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -1636,7 +1649,30 @@ fn render_governance(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(summary, chunks[0]);
 
     // --- Vote status / hint bar ---
-    let hint_line = if let Some((ok, msg)) = &app.vote_status {
+    let eligible = app.can_govern();
+    let hint_line = if !eligible {
+        // Determine why: no masternode vs Free tier
+        let tier = app
+            .data
+            .masternode
+            .as_ref()
+            .map(|m| m.tier.as_str())
+            .unwrap_or("");
+        let reason = if tier.eq_ignore_ascii_case("free") {
+            "Free tier nodes cannot participate in governance."
+        } else {
+            "This node is not running as a masternode and cannot participate in governance."
+        };
+        Line::from(vec![
+            Span::styled(
+                "⊘ ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(reason, Style::default().fg(Color::DarkGray)),
+        ])
+    } else if let Some((ok, msg)) = &app.vote_status {
         let (icon, color) = if *ok {
             ("✓ ", Color::Green)
         } else {
@@ -2049,7 +2085,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('v') | KeyCode::Char('V')
                             if app.current_tab == 5 =>
                         {
-                            if let Some(proposal) =
+                            if !app.can_govern() {
+                                // ignore — not eligible
+                            } else if let Some(proposal) =
                                 app.data.proposals.get(app.governance_scroll)
                             {
                                 let id = proposal.id.clone();
@@ -2062,7 +2100,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                         KeyCode::Char('x') | KeyCode::Char('X')
                             if app.current_tab == 5 =>
                         {
-                            if let Some(proposal) =
+                            if !app.can_govern() {
+                                // ignore — not eligible
+                            } else if let Some(proposal) =
                                 app.data.proposals.get(app.governance_scroll)
                             {
                                 let id = proposal.id.clone();
