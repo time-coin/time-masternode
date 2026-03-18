@@ -269,6 +269,20 @@ struct BlockDetail {
     block_reward: f64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct GovernanceProposal {
+    id: String,
+    #[serde(rename = "type")]
+    proposal_type: String,
+    submitter: String,
+    submit_height: u64,
+    vote_end_height: u64,
+    status: String,
+    #[serde(default)]
+    total_weight: u64,
+}
+
 struct DashboardData {
     blockchain: Option<BlockchainInfo>,
     wallet: Option<WalletInfo>,
@@ -280,6 +294,7 @@ struct DashboardData {
     mempool: Option<MempoolInfo>,
     mempool_txs: Vec<MempoolTx>,
     recent_blocks: Vec<BlockDetail>,
+    proposals: Vec<GovernanceProposal>,
     last_update: DateTime<Utc>,
     update_count: u64,
 }
@@ -297,6 +312,7 @@ impl Default for DashboardData {
             mempool: None,
             mempool_txs: Vec::new(),
             recent_blocks: Vec::new(),
+            proposals: Vec::new(),
             last_update: Utc::now(),
             update_count: 0,
         }
@@ -318,6 +334,8 @@ struct App {
     block_scroll: usize,
     block_detail: Option<usize>,
     block_tx_scroll: usize,
+    governance_scroll: usize,
+    vote_status: Option<(bool, String)>, // (success, message)
 }
 
 impl App {
@@ -341,6 +359,8 @@ impl App {
             block_scroll: 0,
             block_detail: None,
             block_tx_scroll: 0,
+            governance_scroll: 0,
+            vote_status: None,
         }
     }
 
@@ -456,8 +476,35 @@ impl App {
             }
         }
 
+        // Fetch governance proposals
+        match self
+            .rpc_call::<Vec<GovernanceProposal>>("listproposals", vec![])
+            .await
+        {
+            Ok(proposals) => self.data.proposals = proposals,
+            Err(_) => {} // governance may not be initialized yet
+        }
+
         self.data.last_update = Utc::now();
         self.data.update_count += 1;
+    }
+
+    async fn cast_vote(&self, proposal_id: &str, approve: bool) -> Result<String, String> {
+        let params = vec![
+            serde_json::json!(proposal_id),
+            serde_json::json!(approve),
+        ];
+        match self
+            .rpc_call::<serde_json::Value>("voteproposal", params)
+            .await
+        {
+            Ok(_) => Ok(format!(
+                "Vote {} recorded for {}",
+                if approve { "YES" } else { "NO" },
+                &proposal_id[..16.min(proposal_id.len())]
+            )),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     async fn rpc_call<T: for<'de> Deserialize<'de>>(
@@ -515,14 +562,14 @@ impl App {
     }
 
     fn next_tab(&mut self) {
-        self.current_tab = (self.current_tab + 1) % 5;
+        self.current_tab = (self.current_tab + 1) % 6;
     }
 
     fn previous_tab(&mut self) {
         if self.current_tab > 0 {
             self.current_tab -= 1;
         } else {
-            self.current_tab = 4;
+            self.current_tab = 5;
         }
     }
 }
@@ -551,6 +598,7 @@ fn ui(f: &mut Frame, app: &App) {
         2 => render_masternode(f, chunks[2], app),
         3 => render_mempool(f, chunks[2], app),
         4 => render_blocks(f, chunks[2], app),
+        5 => render_governance(f, chunks[2], app),
         _ => {}
     }
 
@@ -610,7 +658,7 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let titles = vec!["Overview", "Network", "Masternode", "Mempool", "Blocks"];
+    let titles = vec!["Overview", "Network", "Masternode", "Mempool", "Blocks", "Governance"];
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title("Navigation"))
         .select(app.current_tab)
@@ -1541,6 +1589,191 @@ fn render_block_detail(f: &mut Frame, area: Rect, blk: &BlockDetail, tx_scroll: 
     f.render_widget(table, chunks[1]);
 }
 
+fn render_governance(f: &mut Frame, area: Rect, app: &App) {
+    let proposals = &app.data.proposals;
+
+    // Layout: summary bar + vote status + proposal table + hint bar
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // summary
+            Constraint::Length(3), // vote status / hint
+            Constraint::Min(0),    // proposal table
+        ])
+        .split(area);
+
+    // --- Summary bar ---
+    let active = proposals.iter().filter(|p| p.status == "active").count();
+    let passed = proposals
+        .iter()
+        .filter(|p| p.status.starts_with("passed"))
+        .count();
+    let failed = proposals.iter().filter(|p| p.status == "failed").count();
+
+    let summary = Paragraph::new(Line::from(vec![
+        Span::raw("Proposals: "),
+        Span::styled(
+            proposals.len().to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  |  Active: "),
+        Span::styled(
+            active.to_string(),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  |  Passed: "),
+        Span::styled(passed.to_string(), Style::default().fg(Color::Green)),
+        Span::raw("  |  Failed: "),
+        Span::styled(failed.to_string(), Style::default().fg(Color::Red)),
+    ]))
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Governance")
+            .border_style(Style::default().fg(Color::Cyan)),
+    )
+    .alignment(Alignment::Left);
+    f.render_widget(summary, chunks[0]);
+
+    // --- Vote status / hint bar ---
+    let hint_line = if let Some((ok, msg)) = &app.vote_status {
+        let (icon, color) = if *ok {
+            ("✓ ", Color::Green)
+        } else {
+            ("✗ ", Color::Red)
+        };
+        Line::from(vec![
+            Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(msg.as_str(), Style::default().fg(color)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("[v] ", Style::default().fg(Color::Green)),
+            Span::raw("Vote Yes  "),
+            Span::styled("[x] ", Style::default().fg(Color::Red)),
+            Span::raw("Vote No  "),
+            Span::styled("[↑↓] ", Style::default().fg(Color::Yellow)),
+            Span::raw("Navigate  "),
+            Span::styled("[r] ", Style::default().fg(Color::Yellow)),
+            Span::raw("Refresh"),
+        ])
+    };
+    let hint = Paragraph::new(hint_line)
+        .block(Block::default().borders(Borders::ALL))
+        .alignment(Alignment::Left);
+    f.render_widget(hint, chunks[1]);
+
+    // --- Proposal table ---
+    if proposals.is_empty() {
+        let empty = Paragraph::new("No governance proposals found.")
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Proposals")
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        f.render_widget(empty, chunks[2]);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from("#").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("ID").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("Type").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("Submitter").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("Status").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("Ends At").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .height(1);
+
+    let rows: Vec<Row> = proposals
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let selected = i == app.governance_scroll;
+
+            let id_short = if p.id.len() > 16 {
+                format!("{}...", &p.id[..16])
+            } else {
+                p.id.clone()
+            };
+
+            let submitter_short = if p.submitter.len() > 14 {
+                format!("{}...", &p.submitter[..14])
+            } else {
+                p.submitter.clone()
+            };
+
+            let type_label = match p.proposal_type.as_str() {
+                "treasury_spend" => "Treasury",
+                "fee_schedule_change" => "Fee Change",
+                other => other,
+            };
+
+            let status_color = if p.status == "active" {
+                Color::Yellow
+            } else if p.status.starts_with("passed") {
+                Color::Green
+            } else if p.status == "failed" {
+                Color::Red
+            } else {
+                Color::Gray
+            };
+
+            let row_style = if selected {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+
+            Row::new(vec![
+                Cell::from(format!("{}", i + 1)),
+                Cell::from(id_short),
+                Cell::from(type_label),
+                Cell::from(submitter_short),
+                Cell::from(p.status.clone()).style(Style::default().fg(status_color)),
+                Cell::from(format!("{}", p.vote_end_height)),
+            ])
+            .style(row_style)
+            .height(1)
+        })
+        .collect();
+
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Length(20),
+        Constraint::Length(12),
+        Constraint::Length(18),
+        Constraint::Length(24),
+        Constraint::Length(10),
+    ];
+
+    let mut table_state = TableState::default();
+    table_state.select(Some(app.governance_scroll));
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Proposals ({} total)", proposals.len()))
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    f.render_stateful_widget(table, chunks[2], &mut table_state);
+}
+
 fn format_age(secs: u64) -> String {
     if secs < 60 {
         format!("{}s", secs)
@@ -1702,6 +1935,8 @@ async fn run_app<B: ratatui::backend::Backend>(
                             } else if app.block_detail.is_some() {
                                 app.block_detail = None;
                                 app.block_tx_scroll = 0;
+                            } else if app.current_tab == 5 && app.vote_status.is_some() {
+                                app.vote_status = None;
                             } else {
                                 app.should_quit = true;
                             }
@@ -1721,12 +1956,14 @@ async fn run_app<B: ratatui::backend::Backend>(
                             if app.mempool_detail.is_none() && app.block_detail.is_none() {
                                 app.next_tab();
                                 app.mempool_scroll = 0;
+                                app.vote_status = None;
                             }
                         }
                         KeyCode::Left => {
                             if app.mempool_detail.is_none() && app.block_detail.is_none() {
                                 app.previous_tab();
                                 app.mempool_scroll = 0;
+                                app.vote_status = None;
                             }
                         }
                         KeyCode::Up => {
@@ -1740,6 +1977,9 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 } else {
                                     app.block_scroll = app.block_scroll.saturating_sub(1);
                                 }
+                            } else if app.current_tab == 5 {
+                                app.governance_scroll = app.governance_scroll.saturating_sub(1);
+                                app.vote_status = None;
                             }
                         }
                         KeyCode::Down => {
@@ -1771,6 +2011,12 @@ async fn run_app<B: ratatui::backend::Backend>(
                                         app.block_scroll += 1;
                                     }
                                 }
+                            } else if app.current_tab == 5 {
+                                let max = app.data.proposals.len().saturating_sub(1);
+                                if app.governance_scroll < max {
+                                    app.governance_scroll += 1;
+                                }
+                                app.vote_status = None;
                             }
                         }
                         KeyCode::Enter => {
@@ -1796,6 +2042,34 @@ async fn run_app<B: ratatui::backend::Backend>(
                             } else if app.block_detail.is_some() {
                                 app.block_detail = None;
                                 app.block_tx_scroll = 0;
+                            } else if app.current_tab == 5 {
+                                app.vote_status = None;
+                            }
+                        }
+                        KeyCode::Char('v') | KeyCode::Char('V')
+                            if app.current_tab == 5 =>
+                        {
+                            if let Some(proposal) =
+                                app.data.proposals.get(app.governance_scroll)
+                            {
+                                let id = proposal.id.clone();
+                                match app.cast_vote(&id, true).await {
+                                    Ok(msg) => app.vote_status = Some((true, msg)),
+                                    Err(e) => app.vote_status = Some((false, e)),
+                                }
+                            }
+                        }
+                        KeyCode::Char('x') | KeyCode::Char('X')
+                            if app.current_tab == 5 =>
+                        {
+                            if let Some(proposal) =
+                                app.data.proposals.get(app.governance_scroll)
+                            {
+                                let id = proposal.id.clone();
+                                match app.cast_vote(&id, false).await {
+                                    Ok(msg) => app.vote_status = Some((true, msg)),
+                                    Err(e) => app.vote_status = Some((false, e)),
+                                }
                             }
                         }
                         _ => {}
