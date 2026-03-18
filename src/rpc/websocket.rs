@@ -49,8 +49,26 @@ pub enum TxEventStatus {
     PaymentRequest {
         from_address: String,
         memo: String,
+        requester_name: String,
         pubkey_hex: String,
         expires: i64,
+    },
+    /// Payer responded to a payment request (notify requester)
+    PaymentRequestResponse {
+        request_id: String,
+        payer_address: String,
+        accepted: bool,
+        txid: Option<String>,
+    },
+    /// Requester cancelled a payment request (notify payer)
+    PaymentRequestCancelled {
+        request_id: String,
+        requester_address: String,
+    },
+    /// Payer viewed a payment request (notify requester)
+    PaymentRequestViewed {
+        request_id: String,
+        payer_address: String,
     },
 }
 
@@ -137,6 +155,9 @@ impl SubscriptionManager {
             TxEventStatus::Pending => "tx_notification",
             TxEventStatus::Declined(_) => "tx_declined",
             TxEventStatus::PaymentRequest { .. } => "payment_request",
+            TxEventStatus::PaymentRequestResponse { .. } => "payment_request_response",
+            TxEventStatus::PaymentRequestCancelled { .. } => "payment_request_cancelled",
+            TxEventStatus::PaymentRequestViewed { .. } => "payment_request_viewed",
         };
 
         let sub_count = self.total_subscriptions();
@@ -190,6 +211,7 @@ impl SubscriptionManager {
                     TxEventStatus::PaymentRequest {
                         from_address,
                         memo,
+                        requester_name,
                         pubkey_hex,
                         expires,
                     } => {
@@ -199,9 +221,41 @@ impl SubscriptionManager {
                             "to_address": output.address,
                             "amount": output.amount,
                             "memo": memo,
+                            "requester_name": requester_name,
                             "pubkey": pubkey_hex,
                             "timestamp": event.timestamp,
                             "expires": expires,
+                        })
+                    }
+                    TxEventStatus::PaymentRequestResponse {
+                        request_id,
+                        payer_address,
+                        accepted,
+                        txid,
+                    } => {
+                        serde_json::json!({
+                            "id": request_id,
+                            "payer_address": payer_address,
+                            "accepted": accepted,
+                            "txid": txid,
+                        })
+                    }
+                    TxEventStatus::PaymentRequestCancelled {
+                        request_id,
+                        requester_address,
+                    } => {
+                        serde_json::json!({
+                            "id": request_id,
+                            "requester_address": requester_address,
+                        })
+                    }
+                    TxEventStatus::PaymentRequestViewed {
+                        request_id,
+                        payer_address,
+                    } => {
+                        serde_json::json!({
+                            "id": request_id,
+                            "payer_address": payer_address,
                         })
                     }
                 };
@@ -214,6 +268,20 @@ impl SubscriptionManager {
                 for sender in senders.iter() {
                     let _ = sender.send(notification.clone());
                 }
+            }
+        }
+    }
+
+    /// Push a typed notification directly to all subscribers of a specific address.
+    /// Used for payment-request status events where the target is not in the tx outputs.
+    pub fn notify_for_address(&self, address: &str, msg_type: &str, data: serde_json::Value) {
+        if let Some(senders) = self.subscriptions.get(address) {
+            let notification = ServerNotification {
+                msg_type: msg_type.to_string(),
+                data: Some(data),
+            };
+            for sender in senders.iter() {
+                let _ = sender.send(notification.clone());
             }
         }
     }
@@ -329,6 +397,9 @@ pub async fn start_ws_server(
                                 TxEventStatus::Finalized => "finalized",
                                 TxEventStatus::Declined(_) => "declined",
                                 TxEventStatus::PaymentRequest { .. } => "payment_request",
+                                TxEventStatus::PaymentRequestResponse { .. } => "payment_request_response",
+                                TxEventStatus::PaymentRequestCancelled { .. } => "payment_request_cancelled",
+                                TxEventStatus::PaymentRequestViewed { .. } => "payment_request_viewed",
                             };
                             tracing::info!(
                                 "📡 WS dispatcher received event: txid={}..., status={}",

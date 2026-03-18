@@ -719,6 +719,9 @@ impl MessageHandler {
                                                             .from_address
                                                             .clone(),
                                                         memo: request.memo.clone(),
+                                                        requester_name: request
+                                                            .requester_name
+                                                            .clone(),
                                                         pubkey_hex: request
                                                             .pubkey_hex
                                                             .clone(),
@@ -736,6 +739,95 @@ impl MessageHandler {
                             );
                         }
                     }
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::PaymentRequestResponse {
+                ref id,
+                ref requester_address,
+                ref payer_address,
+                accepted,
+                ref txid,
+            } => {
+                // Remove the resolved request from local storage
+                if let Some(ref consensus) = context.consensus {
+                    consensus.remove_payment_request(id);
+                }
+                // Push WS notification to the requester if subscribed on this node
+                if let Some(ref tx_sender) = context.tx_event_sender {
+                    let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                        txid: format!("pr-resp:{}", id),
+                        outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                            address: requester_address.clone(),
+                            amount: 0.0,
+                            index: 0,
+                        }],
+                        timestamp: chrono::Utc::now().timestamp(),
+                        status: crate::rpc::websocket::TxEventStatus::PaymentRequestResponse {
+                            request_id: id.clone(),
+                            payer_address: payer_address.clone(),
+                            accepted: *accepted,
+                            txid: txid.clone(),
+                        },
+                    });
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::PaymentRequestCancelled {
+                ref id,
+                ref requester_address,
+            } => {
+                // Retrieve payer before removing so we can notify them
+                let payer_address = context
+                    .consensus
+                    .as_ref()
+                    .and_then(|c| c.get_payment_request_payer(id))
+                    .unwrap_or_default();
+
+                if let Some(ref consensus) = context.consensus {
+                    consensus.remove_payment_request(id);
+                }
+                if !payer_address.is_empty() {
+                    if let Some(ref tx_sender) = context.tx_event_sender {
+                        let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                            txid: format!("pr-cancel:{}", id),
+                            outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                                address: payer_address,
+                                amount: 0.0,
+                                index: 0,
+                            }],
+                            timestamp: chrono::Utc::now().timestamp(),
+                            status: crate::rpc::websocket::TxEventStatus::PaymentRequestCancelled {
+                                request_id: id.clone(),
+                                requester_address: requester_address.clone(),
+                            },
+                        });
+                    }
+                }
+                Ok(None)
+            }
+
+            NetworkMessage::PaymentRequestViewed {
+                ref id,
+                ref requester_address,
+                ref payer_address,
+            } => {
+                if let Some(ref tx_sender) = context.tx_event_sender {
+                    let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                        txid: format!("pr-view:{}", id),
+                        outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                            address: requester_address.clone(),
+                            amount: 0.0,
+                            index: 0,
+                        }],
+                        timestamp: chrono::Utc::now().timestamp(),
+                        status: crate::rpc::websocket::TxEventStatus::PaymentRequestViewed {
+                            request_id: id.clone(),
+                            payer_address: payer_address.clone(),
+                        },
+                    });
                 }
                 Ok(None)
             }

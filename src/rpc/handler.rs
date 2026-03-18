@@ -129,6 +129,9 @@ impl RpcHandler {
             "sendpaymentrequest" => self.send_payment_request(&params_array).await,
             "getpaymentrequests" => self.get_payment_requests(&params_array).await,
             "acknowledgepaymentrequest" => self.acknowledge_payment_request(&params_array).await,
+            "respondpaymentrequest" => self.respond_payment_request(&params_array).await,
+            "cancelpaymentrequest" => self.cancel_payment_request(&params_array).await,
+            "markpaymentrequestviewed" => self.mark_payment_request_viewed(&params_array).await,
             "submitproposal" => self.submit_proposal(&params_array).await,
             "voteproposal" => self.vote_proposal(&params_array).await,
             "listproposals" => self.list_proposals(&params_array).await,
@@ -2808,13 +2811,20 @@ impl RpcHandler {
             // Encrypt memo if provided
             let encrypted_memo = if let Some(memo_text) = memo {
                 // Get recipient's Ed25519 pubkey from their address
-                self.consensus
-                    .encrypt_memo_for_address(memo_text, to_address)
-                    .map_err(|e| RpcError {
-                        code: -4,
-                        message: format!("Failed to encrypt memo: {}", e),
-                    })
-                    .ok()
+                Some(
+                    self.consensus
+                        .encrypt_memo_for_address(memo_text, to_address)
+                        .map_err(|e| RpcError {
+                            code: -4,
+                            message: format!(
+                                "Failed to encrypt memo: {}. \
+                                 The recipient must have at least one on-chain transaction \
+                                 visible to this node, or use `paypaymentrequest` which \
+                                 includes the recipient pubkey in the URI.",
+                                e
+                            ),
+                        })?,
+                )
             } else {
                 None
             };
@@ -4286,6 +4296,11 @@ impl RpcHandler {
                 code: -32602,
                 message: "Missing timestamp".to_string(),
             })?;
+        let requester_name = params
+            .get(7)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // Decode pubkey
         let pubkey_bytes = hex::decode(pubkey_hex).map_err(|_| RpcError {
@@ -4353,6 +4368,7 @@ impl RpcHandler {
             to_address: to_address.to_string(),
             amount,
             memo: memo.to_string(),
+            requester_name,
             pubkey_hex: pubkey_hex.to_string(),
             signature_hex: signature_hex.to_string(),
             timestamp,
@@ -4374,7 +4390,7 @@ impl RpcHandler {
         }
 
         // Broadcast to peers
-        self.consensus.broadcast_payment_request(request).await;
+        self.consensus.broadcast_payment_request(request.clone()).await;
 
         // Push WS notification to payer if subscribed
         if let Some(ref tx_sender) = self.tx_event_sender {
@@ -4389,6 +4405,7 @@ impl RpcHandler {
                 status: crate::rpc::websocket::TxEventStatus::PaymentRequest {
                     from_address: from_address.to_string(),
                     memo: memo.to_string(),
+                    requester_name: request.requester_name.clone(),
                     pubkey_hex: pubkey_hex.to_string(),
                     expires,
                 },
@@ -4429,6 +4446,7 @@ impl RpcHandler {
                     "to_address": r.to_address,
                     "amount": r.amount,
                     "memo": r.memo,
+                    "requester_name": r.requester_name,
                     "pubkey": r.pubkey_hex,
                     "timestamp": r.timestamp,
                     "expires": r.expires,
@@ -4461,6 +4479,197 @@ impl RpcHandler {
             "status": status,
             "removed": removed,
         }))
+    }
+
+    /// Payer responds to a pending payment request (accept or decline).
+    /// Params: [request_id, requester_address, payer_address, accepted, txid?]
+    async fn respond_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let request_id = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing request_id".to_string(),
+            })?;
+        let requester_address = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing requester_address".to_string(),
+            })?;
+        let payer_address = params
+            .get(2)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing payer_address".to_string(),
+            })?;
+        let accepted = params
+            .get(3)
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing accepted (bool)".to_string(),
+            })?;
+        let txid: Option<String> = params
+            .get(4)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Remove from storage (request is resolved)
+        self.consensus.remove_payment_request(request_id);
+
+        // Relay to peers so the requester's node gets notified
+        self.consensus
+            .broadcast_payment_request_response(
+                request_id.to_string(),
+                requester_address.to_string(),
+                payer_address.to_string(),
+                accepted,
+                txid.clone(),
+            )
+            .await;
+
+        // Push WS notification to the requester if they're subscribed on this node
+        // (route to requester_address via the outputs field)
+        if let Some(ref tx_sender) = self.tx_event_sender {
+            let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                txid: format!("pr-resp:{}", request_id),
+                outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                    address: requester_address.to_string(),
+                    amount: 0.0,
+                    index: 0,
+                }],
+                timestamp: chrono::Utc::now().timestamp(),
+                status: crate::rpc::websocket::TxEventStatus::PaymentRequestResponse {
+                    request_id: request_id.to_string(),
+                    payer_address: payer_address.to_string(),
+                    accepted,
+                    txid,
+                },
+            });
+        }
+
+        Ok(json!({
+            "id": request_id,
+            "accepted": accepted,
+            "status": if accepted { "accepted" } else { "declined" },
+        }))
+    }
+
+    /// Requester cancels their own pending payment request.
+    /// Params: [request_id, requester_address]
+    async fn cancel_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let request_id = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing request_id".to_string(),
+            })?;
+        let requester_address = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing requester_address".to_string(),
+            })?;
+
+        // Look up the payer address before removing (needed for WS notification)
+        let payer_address = self
+            .consensus
+            .get_payment_request_payer(request_id)
+            .unwrap_or_default();
+
+        let removed = self.consensus.remove_payment_request(request_id);
+
+        // Relay cancellation to peers
+        self.consensus
+            .broadcast_payment_request_cancelled(
+                request_id.to_string(),
+                requester_address.to_string(),
+            )
+            .await;
+
+        // Push WS notification to the payer if subscribed on this node
+        if !payer_address.is_empty() {
+            if let Some(ref tx_sender) = self.tx_event_sender {
+                let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                    txid: format!("pr-cancel:{}", request_id),
+                    outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                        address: payer_address.clone(),
+                        amount: 0.0,
+                        index: 0,
+                    }],
+                    timestamp: chrono::Utc::now().timestamp(),
+                    status: crate::rpc::websocket::TxEventStatus::PaymentRequestCancelled {
+                        request_id: request_id.to_string(),
+                        requester_address: requester_address.to_string(),
+                    },
+                });
+            }
+        }
+
+        Ok(json!({
+            "id": request_id,
+            "status": "cancelled",
+            "removed": removed,
+        }))
+    }
+
+    /// Mark a payment request as viewed by the payer (notifies the requester).
+    /// Params: [request_id, requester_address, payer_address]
+    async fn mark_payment_request_viewed(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let request_id = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing request_id".to_string(),
+            })?;
+        let requester_address = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing requester_address".to_string(),
+            })?;
+        let payer_address = params
+            .get(2)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Missing payer_address".to_string(),
+            })?;
+
+        // Relay to peers so the requester's node gets notified
+        self.consensus
+            .broadcast_payment_request_viewed(
+                request_id.to_string(),
+                requester_address.to_string(),
+                payer_address.to_string(),
+            )
+            .await;
+
+        // Push WS notification to the requester if subscribed on this node
+        if let Some(ref tx_sender) = self.tx_event_sender {
+            let _ = tx_sender.send(crate::rpc::websocket::TransactionEvent {
+                txid: format!("pr-view:{}", request_id),
+                outputs: vec![crate::rpc::websocket::TxOutputInfo {
+                    address: requester_address.to_string(),
+                    amount: 0.0,
+                    index: 0,
+                }],
+                timestamp: chrono::Utc::now().timestamp(),
+                status: crate::rpc::websocket::TxEventStatus::PaymentRequestViewed {
+                    request_id: request_id.to_string(),
+                    payer_address: payer_address.to_string(),
+                },
+            });
+        }
+
+        Ok(json!({ "id": request_id, "status": "viewed" }))
     }
 
     // ── Governance RPCs ───────────────────────────────────────────────────────
