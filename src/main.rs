@@ -1128,6 +1128,14 @@ async fn main() {
                     eprintln!("⚠️ Failed to set wallet signing key: {}", e);
                 }
 
+                // Pre-seed the pubkey cache with our own wallet address so that
+                // self-sends (consolidation, merge) can encrypt memos immediately
+                // on a freshly started node without waiting for a prior transaction.
+                consensus_engine.utxo_manager.register_pubkey(
+                    &mn.wallet_address,
+                    wallet.signing_key().verifying_key().to_bytes(),
+                );
+
                 tracing::info!("✓ Registered masternode: {}", mn.wallet_address);
                 tracing::info!("✓ Consensus engine identity configured with wallet key");
 

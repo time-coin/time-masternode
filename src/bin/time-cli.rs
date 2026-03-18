@@ -262,6 +262,75 @@ enum Commands {
         memo: Option<String>,
     },
 
+    /// Send a P2P payment request to another address
+    #[command(next_help_heading = "Wallet")]
+    SendPaymentRequest {
+        /// Your address (requester)
+        from_address: String,
+        /// Recipient address (payer)
+        to_address: String,
+        /// Amount requested in TIME atoms
+        amount: u64,
+        /// Description / memo for the payment
+        #[arg(long)]
+        memo: Option<String>,
+        /// Your Ed25519 pubkey (hex) for the recipient to encrypt the payment memo
+        #[arg(long)]
+        pubkey: String,
+        /// Ed25519 signature over the request fields (hex)
+        #[arg(long)]
+        signature: String,
+        /// Unix timestamp of the request
+        #[arg(long)]
+        timestamp: i64,
+        /// Optional display name for the requester
+        #[arg(long)]
+        requester_name: Option<String>,
+    },
+
+    /// List incoming payment requests (as payer)
+    #[command(next_help_heading = "Wallet")]
+    GetPaymentRequests {
+        /// Filter by payer address (your address)
+        address: Option<String>,
+    },
+
+    /// Respond to a payment request (accept or decline)
+    #[command(next_help_heading = "Wallet")]
+    RespondPaymentRequest {
+        /// Payment request ID
+        request_id: String,
+        /// Address of the requester
+        requester_address: String,
+        /// Your payer address
+        payer_address: String,
+        /// Accept (true) or decline (false)
+        accepted: bool,
+        /// Transaction ID if accepted
+        #[arg(long)]
+        txid: Option<String>,
+    },
+
+    /// Cancel a pending payment request you sent
+    #[command(next_help_heading = "Wallet")]
+    CancelPaymentRequest {
+        /// Payment request ID
+        request_id: String,
+        /// Your requester address
+        requester_address: String,
+    },
+
+    /// Mark a payment request as viewed (notifies the requester)
+    #[command(next_help_heading = "Wallet")]
+    MarkPaymentRequestViewed {
+        /// Payment request ID
+        request_id: String,
+        /// Address of the requester
+        requester_address: String,
+        /// Your payer address
+        payer_address: String,
+    },
+
     // ============================================================
     // TRANSACTION COMMANDS
     // ============================================================
@@ -707,6 +776,44 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             label,
         } => ("createpaymentrequest", json!([amount, memo, label])),
         Commands::PayRequest { uri, memo } => ("paypaymentrequest", json!([uri, memo])),
+        Commands::SendPaymentRequest {
+            from_address,
+            to_address,
+            amount,
+            memo,
+            pubkey,
+            signature,
+            timestamp,
+            requester_name,
+        } => (
+            "sendpaymentrequest",
+            json!([from_address, to_address, amount, memo, pubkey, signature, timestamp, requester_name]),
+        ),
+        Commands::GetPaymentRequests { address } => {
+            ("getpaymentrequests", json!([address]))
+        }
+        Commands::RespondPaymentRequest {
+            request_id,
+            requester_address,
+            payer_address,
+            accepted,
+            txid,
+        } => (
+            "respondpaymentrequest",
+            json!([request_id, requester_address, payer_address, accepted, txid]),
+        ),
+        Commands::CancelPaymentRequest {
+            request_id,
+            requester_address,
+        } => ("cancelpaymentrequest", json!([request_id, requester_address])),
+        Commands::MarkPaymentRequestViewed {
+            request_id,
+            requester_address,
+            payer_address,
+        } => (
+            "markpaymentrequestviewed",
+            json!([request_id, requester_address, payer_address]),
+        ),
     };
 
     let request = RpcRequest {

@@ -2358,6 +2358,53 @@ impl ConsensusEngine {
             .await;
     }
 
+    /// Broadcast a payment request response to all peers.
+    pub async fn broadcast_payment_request_response(
+        &self,
+        id: String,
+        requester_address: String,
+        payer_address: String,
+        accepted: bool,
+        txid: Option<String>,
+    ) {
+        self.broadcast(NetworkMessage::PaymentRequestResponse {
+            id,
+            requester_address,
+            payer_address,
+            accepted,
+            txid,
+        })
+        .await;
+    }
+
+    /// Broadcast a payment request cancellation to all peers.
+    pub async fn broadcast_payment_request_cancelled(
+        &self,
+        id: String,
+        requester_address: String,
+    ) {
+        self.broadcast(NetworkMessage::PaymentRequestCancelled {
+            id,
+            requester_address,
+        })
+        .await;
+    }
+
+    /// Broadcast a payment-request-viewed notification to all peers.
+    pub async fn broadcast_payment_request_viewed(
+        &self,
+        id: String,
+        requester_address: String,
+        payer_address: String,
+    ) {
+        self.broadcast(NetworkMessage::PaymentRequestViewed {
+            id,
+            requester_address,
+            payer_address,
+        })
+        .await;
+    }
+
     /// Store a payment request, enforcing per-address limits and dedup.
     /// Returns true if stored (new), false if duplicate or limit reached.
     pub fn store_payment_request(&self, request: crate::network::message::PaymentRequest) -> bool {
@@ -2430,6 +2477,16 @@ impl ConsensusEngine {
             }
         }
         results
+    }
+
+    /// Return the payer address (to_address) for a payment request, if it exists.
+    pub fn get_payment_request_payer(&self, request_id: &str) -> Option<String> {
+        for entry in self.payment_requests.iter() {
+            if let Some(r) = entry.value().iter().find(|r| r.id == request_id) {
+                return Some(r.to_address.clone());
+            }
+        }
+        None
     }
 
     /// Remove a payment request by id

@@ -261,6 +261,26 @@ pub enum NetworkMessage {
     },
     /// A payment request relayed between masternodes (24h TTL, signed by requester)
     PaymentRequestRelay(PaymentRequest),
+    /// Requester cancelled their own pending payment request
+    PaymentRequestCancelled {
+        id: String,
+        requester_address: String,
+    },
+    /// Payer responded to a payment request (accepted or declined)
+    PaymentRequestResponse {
+        id: String,
+        requester_address: String,
+        payer_address: String,
+        accepted: bool,
+        /// TXID of the payment transaction when accepted
+        txid: Option<String>,
+    },
+    /// Payer opened/viewed a payment request (lets requester know it was seen)
+    PaymentRequestViewed {
+        id: String,
+        requester_address: String,
+        payer_address: String,
+    },
     /// Gossip a new governance proposal to peers.
     GovernanceProposal(crate::governance::GovernanceProposal),
     /// Gossip a governance vote to peers.
@@ -351,6 +371,9 @@ pub struct PaymentRequest {
     pub amount: u64,
     /// Plaintext memo describing what the payment is for
     pub memo: String,
+    /// Optional display name for the requester (e.g. merchant name)
+    #[serde(default)]
+    pub requester_name: String,
     /// Requester's Ed25519 public key as hex (enables encrypted memo when paying)
     pub pubkey_hex: String,
     /// Ed25519 signature as hex over (id || from_address || to_address || amount || memo || timestamp)
@@ -441,6 +464,9 @@ impl NetworkMessage {
             NetworkMessage::MasternodeAnnouncementV2 { .. } => "MasternodeAnnouncementV2",
             NetworkMessage::MasternodeAnnouncementV3 { .. } => "MasternodeAnnouncementV3",
             NetworkMessage::PaymentRequestRelay(_) => "PaymentRequestRelay",
+            NetworkMessage::PaymentRequestCancelled { .. } => "PaymentRequestCancelled",
+            NetworkMessage::PaymentRequestResponse { .. } => "PaymentRequestResponse",
+            NetworkMessage::PaymentRequestViewed { .. } => "PaymentRequestViewed",
             NetworkMessage::UnknownMessage => "UnknownMessage",
             NetworkMessage::PeerExchange(_) => "PeerExchange",
             NetworkMessage::GovernanceProposal(_) => "GovernanceProposal",
