@@ -1,7 +1,35 @@
 # TimeCoin Architecture Overview
 
-**Last Updated:** 2026-03-09  
+**Last Updated:** 2026-03-19
 **Version:** 1.2.3 (Solo Production Prevention, Block Timing Enforcement, Sync Loop Fix, Fork Resolution Bugs 1-4, Faster Peer Connections, Encrypted Memos, Payment Request URIs)
+
+---
+
+## Recent Updates (v1.6.0 - March 19, 2026)
+
+### Re-Sync Watchdog
+
+- A background task runs every **5 minutes** after initial sync completes and compares the local height against all connected peers' reported chain tips
+- If any peer is more than 1 block ahead, `sync_from_peers(target)` is triggered automatically
+- Fixes the observed production stall where a node would declare initial sync "complete" after all peers timed out, then sit idle for hours despite being 985 blocks behind
+
+### Collateral Deregistration Grace Period
+
+- `cleanup_invalid_collaterals()` now requires a masternode's collateral UTXO to be missing for **3 consecutive block checks** before deregistration (previously immediate)
+- A per-masternode miss counter (`collateral_miss_counts` DashMap) resets immediately if the UTXO reappears
+- Prevents split-brain from transient UTXO-set divergence at block boundaries — a masternode that appears deregistered on one node due to timing no longer causes reward-recipient mismatches that cascade into block rejection
+
+### VRF Weight Cap Alignment (Validator ↔ Producer)
+
+- The block validator in `message_handler.rs` now applies the same **Free-tier weight cap** (`Bronze.sampling_weight() - 1 = 9`) as the producer's self-selection code in `main.rs`
+- Previously the producer capped Free-tier effective weight at 9 when computing its own VRF threshold, but the validator used the raw weight (1) plus uncapped fairness bonus — causing both sides to compute different thresholds
+- The `total_sampling_weight` sum in the validator also now applies the cap, keeping it consistent with what the producer uses
+
+### VRF Relaxation Interval Alignment (Producer ↔ Validator)
+
+- **`LEADER_TIMEOUT_SECS`: 5 → 10** — the producer now advances `leader_attempt` every 10 seconds, matching the validator's `elapsed / 10` relaxation intervals
+- Previously paid-tier nodes would broadcast a proposal at 5s when the validator still required 10s elapsed to apply any relaxation, guaranteeing one wasted rejection per stalled slot
+- **Free-tier gate raised: `attempt ≥ 3` (15 s) → `attempt ≥ 5` (50 s)** — with capped weight 9 and a ~2338-weight network, a Free-tier node needs multiplier ≥ 32 (2^5, elapsed ≥ 50 s) for the validator to accept its proposal; the old gate at 15 s produced 35 seconds of guaranteed-rejected proposals per stalled slot
 
 ---
 

@@ -1,7 +1,7 @@
 # TIME Coin Protocol Specification (Improved)
 **Document:** `TIMECOIN_PROTOCOL.md`  
-**Version:** 6.2 (TimeVote Protocol + TimeLock Checkpoints + TimeProof + TimeGuard Protocol - COMPLETE)  
-**Last Updated:** January 28, 2026  
+**Version:** 6.3 (TimeVote Protocol + TimeLock Checkpoints + TimeProof + TimeGuard Protocol - COMPLETE)
+**Last Updated:** March 19, 2026  
 **Status:** Implementation Spec (Normative)
 
 ---
@@ -1478,6 +1478,41 @@ MEMBERSHIP_VERIFICATION:
   - Canonical membership = result from peers with highest total weight
   - Cache locally for 1 heartbeat period (60s)
 ```
+
+### 22.5 Post-Initial-Sync Chain Stall Recovery
+**Scenario:** A node completes initial sync but then cannot acquire any new blocks (peers time out, all sync attempts fail). The node is live but stuck.
+
+**Behavior:**
+```
+SYNC_WATCHDOG (runs every 300 s after initial sync):
+  1. Read local height H
+  2. Query all connected peers for their chain tips
+  3. If max_peer_height > H + 1:
+       a. Log warning with heights
+       b. Call sync_from_peers(max_peer_height)
+  4. sync_from_peers() is idempotent — concurrent calls are ignored via is_syncing flag
+```
+
+**Design rationale:** The initial sync loop exits after two rounds of peer timeouts and declares "sync complete" to unblock block production. Without the watchdog, a node that got stuck due to registry divergence or peer unavailability would remain at the stale height indefinitely.
+
+### 22.6 Collateral Deregistration Grace Period
+**Scenario:** A masternode's collateral UTXO appears missing in a node's UTXO set immediately after a block is applied, but the UTXO is present on other nodes (transient divergence at block boundaries).
+
+**Behavior:**
+```
+COLLATERAL_CLEANUP (called after each block):
+  FOR each masternode M with a collateral_outpoint:
+    IF collateral UTXO exists in UTXO set:
+      reset miss_count[M] = 0
+    ELSE:
+      miss_count[M] += 1
+      IF miss_count[M] >= 3:
+        deregister M, unlock collateral
+      ELSE:
+        log warning, defer deregistration
+```
+
+**Threshold:** 3 consecutive misses (≈ 30 minutes at 10-minute block time). This provides ample time for UTXO-set convergence while still deregistering genuinely spent collateral within 3 blocks.
 
 ---
 
