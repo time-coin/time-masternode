@@ -1549,6 +1549,9 @@ impl RpcHandler {
                     if let Some(ref m) = memo {
                         entry["memo"] = json!(m);
                     }
+                    if let Some(ref enc) = tx.encrypted_memo {
+                        entry["encrypted_memo"] = json!(hex::encode(enc));
+                    }
 
                     transactions.push(entry);
                 }
@@ -1620,6 +1623,9 @@ impl RpcHandler {
                 if let Some(ref m) = memo {
                     entry["memo"] = json!(m);
                 }
+                if let Some(ref enc) = tx.encrypted_memo {
+                    entry["encrypted_memo"] = json!(hex::encode(enc));
+                }
 
                 transactions.insert(0, entry);
             }
@@ -1651,18 +1657,19 @@ impl RpcHandler {
             }
 
             if received > 0 {
-                transactions.insert(
-                    0,
-                    json!({
-                        "txid": txid,
-                        "category": "receive",
-                        "amount": received as f64 / 100_000_000.0,
-                        "confirmations": 0,
-                        "finalized": false,
-                        "time": tx.timestamp,
-                        "blocktime": tx.timestamp,
-                    }),
-                );
+                let mut entry = json!({
+                    "txid": txid,
+                    "category": "receive",
+                    "amount": received as f64 / 100_000_000.0,
+                    "confirmations": 0,
+                    "finalized": false,
+                    "time": tx.timestamp,
+                    "blocktime": tx.timestamp,
+                });
+                if let Some(ref enc) = tx.encrypted_memo {
+                    entry["encrypted_memo"] = json!(hex::encode(enc));
+                }
+                transactions.insert(0, entry);
             }
         }
 
@@ -1841,6 +1848,9 @@ impl RpcHandler {
                     if let Some(ref m) = memo {
                         entry["memo"] = json!(m);
                     }
+                    if let Some(ref enc) = tx.encrypted_memo {
+                        entry["encrypted_memo"] = json!(hex::encode(enc));
+                    }
 
                     transactions.push(entry);
                 }
@@ -1926,6 +1936,9 @@ impl RpcHandler {
                 if let Some(ref m) = memo {
                     entry["memo"] = json!(m);
                 }
+                if let Some(ref enc) = tx.encrypted_memo {
+                    entry["encrypted_memo"] = json!(hex::encode(enc));
+                }
 
                 transactions.insert(0, entry);
             }
@@ -1978,6 +1991,9 @@ impl RpcHandler {
                     .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
                 if let Some(ref m) = memo {
                     entry["memo"] = json!(m);
+                }
+                if let Some(ref enc) = tx.encrypted_memo {
+                    entry["encrypted_memo"] = json!(hex::encode(enc));
                 }
 
                 transactions.insert(0, entry);
