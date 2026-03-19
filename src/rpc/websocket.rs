@@ -5,6 +5,7 @@
 //!
 //! Protocol:
 //!   Client → Server: {"method":"subscribe","params":{"address":"TIME0..."}}
+//!   Client → Server: {"method":"subscribe_batch","params":{"addresses":["TIME0...","TIME1..."]}}
 //!   Client → Server: {"method":"unsubscribe","params":{"address":"TIME0..."}}
 //!   Server → Client: {"type":"tx_notification","data":{...}}   (mempool entry — pending)
 //!   Server → Client: {"type":"utxo_finalized","data":{...}}    (consensus reached — approved)
@@ -538,6 +539,24 @@ where
                                         let resp = ServerNotification {
                                             msg_type: "subscribed".to_string(),
                                             data: Some(serde_json::json!({"address": addr})),
+                                        };
+                                        let json = serde_json::to_string(&resp)?;
+                                        ws_sender.send(Message::Text(json.into())).await?;
+                                    }
+                                }
+                                "subscribe_batch" => {
+                                    if let Some(addrs) = client_msg.params.get("addresses").and_then(|v| v.as_array()) {
+                                        let mut subscribed: Vec<&str> = Vec::new();
+                                        for val in addrs {
+                                            if let Some(addr) = val.as_str() {
+                                                sub_manager.subscribe(addr, notif_tx.clone());
+                                                subscribed_addresses.push(addr.to_string());
+                                                subscribed.push(addr);
+                                            }
+                                        }
+                                        let resp = ServerNotification {
+                                            msg_type: "subscribed_batch".to_string(),
+                                            data: Some(serde_json::json!({"addresses": subscribed})),
                                         };
                                         let json = serde_json::to_string(&resp)?;
                                         ws_sender.send(Message::Text(json.into())).await?;
