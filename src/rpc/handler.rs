@@ -1546,7 +1546,11 @@ impl RpcHandler {
                         entry["fee"] = json!(f);
                     }
 
-                    if let Some(ref m) = memo {
+                    if category == "generate" {
+                        // Block reward: the encrypted_memo here belongs to the
+                        // masternode, not the wallet. Always emit a plain label.
+                        entry["memo"] = json!("Block Reward");
+                    } else if let Some(ref m) = memo {
                         entry["memo"] = json!(m);
                     } else if let Some(ref enc) = tx.encrypted_memo {
                         entry["encrypted_memo"] = json!(hex::encode(enc));
@@ -1843,7 +1847,9 @@ impl RpcHandler {
                         .encrypted_memo
                         .as_ref()
                         .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
-                    if let Some(ref m) = memo {
+                    if category == "generate" {
+                        entry["memo"] = json!("Block Reward");
+                    } else if let Some(ref m) = memo {
                         entry["memo"] = json!(m);
                     } else if let Some(ref enc) = tx.encrypted_memo {
                         entry["encrypted_memo"] = json!(hex::encode(enc));
@@ -1987,8 +1993,7 @@ impl RpcHandler {
                     .and_then(|encrypted| self.consensus.decrypt_memo(encrypted));
                 if let Some(ref m) = memo {
                     entry["memo"] = json!(m);
-                }
-                if let Some(ref enc) = tx.encrypted_memo {
+                } else if let Some(ref enc) = tx.encrypted_memo {
                     entry["encrypted_memo"] = json!(hex::encode(enc));
                 }
 
