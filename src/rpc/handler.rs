@@ -4250,115 +4250,109 @@ impl RpcHandler {
         Ok(response)
     }
 
-    /// Accept a signed payment request from a wallet, store it, and broadcast to peers.
-    /// Params: [from_address, to_address, amount, memo, pubkey_hex, signature_hex, timestamp]
+    /// Accept a payment request from a wallet, store it, and broadcast to peers.
+    ///
+    /// Params: [object] where object contains:
+    ///   requester_address  (required) — address of the party requesting payment
+    ///   payer_address      (required) — address of the party being asked to pay
+    ///   amount             (required) — amount in satoshis (u64)
+    ///   id                 (optional) — client-generated UUID; computed from hash if absent
+    ///   memo               (optional) — human-readable description
+    ///   requester_name     (optional) — display name of the requester
+    ///   pubkey_hex         (optional) — Ed25519 public key hex; enables signature verification
+    ///   signature_hex      (optional) — Ed25519 signature hex over canonical fields
+    ///   timestamp          (optional) — Unix timestamp; defaults to now
     async fn send_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let from_address = params
+        let obj = params
             .first()
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected JSON object as first parameter".to_string(),
+            })?;
+
+        let from_address = obj
+            .get("requester_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing from_address".to_string(),
+                message: "Missing requester_address".to_string(),
             })?;
-        let to_address = params
-            .get(1)
+        let to_address = obj
+            .get("payer_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing to_address".to_string(),
+                message: "Missing payer_address".to_string(),
             })?;
-        let amount = params
-            .get(2)
+        let amount = obj
+            .get("amount")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing or invalid amount".to_string(),
+                message: "Missing or invalid amount (expected u64 satoshis)".to_string(),
             })?;
-        let memo = params.get(3).and_then(|v| v.as_str()).unwrap_or("");
-        let pubkey_hex = params
-            .get(4)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing pubkey".to_string(),
-            })?;
-        let signature_hex = params
-            .get(5)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing signature".to_string(),
-            })?;
-        let timestamp = params
-            .get(6)
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing timestamp".to_string(),
-            })?;
-        let requester_name = params
-            .get(7)
+        let memo = obj.get("memo").and_then(|v| v.as_str()).unwrap_or("");
+        let requester_name = obj
+            .get("requester_name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let pubkey_hex_opt = obj
+            .get("pubkey_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let signature_hex_opt = obj
+            .get("signature_hex")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let timestamp = obj
+            .get("timestamp")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
 
-        // Decode pubkey
-        let pubkey_bytes = hex::decode(pubkey_hex).map_err(|_| RpcError {
-            code: -32602,
-            message: "Invalid pubkey hex".to_string(),
-        })?;
-        if pubkey_bytes.len() != 32 {
-            return Err(RpcError {
-                code: -32602,
-                message: "Pubkey must be 32 bytes".to_string(),
-            });
-        }
-        let mut pubkey = [0u8; 32];
-        pubkey.copy_from_slice(&pubkey_bytes);
-
-        // Decode signature
-        let sig_bytes = hex::decode(signature_hex).map_err(|_| RpcError {
-            code: -32602,
-            message: "Invalid signature hex".to_string(),
-        })?;
-        if sig_bytes.len() != 64 {
-            return Err(RpcError {
-                code: -32602,
-                message: "Signature must be 64 bytes".to_string(),
-            });
-        }
-        let mut signature = [0u8; 64];
-        signature.copy_from_slice(&sig_bytes);
-
-        // Compute deterministic ID
+        // Compute deterministic ID from hash, or use client-supplied id
         use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(from_address.as_bytes());
-        hasher.update(to_address.as_bytes());
-        hasher.update(amount.to_le_bytes());
-        hasher.update(timestamp.to_le_bytes());
-        let id = hex::encode(hasher.finalize());
+        let id = if let Some(client_id) = obj.get("id").and_then(|v| v.as_str()) {
+            client_id.to_string()
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(from_address.as_bytes());
+            hasher.update(to_address.as_bytes());
+            hasher.update(amount.to_le_bytes());
+            hasher.update(timestamp.to_le_bytes());
+            hex::encode(hasher.finalize())
+        };
 
-        // Verify Ed25519 signature over (id || from || to || amount || memo || timestamp)
-        let verifying_key =
-            ed25519_dalek::VerifyingKey::from_bytes(&pubkey).map_err(|_| RpcError {
-                code: -32602,
-                message: "Invalid Ed25519 public key".to_string(),
-            })?;
-        let ed_signature = ed25519_dalek::Signature::from_bytes(&signature);
-        let mut sign_data = Vec::new();
-        sign_data.extend_from_slice(id.as_bytes());
-        sign_data.extend_from_slice(from_address.as_bytes());
-        sign_data.extend_from_slice(to_address.as_bytes());
-        sign_data.extend_from_slice(&amount.to_le_bytes());
-        sign_data.extend_from_slice(memo.as_bytes());
-        sign_data.extend_from_slice(&timestamp.to_le_bytes());
-        verifying_key
-            .verify_strict(&sign_data, &ed_signature)
-            .map_err(|_| RpcError {
-                code: -1,
-                message: "Invalid signature — request may be spoofed".to_string(),
-            })?;
+        // If pubkey + signature are provided, verify them (optional but preferred)
+        let mut verified_pubkey: Option<[u8; 32]> = None;
+        if !pubkey_hex_opt.is_empty() && !signature_hex_opt.is_empty() {
+            let pubkey_bytes = hex::decode(pubkey_hex_opt).unwrap_or_default();
+            let sig_bytes = hex::decode(signature_hex_opt).unwrap_or_default();
+            if pubkey_bytes.len() == 32 && sig_bytes.len() == 64 {
+                let mut pubkey = [0u8; 32];
+                pubkey.copy_from_slice(&pubkey_bytes);
+                let mut signature = [0u8; 64];
+                signature.copy_from_slice(&sig_bytes);
+                if let Ok(verifying_key) = ed25519_dalek::VerifyingKey::from_bytes(&pubkey) {
+                    let ed_signature = ed25519_dalek::Signature::from_bytes(&signature);
+                    let mut sign_data = Vec::new();
+                    sign_data.extend_from_slice(id.as_bytes());
+                    sign_data.extend_from_slice(from_address.as_bytes());
+                    sign_data.extend_from_slice(to_address.as_bytes());
+                    sign_data.extend_from_slice(&amount.to_le_bytes());
+                    sign_data.extend_from_slice(memo.as_bytes());
+                    sign_data.extend_from_slice(&timestamp.to_le_bytes());
+                    if verifying_key.verify_strict(&sign_data, &ed_signature).is_err() {
+                        return Err(RpcError {
+                            code: -1,
+                            message: "Invalid signature — request may be spoofed".to_string(),
+                        });
+                    }
+                    verified_pubkey = Some(pubkey);
+                }
+            }
+        }
 
         let expires = timestamp + 86400; // 24 hours
 
@@ -4369,16 +4363,18 @@ impl RpcHandler {
             amount,
             memo: memo.to_string(),
             requester_name,
-            pubkey_hex: pubkey_hex.to_string(),
-            signature_hex: signature_hex.to_string(),
+            pubkey_hex: pubkey_hex_opt.to_string(),
+            signature_hex: signature_hex_opt.to_string(),
             timestamp,
             expires,
         };
 
-        // Cache the requester's pubkey for future memo encryption
-        self.consensus
-            .utxo_manager
-            .register_pubkey(from_address, pubkey);
+        // Cache the requester's pubkey for future memo encryption (if provided)
+        if let Some(pubkey) = verified_pubkey {
+            self.consensus
+                .utxo_manager
+                .register_pubkey(from_address, pubkey);
+        }
 
         // Store locally
         let stored = self.consensus.store_payment_request(request.clone());
@@ -4406,7 +4402,7 @@ impl RpcHandler {
                     from_address: from_address.to_string(),
                     memo: memo.to_string(),
                     requester_name: request.requester_name.clone(),
-                    pubkey_hex: pubkey_hex.to_string(),
+                    pubkey_hex: pubkey_hex_opt.to_string(),
                     expires,
                 },
             });
@@ -4482,40 +4478,52 @@ impl RpcHandler {
     }
 
     /// Payer responds to a pending payment request (accept or decline).
-    /// Params: [request_id, requester_address, payer_address, accepted, txid?]
+    ///
+    /// Params: [object] where object contains:
+    ///   id           (required) — payment request id
+    ///   payer_address (required) — address of the payer responding
+    ///   accepted     (required) — true if accepted, false if declined
+    ///   txid         (optional) — transaction id if accepted and paid
     async fn respond_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let request_id = params
+        let obj = params
             .first()
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected JSON object as first parameter".to_string(),
+            })?;
+
+        let request_id = obj
+            .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing request_id".to_string(),
+                message: "Missing id".to_string(),
             })?;
-        let requester_address = params
-            .get(1)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing requester_address".to_string(),
-            })?;
-        let payer_address = params
-            .get(2)
+        let payer_address = obj
+            .get("payer_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
                 message: "Missing payer_address".to_string(),
             })?;
-        let accepted = params
-            .get(3)
+        let accepted = obj
+            .get("accepted")
             .and_then(|v| v.as_bool())
             .ok_or_else(|| RpcError {
                 code: -32602,
                 message: "Missing accepted (bool)".to_string(),
             })?;
-        let txid: Option<String> = params
-            .get(4)
+        let txid: Option<String> = obj
+            .get("txid")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+
+        // Look up requester_address before removing (needed for peer broadcast + WS routing)
+        let requester_address = self
+            .consensus
+            .get_payment_request_requester(request_id)
+            .unwrap_or_default();
 
         // Remove from storage (request is resolved)
         self.consensus.remove_payment_request(request_id);
@@ -4559,17 +4567,28 @@ impl RpcHandler {
     }
 
     /// Requester cancels their own pending payment request.
-    /// Params: [request_id, requester_address]
+    ///
+    /// Params: [object] where object contains:
+    ///   id                (required) — payment request id
+    ///   requester_address (required) — address of the requester (must match stored request)
     async fn cancel_payment_request(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let request_id = params
+        let obj = params
             .first()
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected JSON object as first parameter".to_string(),
+            })?;
+
+        let request_id = obj
+            .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing request_id".to_string(),
+                message: "Missing id".to_string(),
             })?;
-        let requester_address = params
-            .get(1)
+        let requester_address = obj
+            .get("requester_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
@@ -4619,29 +4638,39 @@ impl RpcHandler {
     }
 
     /// Mark a payment request as viewed by the payer (notifies the requester).
-    /// Params: [request_id, requester_address, payer_address]
+    ///
+    /// Params: [object] where object contains:
+    ///   id           (required) — payment request id
+    ///   payer_address (required) — address of the payer who viewed the request
     async fn mark_payment_request_viewed(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let request_id = params
+        let obj = params
             .first()
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected JSON object as first parameter".to_string(),
+            })?;
+
+        let request_id = obj
+            .get("id")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Missing request_id".to_string(),
+                message: "Missing id".to_string(),
             })?;
-        let requester_address = params
-            .get(1)
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Missing requester_address".to_string(),
-            })?;
-        let payer_address = params
-            .get(2)
+        let payer_address = obj
+            .get("payer_address")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError {
                 code: -32602,
                 message: "Missing payer_address".to_string(),
             })?;
+
+        // Look up requester_address from stored request for peer broadcast + WS routing
+        let requester_address = self
+            .consensus
+            .get_payment_request_requester(request_id)
+            .unwrap_or_default();
 
         // Relay to peers so the requester's node gets notified
         self.consensus
