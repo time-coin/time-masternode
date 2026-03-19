@@ -1,6 +1,109 @@
-//! RPC handler for the alternative TCP-based RPC server.
+//! RPC method implementations for the TIME Coin JSON-RPC 2.0 server.
 //!
-//! See server.rs for details on why this module is currently unused.
+//! All public methods are routed through [`RpcHandler::handle_request`].
+//!
+//! ## Bitcoin compatibility
+//!
+//! Methods that share names with Bitcoin Core's RPC API follow the same parameter
+//! conventions and response shapes wherever possible, so that standard Bitcoin
+//! tooling (bitcoin-cli, libraries, block explorers) can be pointed at a TIME
+//! node with minimal adaptation.
+//!
+//! ### Implemented Bitcoin-compatible methods
+//!
+//! | Method                  | Notes |
+//! |-------------------------|-------|
+//! | `getblockchaininfo`     | |
+//! | `getblockcount`         | |
+//! | `getblock`              | Accepts **hash** (64-char hex) **or** height (number) |
+//! | `getblockheader`        | Accepts hash or height; returns header without tx list |
+//! | `getbestblockhash`      | |
+//! | `getblockhash`          | |
+//! | `gettxout`              | Returns `null` for spent/unknown outputs |
+//! | `getrawtransaction`     | `verbose=true` returns full JSON |
+//! | `gettransaction`        | |
+//! | `sendrawtransaction`    | |
+//! | `createrawtransaction`  | |
+//! | `decoderawtransaction`  | |
+//! | `testmempoolaccept`     | Validates tx without broadcasting |
+//! | `getmempoolinfo`        | |
+//! | `getrawmempool`         | `verbose=true` returns full entry objects |
+//! | `estimatesmartfee`      | Uses live `FeeSchedule`; always `blocks=1` (instant finality) |
+//! | `getnetworkinfo`        | |
+//! | `getpeerinfo`           | |
+//! | `getconnectioncount`    | |
+//! | `gettxoutsetinfo`       | |
+//! | `getbalance`            | |
+//! | `getbalances`           | |
+//! | `listunspent`           | |
+//! | `getnewaddress`         | |
+//! | `getwalletinfo`         | |
+//! | `validateaddress`       | |
+//! | `getaddressinfo`        | Modern superset of `validateaddress`; sets `ismine` correctly |
+//! | `sendtoaddress`         | |
+//! | `sendfrom`              | Deprecated in Bitcoin ≥0.15, kept for compat |
+//! | `listreceivedbyaddress` | |
+//! | `listtransactions`      | |
+//! | `signmessage`           | Ed25519; only the local node address is supported |
+//! | `verifymessage`         | Looks up pubkey from on-chain UTXO index |
+//! | `lockunspent`           | Bitcoin-compat UTXO lock/unlock toggle |
+//! | `listlockunspent`       | Bitcoin-compat alias for `listlockedutxos` |
+//! | `uptime`                | |
+//! | `stop`                  | |
+//! | `getinfo`               | Deprecated in Bitcoin ≥0.16, kept for compat |
+//!
+//! ### TIME-specific extensions
+//!
+//! | Method                     | Purpose |
+//! |----------------------------|---------|
+//! | `getconsensusinfo`         | TimeVote consensus state |
+//! | `gettimevotestatus`        | Per-slot voting progress |
+//! | `gettransactionfinality`   | Finality proof for a txid |
+//! | `waittransactionfinality`  | Long-poll until finalized |
+//! | `masternodelist`           | All registered masternodes |
+//! | `masternodestatus`         | Local node masternode status |
+//! | `masternodegenkey`         | Generate a new masternode key |
+//! | `masternodereginfo`        | Registration requirements |
+//! | `masternoderegstatus`      | Check registration eligibility |
+//! | `listlockedcollaterals`    | Collateral UTXOs locked for masternodes |
+//! | `gettreasurybalance`       | Treasury fund balance |
+//! | `getfeeschedule`           | Current tiered fee schedule |
+//! | `mergeutxos`               | Consolidate many small UTXOs |
+//! | `listlockedutxos`          | All locked UTXOs with details |
+//! | `unlockutxo`               | Manually unlock a specific UTXO |
+//! | `unlockorphanedutxos`      | Unlock UTXOs locked by missing txs |
+//! | `forceunlockall`           | Emergency: reset all UTXO locks |
+//! | `clearstucktransactions`   | Recovery: roll back stuck finalized txs |
+//! | `cleanuplockedutxos`       | Remove expired UTXO locks |
+//! | `listtransactionsmulti`    | `listtransactions` across multiple addresses |
+//! | `listunspentmulti`         | `listunspent` across multiple addresses |
+//! | `gettransactions`          | Batch txid status query (up to 100) |
+//! | `reindextransactions`      | Rebuild the tx index (async) |
+//! | `reindex`                  | Full UTXO + tx index rebuild |
+//! | `gettxindexstatus`         | Tx index health check |
+//! | `createpaymentrequest`     | Create a signed payment request URI |
+//! | `sendpaymentrequest`       | Deliver a payment request to the payer |
+//! | `paypaymentrequest`        | Pay an incoming request |
+//! | `getpaymentrequests`       | List payment requests for an address |
+//! | `acknowledgepaymentrequest`| Payer acknowledges receipt |
+//! | `respondpaymentrequest`    | Payer accepts or declines |
+//! | `cancelpaymentrequest`     | Requester cancels |
+//! | `markpaymentrequestviewed` | Payer marks as viewed |
+//! | `submitproposal`           | Submit a governance proposal |
+//! | `voteproposal`             | Vote on a governance proposal |
+//! | `listproposals`            | List governance proposals |
+//! | `getproposal`              | Get proposal detail and vote tally |
+//!
+//! ### Known gaps vs Bitcoin Core (not yet implemented)
+//!
+//! - `getblockstats` — per-block statistics
+//! - `getchaintips` — chain tip / fork detection
+//! - `getmempoolancestors` / `getmempooldescendants`
+//! - `signrawtransactionwithkey` — offline signing with an explicit WIF key
+//! - `decodescript` — decode a raw script
+//! - `addnode` / `disconnectnode` / `getaddednodeinfo` — peer management
+//! - `getnettotals` — network bandwidth counters
+//! - `dumpprivkey` / `importprivkey` — key import/export
 
 #![allow(dead_code)]
 
@@ -10,6 +113,7 @@ use crate::masternode_registry::MasternodeRegistry;
 use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
 use crate::utxo_manager::UTXOStateManager;
 use crate::NetworkType;
+use base64::Engine as _;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -93,7 +197,7 @@ impl RpcHandler {
             "uptime" => self.uptime().await,
             "getinfo" => self.get_info().await,
             "getmempoolinfo" => self.get_mempool_info().await,
-            "getrawmempool" => self.get_raw_mempool().await,
+            "getrawmempool" => self.get_raw_mempool(&params_array).await,
             "getmempoolverbose" => self.get_mempool_verbose().await,
             "sendtoaddress" => self.send_to_address(&params_array).await,
             "sendfrom" => self.send_from(&params_array).await,
@@ -136,6 +240,17 @@ impl RpcHandler {
             "voteproposal" => self.vote_proposal(&params_array).await,
             "listproposals" => self.list_proposals(&params_array).await,
             "getproposal" => self.get_proposal(&params_array).await,
+            // --- Bitcoin-compatible additions ---
+            "getblockheader" => self.get_block_header(&params_array).await,
+            "gettxout" => self.get_txout(&params_array).await,
+            "testmempoolaccept" => self.test_mempool_accept(&params_array).await,
+            "estimatesmartfee" => self.estimate_smart_fee(&params_array).await,
+            "getaddressinfo" => self.get_address_info(&params_array).await,
+            "getconnectioncount" => self.get_connection_count().await,
+            "signmessage" => self.sign_message(&params_array).await,
+            "verifymessage" => self.verify_message(&params_array).await,
+            "lockunspent" => self.lock_unspent(&params_array).await,
+            "listlockunspent" => self.list_lock_unspent().await,
             _ => Err(RpcError {
                 code: -32601,
                 message: format!("Method not found: {}", request.method),
@@ -193,50 +308,67 @@ impl RpcHandler {
     }
 
     async fn get_block(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let height = params
-            .first()
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| RpcError {
-                code: -32602,
-                message: "Invalid params: expected block height".to_string(),
+        let first = params.first().ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Expected block hash (string) or height (number)".to_string(),
+        })?;
+
+        // Accept either a 64-char hex hash string or a numeric height
+        let block = if let Some(hash_str) = first.as_str() {
+            let hash_bytes = hex::decode(hash_str).map_err(|_| RpcError {
+                code: -8,
+                message: "Invalid block hash encoding".to_string(),
             })?;
-
-        // Get block from blockchain
-        match self.blockchain.get_block_by_height(height).await {
-            Ok(block) => {
-                let txids: Vec<String> = block
-                    .transactions
-                    .iter()
-                    .map(|tx| hex::encode(tx.txid()))
-                    .collect();
-
-                // Use the canonical block hash (same algorithm as getblockhash)
-                let block_hash = block.hash();
-
-                Ok(json!({
-                    "height": block.header.height,
-                    "hash": hex::encode(block_hash),
-                    "previousblockhash": hex::encode(block.header.previous_hash),
-                    "time": block.header.timestamp,
-                    "version": block.header.version,
-                    "merkleroot": hex::encode(block.header.merkle_root),
-                    "tx": txids,
-                    "nTx": block.transactions.len(),
-                    "confirmations": (self.blockchain.get_height() as i64 - height as i64 + 1).max(0),
-                    "block_reward": block.header.block_reward,
-                    "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
-                        json!({
-                            "address": addr,
-                            "amount": amount
-                        })
-                    }).collect::<Vec<_>>(),
-                }))
+            if hash_bytes.len() != 32 {
+                return Err(RpcError {
+                    code: -8,
+                    message: "Block hash must be 32 bytes (64 hex chars)".to_string(),
+                });
             }
-            Err(e) => Err(RpcError {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&hash_bytes);
+            self.find_block_by_hash(hash).await.ok_or_else(|| RpcError {
                 code: -5,
-                message: format!("Block not found: {}", e),
-            }),
-        }
+                message: "Block not found".to_string(),
+            })?
+        } else if let Some(height) = first.as_u64() {
+            self.blockchain
+                .get_block_by_height(height)
+                .await
+                .map_err(|e| RpcError {
+                    code: -5,
+                    message: format!("Block not found: {}", e),
+                })?
+        } else {
+            return Err(RpcError {
+                code: -32602,
+                message: "Expected block hash (string) or height (number)".to_string(),
+            });
+        };
+
+        let height = block.header.height;
+        let txids: Vec<String> = block
+            .transactions
+            .iter()
+            .map(|tx| hex::encode(tx.txid()))
+            .collect();
+        let block_hash = block.hash();
+
+        Ok(json!({
+            "height": height,
+            "hash": hex::encode(block_hash),
+            "previousblockhash": hex::encode(block.header.previous_hash),
+            "time": block.header.timestamp,
+            "version": block.header.version,
+            "merkleroot": hex::encode(block.header.merkle_root),
+            "tx": txids,
+            "nTx": block.transactions.len(),
+            "confirmations": (self.blockchain.get_height() as i64 - height as i64 + 1).max(0),
+            "block_reward": block.header.block_reward,
+            "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
+                json!({ "address": addr, "amount": amount })
+            }).collect::<Vec<_>>(),
+        }))
     }
 
     async fn get_network_info(&self) -> Result<Value, RpcError> {
@@ -277,12 +409,9 @@ impl RpcHandler {
         let peers: Vec<Value> = masternodes
             .iter()
             .map(|mn| {
-                // TODO: Replace with actual ping times from peer connection registry
-                let pingtime = if mn.is_active {
-                    Some(0.020 + (rand::random::<f64>() * 0.030)) // 20-50ms for active nodes
-                } else {
-                    None
-                };
+                // Ping times are not tracked per-peer in the current registry implementation.
+                // A future improvement would pull real RTT from PeerConnectionRegistry.
+                let pingtime: Option<f64> = None;
 
                 json!({
                     "addr": mn.masternode.address.clone(),
@@ -736,25 +865,32 @@ impl RpcHandler {
     }
 
     async fn send_raw_transaction(&self, params: &[Value]) -> Result<Value, RpcError> {
-        let hex_tx = params
-            .first()
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| RpcError {
+        let param = params.first().ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Invalid params: expected transaction object or hex".to_string(),
+        })?;
+
+        // Accept either a JSON object (from mobile wallet) or a hex-encoded
+        // bincode string (legacy desktop wallet format).
+        let tx: Transaction = if param.is_object() || param.is_array() {
+            serde_json::from_value(param.clone()).map_err(|e| RpcError {
+                code: -22,
+                message: format!("TX parse failed: {}", e),
+            })?
+        } else {
+            let hex_tx = param.as_str().ok_or_else(|| RpcError {
                 code: -32602,
-                message: "Invalid params: expected transaction hex".to_string(),
+                message: "Invalid params: expected transaction object or hex string".to_string(),
             })?;
-
-        // Decode hex transaction
-        let tx_bytes = hex::decode(hex_tx).map_err(|_| RpcError {
-            code: -22,
-            message: "TX decode failed".to_string(),
-        })?;
-
-        // Deserialize transaction
-        let tx: Transaction = bincode::deserialize(&tx_bytes).map_err(|_| RpcError {
-            code: -22,
-            message: "TX deserialization failed".to_string(),
-        })?;
+            let tx_bytes = hex::decode(hex_tx).map_err(|_| RpcError {
+                code: -22,
+                message: "TX decode failed".to_string(),
+            })?;
+            bincode::deserialize(&tx_bytes).map_err(|_| RpcError {
+                code: -22,
+                message: "TX deserialization failed".to_string(),
+            })?
+        };
 
         let txid = tx.txid();
 
@@ -2286,8 +2422,13 @@ impl RpcHandler {
         }))
     }
 
-    async fn get_raw_mempool(&self) -> Result<Value, RpcError> {
-        // Get transaction IDs from consensus tx_pool
+    async fn get_raw_mempool(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let verbose = params.first().and_then(|v| v.as_bool()).unwrap_or(false);
+        if verbose {
+            return self.get_mempool_verbose().await;
+        }
+
+        // Non-verbose: return array of txids (Bitcoin default behavior)
         let pending_txs = self.consensus.tx_pool.get_pending_transactions();
         let finalized_txs = self.consensus.tx_pool.get_finalized_transactions();
 
@@ -5141,5 +5282,653 @@ impl RpcHandler {
             "quorum_pct": if total_weight > 0 { yes_weight * 100 / total_weight } else { 0 },
             "votes": votes_json,
         }))
+    }
+
+    // -------------------------------------------------------------------------
+    // Bitcoin-compatible additions
+    // -------------------------------------------------------------------------
+
+    /// Scan the chain tip-to-genesis for a block whose hash matches `target_hash`.
+    /// O(n) — there is no hash→height index yet. Acceptable for current chain lengths;
+    /// a sled reverse-index should be added when the chain grows beyond ~100k blocks.
+    async fn find_block_by_hash(&self, target_hash: [u8; 32]) -> Option<crate::block::types::Block> {
+        let current_height = self.blockchain.get_height();
+        for h in (0..=current_height).rev() {
+            if let Ok(block) = self.blockchain.get_block_by_height(h).await {
+                if block.hash() == target_hash {
+                    return Some(block);
+                }
+            }
+        }
+        None
+    }
+
+    /// `getblockheader "hash"|height`
+    ///
+    /// Returns the block header without the full transaction list.
+    /// Accepts either a 64-char hex block hash or a numeric height, matching
+    /// the same dual-dispatch logic as `getblock`.
+    async fn get_block_header(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let first = params.first().ok_or_else(|| RpcError {
+            code: -32602,
+            message: "Expected block hash (string) or height (number)".to_string(),
+        })?;
+
+        let block = if let Some(hash_str) = first.as_str() {
+            let hash_bytes = hex::decode(hash_str).map_err(|_| RpcError {
+                code: -8,
+                message: "Invalid block hash encoding".to_string(),
+            })?;
+            if hash_bytes.len() != 32 {
+                return Err(RpcError {
+                    code: -8,
+                    message: "Block hash must be 32 bytes (64 hex chars)".to_string(),
+                });
+            }
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&hash_bytes);
+            self.find_block_by_hash(hash).await.ok_or_else(|| RpcError {
+                code: -5,
+                message: "Block not found".to_string(),
+            })?
+        } else if let Some(height) = first.as_u64() {
+            self.blockchain
+                .get_block_by_height(height)
+                .await
+                .map_err(|e| RpcError {
+                    code: -5,
+                    message: format!("Block not found: {}", e),
+                })?
+        } else {
+            return Err(RpcError {
+                code: -32602,
+                message: "Expected block hash (string) or height (number)".to_string(),
+            });
+        };
+
+        let height = block.header.height;
+        let current_height = self.blockchain.get_height();
+        let block_hash = block.hash();
+        let next_hash = if height < current_height {
+            self.blockchain
+                .get_block_by_height(height + 1)
+                .await
+                .ok()
+                .map(|b| hex::encode(b.hash()))
+        } else {
+            None
+        };
+
+        Ok(json!({
+            "hash": hex::encode(block_hash),
+            "height": height,
+            "version": block.header.version,
+            "previousblockhash": hex::encode(block.header.previous_hash),
+            "nextblockhash": next_hash,
+            "merkleroot": hex::encode(block.header.merkle_root),
+            "time": block.header.timestamp,
+            "confirmations": (current_height as i64 - height as i64 + 1).max(0),
+            "nTx": block.transactions.len(),
+            "difficulty": 1.0,
+            "chainwork": format!("{:064x}", height),
+        }))
+    }
+
+    /// `gettxout "txid" vout [include_mempool]`
+    ///
+    /// Returns details about an unspent transaction output.
+    /// Returns `null` if the output is spent or does not exist.
+    async fn get_txout(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let txid_str = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected txid".to_string(),
+            })?;
+        let vout = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected vout".to_string(),
+            })? as u32;
+        let include_mempool = params.get(2).and_then(|v| v.as_bool()).unwrap_or(true);
+
+        let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+            code: -8,
+            message: "Invalid txid encoding".to_string(),
+        })?;
+        if txid_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -8,
+                message: "txid must be 32 bytes (64 hex chars)".to_string(),
+            });
+        }
+        let mut txid = [0u8; 32];
+        txid.copy_from_slice(&txid_bytes);
+        let outpoint = OutPoint { txid, vout };
+
+        // Spent outputs return null — do not look further
+        if let Some(state) = self.utxo_manager.get_state(&outpoint) {
+            match state {
+                crate::types::UTXOState::SpentFinalized { .. }
+                | crate::types::UTXOState::SpentPending { .. }
+                | crate::types::UTXOState::Archived { .. } => return Ok(Value::Null),
+                _ => {}
+            }
+        }
+
+        let current_height = self.blockchain.get_height();
+        let best_block_hash = hex::encode(
+            self.blockchain
+                .get_block_hash(current_height)
+                .unwrap_or([0u8; 32]),
+        );
+
+        // Check mempool first if requested
+        if include_mempool {
+            if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid) {
+                if let Some(output) = tx.outputs.get(vout as usize) {
+                    let address =
+                        String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    return Ok(json!({
+                        "bestblock": best_block_hash,
+                        "confirmations": 0,
+                        "value": output.value as f64 / 100_000_000.0,
+                        "scriptPubKey": {
+                            "hex": hex::encode(&output.script_pubkey),
+                            "address": address,
+                        },
+                        "coinbase": false,
+                        "in_mempool": true,
+                    }));
+                }
+            }
+        }
+
+        // Look up confirmed UTXO
+        match self.utxo_manager.get_utxo(&outpoint).await {
+            Ok(utxo) => {
+                let confirmations = if let Some(ref tx_index) = self.blockchain.tx_index {
+                    if let Some(location) = tx_index.get_location(&txid) {
+                        (current_height - location.block_height + 1) as i64
+                    } else {
+                        1
+                    }
+                } else {
+                    1
+                };
+
+                Ok(json!({
+                    "bestblock": best_block_hash,
+                    "confirmations": confirmations,
+                    "value": utxo.value as f64 / 100_000_000.0,
+                    "scriptPubKey": {
+                        "hex": hex::encode(utxo.address.as_bytes()),
+                        "address": utxo.address,
+                    },
+                    "coinbase": false,
+                    "in_mempool": false,
+                }))
+            }
+            Err(_) => Ok(Value::Null),
+        }
+    }
+
+    /// `testmempoolaccept [rawtxs] [maxfeerate]`
+    ///
+    /// Validates one or more raw transactions without broadcasting them.
+    /// Returns per-tx `allowed` / `reject-reason` the same way Bitcoin Core does.
+    async fn test_mempool_accept(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let rawtxs = params
+            .first()
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected array of raw transactions".to_string(),
+            })?;
+        let maxfeerate = params.get(1).and_then(|v| v.as_f64()).unwrap_or(0.10); // TIME/kB
+
+        let mut results = Vec::with_capacity(rawtxs.len());
+
+        for raw_tx_val in rawtxs {
+            let hex_str = match raw_tx_val.as_str() {
+                Some(s) => s,
+                None => {
+                    results.push(json!({ "allowed": false, "reject-reason": "not a string" }));
+                    continue;
+                }
+            };
+
+            let tx_bytes = match hex::decode(hex_str) {
+                Ok(b) => b,
+                Err(_) => {
+                    results
+                        .push(json!({ "allowed": false, "reject-reason": "TX decode failed" }));
+                    continue;
+                }
+            };
+
+            let tx: Transaction = match bincode::deserialize(&tx_bytes) {
+                Ok(t) => t,
+                Err(_) => {
+                    results.push(
+                        json!({ "allowed": false, "reject-reason": "TX deserialization failed" }),
+                    );
+                    continue;
+                }
+            };
+
+            let txid = hex::encode(tx.txid());
+
+            if tx.inputs.is_empty() {
+                results.push(
+                    json!({ "txid": txid, "allowed": false, "reject-reason": "bad-txns-vin-empty" }),
+                );
+                continue;
+            }
+            if tx.outputs.is_empty() {
+                results.push(
+                    json!({ "txid": txid, "allowed": false, "reject-reason": "bad-txns-vout-empty" }),
+                );
+                continue;
+            }
+            if tx.outputs.iter().any(|o| o.value == 0) {
+                results.push(
+                    json!({ "txid": txid, "allowed": false, "reject-reason": "bad-txns-vout-toolow" }),
+                );
+                continue;
+            }
+
+            // Accumulate input value and check all inputs are available
+            let mut input_sum: u64 = 0;
+            let mut reject_reason: Option<&'static str> = None;
+
+            for input in &tx.inputs {
+                match self.utxo_manager.get_utxo(&input.previous_output).await {
+                    Ok(utxo) => {
+                        match self.utxo_manager.get_state(&input.previous_output) {
+                            Some(
+                                crate::types::UTXOState::SpentFinalized { .. }
+                                | crate::types::UTXOState::SpentPending { .. }
+                                | crate::types::UTXOState::Archived { .. },
+                            ) => {
+                                reject_reason = Some("bad-txns-inputs-missingorspent");
+                                break;
+                            }
+                            _ => input_sum += utxo.value,
+                        }
+                    }
+                    Err(_) => {
+                        // Check if it's an output of an unconfirmed mempool tx
+                        let in_pool = self
+                            .consensus
+                            .tx_pool
+                            .get_transaction(&input.previous_output.txid)
+                            .and_then(|prev| {
+                                prev.outputs.get(input.previous_output.vout as usize).map(|o| o.value)
+                            });
+                        match in_pool {
+                            Some(val) => input_sum += val,
+                            None => {
+                                reject_reason = Some("bad-txns-inputs-missingorspent");
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(reason) = reject_reason {
+                results.push(json!({ "txid": txid, "allowed": false, "reject-reason": reason }));
+                continue;
+            }
+
+            let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+            if output_sum > input_sum {
+                results.push(
+                    json!({ "txid": txid, "allowed": false, "reject-reason": "bad-txns-in-belowout" }),
+                );
+                continue;
+            }
+
+            let fee = input_sum - output_sum;
+            let fee_schedule = self.consensus.current_fee_schedule();
+            if fee < fee_schedule.min_fee {
+                results.push(json!({
+                    "txid": txid,
+                    "allowed": false,
+                    "reject-reason": format!("min relay fee not met, {} < {}", fee, fee_schedule.min_fee),
+                }));
+                continue;
+            }
+
+            // Fee-rate check (TIME/kB)
+            if maxfeerate > 0.0 {
+                let fee_rate =
+                    (fee as f64 / 100_000_000.0) / (tx_bytes.len() as f64 / 1000.0);
+                if fee_rate > maxfeerate {
+                    results.push(
+                        json!({ "txid": txid, "allowed": false, "reject-reason": "max-fee-exceeded" }),
+                    );
+                    continue;
+                }
+            }
+
+            results.push(json!({
+                "txid": txid,
+                "allowed": true,
+                "vsize": tx_bytes.len(),
+                "fees": { "base": fee as f64 / 100_000_000.0 },
+            }));
+        }
+
+        Ok(json!(results))
+    }
+
+    /// `estimatesmartfee conf_target [estimate_mode]`
+    ///
+    /// Returns the recommended fee rate in TIME/kB for a transaction to confirm
+    /// within `conf_target` blocks. Because TIME has instant finality (TimeVote),
+    /// `conf_target` is informational only — all valid transactions confirm in ≤1 block.
+    async fn estimate_smart_fee(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let _conf_target = params.first().and_then(|v| v.as_u64()).unwrap_or(6);
+
+        let fee_schedule = self.consensus.current_fee_schedule();
+        // Convert min_fee (satoshis per tx, ~250 bytes) to TIME per kB
+        let feerate = (fee_schedule.min_fee as f64 / 100_000_000.0) * 4.0;
+
+        Ok(json!({
+            "feerate": feerate,
+            "blocks": 1,
+            "errors": [],
+        }))
+    }
+
+    /// `getaddressinfo "address"`
+    ///
+    /// Returns detailed information about an address, including wallet ownership
+    /// (`ismine`), associated public key, and validity.  This is the modern
+    /// replacement for `validateaddress`, which always returns `ismine: false`.
+    async fn get_address_info(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected address".to_string(),
+            })?;
+
+        let expected_prefix = match self.network {
+            NetworkType::Mainnet => "TIME1",
+            NetworkType::Testnet => "TIME0",
+        };
+        let is_valid = address.starts_with(expected_prefix) && address.len() > 10;
+
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address);
+        let is_mine = local_address.as_deref() == Some(address);
+
+        let pubkey_hex = self
+            .utxo_manager
+            .find_pubkey_for_address(address)
+            .map(hex::encode)
+            .unwrap_or_default();
+
+        Ok(json!({
+            "address": address,
+            "isvalid": is_valid,
+            "scriptPubKey": if is_valid { hex::encode(address.as_bytes()) } else { String::new() },
+            "ismine": is_mine,
+            "iswatchonly": false,
+            "isscript": false,
+            "iswitness": false,
+            "pubkey": pubkey_hex,
+            "iscompressed": true,
+            "label": if is_mine { "default" } else { "" },
+            "labels": if is_mine {
+                json!([{"name": "default", "purpose": "receive"}])
+            } else {
+                json!([])
+            },
+        }))
+    }
+
+    /// `getconnectioncount`
+    ///
+    /// Returns the number of currently active masternode connections.
+    async fn get_connection_count(&self) -> Result<Value, RpcError> {
+        let count = self.registry.count_active().await;
+        Ok(json!(count))
+    }
+
+    /// `signmessage "address" "message"`
+    ///
+    /// Sign an arbitrary message with the Ed25519 private key of `address`.
+    /// Only the node's own local masternode address can be used (the handler
+    /// holds the identity signing key, not an HD keychain).
+    ///
+    /// Returns a base64-encoded Ed25519 signature. Verify with `verifymessage`.
+    async fn sign_message(&self, params: &[Value]) -> Result<Value, RpcError> {
+        use ed25519_dalek::Signer;
+
+        let address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected address".to_string(),
+            })?;
+        let message = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected message".to_string(),
+            })?;
+
+        let local_address = self
+            .registry
+            .get_local_masternode()
+            .await
+            .map(|mn| mn.reward_address)
+            .ok_or_else(|| RpcError {
+                code: -4,
+                message: "Node is not configured as a masternode".to_string(),
+            })?;
+        if local_address != address {
+            return Err(RpcError {
+                code: -4,
+                message: "Private key not available for that address".to_string(),
+            });
+        }
+
+        let signing_key = self.consensus.get_signing_key().ok_or_else(|| RpcError {
+            code: -4,
+            message: "Signing key not available — node identity not initialised".to_string(),
+        })?;
+
+        // Prefix mirrors Bitcoin's approach, substituting "TIME" for "Bitcoin"
+        let prefixed = format!(
+            "\x18TIME Signed Message:\n{}{}",
+            message.len(),
+            message
+        );
+        let signature = signing_key.sign(prefixed.as_bytes());
+        let sig_b64 =
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+
+        Ok(json!(sig_b64))
+    }
+
+    /// `verifymessage "address" "signature" "message"`
+    ///
+    /// Verify a message signed by `signmessage`. The public key for `address`
+    /// is looked up from the on-chain UTXO index, so the address must have
+    /// appeared in at least one transaction before it can be verified.
+    async fn verify_message(&self, params: &[Value]) -> Result<Value, RpcError> {
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+
+        let address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected address".to_string(),
+            })?;
+        let sig_b64 = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected signature (base64)".to_string(),
+            })?;
+        let message = params
+            .get(2)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected message".to_string(),
+            })?;
+
+        let pubkey_bytes =
+            self.utxo_manager
+                .find_pubkey_for_address(address)
+                .ok_or_else(|| RpcError {
+                    code: -5,
+                    message: format!(
+                        "Public key not found for {} — address must have appeared in a transaction",
+                        address
+                    ),
+                })?;
+
+        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| RpcError {
+            code: -5,
+            message: "Invalid public key length".to_string(),
+        })?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| RpcError {
+                code: -5,
+                message: "Invalid public key".to_string(),
+            })?;
+
+        let sig_bytes =
+            base64::engine::general_purpose::STANDARD
+                .decode(sig_b64)
+                .map_err(|_| RpcError {
+                    code: -5,
+                    message: "Invalid signature encoding (expected base64)".to_string(),
+                })?;
+        let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| RpcError {
+            code: -5,
+            message: "Invalid signature length (expected 64 bytes)".to_string(),
+        })?;
+        let signature = Signature::from_bytes(&sig_arr);
+
+        let prefixed = format!(
+            "\x18TIME Signed Message:\n{}{}",
+            message.len(),
+            message
+        );
+        let valid = verifying_key
+            .verify(prefixed.as_bytes(), &signature)
+            .is_ok();
+
+        Ok(json!(valid))
+    }
+
+    /// `lockunspent unlock [{"txid":"...","vout":0}, ...]`
+    ///
+    /// Bitcoin-compatible UTXO lock/unlock.
+    /// `unlock=false` prevents the listed outputs from being selected by the wallet.
+    /// `unlock=true`  releases the lock.
+    ///
+    /// Internally maps to the same `UTXOState::Locked` mechanism used by
+    /// `unlockutxo` / `listlockedutxos`, with a sentinel txid (all-zeros) to
+    /// distinguish user-initiated locks from in-flight transaction locks.
+    async fn lock_unspent(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let unlock = params
+            .first()
+            .and_then(|v| v.as_bool())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected unlock (bool)".to_string(),
+            })?;
+
+        if let Some(entries) = params.get(1).and_then(|v| v.as_array()) {
+            for entry in entries {
+                let txid_str =
+                    entry
+                        .get("txid")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| RpcError {
+                            code: -32602,
+                            message: "Expected txid in each entry".to_string(),
+                        })?;
+                let vout = entry
+                    .get("vout")
+                    .and_then(|v| v.as_u64())
+                    .ok_or_else(|| RpcError {
+                        code: -32602,
+                        message: "Expected vout in each entry".to_string(),
+                    })? as u32;
+
+                let txid_bytes = hex::decode(txid_str).map_err(|_| RpcError {
+                    code: -8,
+                    message: "Invalid txid encoding".to_string(),
+                })?;
+                if txid_bytes.len() != 32 {
+                    return Err(RpcError {
+                        code: -8,
+                        message: "txid must be 32 bytes".to_string(),
+                    });
+                }
+                let mut txid = [0u8; 32];
+                txid.copy_from_slice(&txid_bytes);
+                let outpoint = OutPoint { txid, vout };
+
+                if unlock {
+                    if let Some(crate::types::UTXOState::Locked { .. }) =
+                        self.utxo_manager.get_state(&outpoint)
+                    {
+                        self.utxo_manager
+                            .update_state(&outpoint, crate::types::UTXOState::Unspent);
+                    }
+                } else {
+                    // Lock with sentinel txid (all-zeros = user-initiated lock)
+                    self.utxo_manager.update_state(
+                        &outpoint,
+                        crate::types::UTXOState::Locked {
+                            txid: [0u8; 32],
+                            locked_at: chrono::Utc::now().timestamp(),
+                        },
+                    );
+                }
+            }
+        }
+
+        Ok(json!(true))
+    }
+
+    /// `listlockunspent`
+    ///
+    /// Bitcoin-compatible alias for `listlockedutxos`.
+    /// Returns `[{"txid":"...", "vout": N}, ...]` for all currently locked outputs.
+    async fn list_lock_unspent(&self) -> Result<Value, RpcError> {
+        let locked = self.utxo_manager.get_locked_utxos();
+        let result: Vec<Value> = locked
+            .iter()
+            .map(|(outpoint, _txid, _locked_at)| {
+                json!({
+                    "txid": hex::encode(outpoint.txid),
+                    "vout": outpoint.vout,
+                })
+            })
+            .collect();
+        Ok(json!(result))
     }
 }
