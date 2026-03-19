@@ -1731,16 +1731,23 @@ impl RpcHandler {
             for (tx_idx, tx) in block.transactions.iter().enumerate() {
                 let txid = hex::encode(tx.txid());
 
-                // Check outputs for any of our addresses
+                // Check outputs: track wallet receives and the first external recipient
                 let mut received: u64 = 0;
                 let mut recv_address = String::new();
-                for output in &tx.outputs {
+                let mut recv_vout: u32 = 0;
+                let mut ext_address = String::new(); // first non-wallet output = real recipient
+                let mut ext_vout: u32 = 0;
+                for (vout_idx, output) in tx.outputs.iter().enumerate() {
                     let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
                     if addr_set.contains(&addr) {
                         received += output.value;
                         if recv_address.is_empty() {
                             recv_address = addr;
+                            recv_vout = vout_idx as u32;
                         }
+                    } else if ext_address.is_empty() {
+                        ext_address = addr;
+                        ext_vout = vout_idx as u32;
                     }
                 }
 
@@ -1821,15 +1828,18 @@ impl RpcHandler {
                         None
                     };
 
-                    let address = if !recv_address.is_empty() {
-                        &recv_address
+                    let (address, vout) = if category == "send" && !ext_address.is_empty() {
+                        (&ext_address, ext_vout)
+                    } else if !recv_address.is_empty() {
+                        (&recv_address, recv_vout)
                     } else {
-                        &send_address
+                        (&send_address, 0u32)
                     };
 
                     let mut entry = json!({
                         "txid": txid,
                         "address": address,
+                        "vout": vout,
                         "category": category,
                         "amount": net_amount,
                         "confirmations": chain_height.saturating_sub(height) + 1,
@@ -1883,13 +1893,20 @@ impl RpcHandler {
 
             let mut received: u64 = 0;
             let mut recv_address = String::new();
-            for output in &tx.outputs {
+            let mut recv_vout: u32 = 0;
+            let mut ext_address = String::new();
+            let mut ext_vout: u32 = 0;
+            for (vout_idx, output) in tx.outputs.iter().enumerate() {
                 let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
                 if addr_set.contains(&addr) {
                     received += output.value;
                     if recv_address.is_empty() {
                         recv_address = addr;
+                        recv_vout = vout_idx as u32;
                     }
+                } else if ext_address.is_empty() {
+                    ext_address = addr;
+                    ext_vout = vout_idx as u32;
                 }
             }
 
@@ -1915,15 +1932,18 @@ impl RpcHandler {
                     received as f64 / 100_000_000.0
                 };
 
-                let address = if !recv_address.is_empty() {
-                    &recv_address
+                let (address, vout) = if category == "send" && !ext_address.is_empty() {
+                    (&ext_address, ext_vout)
+                } else if !recv_address.is_empty() {
+                    (&recv_address, recv_vout)
                 } else {
-                    &send_address
+                    (&send_address, 0u32)
                 };
 
                 let mut entry = json!({
                     "txid": txid,
                     "address": address,
+                    "vout": vout,
                     "category": category,
                     "amount": net_amount,
                     "confirmations": 0,
@@ -1965,22 +1985,57 @@ impl RpcHandler {
 
             let mut received: u64 = 0;
             let mut recv_address = String::new();
-            for output in &tx.outputs {
+            let mut recv_vout: u32 = 0;
+            let mut ext_address = String::new();
+            let mut ext_vout: u32 = 0;
+            for (vout_idx, output) in tx.outputs.iter().enumerate() {
                 let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
                 if addr_set.contains(&addr) {
                     received += output.value;
                     if recv_address.is_empty() {
                         recv_address = addr;
+                        recv_vout = vout_idx as u32;
+                    }
+                } else if ext_address.is_empty() {
+                    ext_address = addr;
+                    ext_vout = vout_idx as u32;
+                }
+            }
+
+            let mut sent: u64 = 0;
+            let mut send_address = String::new();
+            for input in &tx.inputs {
+                if let Ok(utxo) = self.utxo_manager.get_utxo(&input.previous_output).await {
+                    let src_addr = utxo.address.clone();
+                    if addr_set.contains(&src_addr) {
+                        sent += utxo.value;
+                        if send_address.is_empty() {
+                            send_address = src_addr;
+                        }
                     }
                 }
             }
 
-            if received > 0 {
+            if sent > 0 || received > 0 {
+                let category = if sent > 0 { "send" } else { "receive" };
+                let net_amount = if category == "send" {
+                    -((sent.saturating_sub(received)) as f64 / 100_000_000.0)
+                } else {
+                    received as f64 / 100_000_000.0
+                };
+                let (address, vout) = if category == "send" && !ext_address.is_empty() {
+                    (&ext_address, ext_vout)
+                } else if !recv_address.is_empty() {
+                    (&recv_address, recv_vout)
+                } else {
+                    (&send_address, 0u32)
+                };
                 let mut entry = json!({
                     "txid": txid,
-                    "address": recv_address,
-                    "category": "receive",
-                    "amount": received as f64 / 100_000_000.0,
+                    "address": address,
+                    "vout": vout,
+                    "category": category,
+                    "amount": net_amount,
                     "confirmations": 0,
                     "finalized": false,
                     "time": tx.timestamp,
