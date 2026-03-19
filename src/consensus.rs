@@ -2489,6 +2489,16 @@ impl ConsensusEngine {
         None
     }
 
+    /// Return the requester address (from_address) for a payment request, if it exists.
+    pub fn get_payment_request_requester(&self, request_id: &str) -> Option<String> {
+        for entry in self.payment_requests.iter() {
+            if let Some(r) = entry.value().iter().find(|r| r.id == request_id) {
+                return Some(r.from_address.clone());
+            }
+        }
+        None
+    }
+
     /// Remove a payment request by id
     pub fn remove_payment_request(&self, request_id: &str) -> bool {
         for mut entry in self.payment_requests.iter_mut() {

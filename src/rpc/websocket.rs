@@ -217,8 +217,8 @@ impl SubscriptionManager {
                     } => {
                         serde_json::json!({
                             "id": event.txid.strip_prefix("pr:").unwrap_or(&event.txid),
-                            "from_address": from_address,
-                            "to_address": output.address,
+                            "requester_address": from_address,
+                            "payer_address": output.address,
                             "amount": output.amount,
                             "memo": memo,
                             "requester_name": requester_name,
