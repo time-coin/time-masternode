@@ -238,6 +238,13 @@ const PUBLIC_METHODS: &[&str] = &[
     "getblacklist",
     "gettreasurybalance",
     "getfeeschedule",
+    // Payment requests — signed by the requester/payer; signature is the authentication
+    "sendpaymentrequest",
+    "getpaymentrequests",
+    "acknowledgepaymentrequest",
+    "respondpaymentrequest",
+    "cancelpaymentrequest",
+    "markpaymentrequestviewed",
 ];
 
 /// Returns `true` if the given RPC method is in the public (read-only) whitelist
