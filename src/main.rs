@@ -1726,6 +1726,53 @@ async fn main() {
         tracing::info!("✅ Initial blockchain sync complete");
         sync_complete_signal.notify_one();
 
+        // Re-sync watchdog: if the node stalls (height not advancing but peers are ahead),
+        // retry sync every 5 minutes so a post-initial-sync stall self-recovers.
+        let blockchain_for_watchdog = blockchain_init.clone();
+        tokio::spawn(async move {
+            // Give the node time to settle before first watchdog check
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+
+                let current = blockchain_for_watchdog.get_height();
+
+                // Check if any peer is ahead of us
+                let max_peer_height = if let Some(reg) =
+                    blockchain_for_watchdog.get_peer_registry().await
+                {
+                    let peers = reg.get_connected_peers().await;
+                    let mut max_h = current;
+                    for peer in &peers {
+                        if let Some((h, _)) = reg.get_peer_chain_tip(&peer).await {
+                            if h > max_h {
+                                max_h = h;
+                            }
+                        }
+                    }
+                    max_h
+                } else {
+                    current
+                };
+
+                if max_peer_height > current + 1 {
+                    tracing::warn!(
+                        "🔁 Sync watchdog: height {} is behind best peer at {} — retrying sync",
+                        current,
+                        max_peer_height
+                    );
+                    if let Err(e) =
+                        blockchain_for_watchdog.sync_from_peers(Some(max_peer_height)).await
+                    {
+                        tracing::warn!("⚠️ Watchdog sync attempt failed: {}", e);
+                    }
+                }
+            }
+        });
+
         // Start periodic chain integrity check (every 10 minutes at block time)
         let blockchain_for_integrity = blockchain_init.clone();
         tokio::spawn(async move {
@@ -2040,7 +2087,7 @@ async fn main() {
 
         // Leader rotation timeout tracking
         // If a leader doesn't produce within LEADER_TIMEOUT_SECS, rotate to next leader
-        const LEADER_TIMEOUT_SECS: u64 = 5; // Wait 5s before rotating to backup leader
+        const LEADER_TIMEOUT_SECS: u64 = 10; // Match validator's 10s relaxation interval
         let mut waiting_for_height: Option<u64> = None;
         let mut leader_attempt: u64 = 0; // Increments when leader times out
         let mut height_first_seen = std::time::Instant::now();
@@ -2731,11 +2778,13 @@ async fn main() {
 
             // Apply threshold relaxation for timeout: multiply effective weight by 2^attempt
             // attempt=0: normal threshold, attempt=1: 2x more likely, attempt=2: 4x, etc.
-            // SECURITY: Free tier nodes only get emergency boost after extended deadlock
-            // (attempt >= 3 = 15s) to maintain sybil resistance while preventing permanent stalls.
+            // SECURITY: Free tier nodes only get emergency boost after extended deadlock.
+            // Validator uses `elapsed / 10` intervals; with capped weight 9 and a ~2338-weight
+            // network, Free tier needs multiplier ≥32 (attempt≥5, 50s) to pass validation.
+            // Gate at attempt≥5 so the producer only self-selects when the validator will accept.
             let effective_sampling_weight = if leader_attempt > 0 {
                 let allow_boost = if matches!(our_mn.tier, crate::types::MasternodeTier::Free) {
-                    leader_attempt >= 3 // Free tier: only after 15s deadlock (was 60s)
+                    leader_attempt >= 5 // Free tier: 50s deadlock (aligns with validator 2^5=32x)
                 } else {
                     true // Paid tiers: immediate relaxation
                 };

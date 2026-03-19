@@ -4316,8 +4316,20 @@ impl MessageHandler {
                 .copied()
                 .unwrap_or(0);
             let proposer_fairness_bonus = proposer_blocks_without / 10;
-            let proposer_weight =
-                proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
+            // Apply the same Free-tier cap as the producer's self-selection code so that
+            // both sides compute identical thresholds (prevents spurious validator rejections).
+            let proposer_weight = {
+                let raw =
+                    proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
+                if matches!(
+                    proposer_info.masternode.tier,
+                    crate::types::MasternodeTier::Free
+                ) {
+                    raw.min(crate::types::MasternodeTier::Bronze.sampling_weight() - 1)
+                } else {
+                    raw
+                }
+            };
 
             let eligible_masternodes = context
                 .masternode_registry
@@ -4331,7 +4343,12 @@ impl MessageHandler {
                         .copied()
                         .map(|b| b / 10)
                         .unwrap_or(0);
-                    mn.tier.sampling_weight() + bonus
+                    let raw = mn.tier.sampling_weight() + bonus;
+                    if matches!(mn.tier, crate::types::MasternodeTier::Free) {
+                        raw.min(crate::types::MasternodeTier::Bronze.sampling_weight() - 1)
+                    } else {
+                        raw
+                    }
                 })
                 .sum();
 

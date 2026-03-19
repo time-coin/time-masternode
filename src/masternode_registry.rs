@@ -137,6 +137,10 @@ pub struct MasternodeRegistry {
     pending_collateral_unlocks: Arc<parking_lot::Mutex<Vec<OutPoint>>>,
     /// Collateral outpoints pending lock after a collateral change
     pending_collateral_locks: Arc<parking_lot::Mutex<Vec<PendingCollateralLock>>>,
+    /// Consecutive blocks where each masternode's collateral UTXO was missing.
+    /// Only deregister after this count reaches the threshold (avoids split-brain
+    /// from transient UTXO-set divergence at block boundaries).
+    collateral_miss_counts: Arc<DashMap<String, u32>>,
 }
 
 impl MasternodeRegistry {
@@ -220,6 +224,7 @@ impl MasternodeRegistry {
             current_height: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             pending_collateral_unlocks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_collateral_locks: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            collateral_miss_counts: Arc::new(DashMap::new()),
         }
     }
 
@@ -1370,12 +1375,16 @@ impl MasternodeRegistry {
         }
     }
 
-    /// Automatically deregister masternodes whose collateral has been spent
-    /// Should be called periodically (e.g., after each block)
+    /// Automatically deregister masternodes whose collateral has been spent.
+    /// Uses a 3-block grace period before deregistering to avoid split-brain
+    /// caused by transient UTXO-set divergence at block boundaries.
+    /// Should be called periodically (e.g., after each block).
     pub async fn cleanup_invalid_collaterals(
         &self,
         utxo_manager: &crate::utxo_manager::UTXOStateManager,
     ) -> usize {
+        const MISS_THRESHOLD: u32 = 3; // consecutive misses required before deregistration
+
         let mut to_deregister = Vec::new();
 
         // Never auto-deregister the local masternode — operator must disable explicitly
@@ -1392,20 +1401,36 @@ impl MasternodeRegistry {
                     }
                 }
                 // Only check masternodes with locked collateral
-                if info.masternode.collateral_outpoint.is_some()
-                    && !self.check_collateral_validity(address, utxo_manager).await
-                {
-                    to_deregister.push(address.clone());
+                if info.masternode.collateral_outpoint.is_none() {
+                    continue;
+                }
+                if self.check_collateral_validity(address, utxo_manager).await {
+                    // Collateral is fine — reset any pending miss count
+                    self.collateral_miss_counts.remove(address);
+                } else {
+                    // Collateral missing — increment miss counter
+                    let mut entry = self.collateral_miss_counts.entry(address.clone()).or_insert(0);
+                    *entry += 1;
+                    let misses = *entry;
+                    if misses >= MISS_THRESHOLD {
+                        to_deregister.push(address.clone());
+                    } else {
+                        tracing::warn!(
+                            "⚠️ Masternode {} collateral missing ({}/{} consecutive misses — deferring deregistration)",
+                            address, misses, MISS_THRESHOLD
+                        );
+                    }
                 }
             }
         }
 
-        // Deregister invalid masternodes and unlock their collateral
+        // Deregister masternodes that have exceeded the grace period
         let count = to_deregister.len();
         for address in to_deregister {
+            self.collateral_miss_counts.remove(&address);
             tracing::warn!(
-                "🗑️ Auto-deregistering masternode {} due to invalid collateral",
-                address
+                "🗑️ Auto-deregistering masternode {} due to invalid collateral ({} consecutive misses)",
+                address, MISS_THRESHOLD
             );
             match self.unregister(&address).await {
                 Ok(Some(info)) => {
@@ -2306,6 +2331,7 @@ impl Clone for MasternodeRegistry {
             current_height: self.current_height.clone(),
             pending_collateral_unlocks: self.pending_collateral_unlocks.clone(),
             pending_collateral_locks: self.pending_collateral_locks.clone(),
+            collateral_miss_counts: self.collateral_miss_counts.clone(),
         }
     }
 }
