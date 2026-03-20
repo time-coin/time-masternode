@@ -21,6 +21,7 @@ fresh Linux server. Follow it from top to bottom for a production-ready node.
 9. [Directory Layout](#9-directory-layout)
 10. [Configuration Reference](#10-configuration-reference)
 11. [Troubleshooting](#11-troubleshooting)
+12. [Portal Registration (Peer Whitelisting)](#12-portal-registration-peer-whitelisting)
 
 ---
 
@@ -121,6 +122,18 @@ node (no collateral required) and begins earning rewards immediately.
 
 For staked tiers (Bronze/Silver/Gold) with higher rewards, see
 [§5 — Masternode Configuration](#5-masternode-configuration).
+
+### Step 5 — Register at the Portal
+
+**This is the final and most important step.** Log in to the TIME Coin Masternode
+Portal and submit your node's IP for peer whitelisting:
+
+👉 **[https://time-coin.io/dashboard.html](https://time-coin.io/dashboard.html)**
+
+Without this step your node can still participate in the network, but it will
+not appear in the official peer registry and other nodes won't be able to
+whitelist it. See [§12 — Portal Registration](#12-portal-registration-peer-whitelisting)
+for the full details and what you get from registering.
 
 ---
 
@@ -766,6 +779,89 @@ sudo systemctl restart timetd
 journalctl -u timetd -f
 journalctl -u timetd -n 100 --no-pager
 ```
+
+---
+
+## 12. Portal Registration (Peer Whitelisting)
+
+After your node is up and synced, register it at the TIME Coin Masternode
+Portal to be added to the official peer whitelist.
+
+👉 **[https://time-coin.io/dashboard.html](https://time-coin.io/dashboard.html)**
+
+### Why register?
+
+When your node is approved through the portal its IP is published in the
+official peer registry (`https://time-coin.io/api/peers`). This unlocks two
+concrete benefits:
+
+| Benefit | What it means |
+|---------|---------------|
+| **Priority inbound connections** | Other nodes and wallets preferentially connect to whitelisted peers when discovering the network. Your node will receive more consistent inbound connections. |
+| **Whitelist exemption** | Whitelisted IPs are permanently exempt from rate-limiting and automatic bans. This prevents your node from being cut off during high-traffic periods or after a brief network hiccup. |
+
+Nodes that are *not* registered may still connect and earn rewards, but they
+are treated as untrusted peers and are subject to the same rate-limiting and
+ban logic as any unknown IP.
+
+### How it works
+
+The registration process has three steps, mirroring what you'll see on the
+portal:
+
+1. **Submit** — Log in and fill in your node's public IP, port, tier
+   (Free / Bronze / Silver / Gold), and network (mainnet or testnet).
+   An optional label helps you identify the node in your dashboard.
+
+2. **Review** — The TIME Coin team reviews your submission, typically within
+   **24 hours**. You can track the status (Pending / Approved / Rejected) in
+   the "My Masternodes" section of the dashboard.
+
+3. **Activated** — Once approved, your IP is added to the live peer list.
+   The `addwhitelist` RPC command verifies against this list before whitelisting
+   any IP, so approval is required before other operators can whitelist you.
+
+### Step-by-step
+
+1. Open **[https://time-coin.io/login.html](https://time-coin.io/login.html)**
+   and sign in (or create an account) with your email, or via Google.
+
+2. You'll land on the **Masternode Dashboard**. In the *Submit Your Masternode*
+   form, enter:
+   - **IP address** — your server's public IPv4 address (the same one used for
+     the P2P port)
+   - **Port** — `24000` for mainnet, `24100` for testnet (pre-filled
+     automatically when you select the network)
+   - **Tier** — Free, Bronze, Silver, or Gold
+   - **Network** — Mainnet or Testnet
+   - **Label** *(optional)* — a friendly name, e.g. `vps-fra-01`
+
+3. Click **Submit for Whitelisting** and wait for the review email.
+
+4. Once the status badge changes to **✓ Approved**, your node is live in the
+   registry and will begin receiving priority connections on the next peer
+   discovery cycle (within a few minutes).
+
+> **Finding your public IP:**
+> ```bash
+> curl -s https://ifconfig.me
+> # or
+> curl -s https://api.ipify.org
+> ```
+
+### Checking your whitelist status
+
+After approval you can confirm your IP is in the registry:
+
+```bash
+# Mainnet
+curl -s https://time-coin.io/api/peers | python3 -m json.tool
+
+# Testnet
+curl -s https://time-coin.io/api/testnet/peers | python3 -m json.tool
+```
+
+Your IP should appear in the returned JSON array.
 
 ---
 

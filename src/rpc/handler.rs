@@ -3470,7 +3470,10 @@ impl RpcHandler {
         }))
     }
 
-    /// Add IP to whitelist
+    /// Add IP to whitelist — only permitted if the IP appears in the official
+    /// peer list published at `https://time-coin.io/api/peers` (or the testnet
+    /// equivalent). This prevents arbitrary IPs from being whitelisted; only
+    /// registered network masternodes/peers can bypass rate-limiting and bans.
     async fn add_whitelist(&self, params: &[Value]) -> Result<Value, RpcError> {
         let ip_str = params.first().and_then(|v| v.as_str()).ok_or(RpcError {
             code: -32602,
@@ -3482,21 +3485,46 @@ impl RpcHandler {
             message: format!("Invalid IP address: {}", ip_str),
         })?;
 
-        let mut bl = self.blacklist.write().await;
-        let was_whitelisted = bl.is_whitelisted(ip_addr);
+        // ── Authorization check ─────────────────────────────────────────────
+        // Fetch the official peer list and confirm this IP is on it before
+        // we whitelist it.  Fail closed: if the API is unreachable we refuse
+        // the request rather than silently allowing unknown IPs through.
+        let peers_url = self.network.peer_discovery_url();
+        let known_ips = fetch_official_peer_ips(peers_url).await.map_err(|e| {
+            RpcError {
+                code: -1,
+                message: format!(
+                    "Cannot verify peer — official peer list unavailable ({}). Try again later.",
+                    e
+                ),
+            }
+        })?;
 
-        if was_whitelisted {
+        if !known_ips.contains(&ip_addr) {
+            return Err(RpcError {
+                code: -8,
+                message: format!(
+                    "{} is not listed in the official peer registry ({}). \
+                     Only registered network peers may be whitelisted.",
+                    ip_str, peers_url
+                ),
+            });
+        }
+        // ────────────────────────────────────────────────────────────────────
+
+        let mut bl = self.blacklist.write().await;
+        if bl.is_whitelisted(ip_addr) {
             Ok(json!({
                 "result": "already_whitelisted",
                 "ip": ip_str,
                 "message": "IP is already whitelisted"
             }))
         } else {
-            bl.add_to_whitelist(ip_addr, "Added via RPC");
+            bl.add_to_whitelist(ip_addr, "Added via RPC (verified against official peer list)");
             Ok(json!({
                 "result": "success",
                 "ip": ip_str,
-                "message": "IP added to whitelist"
+                "message": format!("IP added to whitelist (verified via {})", peers_url)
             }))
         }
     }
@@ -5931,4 +5959,52 @@ impl RpcHandler {
             .collect();
         Ok(json!(result))
     }
+}  // end impl RpcHandler
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Free helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch the official peer IP list from `url` (e.g. `https://time-coin.io/api/peers`)
+/// and return the parsed set of IP addresses (ports are stripped if present).
+///
+/// The API is expected to return a JSON array of strings in `"ip"` or `"ip:port"` format.
+/// A 10-second timeout is applied; any network or parse error is returned as a `String`.
+async fn fetch_official_peer_ips(
+    url: &str,
+) -> Result<std::collections::HashSet<std::net::IpAddr>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let raw: Vec<String> = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let mut ips = std::collections::HashSet::new();
+    for entry in raw {
+        // Strip optional port suffix (handles both "1.2.3.4" and "1.2.3.4:24000")
+        let ip_str = if let Some(colon) = entry.rfind(':') {
+            let after = &entry[colon + 1..];
+            if after.parse::<u16>().is_ok() {
+                &entry[..colon]
+            } else {
+                entry.as_str()
+            }
+        } else {
+            entry.as_str()
+        };
+
+        if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
+            ips.insert(ip);
+        }
+    }
+
+    Ok(ips)
 }
