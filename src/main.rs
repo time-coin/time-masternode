@@ -1746,12 +1746,26 @@ async fn main() {
                 {
                     let peers = reg.get_connected_peers().await;
                     let mut max_h = current;
+                    let mut tips_found = 0usize;
                     for peer in &peers {
                         if let Some((h, _)) = reg.get_peer_chain_tip(&peer).await {
+                            tips_found += 1;
                             if h > max_h {
                                 max_h = h;
                             }
                         }
+                    }
+                    // If we have connected peers but NO cached chain tips, the tips cache
+                    // was cleared by peer churn and hasn't been repopulated yet.
+                    // Broadcast GetChainTip so the cache is refreshed before next check.
+                    if !peers.is_empty() && tips_found == 0 {
+                        tracing::warn!(
+                            "🔁 Sync watchdog: {} peer(s) connected but tip cache is empty — requesting chain tips",
+                            peers.len()
+                        );
+                        let _ = reg
+                            .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                            .await;
                     }
                     max_h
                 } else {
@@ -2512,6 +2526,40 @@ async fn main() {
                 } else if !connected_peers.is_empty() {
                     // Not in syncing state - check consensus to decide sync vs produce
                     // Single consensus check handles both sync-behind and same-height fork cases
+
+                    // STALL GUARD: Before calling compare_chain_with_peers() (which reads
+                    // cached tips), verify that we actually have tip data for at least one
+                    // connected peer. If the cache is empty — e.g. after peer churn cleared
+                    // it — compare_chain_with_peers returns None, which the code below
+                    // interprets as "peers agree." That interpretation is WRONG when the
+                    // cache is simply cold; it causes the node to skip syncing and spin
+                    // indefinitely at a stale height. Detect empty cache early and refill it.
+                    let any_tip_cached = {
+                        let mut found = false;
+                        for peer_ip in &connected_peers {
+                            if block_peer_registry.get_peer_chain_tip(peer_ip).await.is_some() {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    };
+                    if !any_tip_cached {
+                        tracing::warn!(
+                            "⚠️  {} blocks behind, {} peer(s) connected but tip cache is empty \
+                             — requesting chain tips before sync decision",
+                            blocks_behind,
+                            connected_peers.len()
+                        );
+                        block_peer_registry
+                            .broadcast(crate::network::message::NetworkMessage::GetChainTip)
+                            .await;
+                        last_chain_tip_request = std::time::Instant::now();
+                        // Brief wait for tip responses to arrive before looping back
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
+
                     let min_peers_for_check = connected_peers.len().min(3);
                     if connected_peers.len() >= min_peers_for_check {
                         if let Some((consensus_height, _)) =

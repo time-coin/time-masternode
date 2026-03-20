@@ -7741,9 +7741,52 @@ impl Blockchain {
 
                 // Decision: accept only if fork resolver says so
                 if !resolution.accept_peer_chain {
-                    info!("📊 Fork resolver rejected peer chain");
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Ok(());
+                    // CONSENSUS OVERRIDE: The hash tiebreaker can keep us on a minority fork
+                    // when the entire network has already settled on the competing block.
+                    // If ≥3 peers independently confirm the peer's hash at the same height,
+                    // the majority-chain consensus overrides the local hash tiebreaker.
+                    let mut consensus_override = false;
+                    if peer_tip_height == our_height {
+                        let peer_registry_guard = self.peer_registry.read().await;
+                        if let Some(registry) = peer_registry_guard.as_ref() {
+                            let compatible_peers = registry.get_compatible_peers().await;
+                            let mut supporting_peers = 0usize;
+                            let mut total_checked = 0usize;
+                            for pip in &compatible_peers {
+                                if let Some((tip_height, tip_hash)) =
+                                    registry.get_peer_chain_tip(pip).await
+                                {
+                                    total_checked += 1;
+                                    if tip_height == peer_tip_height
+                                        && tip_hash == peer_tip_hash
+                                    {
+                                        supporting_peers += 1;
+                                    }
+                                }
+                            }
+                            const MIN_CONSENSUS_OVERRIDE_PEERS: usize = 3;
+                            if total_checked > 0
+                                && supporting_peers >= MIN_CONSENSUS_OVERRIDE_PEERS
+                            {
+                                warn!(
+                                    "🔀 Consensus override: {}/{} peers have hash {} at height {} \
+                                    — accepting majority chain over hash tiebreaker",
+                                    supporting_peers,
+                                    total_checked,
+                                    hex::encode(&peer_tip_hash[..8]),
+                                    peer_tip_height,
+                                );
+                                consensus_override = true;
+                            }
+                        }
+                    }
+
+                    if !consensus_override {
+                        info!("📊 Fork resolver rejected peer chain");
+                        *self.fork_state.write().await = ForkResolutionState::None;
+                        return Ok(());
+                    }
+                    // Fall through to reorg — majority consensus overrides hash tiebreaker
                 }
 
                 // NETWORK CONSENSUS CROSS-CHECK: For same-height forks, verify that
