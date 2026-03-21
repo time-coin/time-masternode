@@ -1114,9 +1114,39 @@ pub fn parse_masternode_conf(
         // 6 fields (legacy): alias IP:port key cert txid vout
         let (addr_idx, txid_idx, vout_idx) = match parts.len() {
             3 => (None, 1, 2),
-            4 => (Some(1), 2, 3),
-            5 => (Some(1), 3, 4),
-            6 => (Some(1), 4, 5),
+            4 => {
+                tracing::warn!(
+                    "masternode.conf:{}: entry '{}' uses the legacy 'alias IP:port txid vout' format. \
+                     The IP:port is ignored — your node's address is read from externalip= in time.conf. \
+                     Simplify to: '{} {} {}'",
+                    line_num + 1,
+                    parts[0],
+                    parts[0], parts[2], parts[3]
+                );
+                (Some(1), 2, 3)
+            }
+            5 => {
+                tracing::warn!(
+                    "masternode.conf:{}: entry '{}' uses the legacy 'alias IP:port privkey txid vout' format. \
+                     The IP:port and privkey are ignored — your node's address is read from externalip= in time.conf. \
+                     Simplify to: '{} {} {}'",
+                    line_num + 1,
+                    parts[0],
+                    parts[0], parts[3], parts[4]
+                );
+                (Some(1), 3, 4)
+            }
+            6 => {
+                tracing::warn!(
+                    "masternode.conf:{}: entry '{}' uses the legacy 'alias IP:port key cert txid vout' format. \
+                     The IP:port, key, and cert fields are ignored — your node's address is read from externalip= in time.conf. \
+                     Simplify to: '{} {} {}'",
+                    line_num + 1,
+                    parts[0],
+                    parts[0], parts[4], parts[5]
+                );
+                (Some(1), 4, 5)
+            }
             _ => {
                 tracing::warn!(
                     "⚠️ masternode.conf:{}: expected 3-6 fields, got {} — skipping",
