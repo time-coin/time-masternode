@@ -7476,6 +7476,25 @@ impl Blockchain {
         let fork_height = blocks[0].header.height;
         let our_height = self.get_height();
 
+        // Guard: if a reorg is already committed (ReadyToReorg) or in progress (Reorging),
+        // do not allow a concurrent handle_fork() call to overwrite the fork_state.
+        // Without this, a second peer arriving while the first peer's reorg is about to execute
+        // would clobber the ReadyToReorg state with FetchingChain, causing the reorg to never run.
+        {
+            let current_state = self.fork_state.read().await;
+            match &*current_state {
+                ForkResolutionState::ReadyToReorg { .. }
+                | ForkResolutionState::Reorging { .. } => {
+                    tracing::debug!(
+                        "🚫 Skipping handle_fork() from {} — reorg already committed/in-progress",
+                        peer_addr
+                    );
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         // Check if we're already in FetchingChain state for this peer
         // If so, merge these blocks with accumulated blocks and preserve peer_height
         let mut all_blocks = blocks.clone();
@@ -8169,14 +8188,26 @@ impl Blockchain {
                         sorted_reorg_blocks.last().unwrap().header.height
                     );
 
-                    // Transition to reorg state
-                    *self.fork_state.write().await = ForkResolutionState::ReadyToReorg {
-                        common_ancestor,
-                        alternate_blocks: sorted_reorg_blocks, // Use sorted blocks
+                    // CRITICAL: Set Reorging state and call perform_reorg directly.
+                    // We must NOT go through continue_fork_resolution() here because it
+                    // re-reads fork_state, which creates a race: concurrent handle_fork()
+                    // calls from other peers (already past the guard) can overwrite the
+                    // state between our write and continue_fork_resolution's read, causing
+                    // the reorg to silently never execute.
+                    *self.fork_state.write().await = ForkResolutionState::Reorging {
+                        from_height: our_height,
+                        to_height: sorted_reorg_blocks.last().unwrap().header.height,
                         started_at: std::time::Instant::now(),
                     };
 
-                    self.continue_fork_resolution().await
+                    let reorg_result =
+                        self.perform_reorg(common_ancestor, sorted_reorg_blocks).await;
+
+                    // Always clear fork state after reorg attempt
+                    *self.fork_state.write().await = ForkResolutionState::None;
+                    self.consensus_peers.write().await.clear();
+
+                    reorg_result
                 }
             }
             Err(e) => {
@@ -8213,6 +8244,7 @@ impl Blockchain {
     }
 
     /// Continue fork resolution state machine with timeout protection
+    #[allow(dead_code)]
     async fn continue_fork_resolution(&self) -> Result<(), String> {
         // Check for stale fork resolution state (timeout after 2 minutes)
         const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 120;
