@@ -4319,8 +4319,7 @@ impl MessageHandler {
             // Apply the same Free-tier cap as the producer's self-selection code so that
             // both sides compute identical thresholds (prevents spurious validator rejections).
             let proposer_weight = {
-                let raw =
-                    proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
+                let raw = proposer_info.masternode.tier.sampling_weight() + proposer_fairness_bonus;
                 if matches!(
                     proposer_info.masternode.tier,
                     crate::types::MasternodeTier::Free

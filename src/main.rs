@@ -1733,8 +1733,7 @@ async fn main() {
             // Give the node time to settle before first watchdog check
             tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
 
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(300));
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
             loop {
                 interval.tick().await;
 
@@ -1748,7 +1747,7 @@ async fn main() {
                     let mut max_h = current;
                     let mut tips_found = 0usize;
                     for peer in &peers {
-                        if let Some((h, _)) = reg.get_peer_chain_tip(&peer).await {
+                        if let Some((h, _)) = reg.get_peer_chain_tip(peer).await {
                             tips_found += 1;
                             if h > max_h {
                                 max_h = h;
@@ -1778,8 +1777,9 @@ async fn main() {
                         current,
                         max_peer_height
                     );
-                    if let Err(e) =
-                        blockchain_for_watchdog.sync_from_peers(Some(max_peer_height)).await
+                    if let Err(e) = blockchain_for_watchdog
+                        .sync_from_peers(Some(max_peer_height))
+                        .await
                     {
                         tracing::warn!("⚠️ Watchdog sync attempt failed: {}", e);
                     }
@@ -2537,7 +2537,11 @@ async fn main() {
                     let any_tip_cached = {
                         let mut found = false;
                         for peer_ip in &connected_peers {
-                            if block_peer_registry.get_peer_chain_tip(peer_ip).await.is_some() {
+                            if block_peer_registry
+                                .get_peer_chain_tip(peer_ip)
+                                .await
+                                .is_some()
+                            {
                                 found = true;
                                 break;
                             }
