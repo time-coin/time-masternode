@@ -341,6 +341,7 @@ impl UTXOStateManager {
     /// Unlike add_utxo, this forces the UTXO back to Unspent even if it was previously spent
     pub async fn restore_utxo(&self, utxo: UTXO) -> Result<(), UtxoError> {
         let outpoint = utxo.outpoint.clone();
+        let address = utxo.address.clone();
 
         // During rollback, we need to restore UTXOs that were spent
         // Clear any existing state (including SpentFinalized) and restore to Unspent
@@ -353,6 +354,11 @@ impl UTXOStateManager {
                             "UTXO {:?} already exists in Unspent state during restore",
                             outpoint
                         );
+                        // Ensure address_index is consistent even for early return
+                        self.address_index
+                            .entry(address)
+                            .or_default()
+                            .insert(outpoint);
                         return Ok(());
                     }
                     // State says unspent but not in storage - add it
@@ -376,7 +382,13 @@ impl UTXOStateManager {
 
         // Add to storage and set state to Unspent
         self.storage.add_utxo(utxo).await?;
-        self.utxo_states.insert(outpoint, UTXOState::Unspent);
+        self.utxo_states
+            .insert(outpoint.clone(), UTXOState::Unspent);
+        // Update address index so balance queries see the restored UTXO
+        self.address_index
+            .entry(address)
+            .or_default()
+            .insert(outpoint);
         Ok(())
     }
 
