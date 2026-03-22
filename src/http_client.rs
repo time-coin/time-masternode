@@ -50,6 +50,12 @@ impl HttpResponse {
     }
 }
 
+impl Default for HttpClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HttpClient {
     pub fn new() -> Self {
         Self {

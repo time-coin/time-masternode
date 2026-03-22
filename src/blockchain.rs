@@ -5331,7 +5331,7 @@ impl Blockchain {
 
                 // Rounding tolerance: at most 1 satoshi per recipient.
                 let tolerance = recipient_count as u64;
-                let diff = if paid > pool { paid - pool } else { pool - paid };
+                let diff = paid.abs_diff(pool);
                 if diff > tolerance {
                     return Err(format!(
                         "Block {} {:?} tier pool mismatch: expected {} satoshis, \
