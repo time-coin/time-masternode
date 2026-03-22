@@ -148,7 +148,12 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn txid(&self) -> Hash256 {
-        let json = serde_json::to_string(self).expect("JSON serialization should succeed");
+        // Exclude encrypted_memo from the txid hash so that attaching a memo
+        // after signing does not change the transaction's identity. This matches
+        // the wallet's Transaction::hash() which also clears encrypted_memo.
+        let mut tx_for_hash = self.clone();
+        tx_for_hash.encrypted_memo = None;
+        let json = serde_json::to_string(&tx_for_hash).expect("JSON serialization should succeed");
         Sha256::digest(json.as_bytes()).into()
     }
 

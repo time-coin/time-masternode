@@ -2378,11 +2378,7 @@ impl ConsensusEngine {
     }
 
     /// Broadcast a payment request cancellation to all peers.
-    pub async fn broadcast_payment_request_cancelled(
-        &self,
-        id: String,
-        requester_address: String,
-    ) {
+    pub async fn broadcast_payment_request_cancelled(&self, id: String, requester_address: String) {
         self.broadcast(NetworkMessage::PaymentRequestCancelled {
             id,
             requester_address,
@@ -2685,11 +2681,15 @@ impl ConsensusEngine {
         input_idx: usize,
     ) -> Result<Vec<u8>, String> {
         // Compute transaction hash with script_sigs cleared to avoid
-        // chicken-and-egg: signer has empty sigs, verifier has filled sigs
+        // chicken-and-egg: signer has empty sigs, verifier has filled sigs.
+        // encrypted_memo is also excluded so that attaching a memo after
+        // signing does not invalidate the signature (memo is metadata, not
+        // part of the UTXO commitment). This matches the wallet's hash().
         let mut signing_tx = tx.clone();
         for input in &mut signing_tx.inputs {
             input.script_sig = vec![];
         }
+        signing_tx.encrypted_memo = None;
         let tx_hash = signing_tx.txid();
 
         // Create message: txid || input_index || outputs_hash
