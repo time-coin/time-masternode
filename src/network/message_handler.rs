@@ -30,6 +30,18 @@ fn fork_alert_rate_limit() -> &'static dashmap::DashMap<String, Instant> {
     INSTANCE.get_or_init(dashmap::DashMap::new)
 }
 
+/// Rate-limits GetBlocks requests sent from the ChainTip handler.
+/// Without this, every block announcement from a far-ahead peer causes a new
+/// GetBlocks request, which triggers the remote peer's sync-loop detector
+/// (which ignores requests after seeing too many in a short window).
+/// One request per peer per 60 s is enough — the sync coordinator already
+/// manages the authoritative sync; this path is just a fallback.
+fn chain_tip_getblocks_rate_limit() -> &'static dashmap::DashMap<String, Instant> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, Instant>> =
+        std::sync::OnceLock::new();
+    INSTANCE.get_or_init(dashmap::DashMap::new)
+}
+
 /// Cached UTXO state hash received from a peer.
 struct PeerUtxoHashEntry {
     hash: [u8; 32],
@@ -3521,7 +3533,25 @@ impl MessageHandler {
                 }
             }
 
-            // Peer is ahead and in consensus - sync from them
+            // Peer is ahead and in consensus - sync from them.
+            // Rate-limit to one GetBlocks request per peer per 60 s to avoid
+            // triggering the remote peer's sync-loop detector when block
+            // announcements arrive faster than the sync can complete.
+            {
+                let now = Instant::now();
+                let should_request = match chain_tip_getblocks_rate_limit().get(&self.peer_ip) {
+                    Some(last) => now.duration_since(*last) >= Duration::from_secs(60),
+                    None => true,
+                };
+                if !should_request {
+                    debug!(
+                        "📈 [{}] Peer {} ahead at height {} — GetBlocks rate-limited (wait 60s)",
+                        self.direction, self.peer_ip, peer_height
+                    );
+                    return Ok(None);
+                }
+                chain_tip_getblocks_rate_limit().insert(self.peer_ip.clone(), now);
+            }
             debug!(
                 "📈 [{}] Peer {} ahead at height {} (we have {}), requesting blocks",
                 self.direction, self.peer_ip, peer_height, our_height
