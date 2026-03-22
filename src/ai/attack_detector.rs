@@ -1,13 +1,19 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use sled::Db;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-// Use parking_lot::RwLock instead of std::sync::RwLock
-// parking_lot RwLock doesn't poison on panic, making it safer for production
 use parking_lot::RwLock;
+
+/// Dedup window: suppress re-reporting the same attack type from the same peer within this window.
+const ATTACK_DEDUP_SECS: u64 = 300; // 5 minutes
+/// Fork-bombing window: only flag if N forks occur within this sliding window.
+const FORK_BOMB_WINDOW_SECS: u64 = 300; // 5 minutes
+const FORK_BOMB_THRESHOLD: usize = 5;
+/// DB key for persisted attacks.
+const DB_KEY_ATTACKS: &[u8] = b"ai:attack_detector:attacks";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AttackType {
@@ -55,7 +61,8 @@ struct PeerBehavior {
     connect_count: u32,
     disconnect_count: u32,
     invalid_messages: u32,
-    fork_count: u32,
+    /// Timestamps of recent forks — entries older than FORK_BOMB_WINDOW_SECS are pruned.
+    fork_timestamps: VecDeque<u64>,
     timestamp_drift: Vec<i64>,
     first_seen: u64,
     last_activity: u64,
@@ -71,23 +78,89 @@ struct TransactionTracker {
 }
 
 pub struct AttackDetector {
-    _db: Arc<Db>,
+    db: Arc<Db>,
     peer_behaviors: Arc<RwLock<HashMap<String, PeerBehavior>>>,
     transaction_history: Arc<RwLock<HashMap<String, TransactionTracker>>>,
     detected_attacks: Arc<RwLock<Vec<AttackPattern>>>,
-    _time_window: Duration,
+    time_window: Duration,
 }
 
 impl AttackDetector {
     pub fn new(db: Arc<Db>) -> Result<Self, AppError> {
+        let detected_attacks = Self::load_attacks_from_db(&db);
         Ok(Self {
-            _db: db,
+            db,
             peer_behaviors: Arc::new(RwLock::new(HashMap::new())),
             transaction_history: Arc::new(RwLock::new(HashMap::new())),
-            detected_attacks: Arc::new(RwLock::new(Vec::new())),
-            _time_window: Duration::from_secs(300), // 5 minute window
+            detected_attacks: Arc::new(RwLock::new(detected_attacks)),
+            time_window: Duration::from_secs(300),
         })
     }
+
+    // ===== DB persistence =====
+
+    fn load_attacks_from_db(db: &Db) -> Vec<AttackPattern> {
+        match db.get(DB_KEY_ATTACKS) {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn persist_attacks(&self) {
+        let attacks = self.detected_attacks.read();
+        if let Ok(bytes) = serde_json::to_vec(&*attacks) {
+            let _ = self.db.insert(DB_KEY_ATTACKS, bytes);
+        }
+    }
+
+    // ===== Dedup helper =====
+
+    /// Add an attack pattern, deduplicating against same-type + same-primary-source within the
+    /// dedup window.  If a recent duplicate exists, `last_seen` is bumped and the list is
+    /// re-persisted.  Returns `true` if a new entry was inserted.
+    fn maybe_add_attack(&self, mut attack: AttackPattern) -> bool {
+        let now = attack.first_detected;
+        let primary_source = attack.source_ips.first().cloned().unwrap_or_default();
+
+        let mut attacks = self.detected_attacks.write();
+
+        for existing in attacks.iter_mut().rev() {
+            if existing.attack_type == attack.attack_type
+                && existing
+                    .source_ips
+                    .first()
+                    .is_some_and(|s| *s == primary_source)
+                && now.saturating_sub(existing.last_seen) <= ATTACK_DEDUP_SECS
+            {
+                // Duplicate within dedup window — just refresh the timestamp.
+                existing.last_seen = now;
+                drop(attacks);
+                self.persist_attacks();
+                return false;
+            }
+        }
+
+        // Merge first_detected from any older entry for the same source/type so we preserve
+        // the true onset time across restarts.
+        if let Some(oldest) = attacks
+            .iter()
+            .filter(|a| {
+                a.attack_type == attack.attack_type
+                    && a.source_ips.first().is_some_and(|s| *s == primary_source)
+            })
+            .map(|a| a.first_detected)
+            .min()
+        {
+            attack.first_detected = oldest;
+        }
+
+        attacks.push(attack);
+        drop(attacks);
+        self.persist_attacks();
+        true
+    }
+
+    // ===== Public recording methods =====
 
     /// Record peer connection event
     pub fn record_peer_connect(&self, addr: &str) {
@@ -102,7 +175,7 @@ impl AttackDetector {
             connect_count: 0,
             disconnect_count: 0,
             invalid_messages: 0,
-            fork_count: 0,
+            fork_timestamps: VecDeque::new(),
             timestamp_drift: Vec::new(),
             first_seen: now,
             last_activity: now,
@@ -113,6 +186,7 @@ impl AttackDetector {
 
         // Check for rapid reconnection (Sybil attack indicator)
         if behavior.connect_count > 10 && (now - behavior.first_seen) < 60 {
+            drop(behaviors);
             self.detect_sybil_attack(addr);
         }
     }
@@ -145,16 +219,31 @@ impl AttackDetector {
         }
     }
 
-    /// Record fork from peer
+    /// Record fork from peer — uses a sliding time window to avoid false positives from
+    /// legitimate but persistent forks.
     pub fn record_fork(&self, addr: &str) {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
         let mut behaviors = self.peer_behaviors.write();
         if let Some(behavior) = behaviors.get_mut(addr) {
-            behavior.fork_count += 1;
+            // Prune events outside the window before counting.
+            while behavior
+                .fork_timestamps
+                .front()
+                .is_some_and(|&t| now.saturating_sub(t) > FORK_BOMB_WINDOW_SECS)
+            {
+                behavior.fork_timestamps.pop_front();
+            }
+            behavior.fork_timestamps.push_back(now);
+            behavior.last_activity = now;
 
-            // Consistent fork creation is suspicious
-            if behavior.fork_count > 5 {
+            let recent_count = behavior.fork_timestamps.len();
+            if recent_count >= FORK_BOMB_THRESHOLD {
                 drop(behaviors);
-                self.detect_fork_bombing(addr);
+                self.detect_fork_bombing(addr, recent_count);
             }
         }
     }
@@ -223,11 +312,6 @@ impl AttackDetector {
 
     /// Check for eclipse attack (isolated from network)
     pub fn check_eclipse_attack(&self, connected_peer_count: usize, unique_ips: &[String]) -> bool {
-        // Eclipse attack indicators:
-        // 1. Low peer count
-        // 2. All peers from same IP range
-        // 3. No diversity in peer connections
-
         if connected_peer_count < 3 {
             return true;
         }
@@ -257,14 +341,11 @@ impl AttackDetector {
         false
     }
 
-    /// Detect Sybil attack
-    fn detect_sybil_attack(&self, addr: &str) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+    // ===== Detection helpers =====
 
-        let attack = AttackPattern {
+    fn detect_sybil_attack(&self, addr: &str) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
             attack_type: AttackType::SybilAttack,
             confidence: 0.85,
             severity: AttackSeverity::High,
@@ -276,43 +357,32 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
-        };
-
-        self.detected_attacks.write().push(attack);
+        });
     }
 
-    /// Detect fork bombing
-    fn detect_fork_bombing(&self, addr: &str) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let attack = AttackPattern {
+    fn detect_fork_bombing(&self, addr: &str, recent_count: usize) {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
             attack_type: AttackType::ForkBombing,
             confidence: 0.9,
             severity: AttackSeverity::Critical,
             indicators: vec![
-                format!("Consistent fork creation from {}", addr),
+                format!(
+                    "{} forks from {} within {}s window",
+                    recent_count, addr, FORK_BOMB_WINDOW_SECS
+                ),
                 "Intentional chain disruption detected".to_string(),
             ],
             first_detected: now,
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
-        };
-
-        self.detected_attacks.write().push(attack);
+        });
     }
 
-    /// Detect timing/clock manipulation attack
     fn detect_timing_attack(&self, addr: &str, avg_drift: i64) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let attack = AttackPattern {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
             attack_type: AttackType::TimingAttack,
             confidence: 0.75,
             severity: AttackSeverity::Medium,
@@ -324,19 +394,12 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::RateLimitPeer(addr.to_string()),
-        };
-
-        self.detected_attacks.write().push(attack);
+        });
     }
 
-    /// Detect double-spend attempt
     fn detect_doublespend_attempt(&self, txid: &str, sources: Vec<String>) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let attack = AttackPattern {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
             attack_type: AttackType::DoublespendAttack,
             confidence: 0.95,
             severity: AttackSeverity::Critical,
@@ -346,21 +409,14 @@ impl AttackDetector {
             ],
             first_detected: now,
             last_seen: now,
-            source_ips: sources.clone(),
+            source_ips: sources,
             recommended_action: MitigationAction::AlertOperator,
-        };
-
-        self.detected_attacks.write().push(attack);
+        });
     }
 
-    /// Detect eclipse attack
     fn detect_eclipse_attack(&self, peer_ips: &[String]) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let attack = AttackPattern {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
             attack_type: AttackType::EclipseAttack,
             confidence: 0.8,
             severity: AttackSeverity::Critical,
@@ -376,19 +432,12 @@ impl AttackDetector {
             last_seen: now,
             source_ips: peer_ips.to_vec(),
             recommended_action: MitigationAction::EmergencySync,
-        };
-
-        self.detected_attacks.write().push(attack);
+        });
     }
 
-    /// Flag malicious peer
     fn flag_malicious_peer(&self, addr: &str) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        let attack = AttackPattern {
+        let now = Self::now_secs();
+        self.maybe_add_attack(AttackPattern {
             attack_type: AttackType::ResourceExhaustion,
             confidence: 0.9,
             severity: AttackSeverity::High,
@@ -400,17 +449,14 @@ impl AttackDetector {
             last_seen: now,
             source_ips: vec![addr.to_string()],
             recommended_action: MitigationAction::BlockPeer(addr.to_string()),
-        };
-
-        self.detected_attacks.write().push(attack);
+        });
     }
+
+    // ===== Query methods =====
 
     /// Get recent attacks
     pub fn get_recent_attacks(&self, since: Duration) -> Vec<AttackPattern> {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = Self::now_secs();
         let cutoff = now.saturating_sub(since.as_secs());
 
         self.detected_attacks
@@ -428,10 +474,7 @@ impl AttackDetector {
 
     /// Clear old attack records
     pub fn cleanup_old_records(&self, max_age: Duration) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = Self::now_secs();
         let cutoff = now.saturating_sub(max_age.as_secs());
 
         // Clean old peer behaviors
@@ -442,10 +485,13 @@ impl AttackDetector {
         let mut history = self.transaction_history.write();
         history.retain(|_, t| t.first_seen >= cutoff);
 
-        // Clean old attacks (keep for longer - 24 hours)
-        let attack_cutoff = now.saturating_sub(86400);
-        let mut attacks = self.detected_attacks.write();
-        attacks.retain(|a| a.last_seen >= attack_cutoff);
+        // Clean old attacks (keep for 24 hours)
+        let attack_cutoff = now.saturating_sub(86_400);
+        {
+            let mut attacks = self.detected_attacks.write();
+            attacks.retain(|a| a.last_seen >= attack_cutoff);
+        }
+        self.persist_attacks();
     }
 
     /// Get attack statistics
@@ -475,6 +521,20 @@ impl AttackDetector {
         }
 
         stats
+    }
+
+    // ===== Utilities =====
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// Expose the configured time window (used by AISystem for cleanup calls).
+    pub fn time_window(&self) -> Duration {
+        self.time_window
     }
 }
 
@@ -526,6 +586,27 @@ mod tests {
     }
 
     #[test]
+    fn test_fork_bombing_dedup() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(sled::open(dir.path()).unwrap());
+        let detector = AttackDetector::new(db).unwrap();
+
+        detector.record_peer_connect("192.168.1.1:8333");
+
+        // First burst — should produce exactly one attack entry
+        for _ in 0..10 {
+            detector.record_fork("192.168.1.1:8333");
+        }
+
+        let attacks = detector.get_all_attacks();
+        assert_eq!(
+            attacks.len(),
+            1,
+            "dedup should collapse repeated detections"
+        );
+    }
+
+    #[test]
     fn test_timing_attack_detection() {
         let dir = tempdir().unwrap();
         let db = Arc::new(sled::open(dir.path()).unwrap());
@@ -557,5 +638,27 @@ mod tests {
 
         let is_attack = detector.check_eclipse_attack(2, &peers);
         assert!(is_attack);
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db = Arc::new(sled::open(dir.path()).unwrap());
+
+        {
+            let detector = AttackDetector::new(db.clone()).unwrap();
+            detector.record_peer_connect("10.0.0.1:8333");
+            for _ in 0..6 {
+                detector.record_fork("10.0.0.1:8333");
+            }
+            assert!(!detector.get_all_attacks().is_empty());
+        }
+
+        // Re-open with same DB — attacks should survive.
+        let detector2 = AttackDetector::new(db).unwrap();
+        assert!(
+            !detector2.get_all_attacks().is_empty(),
+            "attacks must persist across restarts"
+        );
     }
 }

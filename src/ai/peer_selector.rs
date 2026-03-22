@@ -10,6 +10,9 @@ use std::time::SystemTime;
 // parking_lot RwLock doesn't poison on panic, making it safer for production
 use parking_lot::RwLock;
 
+/// Bandwidth normalisation baseline: a peer sustaining 1 MB/s scores ≈ 0.5.
+const BANDWIDTH_SCALE_BYTES_PER_SEC: f64 = 1_000_000.0;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerPerformance {
     pub address: String,
@@ -18,8 +21,15 @@ pub struct PeerPerformance {
     pub avg_response_time: f64,
     pub last_success: u64,
     pub reliability_score: f64,
+    /// EMA of observed throughput in bytes/sec (updated by `record_data_transfer`).
+    pub bandwidth_bytes_per_sec: f64,
     pub bandwidth_score: f64,
     pub latency_score: f64,
+    /// Fraction of times this peer agreed with network consensus (EMA, 0–1).
+    pub consensus_agreement_score: f64,
+    /// Raw counts for consensus agreement tracking.
+    pub consensus_match_count: u64,
+    pub consensus_mismatch_count: u64,
     pub total_score: f64,
 }
 
@@ -32,8 +42,12 @@ impl PeerPerformance {
             avg_response_time: 0.0,
             last_success: 0,
             reliability_score: 0.5,
+            bandwidth_bytes_per_sec: 0.0,
             bandwidth_score: 0.5,
             latency_score: 0.5,
+            consensus_agreement_score: 0.5, // neutral prior
+            consensus_match_count: 0,
+            consensus_mismatch_count: 0,
             total_score: 0.5,
         }
     }
@@ -52,6 +66,23 @@ impl PeerPerformance {
             0.5
         };
 
+        // Bandwidth score: logistic-ish curve anchored at BANDWIDTH_SCALE_BYTES_PER_SEC.
+        self.bandwidth_score = if self.bandwidth_bytes_per_sec > 0.0 {
+            let ratio = self.bandwidth_bytes_per_sec / BANDWIDTH_SCALE_BYTES_PER_SEC;
+            ratio / (1.0 + ratio) // maps (0,∞) → (0,1); 1 MB/s → 0.5
+        } else {
+            0.5 // unknown — neutral until first transfer
+        };
+
+        // Consensus agreement score: Bayesian-style — start at neutral (1 virtual match + 1 mismatch).
+        let total_consensus = self.consensus_match_count + self.consensus_mismatch_count;
+        self.consensus_agreement_score = if total_consensus > 0 {
+            // Laplace smoothing: +1 match, +1 mismatch as priors.
+            (self.consensus_match_count as f64 + 1.0) / (total_consensus as f64 + 2.0)
+        } else {
+            0.5
+        };
+
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
@@ -63,8 +94,12 @@ impl PeerPerformance {
         };
         let recency_score = 1.0 / (1.0 + time_since_success as f64 / 3600.0);
 
-        self.total_score =
-            (self.reliability_score * 0.5) + (self.latency_score * 0.3) + (recency_score * 0.2);
+        // Weights: reliability 40 % · latency 25 % · recency 15 % · consensus 15 % · bandwidth 5 %
+        self.total_score = self.reliability_score * 0.40
+            + self.latency_score * 0.25
+            + recency_score * 0.15
+            + self.consensus_agreement_score * 0.15
+            + self.bandwidth_score * 0.05;
     }
 }
 
@@ -169,6 +204,54 @@ impl AIPeerSelector {
             .or_insert_with(|| PeerPerformance::new(address));
 
         perf.failure_count += 1;
+        perf.calculate_scores();
+    }
+
+    /// Record a completed data transfer to update the bandwidth score.
+    ///
+    /// `bytes` is the number of bytes transferred; `duration_secs` is how long it took.
+    /// Uses an EMA to smooth the observed throughput so a single large transfer doesn't
+    /// permanently dominate.
+    pub fn record_data_transfer(&self, peer: &SocketAddr, bytes: u64, duration_secs: f64) {
+        if duration_secs <= 0.0 {
+            return;
+        }
+        let observed_bps = bytes as f64 / duration_secs;
+        let address = peer.to_string();
+        let mut perf_lock = self.performance.write();
+        let perf = perf_lock
+            .entry(address.clone())
+            .or_insert_with(|| PeerPerformance::new(address));
+
+        // EMA with α = learning_rate for bandwidth.
+        perf.bandwidth_bytes_per_sec = if perf.bandwidth_bytes_per_sec == 0.0 {
+            observed_bps
+        } else {
+            perf.bandwidth_bytes_per_sec * (1.0 - self.learning_rate)
+                + observed_bps * self.learning_rate
+        };
+
+        perf.calculate_scores();
+    }
+
+    /// Record that a peer's chain tip matched the network consensus at a given height.
+    pub fn record_consensus_match(&self, peer: &str) {
+        let mut perf_lock = self.performance.write();
+        let perf = perf_lock
+            .entry(peer.to_string())
+            .or_insert_with(|| PeerPerformance::new(peer.to_string()));
+        perf.consensus_match_count += 1;
+        perf.calculate_scores();
+    }
+
+    /// Record that a peer's chain tip diverged from network consensus at a given height.
+    /// Peers that frequently disagree with consensus are down-ranked for sync selection.
+    pub fn record_consensus_mismatch(&self, peer: &str) {
+        let mut perf_lock = self.performance.write();
+        let perf = perf_lock
+            .entry(peer.to_string())
+            .or_insert_with(|| PeerPerformance::new(peer.to_string()));
+        perf.consensus_mismatch_count += 1;
         perf.calculate_scores();
     }
 

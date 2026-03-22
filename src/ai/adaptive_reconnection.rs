@@ -5,12 +5,15 @@
 //! reliable peers are reconnected quickly.
 
 use serde::{Deserialize, Serialize};
+use sled::Db;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 use tracing::debug;
+
+const DB_PREFIX: &[u8] = b"ai:reconnect:";
 
 /// Per-peer connection history and learned parameters
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,8 +35,10 @@ pub struct PeerConnectionProfile {
 
     // Timing patterns
     pub avg_time_to_connect_ms: f64,
-    pub best_time_of_day: Option<u8>, // Hour (0-23) when most successful
-    pub worst_time_of_day: Option<u8>,
+    /// Per-hour success counts (index = hour 0–23).
+    pub hourly_success_counts: [u32; 24],
+    /// Per-hour attempt counts (index = hour 0–23).
+    pub hourly_attempt_counts: [u32; 24],
 
     // Learned parameters
     pub optimal_retry_delay_secs: f64,
@@ -55,8 +60,8 @@ impl Default for PeerConnectionProfile {
             last_failure_time: 0,
             failure_reasons: HashMap::new(),
             avg_time_to_connect_ms: 1000.0,
-            best_time_of_day: None,
-            worst_time_of_day: None,
+            hourly_success_counts: [0u32; 24],
+            hourly_attempt_counts: [0u32; 24],
             optimal_retry_delay_secs: 5.0,
             reliability_score: 0.5,
             last_updated: now_secs(),
@@ -118,15 +123,47 @@ pub struct AdaptiveReconnectionAI {
 
     /// Global network health factor (affects all reconnections)
     network_health: Arc<RwLock<f64>>,
+
+    /// Persistent storage for profiles across restarts.
+    db: Arc<Db>,
 }
 
 impl AdaptiveReconnectionAI {
-    pub fn new(config: ReconnectionConfig) -> Self {
+    pub fn new(db: Arc<Db>, config: ReconnectionConfig) -> Self {
+        let profiles = Self::load_profiles_from_db(&db);
         Self {
-            profiles: Arc::new(RwLock::new(HashMap::new())),
+            profiles: Arc::new(RwLock::new(profiles)),
             config,
             network_health: Arc::new(RwLock::new(1.0)),
+            db,
         }
+    }
+
+    // ===== DB persistence =====
+
+    fn load_profiles_from_db(db: &Db) -> HashMap<String, PeerConnectionProfile> {
+        let mut map = HashMap::new();
+        for (key, value) in db.scan_prefix(DB_PREFIX).flatten() {
+            let ip = String::from_utf8_lossy(&key[DB_PREFIX.len()..]).to_string();
+            if let Ok(profile) = serde_json::from_slice::<PeerConnectionProfile>(&value) {
+                map.insert(ip, profile);
+            }
+        }
+        map
+    }
+
+    fn save_profile(&self, profile: &PeerConnectionProfile) {
+        if let Ok(bytes) = serde_json::to_vec(profile) {
+            let mut key = DB_PREFIX.to_vec();
+            key.extend_from_slice(profile.ip.as_bytes());
+            let _ = self.db.insert(key, bytes);
+        }
+    }
+
+    fn remove_profile_from_db(&self, ip: &str) {
+        let mut key = DB_PREFIX.to_vec();
+        key.extend_from_slice(ip.as_bytes());
+        let _ = self.db.remove(key);
     }
 
     /// Record a successful connection
@@ -157,15 +194,21 @@ impl AdaptiveReconnectionAI {
         // Update reliability score
         self.update_reliability_score(profile);
 
-        // Track time of day patterns
-        let hour = current_hour();
-        profile.best_time_of_day = Some(hour);
+        // Track time-of-day patterns (per-hour success rates).
+        let hour = current_hour() as usize;
+        profile.hourly_attempt_counts[hour] = profile.hourly_attempt_counts[hour].saturating_add(1);
+        profile.hourly_success_counts[hour] = profile.hourly_success_counts[hour].saturating_add(1);
 
         profile.last_updated = now_secs();
 
+        let ip_owned = ip.to_string();
+        let profile_clone = profile.clone();
+        drop(profiles);
+        self.save_profile(&profile_clone);
+
         debug!(
             "✅ Connection success for {}: reliability={:.2}, avg_connect={:.0}ms",
-            ip, profile.reliability_score, profile.avg_time_to_connect_ms
+            ip_owned, profile_clone.reliability_score, profile_clone.avg_time_to_connect_ms
         );
     }
 
@@ -200,18 +243,23 @@ impl AdaptiveReconnectionAI {
         // Update reliability score
         self.update_reliability_score(profile);
 
-        // Track time of day patterns
-        let hour = current_hour();
-        profile.worst_time_of_day = Some(hour);
+        // Track time-of-day patterns (failures only increment attempt count).
+        let hour = current_hour() as usize;
+        profile.hourly_attempt_counts[hour] = profile.hourly_attempt_counts[hour].saturating_add(1);
 
         profile.last_updated = now_secs();
 
+        let ip_owned = ip.to_string();
+        let profile_clone = profile.clone();
+        drop(profiles);
+        self.save_profile(&profile_clone);
+
         debug!(
             "❌ Connection failure for {}: consecutive={}, reliability={:.2}, next_retry={:.0}s",
-            ip,
-            profile.consecutive_failures,
-            profile.reliability_score,
-            profile.optimal_retry_delay_secs
+            ip_owned,
+            profile_clone.consecutive_failures,
+            profile_clone.reliability_score,
+            profile_clone.optimal_retry_delay_secs
         );
     }
 
@@ -227,6 +275,9 @@ impl AdaptiveReconnectionAI {
                 + alpha * session_duration_secs as f64;
 
             profile.last_updated = now_secs();
+            let profile_clone = profile.clone();
+            drop(profiles);
+            self.save_profile(&profile_clone);
         }
     }
 
@@ -294,6 +345,7 @@ impl AdaptiveReconnectionAI {
     /// Call this after evicting a peer from the peer_manager.
     pub fn forget_peer(&self, ip: &str) {
         self.profiles.write().remove(ip);
+        self.remove_profile_from_db(ip);
     }
 
     /// Update network health factor (called from consensus health monitor)
@@ -391,13 +443,31 @@ impl AdaptiveReconnectionAI {
         // Adjust for consecutive failures
         let failure_factor = 1.0 + (profile.consecutive_failures as f64 * 0.5);
 
-        let adjusted_delay = (base_delay * health_factor * masternode_factor * failure_factor)
-            .max(self.config.min_retry_delay_secs)
-            .min(self.config.max_retry_delay_secs);
+        // Time-of-day factor: if this hour has historically poor results, wait longer;
+        // if it's historically good, reduce delay slightly.
+        let hour = current_hour() as usize;
+        let hour_attempts = profile.hourly_attempt_counts[hour];
+        let time_of_day_factor = if hour_attempts >= 3 {
+            let hour_success_rate =
+                profile.hourly_success_counts[hour] as f64 / hour_attempts as f64;
+            // Map [0, 1] success rate → [1.5, 0.8] delay factor
+            1.5 - 0.7 * hour_success_rate
+        } else {
+            1.0 // not enough data — neutral
+        };
+
+        let adjusted_delay =
+            (base_delay * health_factor * masternode_factor * failure_factor * time_of_day_factor)
+                .max(self.config.min_retry_delay_secs)
+                .min(self.config.max_retry_delay_secs);
 
         let reasoning = format!(
-            "reliability={:.2}, failures={}, base_delay={:.0}s, adjusted={:.0}s",
-            profile.reliability_score, profile.consecutive_failures, base_delay, adjusted_delay
+            "reliability={:.2}, failures={}, base_delay={:.0}s, tod_factor={:.2}, adjusted={:.0}s",
+            profile.reliability_score,
+            profile.consecutive_failures,
+            base_delay,
+            time_of_day_factor,
+            adjusted_delay
         );
 
         ReconnectionAdvice {
@@ -462,10 +532,16 @@ fn current_hour() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
+
+    fn ephemeral_db() -> Arc<sled::Db> {
+        let dir = tempdir().unwrap();
+        Arc::new(sled::open(dir.path()).unwrap())
+    }
 
     #[test]
     fn test_new_peer_advice() {
-        let ai = AdaptiveReconnectionAI::new(ReconnectionConfig::default());
+        let ai = AdaptiveReconnectionAI::new(ephemeral_db(), ReconnectionConfig::default());
 
         let advice = ai.get_reconnection_advice("192.168.1.1", false);
         assert!(advice.should_attempt);
@@ -474,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_masternode_priority() {
-        let ai = AdaptiveReconnectionAI::new(ReconnectionConfig::default());
+        let ai = AdaptiveReconnectionAI::new(ephemeral_db(), ReconnectionConfig::default());
 
         let advice = ai.get_reconnection_advice("192.168.1.1", true);
         assert_eq!(advice.priority, ReconnectionPriority::Critical);
@@ -482,7 +558,7 @@ mod tests {
 
     #[test]
     fn test_reliability_updates() {
-        let ai = AdaptiveReconnectionAI::new(ReconnectionConfig::default());
+        let ai = AdaptiveReconnectionAI::new(ephemeral_db(), ReconnectionConfig::default());
 
         // Record successes
         ai.record_connection_success("192.168.1.1", false, 100);
@@ -496,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_backoff_on_failure() {
-        let ai = AdaptiveReconnectionAI::new(ReconnectionConfig::default());
+        let ai = AdaptiveReconnectionAI::new(ephemeral_db(), ReconnectionConfig::default());
 
         // Record failures
         ai.record_connection_failure("192.168.1.1", false, "timeout");
@@ -515,7 +591,7 @@ mod tests {
             cooldown_period_secs: 60,
             ..Default::default()
         };
-        let ai = AdaptiveReconnectionAI::new(config);
+        let ai = AdaptiveReconnectionAI::new(ephemeral_db(), config);
 
         // Trigger cooldown
         for _ in 0..5 {
@@ -525,5 +601,44 @@ mod tests {
         let advice = ai.get_reconnection_advice("192.168.1.1", false);
         assert!(!advice.should_attempt);
         assert_eq!(advice.priority, ReconnectionPriority::Skip);
+    }
+
+    #[test]
+    fn test_persistence_roundtrip() {
+        let dir = tempdir().unwrap();
+        let db: Arc<sled::Db> = Arc::new(sled::open(dir.path()).unwrap());
+
+        {
+            let ai = AdaptiveReconnectionAI::new(db.clone(), ReconnectionConfig::default());
+            ai.record_connection_success("10.0.0.1", false, 50);
+            ai.record_connection_success("10.0.0.1", false, 60);
+            ai.record_connection_success("10.0.0.1", false, 55);
+            let p = ai.get_peer_stats("10.0.0.1").unwrap();
+            assert!(p.reliability_score > 0.8);
+        }
+
+        // Re-open — profile should survive.
+        let ai2 = AdaptiveReconnectionAI::new(db, ReconnectionConfig::default());
+        let p2 = ai2
+            .get_peer_stats("10.0.0.1")
+            .expect("profile must persist across restarts");
+        assert!(p2.reliability_score > 0.8);
+        assert_eq!(p2.successful_connections, 3);
+    }
+
+    #[test]
+    fn test_time_of_day_factor() {
+        let ai = AdaptiveReconnectionAI::new(ephemeral_db(), ReconnectionConfig::default());
+
+        // Prime time-of-day data with enough samples.
+        // Record 10 failures at current hour to make the hour look bad.
+        for _ in 0..10 {
+            ai.record_connection_failure("10.0.0.2", false, "timeout");
+        }
+
+        let profile = ai.get_peer_stats("10.0.0.2").unwrap();
+        let hour = ((now_secs() % 86400) / 3600) as usize;
+        assert!(profile.hourly_attempt_counts[hour] >= 10);
+        assert_eq!(profile.hourly_success_counts[hour], 0);
     }
 }

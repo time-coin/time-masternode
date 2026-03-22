@@ -107,6 +107,7 @@ impl AISystem {
             Arc::new(anomaly_detector::AnomalyDetector::new(db.clone(), 2.0, 10)?);
         let attack_detector = Arc::new(attack_detector::AttackDetector::new(db.clone())?);
         let reconnection_ai = Arc::new(adaptive_reconnection::AdaptiveReconnectionAI::new(
+            db.clone(),
             adaptive_reconnection::ReconnectionConfig::default(),
         ));
         let peer_selector = Arc::new(peer_selector::AIPeerSelector::new(db.clone(), 0.1)?);
@@ -125,6 +126,42 @@ impl AISystem {
             network_optimizer,
             metrics_collector,
         })
+    }
+
+    /// Propagate signals between AI modules so they inform each other.
+    ///
+    /// Called periodically to let cross-module intelligence flow:
+    /// - Active attacks down-score the involved peers in the peer selector.
+    /// - Recent anomalies lower the reconnection AI's network health estimate.
+    /// - Network health from the optimizer feeds the reconnection AI.
+    pub fn propagate_signals(&self) {
+        use std::time::Duration;
+
+        // 1. Attacks → peer selector: peers flagged for attacks get mismatch penalties.
+        let recent_attacks = self
+            .attack_detector
+            .get_recent_attacks(Duration::from_secs(300));
+        for attack in &recent_attacks {
+            for ip in &attack.source_ips {
+                self.peer_selector.record_consensus_mismatch(ip);
+            }
+        }
+
+        // 2. Anomalies → reconnection AI: if there are many recent anomalies, treat the
+        //    network as less healthy so the reconnection AI becomes more aggressive.
+        let anomaly_count = self.anomaly_detector.get_anomaly_count();
+        let anomaly_health = if anomaly_count == 0 {
+            1.0
+        } else {
+            (1.0 - (anomaly_count as f64 * 0.05)).clamp(0.2, 1.0)
+        };
+
+        // 3. Network optimizer health → reconnection AI.
+        let optimizer_health = self.network_optimizer.get_network_health_score();
+
+        // Combined health = geometric mean of both signals.
+        let combined_health = (anomaly_health * optimizer_health).sqrt();
+        self.reconnection_ai.set_network_health(combined_health);
     }
 
     /// Collect metrics from all subsystems and record a dashboard snapshot.
@@ -184,6 +221,9 @@ impl AISystem {
         };
 
         self.metrics_collector.record_metrics(dashboard);
+
+        // Cross-module signal propagation — run after metrics are fresh.
+        self.propagate_signals();
     }
 
     /// Generate a text report of all AI systems.
