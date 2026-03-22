@@ -5248,14 +5248,16 @@ impl Blockchain {
                     block.header.height, total_non_producer_paid, total_tier_budget
                 ));
             }
-            // We can't determine which pools were empty; conservatively assume
-            // the producer only received base reward (no roll-up credit).
+            // We can't determine which tier pools were empty and rolled to the producer.
+            // Use the full tier budget as the worst-case rolled-up amount so the
+            // producer max check becomes: PRODUCER_REWARD + total_tier_budget + fees + tolerance.
+            // This is the theoretical maximum a producer can receive (all pools rolled up).
+            rolled_up_to_producer = total_tier_budget;
             tracing::debug!(
-                "Block {} has {} satoshis paid to {} unknown (deregistered) recipients — \
-                 skipping strict per-tier pool verification",
+                "Block {} has {} satoshis paid to unknown (deregistered) recipients — \
+                 skipping strict per-tier pool verification, using loose producer max",
                 block.header.height,
                 unknown_non_producer_paid,
-                block.masternode_rewards.len()
             );
         } else {
             for tier in &[
