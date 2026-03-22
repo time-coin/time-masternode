@@ -5128,15 +5128,8 @@ impl Blockchain {
         // Every validating node independently computes the same result, closing the gap
         // where a dishonest producer could manipulate pool distributions.
         //
-        // Skip pool distribution validation for:
-        //  - Early blocks (no meaningful fairness history yet)
-        //  - Historical blocks during sync (current registry does not reflect the historical
-        //    masternode set — unallocated tier pools roll up differently, causing false rejects)
-        // Only validate distribution for blocks within 200 blocks of the current tip,
-        // where the live registry is an accurate proxy for what the producer saw.
-        let current_tip = self.current_height.load(Ordering::Acquire);
-        let near_tip = block.header.height + 200 >= current_tip;
-        if block.header.height > 10 && near_tip {
+        // Skip for very early blocks (no meaningful fairness history yet).
+        if block.header.height > 10 {
             self.validate_pool_distribution(block, calculated_fees)
                 .await?;
         }
@@ -5144,258 +5137,194 @@ impl Blockchain {
         Ok(())
     }
 
-    /// Verify the reward distribution matches the expected per-tier algorithm.
-    /// Mirrors the logic in produce_block_at_height() exactly, using chain-derived
-    /// data so any node can independently verify. Strict validation: rejects blocks
-    /// where the selected winners don't match consensus-deterministic computation.
+    /// Verify the reward distribution in a block is mathematically consistent with the
+    /// tier-pool algorithm, using only data committed in the block itself.
+    ///
+    /// Previous approach: re-derive expected rewards from the live registry, compare to
+    /// block.masternode_rewards.  Problem: the live registry reflects the current network,
+    /// not the historical state when the block was produced, so historical blocks during
+    /// sync are systematically rejected.
+    ///
+    /// This approach: read the actual rewards from block.masternode_rewards (committed,
+    /// tamper-evident), classify each recipient's tier from the registry (stable — tier
+    /// changes require re-registering with a new collateral UTXO), and verify the amounts
+    /// are consistent with the tier-pool constants.  We verify AMOUNTS, not IDENTITY of
+    /// winner within a tier (fairness-rotation winner can only be verified with historical
+    /// blocks_without_reward state that is not stored on-chain).
     async fn validate_pool_distribution(
         &self,
         block: &Block,
         calculated_fees: u64,
     ) -> Result<(), String> {
         use crate::constants::blockchain::{
-            MAX_FREE_TIER_RECIPIENTS, MIN_POOL_PAYOUT_SATOSHIS, PRODUCER_REWARD_SATOSHIS,
+            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, MIN_POOL_PAYOUT_SATOSHIS,
+            PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
         };
         use crate::types::MasternodeTier;
 
         let producer_addr = &block.header.leader;
         if producer_addr.is_empty() || block.masternode_rewards.is_empty() {
-            return Ok(()); // Can't validate without producer info
+            return Ok(());
         }
 
-        // Look up the producer's wallet address from the registry
+        // ── Step 1: resolve producer's wallet address ─────────────────────────
+        // We still use the registry for this single lookup (IP → wallet). The
+        // producer's wallet address is stable — if we can't find it the block
+        // is either very old or the registry is empty; skip validation.
         let all_infos = self.masternode_registry.list_all().await;
-        let producer_wallet = all_infos
+        let producer_wallet = match all_infos
             .iter()
             .find(|info| info.masternode.address == *producer_addr)
-            .map(|info| info.masternode.wallet_address.clone());
-        let producer_wallet = match producer_wallet {
+            .map(|info| info.masternode.wallet_address.clone())
+        {
             Some(w) => w,
-            None => return Ok(()), // Unknown producer — can't validate pool split
+            None => return Ok(()),
         };
 
-        // Compute expected producer share: 30 TIME + fees
-        let expected_producer_base = PRODUCER_REWARD_SATOSHIS + calculated_fees;
+        // ── Step 2: partition block.masternode_rewards into producer vs tier pools ──
+        // Each entry in masternode_rewards is a (TIME_wallet_address, satoshis) pair
+        // committed in the block.  Look up each non-producer wallet's tier from the
+        // registry (stable property) so we can verify the pool amounts.
+        let mut producer_received: u64 = 0;
+        // Accumulate the total paid per tier from the block's actual rewards.
+        let mut tier_paid: std::collections::HashMap<MasternodeTier, u64> =
+            std::collections::HashMap::new();
+        let mut unknown_non_producer_paid: u64 = 0;
 
-        // Find ALL eligible pool nodes (all tiers, with maturity gate for Free)
-        let eligible_pool: Vec<_> = all_infos
-            .iter()
-            .filter(|info| {
-                info.is_active
-                    && (!matches!(info.masternode.tier, MasternodeTier::Free)
-                        || MasternodeRegistry::is_mature_for_sortition(
-                            info,
-                            block.header.height,
-                            self.network_type,
-                        ))
-            })
-            .collect();
+        for (wallet, amount) in &block.masternode_rewards {
+            if wallet == &producer_wallet {
+                producer_received += amount;
+            } else {
+                match self.masternode_registry.tier_for_wallet(wallet).await {
+                    Some(tier) => {
+                        *tier_paid.entry(tier).or_insert(0) += amount;
+                    }
+                    None => {
+                        // Wallet not in current registry — masternode may have
+                        // deregistered since the block was produced.  Accept the
+                        // payment as long as it doesn't exceed the largest single pool.
+                        unknown_non_producer_paid += amount;
+                        if *amount > GOLD_POOL_SATOSHIS {
+                            return Err(format!(
+                                "Block {} unknown recipient {} received {} satoshis, \
+                                 exceeds max tier pool {}",
+                                block.header.height, wallet, amount, GOLD_POOL_SATOSHIS
+                            ));
+                        }
+                    }
+                }
+            }
+        }
 
-        // Get pool reward tracking for fairness-based rotation
-        let blocks_without_map = self
-            .masternode_registry
-            .get_pool_reward_tracking(self)
-            .await;
+        // ── Step 3: verify each tier pool was distributed correctly ───────────
+        // For each paid tier: the total paid to all recipients of that tier must
+        // equal the tier's canonical pool allocation.
+        // For each unpaid tier (no recipients): that pool must have rolled up to
+        // the producer — we track this to verify the producer's total below.
+        let mut rolled_up_to_producer: u64 = 0;
 
-        // Re-derive expected rewards using per-tier algorithm
-        let mut expected_rewards: Vec<(String, u64)> = Vec::new();
-        expected_rewards.push((producer_wallet.clone(), expected_producer_base));
-
-        let tiers = [
+        for tier in &[
             MasternodeTier::Gold,
             MasternodeTier::Silver,
             MasternodeTier::Bronze,
             MasternodeTier::Free,
-        ];
+        ] {
+            let pool = tier.pool_allocation();
+            let paid = tier_paid.get(tier).copied().unwrap_or(0);
 
-        for tier in &tiers {
-            let tier_pool = tier.pool_allocation();
-
-            let mut tier_nodes: Vec<_> = eligible_pool
-                .iter()
-                .filter(|mn| mn.masternode.tier == *tier)
-                .map(|mn| {
-                    let blocks_without = blocks_without_map
-                        .get(&mn.masternode.address)
-                        .copied()
-                        .unwrap_or(0);
-                    let fairness_bonus = blocks_without / 10; // uncapped
-                    (*mn, fairness_bonus)
-                })
-                .collect();
-
-            if tier_nodes.is_empty() {
-                if let Some(entry) = expected_rewards.first_mut() {
-                    entry.1 += tier_pool;
-                }
+            if paid == 0 {
+                // No recipients in this tier — pool should have rolled to producer.
+                rolled_up_to_producer += pool;
                 continue;
             }
 
-            tier_nodes.sort_by(|a, b| {
-                b.1.cmp(&a.1)
-                    .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
-            });
-
-            // Paid tiers: single winner. Free tier: share among up to MAX_FREE_TIER_RECIPIENTS.
-            let is_free_tier = matches!(tier, MasternodeTier::Free);
-            let recipient_count = if is_free_tier {
-                tier_nodes.len().min(MAX_FREE_TIER_RECIPIENTS)
+            // For Free tier: pool is split among ≤ MAX_FREE_TIER_RECIPIENTS nodes.
+            // For paid tiers: the full pool goes to exactly one winner.
+            // In both cases, total paid to the tier must equal the pool allocation
+            // (within 1 satoshi per recipient for integer-division rounding).
+            let recipient_count = if matches!(tier, MasternodeTier::Free) {
+                // Estimate recipient count from amount — Free shares pool evenly.
+                // Allow up to MAX_FREE_TIER_RECIPIENTS.
+                let per_node = pool / MAX_FREE_TIER_RECIPIENTS as u64;
+                if per_node < MIN_POOL_PAYOUT_SATOSHIS {
+                    // Pool too small to split; should have rolled to producer.
+                    rolled_up_to_producer += pool;
+                    if paid > 0 {
+                        tracing::warn!(
+                            "⚠️ Block {} Free tier: per-node payout {} below minimum {}, \
+                             but {} satoshis were distributed",
+                            block.header.height, per_node, MIN_POOL_PAYOUT_SATOSHIS, paid
+                        );
+                    }
+                    continue;
+                }
+                // Accept any split ≤ MAX_FREE_TIER_RECIPIENTS
+                (paid / per_node).max(1) as usize
             } else {
                 1
             };
 
-            let per_node = tier_pool / recipient_count as u64;
-
-            if per_node < MIN_POOL_PAYOUT_SATOSHIS {
-                if let Some(entry) = expected_rewards.first_mut() {
-                    entry.1 += tier_pool;
-                }
-                continue;
-            }
-
-            let mut distributed = 0u64;
-            for (i, (mn, _)) in tier_nodes.iter().take(recipient_count).enumerate() {
-                let share = if i == recipient_count - 1 {
-                    tier_pool - distributed
-                } else {
-                    per_node
-                };
-                if mn.masternode.wallet_address == producer_wallet {
-                    if let Some(entry) = expected_rewards
-                        .iter_mut()
-                        .find(|(a, _)| a == &mn.masternode.wallet_address)
-                    {
-                        entry.1 += share;
-                    }
-                } else {
-                    expected_rewards.push((mn.masternode.wallet_address.clone(), share));
-                }
-                distributed += share;
-            }
-        }
-
-        // ═══ STRICT VALIDATION ═══
-        // Every validating node computes the same expected rewards from chain data.
-        // Reject blocks where the selected winners don't match.
-
-        // Verify recipient count matches exactly
-        if expected_rewards.len() != block.masternode_rewards.len() {
-            // Allow minor divergence only if masternode lists differ between nodes
-            // (e.g., a node just registered/deregistered and not all peers see it yet).
-            // Log a warning but don't hard-reject to avoid chain splits during registry sync.
-            tracing::warn!(
-                "⚠️ Block {} reward validation: expected {} recipients, got {} (possible registry divergence)",
-                block.header.height,
-                expected_rewards.len(),
-                block.masternode_rewards.len()
-            );
-        }
-
-        // Verify producer gets at least their minimum share
-        // Use the block's active_masternodes_bitmap to determine how many masternodes
-        // were active when the block was produced. If our local registry count differs
-        // from the bitmap count, rewards were computed under a different masternode set.
-        let actual_producer_amount = block
-            .masternode_rewards
-            .iter()
-            .find(|(addr, _)| addr == &producer_wallet)
-            .map(|(_, amt)| *amt)
-            .unwrap_or(0);
-
-        let bitmap_active_count: u32 = block
-            .header
-            .active_masternodes_bitmap
-            .iter()
-            .map(|byte| byte.count_ones())
-            .sum();
-        let our_active_count = expected_rewards.len() as u32;
-        // Detect registry divergence via bitmap mismatch OR recipient count mismatch.
-        // The bitmap may be absent/zeroed in older blocks, so the recipient count
-        // mismatch is the reliable fallback (the warning at 5237 already logged it).
-        let recipient_count_diverged = block.masternode_rewards.len() as u32 != our_active_count;
-        let registry_diverged = recipient_count_diverged
-            || (bitmap_active_count > 0 && bitmap_active_count != our_active_count);
-
-        if actual_producer_amount > 0
-            && calculated_fees == 0
-            && actual_producer_amount < PRODUCER_REWARD_SATOSHIS
-        {
-            if registry_diverged {
-                // Bitmap says different masternode count than our registry — accept the block
-                tracing::warn!(
-                    "⚠️ Block {} producer {} received {} satoshis (minimum {}), \
-                     accepting: bitmap shows {} active masternodes vs our {} expected recipients",
-                    block.header.height,
-                    producer_addr,
-                    actual_producer_amount,
-                    PRODUCER_REWARD_SATOSHIS,
-                    bitmap_active_count,
-                    our_active_count
-                );
-            } else {
+            // Rounding tolerance: at most 1 satoshi per recipient.
+            let tolerance = recipient_count as u64;
+            let diff = if paid > pool { paid - pool } else { pool - paid };
+            if diff > tolerance {
                 return Err(format!(
-                    "Block {} producer {} received {} satoshis, less than minimum {} (pool theft)",
-                    block.header.height,
-                    producer_addr,
-                    actual_producer_amount,
-                    PRODUCER_REWARD_SATOSHIS
+                    "Block {} {:?} tier pool mismatch: expected {} satoshis, \
+                     block distributed {} (diff {})",
+                    block.header.height, tier, pool, paid, diff
                 ));
             }
         }
 
-        // Verify each expected recipient is present with correct amount (tight tolerance)
-        // Skip strict checks when registry has diverged — reward splits will differ
-        if !registry_diverged {
-            let tolerance = crate::constants::blockchain::SATOSHIS_PER_TIME; // 1 TIME for rounding
-            for (expected_addr, expected_amt) in &expected_rewards {
-                match block
-                    .masternode_rewards
-                    .iter()
-                    .find(|(a, _)| a == expected_addr)
-                {
-                    Some((_, actual_amt)) => {
-                        let diff = if *actual_amt > *expected_amt {
-                            actual_amt - expected_amt
-                        } else {
-                            expected_amt - actual_amt
-                        };
-                        if diff > tolerance {
-                            let max_divergence = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
-                            if diff > max_divergence {
-                                return Err(format!(
-                                    "Block {} reward for {} deviates beyond max: expected {} satoshis, got {} (diff {})",
-                                    block.header.height, expected_addr, expected_amt, actual_amt, diff
-                                ));
-                            }
-                            tracing::warn!(
-                                "⚠️ Block {} reward for {} deviates: expected {} satoshis, got {} (diff {}). \
-                                 Accepting due to possible masternode list divergence.",
-                                block.header.height, expected_addr, expected_amt, actual_amt, diff
-                            );
-                        }
-                    }
-                    None => {
-                        tracing::warn!(
-                            "⚠️ Block {} expected reward recipient {} not found in actual rewards (registry divergence)",
-                            block.header.height, expected_addr
-                        );
-                    }
-                }
-            }
+        // ── Step 4: verify producer received correct amount ──────────────────
+        // Producer must receive: PRODUCER_REWARD + fees + all rolled-up empty pools.
+        // Allow ±1 TIME tolerance for rounding and minor fee-calculation differences
+        // (e.g., a peer computed fees slightly differently due to UTXO lookup order).
+        let expected_producer_min =
+            PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
+        let expected_producer_max =
+            PRODUCER_REWARD_SATOSHIS + calculated_fees + rolled_up_to_producer + SATOSHIS_PER_TIME;
+
+        if producer_received < expected_producer_min.saturating_sub(SATOSHIS_PER_TIME) {
+            return Err(format!(
+                "Block {} producer {} received {} satoshis, \
+                 below minimum expected {} (30 TIME + {} rolled-up pools)",
+                block.header.height,
+                producer_addr,
+                producer_received,
+                expected_producer_min,
+                rolled_up_to_producer
+            ));
         }
 
-        // Verify no unexpected recipients received more than the largest tier pool
-        // During registry divergence, skip this check since reward splits differ
-        let max_tier_pool = crate::constants::blockchain::GOLD_POOL_SATOSHIS;
-        if !registry_diverged {
-            for (addr, amount) in &block.masternode_rewards {
-                if addr != &producer_wallet && *amount > max_tier_pool {
-                    return Err(format!(
-                        "Block {} recipient {} received {} satoshis, exceeds max tier pool {}",
-                        block.header.height, addr, amount, max_tier_pool
-                    ));
-                }
-            }
+        if producer_received > expected_producer_max {
+            return Err(format!(
+                "Block {} producer {} received {} satoshis, \
+                 exceeds maximum expected {} (30 TIME + fees {} + rolled {} + 1 TIME tolerance)",
+                block.header.height,
+                producer_addr,
+                producer_received,
+                expected_producer_max,
+                calculated_fees,
+                rolled_up_to_producer
+            ));
+        }
+
+        // ── Step 5: sanity-check using bitmap active count ────────────────────
+        let bitmap_active_count: u32 = block
+            .header
+            .active_masternodes_bitmap
+            .iter()
+            .map(|b| b.count_ones())
+            .sum();
+        let actual_recipient_count = block.masternode_rewards.len() as u32;
+        if bitmap_active_count > 0 && actual_recipient_count > bitmap_active_count {
+            tracing::warn!(
+                "⚠️ Block {} has more reward recipients ({}) than bitmap active count ({})",
+                block.header.height,
+                actual_recipient_count,
+                bitmap_active_count
+            );
         }
 
         Ok(())

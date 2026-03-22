@@ -775,6 +775,19 @@ impl MasternodeRegistry {
         self.masternodes.read().await.values().cloned().collect()
     }
 
+    /// Look up the tier for a wallet (reward) address.
+    /// Used by reward validation to classify entries in block.masternode_rewards
+    /// without needing to know which masternodes were active at production time.
+    /// Returns None if the wallet address is not in the current registry.
+    pub async fn tier_for_wallet(&self, wallet_address: &str) -> Option<crate::types::MasternodeTier> {
+        self.masternodes
+            .read()
+            .await
+            .values()
+            .find(|info| info.masternode.wallet_address == wallet_address)
+            .map(|info| info.masternode.tier)
+    }
+
     pub async fn get_active_masternodes(&self) -> Vec<MasternodeInfo> {
         self.masternodes
             .read()
