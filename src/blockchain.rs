@@ -7476,10 +7476,13 @@ impl Blockchain {
         let fork_height = blocks[0].header.height;
         let our_height = self.get_height();
 
-        // Guard: if a reorg is already committed (ReadyToReorg) or in progress (Reorging),
-        // do not allow a concurrent handle_fork() call to overwrite the fork_state.
-        // Without this, a second peer arriving while the first peer's reorg is about to execute
-        // would clobber the ReadyToReorg state with FetchingChain, causing the reorg to never run.
+        // Guard: if a reorg is already committed (ReadyToReorg), in progress (Reorging),
+        // or actively fetching blocks from a DIFFERENT peer (FetchingChain), do not allow
+        // a concurrent handle_fork() call to overwrite the fork_state.
+        // Without this guard:
+        // - ReadyToReorg/Reorging: a second peer's call clobbers the state, reorg never runs.
+        // - FetchingChain (different peer): a same-height peer hijacks the state, discarding
+        //   accumulated blocks from a longer-chain peer, causing infinite fork loops.
         {
             let current_state = self.fork_state.read().await;
             match &*current_state {
@@ -7488,6 +7491,19 @@ impl Blockchain {
                     tracing::debug!(
                         "🚫 Skipping handle_fork() from {} — reorg already committed/in-progress",
                         peer_addr
+                    );
+                    return Ok(());
+                }
+                ForkResolutionState::FetchingChain {
+                    peer_addr: fetching_peer,
+                    peer_height,
+                    ..
+                } if fetching_peer != &peer_addr => {
+                    tracing::debug!(
+                        "🚫 Skipping handle_fork() from {} — already fetching from {} (tip {})",
+                        peer_addr,
+                        fetching_peer,
+                        peer_height
                     );
                     return Ok(());
                 }
