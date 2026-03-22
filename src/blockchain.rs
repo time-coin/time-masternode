@@ -5921,12 +5921,23 @@ impl Blockchain {
         // Validation must use the SAME ordering - directly from block.transactions
         let computed_merkle = crate::block::types::calculate_merkle_root(&block.transactions);
         if computed_merkle != block.header.merkle_root {
-            return Err(format!(
-                "Block {} merkle root mismatch: computed {}, header {}",
-                block.header.height,
-                hex::encode(&computed_merkle[..8]),
-                hex::encode(&block.header.merkle_root[..8])
-            ));
+            // Backward-compat: blocks produced before the txid fix (dd2ef7d) included
+            // encrypted_memo in the txid hash.  Try the legacy formula before rejecting.
+            let legacy_merkle =
+                crate::block::types::calculate_merkle_root_legacy(&block.transactions);
+            if legacy_merkle == block.header.merkle_root {
+                tracing::debug!(
+                    "Block {} accepted with legacy merkle root (pre-txid-fix format)",
+                    block.header.height
+                );
+            } else {
+                return Err(format!(
+                    "Block {} merkle root mismatch: computed {}, header {}",
+                    block.header.height,
+                    hex::encode(&computed_merkle[..8]),
+                    hex::encode(&block.header.merkle_root[..8])
+                ));
+            }
         }
 
         // 3. Verify timestamp is reasonable (Phase 1.3: strict ±15 minute tolerance)
@@ -6304,12 +6315,38 @@ impl Blockchain {
                         return Ok(true);
                     }
                     Err(_) => {
-                        // Previous block also missing - we have a bigger gap
+                        // Previous block also missing — we have a multi-block gap.
+                        // Walk backwards to find the lowest missing height, then
+                        // request the entire missing range from the best available peer.
+                        let mut gap_start = block_height - 1;
+                        while gap_start > 0 && self.get_block(gap_start - 1).is_err() {
+                            gap_start -= 1;
+                        }
+                        let gap_end = current; // chain tip
                         tracing::warn!(
-                            "⚠️  Cannot fill gap at {}: previous block {} also missing",
-                            block_height,
-                            block_height - 1
+                            "⚠️  Multi-block gap detected: heights {}-{} missing — \
+                             requesting range from peers",
+                            gap_start,
+                            gap_end
                         );
+                        // Fire a targeted GetBlocks for the missing range.
+                        let peer_reg = self.peer_registry.read().await;
+                        if let Some(registry) = peer_reg.as_ref() {
+                            let peers = registry.get_connected_peers().await;
+                            if let Some(peer) = peers.first() {
+                                let req = crate::network::message::NetworkMessage::GetBlocks(
+                                    gap_start, gap_end,
+                                );
+                                if let Err(e) = registry.send_to_peer(peer, req).await {
+                                    tracing::warn!("Failed to request gap range from {}: {}", peer, e);
+                                } else {
+                                    tracing::info!(
+                                        "📥 Requested missing blocks {}-{} from {}",
+                                        gap_start, gap_end, peer
+                                    );
+                                }
+                            }
+                        }
                         return Ok(false);
                     }
                 }
@@ -8619,12 +8656,20 @@ impl Blockchain {
                         }
                     }
 
-                    // Check 4: Merkle root matches transactions
+                    // Check 4: Merkle root matches transactions.
+                    // Try the current formula first; fall back to the legacy formula
+                    // (pre-dd2ef7d, which included encrypted_memo in the txid) so that
+                    // blocks produced by older nodes are not incorrectly flagged as corrupt.
                     let computed_merkle =
                         crate::block::types::calculate_merkle_root(&block.transactions);
                     if computed_merkle != block.header.merkle_root {
-                        tracing::error!("❌ CORRUPT BLOCK {}: merkle root mismatch", height);
-                        corrupt_blocks.push(height);
+                        let legacy_merkle =
+                            crate::block::types::calculate_merkle_root_legacy(&block.transactions);
+                        if legacy_merkle != block.header.merkle_root {
+                            tracing::error!("❌ CORRUPT BLOCK {}: merkle root mismatch", height);
+                            corrupt_blocks.push(height);
+                        }
+                        // else: block used legacy txid formula — treat as valid
                     }
                 }
                 Err(e) => {
