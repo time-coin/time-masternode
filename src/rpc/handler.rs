@@ -409,31 +409,37 @@ impl RpcHandler {
 
     async fn get_peer_info(&self) -> Result<Value, RpcError> {
         let masternodes = self.registry.list_all().await;
-        let current_height = self.blockchain.get_height();
-        let peers: Vec<Value> = masternodes
-            .iter()
-            .map(|mn| {
-                // Ping times are not tracked per-peer in the current registry implementation.
-                // A future improvement would pull real RTT from PeerConnectionRegistry.
-                let pingtime: Option<f64> = None;
+        let peer_registry = self.blockchain.get_peer_registry().await;
 
-                json!({
-                    "addr": mn.masternode.address.clone(),
-                    "services": "0000000000000409",
-                    "lastseen": mn.masternode.registered_at,
-                    "subver": format!("/timed:{}/", env!("CARGO_PKG_VERSION")),
-                    "inbound": false,
-                    "conntime": mn.masternode.registered_at,
-                    "timeoffset": 0,
-                    "pingtime": pingtime,
-                    "version": 110000,
-                    "is_masternode": true,
-                    "tier": format!("{:?}", mn.masternode.tier),
-                    "active": mn.is_active,
-                    "height": if mn.is_active { current_height } else { 0u64 },
-                })
-            })
-            .collect();
+        let mut peers: Vec<Value> = Vec::with_capacity(masternodes.len());
+        for mn in &masternodes {
+            // Look up the peer's actual reported height from the connection registry
+            let height = if mn.is_active {
+                if let Some(ref pr) = peer_registry {
+                    pr.get_peer_height(&mn.masternode.address).await.unwrap_or(0)
+                } else {
+                    0u64
+                }
+            } else {
+                0u64
+            };
+
+            peers.push(json!({
+                "addr": mn.masternode.address.clone(),
+                "services": "0000000000000409",
+                "lastseen": mn.masternode.registered_at,
+                "subver": format!("/timed:{}/", env!("CARGO_PKG_VERSION")),
+                "inbound": false,
+                "conntime": mn.masternode.registered_at,
+                "timeoffset": 0,
+                "pingtime": serde_json::Value::Null,
+                "version": 110000,
+                "is_masternode": true,
+                "tier": format!("{:?}", mn.masternode.tier),
+                "active": mn.is_active,
+                "height": height,
+            }));
+        }
         Ok(json!(peers))
     }
 
