@@ -5128,9 +5128,15 @@ impl Blockchain {
         // Every validating node independently computes the same result, closing the gap
         // where a dishonest producer could manipulate pool distributions.
         //
-        // Skip for early blocks (no meaningful fairness data yet) and during initial sync
-        // (we may not have all masternodes registered).
-        if block.header.height > 10 {
+        // Skip pool distribution validation for:
+        //  - Early blocks (no meaningful fairness history yet)
+        //  - Historical blocks during sync (current registry does not reflect the historical
+        //    masternode set — unallocated tier pools roll up differently, causing false rejects)
+        // Only validate distribution for blocks within 200 blocks of the current tip,
+        // where the live registry is an accurate proxy for what the producer saw.
+        let current_tip = self.current_height.load(Ordering::Acquire);
+        let near_tip = block.header.height + 200 >= current_tip;
+        if block.header.height > 10 && near_tip {
             self.validate_pool_distribution(block, calculated_fees)
                 .await?;
         }
