@@ -1024,12 +1024,26 @@ async fn handle_peer(
                                     // (when <3 validators), which handles UTXO state transitions internally.
                                     let auto_finalized = if !consensus.tx_pool.has_transaction(txid) {
                                         tracing::warn!("⚠️ Received TransactionFinalized but TX {} not in pool - adding it now", hex::encode(*txid));
-                                        if let Err(e) = consensus.process_transaction(tx.clone(), None).await {
-                                            tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
-                                            continue;
+                                        match consensus.process_transaction(tx.clone(), None).await {
+                                            Ok(()) => {
+                                                // Check if process_transaction already finalized it
+                                                consensus.tx_pool.is_finalized(txid)
+                                            }
+                                            Err(e) if e.contains("already in pool") => {
+                                                // Race: TX was added concurrently between has_transaction
+                                                // check and process_transaction call. Fall through to
+                                                // manual finalization path.
+                                                tracing::debug!(
+                                                    "TX {} already in pool (race condition), proceeding with finalization",
+                                                    hex::encode(*txid)
+                                                );
+                                                consensus.tx_pool.is_finalized(txid)
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("❌ Failed to process transaction {}: {}", hex::encode(*txid), e);
+                                                continue;
+                                            }
                                         }
-                                        // Check if process_transaction already finalized it
-                                        consensus.tx_pool.is_finalized(txid)
                                     } else {
                                         false
                                     };
