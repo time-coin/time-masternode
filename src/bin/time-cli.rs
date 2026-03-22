@@ -787,11 +787,18 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             requester_name,
         } => (
             "sendpaymentrequest",
-            json!([from_address, to_address, amount, memo, pubkey, signature, timestamp, requester_name]),
+            json!([
+                from_address,
+                to_address,
+                amount,
+                memo,
+                pubkey,
+                signature,
+                timestamp,
+                requester_name
+            ]),
         ),
-        Commands::GetPaymentRequests { address } => {
-            ("getpaymentrequests", json!([address]))
-        }
+        Commands::GetPaymentRequests { address } => ("getpaymentrequests", json!([address])),
         Commands::RespondPaymentRequest {
             request_id,
             requester_address,
@@ -805,7 +812,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Commands::CancelPaymentRequest {
             request_id,
             requester_address,
-        } => ("cancelpaymentrequest", json!([request_id, requester_address])),
+        } => (
+            "cancelpaymentrequest",
+            json!([request_id, requester_address]),
+        ),
         Commands::MarkPaymentRequestViewed {
             request_id,
             requester_address,
