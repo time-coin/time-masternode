@@ -158,29 +158,24 @@ impl PartitionDetector {
 
         // 1. Fetch fresh peers from the discovery API.
         let discovery_url = self.network_type.peer_discovery_url();
-        match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-        {
-            Ok(client) => match client.get(discovery_url).send().await {
-                Ok(resp) => {
-                    if let Ok(peers) = resp.json::<Vec<String>>().await {
-                        for peer in peers {
-                            let addr = if peer.contains(':') {
-                                peer
-                            } else {
-                                format!("{}:{}", peer, default_port)
-                            };
-                            candidates.push(addr);
-                        }
+        let client = crate::http_client::HttpClient::new()
+            .with_timeout(std::time::Duration::from_secs(10))
+            .with_accept_invalid_certs(true);
+        match client.get(discovery_url).await {
+            Ok(resp) => {
+                if let Ok(peers) = resp.json::<Vec<String>>() {
+                    for peer in peers {
+                        let addr = if peer.contains(':') {
+                            peer
+                        } else {
+                            format!("{}:{}", peer, default_port)
+                        };
+                        candidates.push(addr);
                     }
                 }
-                Err(e) => {
-                    tracing::debug!("Partition recovery: discovery API unreachable: {}", e);
-                }
-            },
+            }
             Err(e) => {
-                tracing::debug!("Partition recovery: failed to build HTTP client: {}", e);
+                tracing::debug!("Partition recovery: discovery API unreachable: {}", e);
             }
         }
 

@@ -58,18 +58,12 @@ impl PeerDiscovery {
 
     /// Fetch peers from the discovery API
     async fn fetch_from_api(&self) -> Result<Vec<DiscoveredPeer>, String> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = crate::http_client::HttpClient::new()
+            .with_timeout(std::time::Duration::from_secs(10))
+            .with_accept_invalid_certs(true);
 
-        let response = client
-            .get(&self.discovery_url)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let peer_list: Vec<String> = response.json().await.map_err(|e| e.to_string())?;
+        let response = client.get(&self.discovery_url).await?;
+        let peer_list: Vec<String> = response.json()?;
 
         Ok(self.parse_peer_list(peer_list))
     }

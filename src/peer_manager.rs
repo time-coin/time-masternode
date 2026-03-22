@@ -121,14 +121,13 @@ impl PeerManager {
         let discovery_url = self.network_type.peer_discovery_url();
         info!("🔍 Discovering peers from {}", discovery_url);
 
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = crate::http_client::HttpClient::new()
+            .with_timeout(Duration::from_secs(10))
+            .with_accept_invalid_certs(true);
 
-        match client.get(discovery_url).send().await {
+        match client.get(discovery_url).await {
             Ok(response) => {
-                if let Ok(peer_list) = response.json::<Vec<String>>().await {
+                if let Ok(peer_list) = response.json::<Vec<String>>() {
                     let mut added = 0;
                     for peer_addr in peer_list {
                         // API now returns IPs without ports, add to candidates as-is
