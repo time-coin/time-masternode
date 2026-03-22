@@ -329,11 +329,11 @@ echo ""
 
 # Calculate expected height based on CORRECT genesis time for network
 if [ "$NETWORK" = "mainnet" ]; then
-    GENESIS_TIME=1767225600  # 2026-01-01 00:00:00 UTC (from src/network_type.rs:43)
+    GENESIS_TIME=1775001600  # 2026-04-01 00:00:00 UTC (from src/network_type.rs:43)
 elif [ "$NETWORK" = "testnet" ]; then
     GENESIS_TIME=1764547200  # 2025-12-01 00:00:00 UTC (from src/network_type.rs:44)
 else
-    GENESIS_TIME=1767225600  # Default to mainnet if unknown
+    GENESIS_TIME=1775001600  # Default to mainnet if unknown
 fi
 
 CURRENT_UNIX=$(date +%s)
