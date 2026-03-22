@@ -5129,9 +5129,20 @@ impl Blockchain {
         // where a dishonest producer could manipulate pool distributions.
         //
         // Skip for very early blocks (no meaningful fairness history yet).
-        if block.header.height > 10 {
-            self.validate_pool_distribution(block, calculated_fees)
-                .await?;
+        // Skip for historical blocks (produced > 24 h ago): the current registry does not
+        // reflect the masternode set that was active at production time, so tier-level
+        // verification would produce false positives against blocks that every peer has
+        // already accepted as canonical. Only live / recent blocks need this guard.
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+            let block_age_secs = now_secs.saturating_sub(block.header.timestamp);
+            if block.header.height > 10 && block_age_secs < 24 * 3600 {
+                self.validate_pool_distribution(block, calculated_fees)
+                    .await?;
+            }
         }
 
         Ok(())
