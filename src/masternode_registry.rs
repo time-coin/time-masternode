@@ -417,15 +417,24 @@ impl MasternodeRegistry {
                 const MIGRATION_COOLDOWN_SECS: u64 = 60;
                 let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                 if let Some(last_migrated) = self.collateral_migration_times.get(&outpoint_key) {
-                    if now.saturating_sub(*last_migrated) < MIGRATION_COOLDOWN_SECS {
-                        tracing::warn!(
-                            "⚠️ Collateral {} is already in use by masternode {} — \
-                             rejected claim from {} (migration cooldown: {}s remaining)",
-                            outpoint,
-                            old_addr,
-                            masternode.address,
-                            MIGRATION_COOLDOWN_SECS - now.saturating_sub(*last_migrated)
-                        );
+                    let elapsed = now.saturating_sub(*last_migrated);
+                    if elapsed < MIGRATION_COOLDOWN_SECS {
+                        let remaining = MIGRATION_COOLDOWN_SECS - elapsed;
+                        // Only WARN once per cooldown window (first 2s after the initial block).
+                        // After that, demote to debug to avoid spam from multiple gossip relays.
+                        if elapsed < 2 {
+                            tracing::warn!(
+                                "⚠️ Collateral {} is already in use by masternode {} — \
+                                 rejected claim from {} (migration cooldown: {}s remaining)",
+                                outpoint, old_addr, masternode.address, remaining
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Collateral {} cooldown active ({}s remaining) — \
+                                 ignoring repeat claim from {}",
+                                outpoint, remaining, masternode.address
+                            );
+                        }
                         return Err(RegistryError::InvalidCollateral);
                     }
                 }

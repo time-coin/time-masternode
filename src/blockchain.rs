@@ -5129,17 +5129,21 @@ impl Blockchain {
         // where a dishonest producer could manipulate pool distributions.
         //
         // Skip for very early blocks (no meaningful fairness history yet).
-        // Skip for historical blocks (produced > 24 h ago): the current registry does not
-        // reflect the masternode set that was active at production time, so tier-level
-        // verification would produce false positives against blocks that every peer has
-        // already accepted as canonical. Only live / recent blocks need this guard.
+        // Skip for any block that is not truly "live" (produced in the last 30 minutes).
+        //
+        // During initial sync, the local registry is incomplete: masternodes whose
+        // collateral UTXOs haven't been indexed yet get rejected from the registry.
+        // By the time we sync to those heights, the gossip may not have re-arrived yet,
+        // leaving the registry in an inconsistent state vs. the block's production-time
+        // registry. A 30-minute window ensures only blocks that arrived in real-time
+        // (while the node is already synced and the registry is accurate) are validated.
         {
             let now_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
             let block_age_secs = now_secs.saturating_sub(block.header.timestamp);
-            if block.header.height > 10 && block_age_secs < 24 * 3600 {
+            if block.header.height > 10 && block_age_secs < 1800 {
                 self.validate_pool_distribution(block, calculated_fees)
                     .await?;
             }
