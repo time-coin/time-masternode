@@ -65,8 +65,18 @@ impl NetworkClient {
     ) -> Self {
         let reserved_masternode_slots = (max_peers * 40 / 100).clamp(20, 30);
 
-        // Default AI-powered reconnection system (can be overridden with set_reconnection_ai)
-        let reconnection_ai = Arc::new(AdaptiveReconnectionAI::new(ReconnectionConfig::default()));
+        // Default AI-powered reconnection system (immediately overridden by set_reconnection_ai in main.rs).
+        // Use an ephemeral DB for this throwaway instance — it is never actually queried.
+        let ephemeral_db = Arc::new(
+            sled::Config::new()
+                .temporary(true)
+                .open()
+                .expect("ephemeral sled DB for NetworkClient default reconnection AI"),
+        );
+        let reconnection_ai = Arc::new(AdaptiveReconnectionAI::new(
+            ephemeral_db,
+            ReconnectionConfig::default(),
+        ));
 
         Self {
             peer_manager,
