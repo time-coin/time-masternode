@@ -869,7 +869,12 @@ impl PeerConnection {
                 timestamp,
                 height,
             } => {
-                return self.handle_pong(*nonce, *timestamp, *height).await;
+                self.handle_pong(*nonce, *timestamp, *height).await?;
+                // Push latest RTT to registry so RPC can report it
+                if let Some(rtt_secs) = self.get_ping_rtt().await {
+                    config.peer_registry.set_peer_ping_time(&self.peer_ip, rtt_secs).await;
+                }
+                return Ok(());
             }
             NetworkMessage::Handshake { .. }
             | NetworkMessage::Ack { .. }
