@@ -616,11 +616,7 @@ async fn main() {
 
     // Helper function to calculate appropriate cache size based on available memory
     fn calculate_cache_size() -> u64 {
-        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-        let sys = System::new_with_specifics(
-            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
-        );
-        let available_memory = sys.available_memory();
+        let available_memory = get_available_memory();
 
         // Check cgroup memory limit (common in containers/systemd services)
         let cgroup_limit = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
@@ -643,6 +639,82 @@ async fn main() {
         );
 
         cache_size
+    }
+
+    /// Get available system memory without the sysinfo crate.
+    fn get_available_memory() -> u64 {
+        // Linux: parse /proc/meminfo
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+                for line in contents.lines() {
+                    if line.starts_with("MemAvailable:") {
+                        if let Some(kb) = line.split_whitespace().nth(1) {
+                            if let Ok(val) = kb.parse::<u64>() {
+                                return val * 1024; // kB → bytes
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Windows: use GlobalMemoryStatusEx via win32 API
+        #[cfg(target_os = "windows")]
+        {
+            use std::mem::{size_of, zeroed};
+            #[repr(C)]
+            struct MemoryStatusEx {
+                dw_length: u32,
+                dw_memory_load: u32,
+                ull_total_phys: u64,
+                ull_avail_phys: u64,
+                ull_total_page_file: u64,
+                ull_avail_page_file: u64,
+                ull_total_virtual: u64,
+                ull_avail_virtual: u64,
+                ull_avail_extended_virtual: u64,
+            }
+            extern "system" {
+                fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+            }
+            unsafe {
+                let mut status: MemoryStatusEx = zeroed();
+                status.dw_length = size_of::<MemoryStatusEx>() as u32;
+                if GlobalMemoryStatusEx(&mut status) != 0 {
+                    return status.ull_avail_phys;
+                }
+            }
+        }
+        // macOS: use sysctl
+        #[cfg(target_os = "macos")]
+        {
+            use std::mem::{size_of, zeroed};
+            extern "C" {
+                fn sysctlbyname(
+                    name: *const u8,
+                    oldp: *mut std::ffi::c_void,
+                    oldlenp: *mut usize,
+                    newp: *const std::ffi::c_void,
+                    newlen: usize,
+                ) -> i32;
+            }
+            unsafe {
+                let mut mem: u64 = zeroed();
+                let mut len = size_of::<u64>();
+                if sysctlbyname(
+                    b"hw.memsize\0".as_ptr(),
+                    &mut mem as *mut u64 as *mut std::ffi::c_void,
+                    &mut len,
+                    std::ptr::null(),
+                    0,
+                ) == 0
+                {
+                    return mem;
+                }
+            }
+        }
+        // Fallback: assume 1 GB
+        1024 * 1024 * 1024
     }
 
     let cache_size = calculate_cache_size();

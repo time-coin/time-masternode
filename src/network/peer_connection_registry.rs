@@ -6,12 +6,11 @@
 
 use crate::consensus::ConsensusEngine;
 use crate::network::message::NetworkMessage;
-use arc_swap::ArcSwapOption;
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -52,8 +51,8 @@ pub struct PeerConnectionRegistry {
     connections: DashMap<String, ConnectionState>,
     // Track reconnection backoff
     reconnecting: DashMap<String, ReconnectionState>,
-    // Local IP - set once, read many (lock-free with ArcSwapOption)
-    local_ip: ArcSwapOption<String>,
+    // Local IP - set once, read many
+    local_ip: OnceLock<String>,
     // Metrics (atomic, no locks)
     inbound_count: AtomicUsize,
     outbound_count: AtomicUsize,
@@ -109,7 +108,7 @@ impl PeerConnectionRegistry {
         Self {
             connections: DashMap::new(),
             reconnecting: DashMap::new(),
-            local_ip: ArcSwapOption::empty(),
+            local_ip: OnceLock::new(),
             inbound_count: AtomicUsize::new(0),
             outbound_count: AtomicUsize::new(0),
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
@@ -567,22 +566,15 @@ impl PeerConnectionRegistry {
     // ===== Connection Direction Logic =====
 
     pub fn set_local_ip(&self, ip: String) {
-        self.local_ip.store(Some(Arc::new(ip)));
+        let _ = self.local_ip.set(ip); // ignore if already set
     }
 
     pub fn get_local_ip(&self) -> Option<String> {
-        self.local_ip
-            .load()
-            .as_ref()
-            .map(|arc| arc.as_ref().clone())
+        self.local_ip.get().cloned()
     }
 
     pub fn should_connect_to(&self, peer_ip: &str) -> bool {
-        let local_ip_guard = self.local_ip.load();
-
-        if let Some(local_ip_arc) = local_ip_guard.as_ref() {
-            let local_ip = local_ip_arc.as_str();
-
+        if let Some(local_ip) = self.local_ip.get() {
             if let (Ok(local_addr), Ok(peer_addr)) =
                 (local_ip.parse::<IpAddr>(), peer_ip.parse::<IpAddr>())
             {
@@ -593,7 +585,7 @@ impl PeerConnectionRegistry {
                     (IpAddr::V4(_), IpAddr::V6(_)) => false,
                 }
             } else {
-                local_ip > peer_ip
+                local_ip.as_str() > peer_ip
             }
         } else {
             true

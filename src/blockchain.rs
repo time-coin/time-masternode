@@ -1516,11 +1516,15 @@ impl Blockchain {
         // Now set syncing flag since we actually need to sync
         self.is_syncing.store(true, Ordering::Release);
 
-        // Ensure we reset the sync flag when done
+        // Ensure we reset the sync flag when done (RAII guard)
         let is_syncing = self.is_syncing.clone();
-        let _guard = scopeguard::guard((), |_| {
-            is_syncing.store(false, Ordering::Release);
-        });
+        struct SyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for SyncGuard {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        let _guard = SyncGuard(is_syncing);
 
         // Debug logging for genesis timestamp issue
         let now = chrono::Utc::now().timestamp();
