@@ -23,9 +23,10 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// Global rate limiter for fork alert sending, keyed by peer IP.
-/// Persists across MessageHandler instances (which are created per-message).
-fn fork_alert_rate_limit() -> &'static dashmap::DashMap<String, Instant> {
-    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, Instant>> =
+/// Stores (last_alert_time, alert_count, peer_height_at_last_alert) to enable
+/// exponential backoff: 60s → 2m → 5m → 10m cap. Resets when peer height changes.
+fn fork_alert_rate_limit() -> &'static dashmap::DashMap<String, (Instant, u32, u64)> {
+    static INSTANCE: std::sync::OnceLock<dashmap::DashMap<String, (Instant, u32, u64)>> =
         std::sync::OnceLock::new();
     INSTANCE.get_or_init(dashmap::DashMap::new)
 }
@@ -3431,11 +3432,11 @@ impl MessageHandler {
                 // Rate-limit: only log once per 60s per peer to avoid flooding
                 let now = Instant::now();
                 let should_log = match fork_alert_rate_limit().get(&self.peer_ip) {
-                    Some(last) => now.duration_since(*last) >= Duration::from_secs(60),
+                    Some(entry) => now.duration_since(entry.0) >= Duration::from_secs(60),
                     None => true,
                 };
                 if should_log {
-                    fork_alert_rate_limit().insert(self.peer_ip.clone(), now);
+                    fork_alert_rate_limit().insert(self.peer_ip.clone(), (now, 0, peer_height));
                     warn!(
                         "🔀 [{}] FORK with {} at height {}: our {} vs their {}",
                         self.direction,
@@ -3564,12 +3565,28 @@ impl MessageHandler {
             // We're ahead - peer might need to sync from us
             let height_diff = our_height - peer_height;
 
-            // Rate-limit fork alerts: at most once per 60s per peer (global, survives handler recreation)
+            // Rate-limit fork alerts with exponential backoff: 60s → 2m → 5m → 10m cap.
+            // Resets when the peer's height changes (i.e., they're making progress).
             if height_diff >= 2 {
                 let now = Instant::now();
-                let should_alert = match fork_alert_rate_limit().get(&self.peer_ip) {
-                    Some(last) => now.duration_since(*last) >= Duration::from_secs(60),
-                    None => true,
+                let (should_alert, alert_count) = match fork_alert_rate_limit().get(&self.peer_ip) {
+                    Some(entry) => {
+                        let (last_time, count, last_height) = *entry;
+                        if last_height != peer_height {
+                            // Peer height changed — they're syncing, reset backoff
+                            (true, 0u32)
+                        } else {
+                            // Exponential backoff: 60s, 120s, 300s, 600s cap
+                            let interval = match count {
+                                0 => 60,
+                                1 => 120,
+                                2 => 300,
+                                _ => 600,
+                            };
+                            (now.duration_since(last_time) >= Duration::from_secs(interval), count)
+                        }
+                    }
+                    None => (true, 0u32),
                 };
 
                 if should_alert {
@@ -3590,11 +3607,17 @@ impl MessageHandler {
                     }
 
                     if our_chain_count >= 3 && our_chain_count > behind_count {
-                        fork_alert_rate_limit().insert(self.peer_ip.clone(), now);
+                        let new_count = alert_count + 1;
+                        fork_alert_rate_limit().insert(self.peer_ip.clone(), (now, new_count, peer_height));
+                        let next_interval = match new_count {
+                            0..=1 => 120,
+                            2 => 300,
+                            _ => 600,
+                        };
                         info!(
-                            "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending sync alert.",
+                            "📢 [{}] Peer {} is {} blocks behind (height {}). Consensus: {} peers at height {}. Sending sync alert (#{}, next in {}s).",
                             self.direction, self.peer_ip, height_diff, peer_height,
-                            our_chain_count, our_height
+                            our_chain_count, our_height, new_count, next_interval
                         );
                         return Ok(Some(NetworkMessage::ForkAlert {
                             your_height: peer_height,
