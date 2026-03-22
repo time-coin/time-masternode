@@ -5221,58 +5221,94 @@ impl Blockchain {
         // equal the tier's canonical pool allocation.
         // For each unpaid tier (no recipients): that pool must have rolled up to
         // the producer — we track this to verify the producer's total below.
-        let mut rolled_up_to_producer: u64 = 0;
-
-        for tier in &[
+        //
+        // IMPORTANT: If any reward recipients are no longer in the registry
+        // (deregistered since the block was produced, or from old pool-sharing era),
+        // we cannot accurately reconstruct per-tier totals — fall back to a looser
+        // total-budget check instead of strict per-tier verification.
+        let total_tier_budget: u64 = [
             MasternodeTier::Gold,
             MasternodeTier::Silver,
             MasternodeTier::Bronze,
             MasternodeTier::Free,
-        ] {
-            let pool = tier.pool_allocation();
-            let paid = tier_paid.get(tier).copied().unwrap_or(0);
+        ]
+        .iter()
+        .map(|t| t.pool_allocation())
+        .sum();
 
-            if paid == 0 {
-                // No recipients in this tier — pool should have rolled to producer.
-                rolled_up_to_producer += pool;
-                continue;
+        let mut rolled_up_to_producer: u64 = 0;
+
+        if unknown_non_producer_paid > 0 {
+            // Some recipients have deregistered — we can only verify the total
+            // non-producer payout is within the overall tier-pool budget.
+            let total_non_producer_paid: u64 = tier_paid.values().sum::<u64>() + unknown_non_producer_paid;
+            if total_non_producer_paid > total_tier_budget {
+                return Err(format!(
+                    "Block {} total non-producer payout {} exceeds total tier budget {}",
+                    block.header.height, total_non_producer_paid, total_tier_budget
+                ));
             }
+            // We can't determine which pools were empty; conservatively assume
+            // the producer only received base reward (no roll-up credit).
+            tracing::debug!(
+                "Block {} has {} satoshis paid to {} unknown (deregistered) recipients — \
+                 skipping strict per-tier pool verification",
+                block.header.height,
+                unknown_non_producer_paid,
+                block.masternode_rewards.len()
+            );
+        } else {
+            for tier in &[
+                MasternodeTier::Gold,
+                MasternodeTier::Silver,
+                MasternodeTier::Bronze,
+                MasternodeTier::Free,
+            ] {
+                let pool = tier.pool_allocation();
+                let paid = tier_paid.get(tier).copied().unwrap_or(0);
 
-            // For Free tier: pool is split among ≤ MAX_FREE_TIER_RECIPIENTS nodes.
-            // For paid tiers: the full pool goes to exactly one winner.
-            // In both cases, total paid to the tier must equal the pool allocation
-            // (within 1 satoshi per recipient for integer-division rounding).
-            let recipient_count = if matches!(tier, MasternodeTier::Free) {
-                // Estimate recipient count from amount — Free shares pool evenly.
-                // Allow up to MAX_FREE_TIER_RECIPIENTS.
-                let per_node = pool / MAX_FREE_TIER_RECIPIENTS as u64;
-                if per_node < MIN_POOL_PAYOUT_SATOSHIS {
-                    // Pool too small to split; should have rolled to producer.
+                if paid == 0 {
+                    // No recipients in this tier — pool should have rolled to producer.
                     rolled_up_to_producer += pool;
-                    if paid > 0 {
-                        tracing::warn!(
-                            "⚠️ Block {} Free tier: per-node payout {} below minimum {}, \
-                             but {} satoshis were distributed",
-                            block.header.height, per_node, MIN_POOL_PAYOUT_SATOSHIS, paid
-                        );
-                    }
                     continue;
                 }
-                // Accept any split ≤ MAX_FREE_TIER_RECIPIENTS
-                (paid / per_node).max(1) as usize
-            } else {
-                1
-            };
 
-            // Rounding tolerance: at most 1 satoshi per recipient.
-            let tolerance = recipient_count as u64;
-            let diff = if paid > pool { paid - pool } else { pool - paid };
-            if diff > tolerance {
-                return Err(format!(
-                    "Block {} {:?} tier pool mismatch: expected {} satoshis, \
-                     block distributed {} (diff {})",
-                    block.header.height, tier, pool, paid, diff
-                ));
+                // For Free tier: pool is split among ≤ MAX_FREE_TIER_RECIPIENTS nodes.
+                // For paid tiers: the full pool goes to exactly one winner.
+                // In both cases, total paid to the tier must equal the pool allocation
+                // (within 1 satoshi per recipient for integer-division rounding).
+                let recipient_count = if matches!(tier, MasternodeTier::Free) {
+                    // Estimate recipient count from amount — Free shares pool evenly.
+                    // Allow up to MAX_FREE_TIER_RECIPIENTS.
+                    let per_node = pool / MAX_FREE_TIER_RECIPIENTS as u64;
+                    if per_node < MIN_POOL_PAYOUT_SATOSHIS {
+                        // Pool too small to split; should have rolled to producer.
+                        rolled_up_to_producer += pool;
+                        if paid > 0 {
+                            tracing::warn!(
+                                "⚠️ Block {} Free tier: per-node payout {} below minimum {}, \
+                                 but {} satoshis were distributed",
+                                block.header.height, per_node, MIN_POOL_PAYOUT_SATOSHIS, paid
+                            );
+                        }
+                        continue;
+                    }
+                    // Accept any split ≤ MAX_FREE_TIER_RECIPIENTS
+                    (paid / per_node).max(1) as usize
+                } else {
+                    1
+                };
+
+                // Rounding tolerance: at most 1 satoshi per recipient.
+                let tolerance = recipient_count as u64;
+                let diff = if paid > pool { paid - pool } else { pool - paid };
+                if diff > tolerance {
+                    return Err(format!(
+                        "Block {} {:?} tier pool mismatch: expected {} satoshis, \
+                         block distributed {} (diff {})",
+                        block.header.height, tier, pool, paid, diff
+                    ));
+                }
             }
         }
 
