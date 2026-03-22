@@ -19,6 +19,11 @@ path = "src/bin/time-cli.rs"
 [[bin]]
 name = "time-dashboard"
 path = "src/bin/time-dashboard.rs"
+required-features = ["dashboard"]
+
+[features]
+default = []
+dashboard = ["ratatui", "crossterm"]
 
 [dependencies]
 tokio = { version = "1.38", features = [
@@ -36,7 +41,6 @@ sha2 = "0.10"
 hmac = "0.12"
 ed25519-dalek = { version = "2.0", features = ["serde"] }
 curve25519-dalek = "4.1"
-k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
 sled = "0.34"
 thiserror = "2.0"
@@ -50,9 +54,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt",
 tracing-appender = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-num-bigint = "0.4"
 dirs = "5.0"
-sysinfo = "0.30"
 hostname = "0.4"
 tokio-util = "0.7"
 
@@ -74,10 +76,7 @@ bytes = "1.5"                                       # Byte buffer utilities
 # Performance optimizations (Critical)
 dashmap = "5.5"                                     # Lock-free concurrent hashmap
 lru = "0.12"                                        # Bounded LRU cache
-rayon = "1.8"                                       # Data parallelism
 parking_lot = "0.12"                                # Faster locks than std
-arc-swap = "1.7"                                    # Lock-free atomic pointer swapping
-scopeguard = "1.2"                                  # RAII guards for cleanup
 zstd = "0.13"                                       # Fast compression for block storage
 
 # Network
@@ -87,9 +86,9 @@ socket2 = "0.6"                                     # Socket configuration
 tokio-tungstenite = "0.26"                          # WebSocket server
 futures-util = "0.3"                                # Stream utilities for WebSocket
 
-# TUI dashboard dependencies
-ratatui = "0.26"                                    # Terminal UI framework
-crossterm = "0.27"                                  # Terminal control
+# TUI dashboard dependencies (optional — only needed for time-dashboard binary)
+ratatui = { version = "0.26", optional = true }
+crossterm = { version = "0.27", optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"

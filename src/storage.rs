@@ -146,13 +146,9 @@ pub struct SledUtxoStorage {
 #[allow(dead_code)] // Used by binary (main.rs) for persistent storage option
 impl SledUtxoStorage {
     pub fn new(path: &str) -> Result<Self, StorageError> {
-        use sysinfo::{MemoryRefreshKind, RefreshKind, System};
-
-        let sys = System::new_with_specifics(
-            RefreshKind::new().with_memory(MemoryRefreshKind::everything()),
-        );
-        let available_memory = sys.available_memory();
-        let cache_size = std::cmp::min(available_memory / 10, 512 * 1024 * 1024);
+        // Default to 64MB cache — SledUtxoStorage is currently unused (see doc comment above)
+        // but if revived, caller can set cache_capacity via sled::Config directly.
+        let cache_size: u64 = 64 * 1024 * 1024;
 
         let db = sled::Config::new()
             .path(path)
