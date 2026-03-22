@@ -485,6 +485,24 @@ impl App {
             // governance may not be initialized yet — silently ignore errors
         }
 
+        // Insert local node as first entry in peer list
+        if let Some(ref mn) = self.data.masternode {
+            let local_height = self.data.blockchain.as_ref().map(|b| b.blocks).unwrap_or(0);
+            let local_peer = PeerInfo {
+                addr: if mn.address.is_empty() {
+                    "(this node)".to_string()
+                } else {
+                    format!("{} (you)", mn.address)
+                },
+                pingtime: None,
+                inbound: false,
+                tier: mn.tier.clone(),
+                active: mn.is_active,
+                height: local_height,
+            };
+            self.data.peers.insert(0, local_peer);
+        }
+
         self.data.last_update = Utc::now();
         self.data.update_count += 1;
     }
@@ -876,9 +894,17 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(block, chunks[0]);
     }
 
-    // Peer list — sorted: active masternodes first, then by ping
+    // Peer list — sorted: local node first, then active masternodes, then by ping
     let mut sorted_peers: Vec<&PeerInfo> = app.data.peers.iter().collect();
     sorted_peers.sort_by(|a, b| {
+        let a_local = a.addr.ends_with("(you)") || a.addr == "(this node)";
+        let b_local = b.addr.ends_with("(you)") || b.addr == "(this node)";
+        if a_local {
+            return std::cmp::Ordering::Less;
+        }
+        if b_local {
+            return std::cmp::Ordering::Greater;
+        }
         // Active masternodes first
         let a_mn = !a.tier.is_empty() && a.tier != "Unknown";
         let b_mn = !b.tier.is_empty() && b.tier != "Unknown";
@@ -911,7 +937,14 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
                 .pingtime
                 .map(|p| format!("{:.0} ms", p * 1000.0))
                 .unwrap_or_else(|| "—".to_string());
-            let direction = if peer.inbound { "← in" } else { "→ out" };
+            let is_local = peer.addr.ends_with("(you)") || peer.addr == "(this node)";
+            let direction = if is_local {
+                "local"
+            } else if peer.inbound {
+                "← in"
+            } else {
+                "→ out"
+            };
             let tier_display = if peer.tier.is_empty() || peer.tier == "Unknown" {
                 "—".to_string()
             } else {
@@ -924,7 +957,9 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
             };
             let status_marker = if peer.active { "●" } else { "○" };
 
-            let row_style = if peer.active && !peer.inbound {
+            let row_style = if is_local {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else if peer.active && !peer.inbound {
                 Style::default().fg(Color::Green)
             } else if peer.active {
                 Style::default().fg(Color::Cyan)
