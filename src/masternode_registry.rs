@@ -400,9 +400,12 @@ impl MasternodeRegistry {
                     .map(|i| i.masternode.registered_at)
                     .unwrap_or(0);
                 if masternode.registered_at < existing_registered_at {
-                    tracing::debug!(
-                        "⏩ Ignored stale IP migration for collateral {}: incoming registered_at {} < existing {}",
+                    tracing::warn!(
+                        "⚠️ Collateral {} is already in use by masternode {} — \
+                         rejected claim from {} (stale announcement: registered_at {} < current {})",
                         outpoint,
+                        old_addr,
+                        masternode.address,
                         masternode.registered_at,
                         existing_registered_at
                     );
@@ -416,7 +419,8 @@ impl MasternodeRegistry {
                 if let Some(last_migrated) = self.collateral_migration_times.get(&outpoint_key) {
                     if now.saturating_sub(*last_migrated) < MIGRATION_COOLDOWN_SECS {
                         tracing::warn!(
-                            "🚦 Suppressed rapid IP flip-flop for collateral {}: {} → {} (cooldown {}s remaining)",
+                            "⚠️ Collateral {} is already in use by masternode {} — \
+                             rejected claim from {} (migration cooldown: {}s remaining)",
                             outpoint,
                             old_addr,
                             masternode.address,
