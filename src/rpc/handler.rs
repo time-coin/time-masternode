@@ -413,15 +413,17 @@ impl RpcHandler {
 
         let mut peers: Vec<Value> = Vec::with_capacity(masternodes.len());
         for mn in &masternodes {
-            // Look up the peer's actual reported height from the connection registry
-            let height = if mn.is_active {
+            // Look up the peer's actual reported height and ping time from the connection registry
+            let (height, pingtime) = if mn.is_active {
                 if let Some(ref pr) = peer_registry {
-                    pr.get_peer_height(&mn.masternode.address).await.unwrap_or(0)
+                    let h = pr.get_peer_height(&mn.masternode.address).await.unwrap_or(0);
+                    let p = pr.get_peer_ping_time(&mn.masternode.address).await;
+                    (h, p)
                 } else {
-                    0u64
+                    (0u64, None)
                 }
             } else {
-                0u64
+                (0u64, None)
             };
 
             peers.push(json!({
@@ -432,7 +434,7 @@ impl RpcHandler {
                 "inbound": false,
                 "conntime": mn.masternode.registered_at,
                 "timeoffset": 0,
-                "pingtime": serde_json::Value::Null,
+                "pingtime": pingtime,
                 "version": 110000,
                 "is_masternode": true,
                 "tier": format!("{:?}", mn.masternode.tier),

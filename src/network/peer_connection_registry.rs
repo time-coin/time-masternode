@@ -61,6 +61,8 @@ pub struct PeerConnectionRegistry {
     peer_writers: Arc<RwLock<HashMap<String, PeerWriterTx>>>,
     // Map of peer IP to their reported blockchain height
     peer_heights: Arc<RwLock<HashMap<String, u64>>>,
+    // Map of peer IP to their latest ping RTT in seconds
+    peer_ping_times: Arc<RwLock<HashMap<String, f64>>>,
     // Map of peer IP to their chain tip (height + hash)
     peer_chain_tips: Arc<RwLock<HashMap<String, ChainTip>>>,
     // Pending responses for request/response pattern
@@ -112,6 +114,7 @@ impl PeerConnectionRegistry {
             outbound_count: AtomicUsize::new(0),
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
+            peer_ping_times: Arc::new(RwLock::new(HashMap::new())),
             peer_chain_tips: Arc::new(RwLock::new(HashMap::new())),
             pending_responses: Arc::new(RwLock::new(HashMap::new())),
             timelock_consensus: Arc::new(RwLock::new(None)),
@@ -741,10 +744,12 @@ impl PeerConnectionRegistry {
             tokio::spawn({
                 let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
                 let peer_heights = Arc::clone(&self.peer_heights);
+                let peer_ping_times = Arc::clone(&self.peer_ping_times);
                 let ip = ip.to_string();
                 async move {
                     peer_chain_tips.write().await.remove(&ip);
                     peer_heights.write().await.remove(&ip);
+                    peer_ping_times.write().await.remove(&ip);
                 }
             });
         }
@@ -764,10 +769,12 @@ impl PeerConnectionRegistry {
             tokio::spawn({
                 let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
                 let peer_heights = Arc::clone(&self.peer_heights);
+                let peer_ping_times = Arc::clone(&self.peer_ping_times);
                 let ip = ip.to_string();
                 async move {
                     peer_chain_tips.write().await.remove(&ip);
                     peer_heights.write().await.remove(&ip);
+                    peer_ping_times.write().await.remove(&ip);
                 }
             });
         }
@@ -782,10 +789,12 @@ impl PeerConnectionRegistry {
             tokio::spawn({
                 let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
                 let peer_heights = Arc::clone(&self.peer_heights);
+                let peer_ping_times = Arc::clone(&self.peer_ping_times);
                 let ip = ip.to_string();
                 async move {
                     peer_chain_tips.write().await.remove(&ip);
                     peer_heights.write().await.remove(&ip);
+                    peer_ping_times.write().await.remove(&ip);
                 }
             });
         }
@@ -892,9 +901,11 @@ impl PeerConnectionRegistry {
         let mut pending = self.pending_responses.write().await;
         pending.remove(peer_ip);
 
-        // Remove peer height
+        // Remove peer height and ping time
         let mut heights = self.peer_heights.write().await;
         heights.remove(peer_ip);
+        let mut ping_times = self.peer_ping_times.write().await;
+        ping_times.remove(peer_ip);
     }
 
     /// Set a peer's reported blockchain height
@@ -909,6 +920,20 @@ impl PeerConnectionRegistry {
         let ip_only = extract_ip(peer_ip);
         let heights = self.peer_heights.read().await;
         heights.get(ip_only).copied()
+    }
+
+    /// Set a peer's latest ping RTT in seconds
+    pub async fn set_peer_ping_time(&self, peer_ip: &str, rtt_secs: f64) {
+        let ip_only = extract_ip(peer_ip);
+        let mut times = self.peer_ping_times.write().await;
+        times.insert(ip_only.to_string(), rtt_secs);
+    }
+
+    /// Get a peer's latest ping RTT in seconds
+    pub async fn get_peer_ping_time(&self, peer_ip: &str) -> Option<f64> {
+        let ip_only = extract_ip(peer_ip);
+        let times = self.peer_ping_times.read().await;
+        times.get(ip_only).copied()
     }
 
     /// Phase 3: Update a peer's known height
@@ -956,8 +981,10 @@ impl PeerConnectionRegistry {
     pub async fn clear_peer_data(&self, peer_ip: &str) {
         let mut heights = self.peer_heights.write().await;
         let mut tips = self.peer_chain_tips.write().await;
+        let mut ping_times = self.peer_ping_times.write().await;
         heights.remove(peer_ip);
         tips.remove(peer_ip);
+        ping_times.remove(peer_ip);
         tracing::debug!(
             "🧹 Cleared stale chain tip data for disconnected peer {}",
             peer_ip
