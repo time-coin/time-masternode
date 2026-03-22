@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::{info, warn};
 
-use crate::block::types::{calculate_merkle_root, Block};
+use crate::block::types::{calculate_merkle_root, calculate_merkle_root_legacy, Block};
 use crate::constants::blockchain::{MAX_BLOCK_SIZE, MAX_REORG_DEPTH, TIMESTAMP_TOLERANCE_SECS};
 
 // ===== Fork Resolution State Machine =====
@@ -248,13 +248,16 @@ pub fn validate_fork_chain(
             }
         }
 
-        // Validate merkle root
+        // Validate merkle root (try current formula, then legacy pre-txid-fix formula)
         let computed_merkle = calculate_merkle_root(&block.transactions);
         if computed_merkle != block.header.merkle_root {
-            return Err(format!(
-                "Block {} merkle root mismatch",
-                block.header.height
-            ));
+            let legacy_merkle = calculate_merkle_root_legacy(&block.transactions);
+            if legacy_merkle != block.header.merkle_root {
+                return Err(format!(
+                    "Block {} merkle root mismatch",
+                    block.header.height
+                ));
+            }
         }
 
         // Validate block size
