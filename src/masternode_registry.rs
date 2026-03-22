@@ -141,6 +141,10 @@ pub struct MasternodeRegistry {
     /// Only deregister after this count reaches the threshold (avoids split-brain
     /// from transient UTXO-set divergence at block boundaries).
     collateral_miss_counts: Arc<DashMap<String, u32>>,
+    /// Per-outpoint timestamp of the last IP migration.
+    /// Prevents rapid flip-flop when two peers gossip the same collateral with different IPs.
+    /// Key: "<txid>:<vout>", Value: Unix timestamp of the last accepted migration.
+    collateral_migration_times: Arc<DashMap<String, u64>>,
 }
 
 impl MasternodeRegistry {
@@ -225,6 +229,7 @@ impl MasternodeRegistry {
             pending_collateral_unlocks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_collateral_locks: Arc::new(parking_lot::Mutex::new(Vec::new())),
             collateral_miss_counts: Arc::new(DashMap::new()),
+            collateral_migration_times: Arc::new(DashMap::new()),
         }
     }
 
@@ -386,6 +391,42 @@ impl MasternodeRegistry {
                     );
                     return Err(RegistryError::InvalidCollateral);
                 }
+
+                // Only migrate if the incoming announcement is at least as recent as
+                // the existing entry's registration. Stale gossip from the old IP can
+                // never win back a migration it lost.
+                let existing_registered_at = nodes
+                    .get(&old_addr)
+                    .map(|i| i.masternode.registered_at)
+                    .unwrap_or(0);
+                if masternode.registered_at < existing_registered_at {
+                    tracing::debug!(
+                        "⏩ Ignored stale IP migration for collateral {}: incoming registered_at {} < existing {}",
+                        outpoint,
+                        masternode.registered_at,
+                        existing_registered_at
+                    );
+                    return Err(RegistryError::InvalidCollateral);
+                }
+
+                // Cooldown: refuse to migrate the same outpoint more than once per 60 s.
+                // This stops two peers gossiping competing IPs from flip-flopping indefinitely.
+                const MIGRATION_COOLDOWN_SECS: u64 = 60;
+                let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+                if let Some(last_migrated) = self.collateral_migration_times.get(&outpoint_key) {
+                    if now.saturating_sub(*last_migrated) < MIGRATION_COOLDOWN_SECS {
+                        tracing::warn!(
+                            "🚦 Suppressed rapid IP flip-flop for collateral {}: {} → {} (cooldown {}s remaining)",
+                            outpoint,
+                            old_addr,
+                            masternode.address,
+                            MIGRATION_COOLDOWN_SECS - now.saturating_sub(*last_migrated)
+                        );
+                        return Err(RegistryError::InvalidCollateral);
+                    }
+                }
+                self.collateral_migration_times.insert(outpoint_key, now);
+
                 tracing::info!(
                     "🔄 Masternode IP migration: collateral {} moving from {} to {}",
                     outpoint,
@@ -1409,7 +1450,10 @@ impl MasternodeRegistry {
                     self.collateral_miss_counts.remove(address);
                 } else {
                     // Collateral missing — increment miss counter
-                    let mut entry = self.collateral_miss_counts.entry(address.clone()).or_insert(0);
+                    let mut entry = self
+                        .collateral_miss_counts
+                        .entry(address.clone())
+                        .or_insert(0);
                     *entry += 1;
                     let misses = *entry;
                     if misses >= MISS_THRESHOLD {
@@ -2332,6 +2376,7 @@ impl Clone for MasternodeRegistry {
             pending_collateral_unlocks: self.pending_collateral_unlocks.clone(),
             pending_collateral_locks: self.pending_collateral_locks.clone(),
             collateral_miss_counts: self.collateral_miss_counts.clone(),
+            collateral_migration_times: self.collateral_migration_times.clone(),
         }
     }
 }
