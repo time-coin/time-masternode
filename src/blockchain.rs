@@ -5252,6 +5252,11 @@ impl Blockchain {
         .sum();
 
         let mut rolled_up_to_producer: u64 = 0;
+        // When the fallback path fires (deregistered recipients present), we can't
+        // determine exactly how much rolled up to the producer.  Use 0 as the minimum
+        // (producer must have received at least PRODUCER_REWARD) and total_tier_budget
+        // as the maximum (all pools could theoretically have rolled up).
+        let mut rolled_up_to_producer_max_override: Option<u64> = None;
 
         if unknown_non_producer_paid > 0 {
             // Some recipients have deregistered — we can only verify the total
@@ -5263,11 +5268,10 @@ impl Blockchain {
                     block.header.height, total_non_producer_paid, total_tier_budget
                 ));
             }
-            // We can't determine which tier pools were empty and rolled to the producer.
-            // Use the full tier budget as the worst-case rolled-up amount so the
-            // producer max check becomes: PRODUCER_REWARD + total_tier_budget + fees + tolerance.
-            // This is the theoretical maximum a producer can receive (all pools rolled up).
-            rolled_up_to_producer = total_tier_budget;
+            // Keep rolled_up_to_producer=0 for the MIN check (we don't know actual rollup,
+            // so only require producer received base PRODUCER_REWARD).
+            // Override MAX check to allow up to full tier budget rolled up.
+            rolled_up_to_producer_max_override = Some(total_tier_budget);
             tracing::debug!(
                 "Block {} has {} satoshis paid to unknown (deregistered) recipients — \
                  skipping strict per-tier pool verification, using loose producer max",
@@ -5333,10 +5337,13 @@ impl Blockchain {
         // Producer must receive: PRODUCER_REWARD + fees + all rolled-up empty pools.
         // Allow ±1 TIME tolerance for rounding and minor fee-calculation differences
         // (e.g., a peer computed fees slightly differently due to UTXO lookup order).
+        // When deregistered recipients exist (fallback path), min uses rolled_up=0
+        // (only require base PRODUCER_REWARD) while max uses total_tier_budget override.
+        let rolled_up_for_max = rolled_up_to_producer_max_override.unwrap_or(rolled_up_to_producer);
         let expected_producer_min =
             PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
         let expected_producer_max =
-            PRODUCER_REWARD_SATOSHIS + calculated_fees + rolled_up_to_producer + SATOSHIS_PER_TIME;
+            PRODUCER_REWARD_SATOSHIS + calculated_fees + rolled_up_for_max + SATOSHIS_PER_TIME;
 
         if producer_received < expected_producer_min.saturating_sub(SATOSHIS_PER_TIME) {
             return Err(format!(
@@ -5359,7 +5366,7 @@ impl Blockchain {
                 producer_received,
                 expected_producer_max,
                 calculated_fees,
-                rolled_up_to_producer
+                rolled_up_for_max
             ));
         }
 
