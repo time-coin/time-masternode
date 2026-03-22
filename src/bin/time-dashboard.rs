@@ -1924,11 +1924,9 @@ fn render_footer(f: &mut Frame, area: Rect, app: &App) {
 }
 
 async fn detect_network(prefer_testnet: bool) -> (String, bool) {
-    let client = Client::builder()
-        .danger_accept_invalid_certs(true)
-        .timeout(Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
+    let client = HttpClient::new()
+        .with_accept_invalid_certs(true)
+        .with_timeout(Duration::from_secs(2));
 
     // Preferred network first; for each port try https then http
     let ports: Vec<(u16, bool)> = if prefer_testnet {
@@ -1937,28 +1935,30 @@ async fn detect_network(prefer_testnet: bool) -> (String, bool) {
         vec![(24001, false), (24101, true)]
     };
 
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getblockchaininfo",
+        "params": []
+    });
+
     for (port, is_testnet) in &ports {
         let (user, pass) = resolve_credentials(*is_testnet);
+        let auth = if !user.is_empty() && !pass.is_empty() {
+            Some((user.as_str(), pass.as_str()))
+        } else {
+            None
+        };
         for scheme in &["https", "http"] {
             let url = format!("{}://127.0.0.1:{}", scheme, port);
-            let mut req = client.post(&url).json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getblockchaininfo",
-                "params": []
-            }));
-            if !user.is_empty() && !pass.is_empty() {
-                req = req.basic_auth(&user, Some(&pass));
-            }
-            if let Ok(response) = req.send().await {
-                let status = response.status();
-                if status.is_success() {
-                    if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
+            if let Ok(response) = client.post_json(&url, &body, auth).await {
+                if response.is_success() {
+                    if let Ok(rpc_response) = response.json::<serde_json::Value>() {
                         if rpc_response.get("result").is_some() {
                             return (url, *is_testnet);
                         }
                     }
-                } else if status.as_u16() == 401 || status.as_u16() == 403 {
+                } else if response.status == 401 || response.status == 403 {
                     // Port is alive even if credentials weren't found
                     return (url, *is_testnet);
                 }
