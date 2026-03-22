@@ -108,6 +108,7 @@
 #![allow(dead_code)]
 
 use super::server::{RpcError, RpcRequest, RpcResponse};
+use crate::address::Address;
 use crate::consensus::ConsensusEngine;
 use crate::masternode_registry::MasternodeRegistry;
 use crate::types::{OutPoint, Transaction, TxInput, TxOutput};
@@ -193,6 +194,7 @@ impl RpcHandler {
             "gettimevotestatus" => self.get_timevote_status().await,
             "validateaddress" => self.validate_address(&params_array).await,
             "getaddresspubkey" => self.get_address_pubkey(&params_array).await,
+            "registeraddresspubkey" => self.register_address_pubkey(&params_array).await,
             "stop" => self.stop().await,
             "uptime" => self.uptime().await,
             "getinfo" => self.get_info().await,
@@ -327,10 +329,12 @@ impl RpcHandler {
             }
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&hash_bytes);
-            self.find_block_by_hash(hash).await.ok_or_else(|| RpcError {
-                code: -5,
-                message: "Block not found".to_string(),
-            })?
+            self.find_block_by_hash(hash)
+                .await
+                .ok_or_else(|| RpcError {
+                    code: -5,
+                    message: "Block not found".to_string(),
+                })?
         } else if let Some(height) = first.as_u64() {
             self.blockchain
                 .get_block_by_height(height)
@@ -2378,6 +2382,84 @@ impl RpcHandler {
         }))
     }
 
+    /// Pre-register an Ed25519 public key for a TIME address.
+    ///
+    /// Wallets call this at startup so the node can encrypt memos to them
+    /// even before they appear as a sender in any on-chain transaction.
+    ///
+    /// Params: [address (string), pubkey_hex (64-char hex string)]
+    ///
+    /// Validation: derives the TIME address from the supplied pubkey and
+    /// checks it matches the claimed address, preventing fake registrations.
+    async fn register_address_pubkey(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let address = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected [address, pubkey_hex]".to_string(),
+            })?;
+
+        let pubkey_hex = params
+            .get(1)
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Invalid params: expected [address, pubkey_hex]".to_string(),
+            })?;
+
+        let pubkey_bytes = hex::decode(pubkey_hex).map_err(|_| RpcError {
+            code: -32602,
+            message: "Invalid pubkey_hex: not valid hex".to_string(),
+        })?;
+
+        if pubkey_bytes.len() != 32 {
+            return Err(RpcError {
+                code: -32602,
+                message: format!(
+                    "Invalid pubkey_hex: expected 32 bytes (64 hex chars), got {}",
+                    pubkey_bytes.len()
+                ),
+            });
+        }
+
+        // Derive the network from the address prefix so we can validate.
+        let network = if address.starts_with("TIME1") {
+            NetworkType::Mainnet
+        } else if address.starts_with("TIME0") {
+            NetworkType::Testnet
+        } else {
+            return Err(RpcError {
+                code: -32602,
+                message: "Invalid address: must start with TIME0 (testnet) or TIME1 (mainnet)"
+                    .to_string(),
+            });
+        };
+
+        // Derive the address from the supplied pubkey and verify it matches.
+        let derived = Address::from_public_key(&pubkey_bytes, network).to_string();
+        if derived != address {
+            return Err(RpcError {
+                code: -5,
+                message: format!(
+                    "Pubkey does not match address: derived {} but got {}",
+                    derived, address
+                ),
+            });
+        }
+
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&pubkey_bytes);
+
+        self.consensus
+            .utxo_manager
+            .register_pubkey(address, arr);
+
+        tracing::debug!("📬 Registered pubkey for address {}", address);
+
+        Ok(json!({ "success": true, "address": address }))
+    }
+
     async fn stop(&self) -> Result<Value, RpcError> {
         // Graceful shutdown via RPC
         //
@@ -3490,15 +3572,15 @@ impl RpcHandler {
         // we whitelist it.  Fail closed: if the API is unreachable we refuse
         // the request rather than silently allowing unknown IPs through.
         let peers_url = self.network.peer_discovery_url();
-        let known_ips = fetch_official_peer_ips(peers_url).await.map_err(|e| {
-            RpcError {
+        let known_ips = fetch_official_peer_ips(peers_url)
+            .await
+            .map_err(|e| RpcError {
                 code: -1,
                 message: format!(
                     "Cannot verify peer — official peer list unavailable ({}). Try again later.",
                     e
                 ),
-            }
-        })?;
+            })?;
 
         if !known_ips.contains(&ip_addr) {
             return Err(RpcError {
@@ -3520,7 +3602,10 @@ impl RpcHandler {
                 "message": "IP is already whitelisted"
             }))
         } else {
-            bl.add_to_whitelist(ip_addr, "Added via RPC (verified against official peer list)");
+            bl.add_to_whitelist(
+                ip_addr,
+                "Added via RPC (verified against official peer list)",
+            );
             Ok(json!({
                 "result": "success",
                 "ip": ip_str,
@@ -4539,10 +4624,7 @@ impl RpcHandler {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let pubkey_hex_opt = obj
-            .get("pubkey_hex")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let pubkey_hex_opt = obj.get("pubkey_hex").and_then(|v| v.as_str()).unwrap_or("");
         let signature_hex_opt = obj
             .get("signature_hex")
             .and_then(|v| v.as_str())
@@ -4584,7 +4666,10 @@ impl RpcHandler {
                     sign_data.extend_from_slice(&amount.to_le_bytes());
                     sign_data.extend_from_slice(memo.as_bytes());
                     sign_data.extend_from_slice(&timestamp.to_le_bytes());
-                    if verifying_key.verify_strict(&sign_data, &ed_signature).is_err() {
+                    if verifying_key
+                        .verify_strict(&sign_data, &ed_signature)
+                        .is_err()
+                    {
                         return Err(RpcError {
                             code: -1,
                             message: "Invalid signature — request may be spoofed".to_string(),
@@ -4627,7 +4712,9 @@ impl RpcHandler {
         }
 
         // Broadcast to peers
-        self.consensus.broadcast_payment_request(request.clone()).await;
+        self.consensus
+            .broadcast_payment_request(request.clone())
+            .await;
 
         // Push WS notification to payer if subscribed
         if let Some(ref tx_sender) = self.tx_event_sender {
@@ -5319,7 +5406,10 @@ impl RpcHandler {
     /// Scan the chain tip-to-genesis for a block whose hash matches `target_hash`.
     /// O(n) — there is no hash→height index yet. Acceptable for current chain lengths;
     /// a sled reverse-index should be added when the chain grows beyond ~100k blocks.
-    async fn find_block_by_hash(&self, target_hash: [u8; 32]) -> Option<crate::block::types::Block> {
+    async fn find_block_by_hash(
+        &self,
+        target_hash: [u8; 32],
+    ) -> Option<crate::block::types::Block> {
         let current_height = self.blockchain.get_height();
         for h in (0..=current_height).rev() {
             if let Ok(block) = self.blockchain.get_block_by_height(h).await {
@@ -5355,10 +5445,12 @@ impl RpcHandler {
             }
             let mut hash = [0u8; 32];
             hash.copy_from_slice(&hash_bytes);
-            self.find_block_by_hash(hash).await.ok_or_else(|| RpcError {
-                code: -5,
-                message: "Block not found".to_string(),
-            })?
+            self.find_block_by_hash(hash)
+                .await
+                .ok_or_else(|| RpcError {
+                    code: -5,
+                    message: "Block not found".to_string(),
+                })?
         } else if let Some(height) = first.as_u64() {
             self.blockchain
                 .get_block_by_height(height)
@@ -5438,13 +5530,13 @@ impl RpcHandler {
         let outpoint = OutPoint { txid, vout };
 
         // Spent outputs return null — do not look further
-        if let Some(state) = self.utxo_manager.get_state(&outpoint) {
-            match state {
-                crate::types::UTXOState::SpentFinalized { .. }
-                | crate::types::UTXOState::SpentPending { .. }
-                | crate::types::UTXOState::Archived { .. } => return Ok(Value::Null),
-                _ => {}
-            }
+        if let Some(
+            crate::types::UTXOState::SpentFinalized { .. }
+            | crate::types::UTXOState::SpentPending { .. }
+            | crate::types::UTXOState::Archived { .. },
+        ) = self.utxo_manager.get_state(&outpoint)
+        {
+            return Ok(Value::Null);
         }
 
         let current_height = self.blockchain.get_height();
@@ -5458,8 +5550,7 @@ impl RpcHandler {
         if include_mempool {
             if let Some(tx) = self.consensus.tx_pool.get_transaction(&txid) {
                 if let Some(output) = tx.outputs.get(vout as usize) {
-                    let address =
-                        String::from_utf8_lossy(&output.script_pubkey).to_string();
+                    let address = String::from_utf8_lossy(&output.script_pubkey).to_string();
                     return Ok(json!({
                         "bestblock": best_block_hash,
                         "confirmations": 0,
@@ -5532,8 +5623,7 @@ impl RpcHandler {
             let tx_bytes = match hex::decode(hex_str) {
                 Ok(b) => b,
                 Err(_) => {
-                    results
-                        .push(json!({ "allowed": false, "reject-reason": "TX decode failed" }));
+                    results.push(json!({ "allowed": false, "reject-reason": "TX decode failed" }));
                     continue;
                 }
             };
@@ -5575,19 +5665,17 @@ impl RpcHandler {
 
             for input in &tx.inputs {
                 match self.utxo_manager.get_utxo(&input.previous_output).await {
-                    Ok(utxo) => {
-                        match self.utxo_manager.get_state(&input.previous_output) {
-                            Some(
-                                crate::types::UTXOState::SpentFinalized { .. }
-                                | crate::types::UTXOState::SpentPending { .. }
-                                | crate::types::UTXOState::Archived { .. },
-                            ) => {
-                                reject_reason = Some("bad-txns-inputs-missingorspent");
-                                break;
-                            }
-                            _ => input_sum += utxo.value,
+                    Ok(utxo) => match self.utxo_manager.get_state(&input.previous_output) {
+                        Some(
+                            crate::types::UTXOState::SpentFinalized { .. }
+                            | crate::types::UTXOState::SpentPending { .. }
+                            | crate::types::UTXOState::Archived { .. },
+                        ) => {
+                            reject_reason = Some("bad-txns-inputs-missingorspent");
+                            break;
                         }
-                    }
+                        _ => input_sum += utxo.value,
+                    },
                     Err(_) => {
                         // Check if it's an output of an unconfirmed mempool tx
                         let in_pool = self
@@ -5595,7 +5683,9 @@ impl RpcHandler {
                             .tx_pool
                             .get_transaction(&input.previous_output.txid)
                             .and_then(|prev| {
-                                prev.outputs.get(input.previous_output.vout as usize).map(|o| o.value)
+                                prev.outputs
+                                    .get(input.previous_output.vout as usize)
+                                    .map(|o| o.value)
                             });
                         match in_pool {
                             Some(val) => input_sum += val,
@@ -5634,8 +5724,7 @@ impl RpcHandler {
 
             // Fee-rate check (TIME/kB)
             if maxfeerate > 0.0 {
-                let fee_rate =
-                    (fee as f64 / 100_000_000.0) / (tx_bytes.len() as f64 / 1000.0);
+                let fee_rate = (fee as f64 / 100_000_000.0) / (tx_bytes.len() as f64 / 1000.0);
                 if fee_rate > maxfeerate {
                     results.push(
                         json!({ "txid": txid, "allowed": false, "reject-reason": "max-fee-exceeded" }),
@@ -5781,14 +5870,9 @@ impl RpcHandler {
         })?;
 
         // Prefix mirrors Bitcoin's approach, substituting "TIME" for "Bitcoin"
-        let prefixed = format!(
-            "\x18TIME Signed Message:\n{}{}",
-            message.len(),
-            message
-        );
+        let prefixed = format!("\x18TIME Signed Message:\n{}{}", message.len(), message);
         let signature = signing_key.sign(prefixed.as_bytes());
-        let sig_b64 =
-            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(signature.to_bytes());
 
         Ok(json!(sig_b64))
     }
@@ -5823,45 +5907,35 @@ impl RpcHandler {
                 message: "Expected message".to_string(),
             })?;
 
-        let pubkey_bytes =
-            self.utxo_manager
-                .find_pubkey_for_address(address)
-                .ok_or_else(|| RpcError {
-                    code: -5,
-                    message: format!(
-                        "Public key not found for {} — address must have appeared in a transaction",
-                        address
-                    ),
-                })?;
-
-        let pubkey_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| RpcError {
-            code: -5,
-            message: "Invalid public key length".to_string(),
-        })?;
-        let verifying_key =
-            VerifyingKey::from_bytes(&pubkey_arr).map_err(|_| RpcError {
+        let pubkey_bytes = self
+            .utxo_manager
+            .find_pubkey_for_address(address)
+            .ok_or_else(|| RpcError {
                 code: -5,
-                message: "Invalid public key".to_string(),
+                message: format!(
+                    "Public key not found for {} — address must have appeared in a transaction",
+                    address
+                ),
             })?;
 
-        let sig_bytes =
-            base64::engine::general_purpose::STANDARD
-                .decode(sig_b64)
-                .map_err(|_| RpcError {
-                    code: -5,
-                    message: "Invalid signature encoding (expected base64)".to_string(),
-                })?;
+        let verifying_key = VerifyingKey::from_bytes(&pubkey_bytes).map_err(|_| RpcError {
+            code: -5,
+            message: "Invalid public key".to_string(),
+        })?;
+
+        let sig_bytes = base64::engine::general_purpose::STANDARD
+            .decode(sig_b64)
+            .map_err(|_| RpcError {
+                code: -5,
+                message: "Invalid signature encoding (expected base64)".to_string(),
+            })?;
         let sig_arr: [u8; 64] = sig_bytes.try_into().map_err(|_| RpcError {
             code: -5,
             message: "Invalid signature length (expected 64 bytes)".to_string(),
         })?;
         let signature = Signature::from_bytes(&sig_arr);
 
-        let prefixed = format!(
-            "\x18TIME Signed Message:\n{}{}",
-            message.len(),
-            message
-        );
+        let prefixed = format!("\x18TIME Signed Message:\n{}{}", message.len(), message);
         let valid = verifying_key
             .verify(prefixed.as_bytes(), &signature)
             .is_ok();
@@ -5959,7 +6033,7 @@ impl RpcHandler {
             .collect();
         Ok(json!(result))
     }
-}  // end impl RpcHandler
+} // end impl RpcHandler
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Free helpers
