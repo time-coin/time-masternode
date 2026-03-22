@@ -477,12 +477,12 @@ impl App {
         }
 
         // Fetch governance proposals
-        match self
+        if let Ok(proposals) = self
             .rpc_call::<Vec<GovernanceProposal>>("listproposals", vec![])
             .await
         {
-            Ok(proposals) => self.data.proposals = proposals,
-            Err(_) => {} // governance may not be initialized yet
+            self.data.proposals = proposals;
+            // governance may not be initialized yet — silently ignore errors
         }
 
         self.data.last_update = Utc::now();
@@ -490,10 +490,7 @@ impl App {
     }
 
     async fn cast_vote(&self, proposal_id: &str, approve: bool) -> Result<String, String> {
-        let params = vec![
-            serde_json::json!(proposal_id),
-            serde_json::json!(approve),
-        ];
+        let params = vec![serde_json::json!(proposal_id), serde_json::json!(approve)];
         match self
             .rpc_call::<serde_json::Value>("voteproposal", params)
             .await
@@ -671,7 +668,14 @@ fn render_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
-    let titles = vec!["Overview", "Network", "Masternode", "Mempool", "Blocks", "Governance"];
+    let titles = vec![
+        "Overview",
+        "Network",
+        "Masternode",
+        "Mempool",
+        "Blocks",
+        "Governance",
+    ];
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title("Navigation"))
         .select(app.current_tab)
@@ -1627,12 +1631,16 @@ fn render_governance(f: &mut Frame, area: Rect, app: &App) {
         Span::raw("Proposals: "),
         Span::styled(
             proposals.len().to_string(),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  Active: "),
         Span::styled(
             active.to_string(),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  |  Passed: "),
         Span::styled(passed.to_string(), Style::default().fg(Color::Green)),
@@ -1679,7 +1687,10 @@ fn render_governance(f: &mut Frame, area: Rect, app: &App) {
             ("✗ ", Color::Red)
         };
         Line::from(vec![
-            Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                icon,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
             Span::styled(msg.as_str(), Style::default().fg(color)),
         ])
     } else {
@@ -1715,12 +1726,36 @@ fn render_governance(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let header = Row::new(vec![
-        Cell::from("#").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("ID").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("Type").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("Submitter").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("Status").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Cell::from("Ends At").style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Cell::from("#").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("ID").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Type").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Submitter").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Status").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Cell::from("Ends At").style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
@@ -2082,9 +2117,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 app.vote_status = None;
                             }
                         }
-                        KeyCode::Char('v') | KeyCode::Char('V')
-                            if app.current_tab == 5 =>
-                        {
+                        KeyCode::Char('v') | KeyCode::Char('V') if app.current_tab == 5 => {
                             if !app.can_govern() {
                                 // ignore — not eligible
                             } else if let Some(proposal) =
@@ -2097,9 +2130,7 @@ async fn run_app<B: ratatui::backend::Backend>(
                                 }
                             }
                         }
-                        KeyCode::Char('x') | KeyCode::Char('X')
-                            if app.current_tab == 5 =>
-                        {
+                        KeyCode::Char('x') | KeyCode::Char('X') if app.current_tab == 5 => {
                             if !app.can_govern() {
                                 // ignore — not eligible
                             } else if let Some(proposal) =
