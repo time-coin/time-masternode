@@ -48,7 +48,7 @@ impl NetworkType {
     #[allow(dead_code)]
     pub fn genesis_timestamp(&self) -> i64 {
         match self {
-            NetworkType::Mainnet => 1767225600, // 2026-01-01 00:00:00 UTC
+            NetworkType::Mainnet => 1775001600, // 2026-04-01 00:00:00 UTC
             NetworkType::Testnet => 1764547200, // 2025-12-01 00:00:00 UTC
         }
     }

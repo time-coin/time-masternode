@@ -903,7 +903,7 @@ impl Blockchain {
         // Genesis timestamp: Use FIXED timestamps for deterministic genesis hash
         // All nodes MUST produce identical genesis blocks to be on the same chain
         // - Testnet: December 1, 2025 00:00:00 UTC (1764547200)
-        // - Mainnet: January 1, 2026 00:00:00 UTC (1767225600)
+        // - Mainnet: April 1, 2026 00:00:00 UTC (1775001600)
         let genesis_timestamp = self.network_type.genesis_timestamp();
         tracing::info!(
             "🕐 Using fixed {} genesis timestamp: {} ({})",
@@ -7757,16 +7757,13 @@ impl Blockchain {
                                     registry.get_peer_chain_tip(pip).await
                                 {
                                     total_checked += 1;
-                                    if tip_height == peer_tip_height
-                                        && tip_hash == peer_tip_hash
-                                    {
+                                    if tip_height == peer_tip_height && tip_hash == peer_tip_hash {
                                         supporting_peers += 1;
                                     }
                                 }
                             }
                             const MIN_CONSENSUS_OVERRIDE_PEERS: usize = 3;
-                            if total_checked > 0
-                                && supporting_peers >= MIN_CONSENSUS_OVERRIDE_PEERS
+                            if total_checked > 0 && supporting_peers >= MIN_CONSENSUS_OVERRIDE_PEERS
                             {
                                 warn!(
                                     "🔀 Consensus override: {}/{} peers have hash {} at height {} \

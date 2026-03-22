@@ -66,7 +66,7 @@ impl GenesisBlock {
     pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
             NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z - FIXED for determinism
-            NetworkType::Mainnet => 1767225600, // 2026-01-01T00:00:00Z - FIXED for determinism
+            NetworkType::Mainnet => 1775001600, // 2026-04-01T00:00:00Z - FIXED for determinism
         }
     }
 
@@ -228,7 +228,7 @@ mod tests {
             header: BlockHeader {
                 version: 1,
                 height: 0,
-                timestamp: 1767225600,
+                timestamp: 1775001600,
                 previous_hash: [0u8; 32],
                 merkle_root: [0u8; 32],
                 leader: "test_leader".to_string(),
