@@ -40,6 +40,21 @@ pub fn calculate_merkle_root(txs: &[Transaction]) -> Hash256 {
     build_merkle_root(hashes)
 }
 
+/// Calculate merkle root using the legacy txid formula (pre-dd2ef7d), which included
+/// `encrypted_memo` in the JSON hash.  Used only as a fallback in `validate_block` to
+/// accept blocks that were produced by older nodes before the txid fix was deployed.
+pub fn calculate_merkle_root_legacy(txs: &[Transaction]) -> Hash256 {
+    let hashes: Vec<Hash256> = txs
+        .iter()
+        .map(|tx| {
+            let json =
+                serde_json::to_string(tx).expect("JSON serialization should succeed");
+            sha2::Sha256::digest(json.as_bytes()).into()
+        })
+        .collect();
+    build_merkle_root(hashes)
+}
+
 /// Proof-of-Time attestation included in blocks
 /// This proves a masternode was online and witnessed by peers
 ///
