@@ -6055,19 +6055,12 @@ impl RpcHandler {
 async fn fetch_official_peer_ips(
     url: &str,
 ) -> Result<std::collections::HashSet<std::net::IpAddr>, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::http_client::HttpClient::new()
+        .with_timeout(std::time::Duration::from_secs(10))
+        .with_accept_invalid_certs(true);
 
-    let raw: Vec<String> = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = client.get(url).await?;
+    let raw: Vec<String> = response.json()?;
 
     let mut ips = std::collections::HashSet::new();
     for entry in raw {

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use timed::http_client::HttpClient;
 
 #[derive(Parser, Debug)]
 #[command(name = "time-cli")]
@@ -616,12 +616,10 @@ fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
 }
 
 async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
-    // Build reqwest client: always accept self-signed certs (P2P nodes use self-signed RPC certs).
-    // --no-tls-verify is kept for explicitness but self-signed acceptance is always on for HTTPS.
-    let tls_client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .build()
-        .unwrap_or_else(|_| Client::new());
+    // Build HTTP client: always accept self-signed certs (P2P nodes use self-signed RPC certs).
+    let detect_client = HttpClient::new()
+        .with_timeout(std::time::Duration::from_secs(2))
+        .with_accept_invalid_certs(true);
 
     let (rpc_url, is_testnet) = if let Some(url) = &args.rpc_url {
         let testnet = args.testnet || url.contains("24101");
@@ -641,21 +639,20 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
                 let (user, pass) = read_cookie_file(*testnet)
                     .or_else(|| read_conf_credentials(*testnet))
                     .unwrap_or_default();
-                let mut req = tls_client
-                    .post(&url)
-                    .json(&serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "getblockchaininfo",
-                        "params": []
-                    }))
-                    .timeout(std::time::Duration::from_secs(2));
-                if !user.is_empty() && !pass.is_empty() {
-                    req = req.basic_auth(&user, Some(&pass));
-                }
-                if let Ok(response) = req.send().await {
-                    if response.status().is_success() {
-                        if let Ok(rpc_response) = response.json::<serde_json::Value>().await {
+                let probe = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getblockchaininfo",
+                    "params": []
+                });
+                let auth = if !user.is_empty() && !pass.is_empty() {
+                    Some((user.as_str(), pass.as_str()))
+                } else {
+                    None
+                };
+                if let Ok(response) = detect_client.post_json(&url, &probe, auth).await {
+                    if response.is_success() {
+                        if let Ok(rpc_response) = response.json::<serde_json::Value>() {
                             if rpc_response.get("result").is_some() {
                                 detected = Some((url, *testnet));
                                 break;
@@ -685,7 +682,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default(),
     };
 
-    let client = tls_client;
+    let client = HttpClient::new()
+        .with_timeout(std::time::Duration::from_secs(30))
+        .with_accept_invalid_certs(true);
 
     let (method, params) = match &args.command {
         Commands::GetBlockchainInfo => ("getblockchaininfo", json!([])),
@@ -834,35 +833,30 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Send request; if HTTPS fails, retry over HTTP with a warning (allows use when cert issues)
-    let response = {
-        let mut req = client.post(&rpc_url).json(&request);
-        if !rpc_user.is_empty() && !rpc_pass.is_empty() {
-            req = req.basic_auth(&rpc_user, Some(&rpc_pass));
+    let auth = if !rpc_user.is_empty() && !rpc_pass.is_empty() {
+        Some((rpc_user.as_str(), rpc_pass.as_str()))
+    } else {
+        None
+    };
+    let response = match client.post_json(&rpc_url, &request, auth).await {
+        Ok(r) => r,
+        Err(e) if rpc_url.starts_with("https://") => {
+            let http_url = rpc_url.replacen("https://", "http://", 1);
+            eprintln!("⚠️  HTTPS RPC failed ({}); retrying over plain HTTP — check rpctlscert/rpctlskey", e);
+            client.post_json(&http_url, &request, auth).await?
         }
-        match req.send().await {
-            Ok(r) => r,
-            Err(e) if rpc_url.starts_with("https://") => {
-                let http_url = rpc_url.replacen("https://", "http://", 1);
-                eprintln!("⚠️  HTTPS RPC failed ({}); retrying over plain HTTP — check rpctlscert/rpctlskey", e);
-                let mut req = client.post(&http_url).json(&request);
-                if !rpc_user.is_empty() && !rpc_pass.is_empty() {
-                    req = req.basic_auth(&rpc_user, Some(&rpc_pass));
-                }
-                req.send().await?
-            }
-            Err(e) => return Err(e.into()),
-        }
+        Err(e) => return Err(e.into()),
     };
 
-    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+    if response.status == 401 {
         return Err("RPC authentication failed. Check rpcuser/rpcpassword in time.conf or use --rpcuser/--rpcpassword flags.".into());
     }
 
-    if !response.status().is_success() {
-        return Err(format!("HTTP error: {}", response.status()).into());
+    if !response.is_success() {
+        return Err(format!("HTTP error: {}", response.status).into());
     }
 
-    let rpc_response: RpcResponse = response.json().await?;
+    let rpc_response: RpcResponse = response.json().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     if let Some(error) = rpc_response.error {
         return Err(format!("RPC error {}: {}", error.code, error.message).into());

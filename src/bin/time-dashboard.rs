@@ -12,8 +12,8 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Tabs},
     Frame, Terminal,
 };
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use timed::http_client::HttpClient;
 use std::{
     error::Error,
     io,
@@ -324,7 +324,7 @@ struct App {
     rpc_url: String,
     rpc_user: String,
     rpc_pass: String,
-    client: Client,
+    client: HttpClient,
     current_tab: usize,
     should_quit: bool,
     error_message: Option<String>,
@@ -345,11 +345,9 @@ impl App {
             rpc_url,
             rpc_user,
             rpc_pass,
-            client: Client::builder()
-                .timeout(Duration::from_secs(3))
-                .danger_accept_invalid_certs(true)
-                .build()
-                .unwrap_or_default(),
+            client: HttpClient::new()
+                .with_timeout(Duration::from_secs(3))
+                .with_accept_invalid_certs(true),
             current_tab: 0,
             should_quit: false,
             error_message: None,
@@ -542,14 +540,16 @@ impl App {
             params,
         };
 
-        let mut req = self.client.post(&self.rpc_url).json(&request);
-        if !self.rpc_user.is_empty() && !self.rpc_pass.is_empty() {
-            req = req.basic_auth(&self.rpc_user, Some(&self.rpc_pass));
-        }
-        let response = req.send().await?;
+        let auth = if !self.rpc_user.is_empty() && !self.rpc_pass.is_empty() {
+            Some((self.rpc_user.as_str(), self.rpc_pass.as_str()))
+        } else {
+            None
+        };
+        let response = self.client.post_json(&self.rpc_url, &request, auth).await
+            .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
-        // Get raw response text first for debugging
-        let response_text = response.text().await?;
+        // Get raw response text for debugging
+        let response_text = response.text();
 
         // First parse as generic Value to check for errors
         let rpc_value: serde_json::Value = serde_json::from_str(&response_text)?;
