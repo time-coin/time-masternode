@@ -5303,9 +5303,14 @@ impl Blockchain {
                     // Allow up to MAX_FREE_TIER_RECIPIENTS.
                     let per_node = pool / MAX_FREE_TIER_RECIPIENTS as u64;
                     if per_node < MIN_POOL_PAYOUT_SATOSHIS {
-                        // Pool too small to split; should have rolled to producer.
-                        rolled_up_to_producer += pool;
-                        if paid > 0 {
+                        // Per-node payout below minimum. Whether the pool rolled up to the
+                        // producer or was distributed anyway depends on what the block actually did.
+                        if paid == 0 {
+                            // Nothing distributed — pool rolled to producer.
+                            rolled_up_to_producer += pool;
+                        } else {
+                            // Block distributed the pool despite per-node being below minimum.
+                            // Accept it (don't add to rolled_up_to_producer since it wasn't rolled up).
                             tracing::warn!(
                                 "⚠️ Block {} Free tier: per-node payout {} below minimum {}, \
                                  but {} satoshis were distributed",
