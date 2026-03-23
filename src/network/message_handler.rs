@@ -999,7 +999,7 @@ impl MessageHandler {
         Ok(Some(pong))
     }
 
-    /// Handle Pong message - update peer height
+    /// Handle Pong message - update peer height and RTT
     async fn handle_pong(
         &self,
         nonce: u64,
@@ -1019,6 +1019,12 @@ impl MessageHandler {
                 .update_peer_height(&self.peer_ip, h)
                 .await;
         }
+
+        // Record pong for centralized RTT tracking
+        context
+            .peer_registry
+            .record_pong_received(&self.peer_ip, nonce)
+            .await;
 
         Ok(None)
     }

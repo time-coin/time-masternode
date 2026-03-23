@@ -635,8 +635,8 @@ impl PeerConnection {
             .map_err(|_| "Writer channel closed".to_string())
     }
 
-    /// Send a ping to the peer
-    async fn send_ping(&mut self, blockchain: Option<&Arc<Blockchain>>) -> Result<(), String> {
+    /// Send a ping to the peer. Returns the nonce on success for RTT tracking.
+    async fn send_ping(&mut self, blockchain: Option<&Arc<Blockchain>>) -> Result<u64, String> {
         let nonce = rand::random::<u64>();
         let timestamp = chrono::Utc::now().timestamp();
         let height = blockchain.map(|bc| bc.get_height());
@@ -663,7 +663,8 @@ impl PeerConnection {
                 timestamp,
                 height,
             },
-        )
+        )?;
+        Ok(nonce)
     }
 
     /// Handle received ping
@@ -870,7 +871,8 @@ impl PeerConnection {
                 height,
             } => {
                 self.handle_pong(*nonce, *timestamp, *height).await?;
-                // Push latest RTT to registry so RPC can report it
+                // Push RTT to registry via both paths for reliability
+                config.peer_registry.record_pong_received(&self.peer_ip, *nonce).await;
                 if let Some(rtt_secs) = self.get_ping_rtt().await {
                     config.peer_registry.set_peer_ping_time(&self.peer_ip, rtt_secs).await;
                 }
@@ -1015,12 +1017,17 @@ impl PeerConnection {
         );
 
         // Send initial ping
-        if let Err(e) = self.send_ping(config.blockchain.as_ref()).await {
-            error!(
-                "❌ [{:?}] Failed to send initial ping to {}: {}",
-                self.direction, self.peer_ip, e
-            );
-            return Err(e);
+        match self.send_ping(config.blockchain.as_ref()).await {
+            Ok(nonce) => {
+                config.peer_registry.record_ping_sent(&self.peer_ip, nonce).await;
+            }
+            Err(e) => {
+                error!(
+                    "❌ [{:?}] Failed to send initial ping to {}: {}",
+                    self.direction, self.peer_ip, e
+                );
+                return Err(e);
+            }
         }
 
         // Extract broadcast_rx before the loop to avoid borrow checker issues
@@ -1082,9 +1089,14 @@ impl PeerConnection {
 
                 // Send periodic pings
                 _ = ping_interval.tick() => {
-                    if let Err(e) = self.send_ping(config.blockchain.as_ref()).await {
-                        error!("❌ [{:?}] Failed to send ping to {}: {}", self.direction, self.peer_ip, e);
-                        break;
+                    match self.send_ping(config.blockchain.as_ref()).await {
+                        Ok(nonce) => {
+                            config.peer_registry.record_ping_sent(&self.peer_ip, nonce).await;
+                        }
+                        Err(e) => {
+                            error!("❌ [{:?}] Failed to send ping to {}: {}", self.direction, self.peer_ip, e);
+                            break;
+                        }
                     }
                 }
 

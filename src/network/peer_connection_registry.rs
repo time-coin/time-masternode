@@ -62,6 +62,8 @@ pub struct PeerConnectionRegistry {
     peer_heights: Arc<RwLock<HashMap<String, u64>>>,
     // Map of peer IP to their latest ping RTT in seconds
     peer_ping_times: Arc<RwLock<HashMap<String, f64>>>,
+    // Map of peer IP to pending ping send times (nonce -> sent_at) for RTT calculation
+    pending_pings: Arc<RwLock<HashMap<String, Vec<(u64, std::time::Instant)>>>>,
     // Map of peer IP to their chain tip (height + hash)
     peer_chain_tips: Arc<RwLock<HashMap<String, ChainTip>>>,
     // Pending responses for request/response pattern
@@ -114,6 +116,7 @@ impl PeerConnectionRegistry {
             peer_writers: Arc::new(RwLock::new(HashMap::new())),
             peer_heights: Arc::new(RwLock::new(HashMap::new())),
             peer_ping_times: Arc::new(RwLock::new(HashMap::new())),
+            pending_pings: Arc::new(RwLock::new(HashMap::new())),
             peer_chain_tips: Arc::new(RwLock::new(HashMap::new())),
             pending_responses: Arc::new(RwLock::new(HashMap::new())),
             timelock_consensus: Arc::new(RwLock::new(None)),
@@ -737,11 +740,13 @@ impl PeerConnectionRegistry {
                 let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
                 let peer_heights = Arc::clone(&self.peer_heights);
                 let peer_ping_times = Arc::clone(&self.peer_ping_times);
+                let pending_pings = Arc::clone(&self.pending_pings);
                 let ip = ip.to_string();
                 async move {
                     peer_chain_tips.write().await.remove(&ip);
                     peer_heights.write().await.remove(&ip);
                     peer_ping_times.write().await.remove(&ip);
+                    pending_pings.write().await.remove(&ip);
                 }
             });
         }
@@ -762,11 +767,13 @@ impl PeerConnectionRegistry {
                 let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
                 let peer_heights = Arc::clone(&self.peer_heights);
                 let peer_ping_times = Arc::clone(&self.peer_ping_times);
+                let pending_pings = Arc::clone(&self.pending_pings);
                 let ip = ip.to_string();
                 async move {
                     peer_chain_tips.write().await.remove(&ip);
                     peer_heights.write().await.remove(&ip);
                     peer_ping_times.write().await.remove(&ip);
+                    pending_pings.write().await.remove(&ip);
                 }
             });
         }
@@ -782,11 +789,13 @@ impl PeerConnectionRegistry {
                 let peer_chain_tips = Arc::clone(&self.peer_chain_tips);
                 let peer_heights = Arc::clone(&self.peer_heights);
                 let peer_ping_times = Arc::clone(&self.peer_ping_times);
+                let pending_pings = Arc::clone(&self.pending_pings);
                 let ip = ip.to_string();
                 async move {
                     peer_chain_tips.write().await.remove(&ip);
                     peer_heights.write().await.remove(&ip);
                     peer_ping_times.write().await.remove(&ip);
+                    pending_pings.write().await.remove(&ip);
                 }
             });
         }
@@ -893,11 +902,13 @@ impl PeerConnectionRegistry {
         let mut pending = self.pending_responses.write().await;
         pending.remove(peer_ip);
 
-        // Remove peer height and ping time
+        // Remove peer height, ping time, and pending pings
         let mut heights = self.peer_heights.write().await;
         heights.remove(peer_ip);
         let mut ping_times = self.peer_ping_times.write().await;
         ping_times.remove(peer_ip);
+        let mut pings = self.pending_pings.write().await;
+        pings.remove(peer_ip);
     }
 
     /// Set a peer's reported blockchain height
@@ -926,6 +937,34 @@ impl PeerConnectionRegistry {
         let ip_only = extract_ip(peer_ip);
         let times = self.peer_ping_times.read().await;
         times.get(ip_only).copied()
+    }
+
+    /// Record that a ping was sent to a peer (for centralized RTT tracking)
+    pub async fn record_ping_sent(&self, peer_ip: &str, nonce: u64) {
+        let ip_only = extract_ip(peer_ip).to_string();
+        let mut pings = self.pending_pings.write().await;
+        let entry = pings.entry(ip_only).or_default();
+        entry.push((nonce, std::time::Instant::now()));
+        // Keep at most 10 pending pings per peer
+        if entry.len() > 10 {
+            entry.remove(0);
+        }
+    }
+
+    /// Record that a pong was received, compute and store RTT
+    pub async fn record_pong_received(&self, peer_ip: &str, nonce: u64) {
+        let ip_only = extract_ip(peer_ip).to_string();
+        let now = std::time::Instant::now();
+        let mut pings = self.pending_pings.write().await;
+        if let Some(pending) = pings.get_mut(&ip_only) {
+            if let Some(pos) = pending.iter().position(|(n, _)| *n == nonce) {
+                let (_, sent_time) = pending.remove(pos);
+                let rtt_secs = now.duration_since(sent_time).as_secs_f64() / 2.0;
+                drop(pings); // Release lock before acquiring another
+                let mut times = self.peer_ping_times.write().await;
+                times.insert(ip_only, rtt_secs);
+            }
+        }
     }
 
     /// Phase 3: Update a peer's known height
@@ -974,9 +1013,11 @@ impl PeerConnectionRegistry {
         let mut heights = self.peer_heights.write().await;
         let mut tips = self.peer_chain_tips.write().await;
         let mut ping_times = self.peer_ping_times.write().await;
+        let mut pings = self.pending_pings.write().await;
         heights.remove(peer_ip);
         tips.remove(peer_ip);
         ping_times.remove(peer_ip);
+        pings.remove(peer_ip);
         tracing::debug!(
             "🧹 Cleared stale chain tip data for disconnected peer {}",
             peer_ip
