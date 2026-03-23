@@ -1,4 +1,5 @@
 // src/address.rs
+use crate::crypto::base58;
 use crate::network_type::NetworkType;
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -11,7 +12,6 @@ use std::fmt;
 /// The base58 encoding of 24 bytes (20 payload + 4 checksum) typically produces ~33 chars
 #[allow(dead_code)]
 const ADDRESS_LENGTH: usize = 38;
-const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Address {
@@ -106,76 +106,15 @@ impl Address {
     }
 
     fn compute_checksum(data: &[u8]) -> [u8; 4] {
-        let hash1 = Sha256::digest(data);
-        let hash2 = Sha256::digest(hash1);
-        let mut checksum = [0u8; 4];
-        checksum.copy_from_slice(&hash2[..4]);
-        checksum
+        base58::checksum(data)
     }
 
     fn encode_base58(data: &[u8]) -> String {
-        // divmod-on-byte-array: no bigint needed
-        let mut digits: Vec<u8> = Vec::new(); // base58 digit values in big-endian
-
-        for &byte in data {
-            let mut carry = byte as u32;
-            for d in digits.iter_mut() {
-                carry += (*d as u32) << 8;
-                *d = (carry % 58) as u8;
-                carry /= 58;
-            }
-            while carry > 0 {
-                digits.push((carry % 58) as u8);
-                carry /= 58;
-            }
-        }
-
-        // Leading zeros in input become '1' characters
-        let mut result = String::new();
-        for &byte in data {
-            if byte == 0 {
-                result.push('1');
-            } else {
-                break;
-            }
-        }
-
-        // digits are in reverse order
-        for &d in digits.iter().rev() {
-            result.push(BASE58_ALPHABET[d as usize] as char);
-        }
-
-        result
+        base58::encode(data)
     }
 
     fn decode_base58(s: &str) -> Result<Vec<u8>, AddressError> {
-        let mut bytes: Vec<u8> = Vec::new(); // big-endian byte values
-
-        for ch in s.chars() {
-            let idx = BASE58_ALPHABET
-                .iter()
-                .position(|&c| c == ch as u8)
-                .ok_or(AddressError::InvalidBase58)? as u32;
-
-            let mut carry = idx;
-            for b in bytes.iter_mut() {
-                carry += (*b as u32) * 58;
-                *b = (carry & 0xFF) as u8;
-                carry >>= 8;
-            }
-            while carry > 0 {
-                bytes.push((carry & 0xFF) as u8);
-                carry >>= 8;
-            }
-        }
-
-        // Leading '1' characters become zero bytes
-        let leading_ones = s.chars().take_while(|&c| c == '1').count();
-        let mut result = vec![0u8; leading_ones];
-        // bytes are in reverse order
-        result.extend(bytes.iter().rev());
-
-        Ok(result)
+        base58::decode(s).map_err(|_| AddressError::InvalidBase58)
     }
 }
 

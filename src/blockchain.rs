@@ -8208,12 +8208,8 @@ impl Blockchain {
                         sorted_reorg_blocks.last().unwrap().header.height
                     );
 
-                    // CRITICAL: Set Reorging state and call perform_reorg directly.
-                    // We must NOT go through continue_fork_resolution() here because it
-                    // re-reads fork_state, which creates a race: concurrent handle_fork()
-                    // calls from other peers (already past the guard) can overwrite the
-                    // state between our write and continue_fork_resolution's read, causing
-                    // the reorg to silently never execute.
+                    // Set Reorging state and call perform_reorg directly (avoids
+                    // fork_state race with concurrent handle_fork() calls).
                     *self.fork_state.write().await = ForkResolutionState::Reorging {
                         from_height: our_height,
                         to_height: sorted_reorg_blocks.last().unwrap().header.height,
@@ -8258,104 +8254,6 @@ impl Blockchain {
 
                 self.request_blocks_from_peer(&peer_addr, request_from, request_to)
                     .await?;
-                Ok(())
-            }
-        }
-    }
-
-    /// Continue fork resolution state machine with timeout protection
-    #[allow(dead_code)]
-    async fn continue_fork_resolution(&self) -> Result<(), String> {
-        // Check for stale fork resolution state (timeout after 2 minutes)
-        const FORK_RESOLUTION_TIMEOUT_SECS: u64 = 120;
-
-        let state = self.fork_state.read().await.clone();
-
-        // Check timeout for states with timestamps
-        match &state {
-            ForkResolutionState::FetchingChain { started_at, .. }
-            | ForkResolutionState::Reorging { started_at, .. }
-            | ForkResolutionState::ReadyToReorg { started_at, .. } => {
-                if started_at.elapsed().as_secs() > FORK_RESOLUTION_TIMEOUT_SECS {
-                    warn!(
-                        "⚠️  Fork resolution timed out after {}s, resetting state",
-                        started_at.elapsed().as_secs()
-                    );
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Err(format!(
-                        "Fork resolution timeout after {}s",
-                        FORK_RESOLUTION_TIMEOUT_SECS
-                    ));
-                }
-            }
-            _ => {}
-        }
-
-        match state {
-            ForkResolutionState::None => Ok(()),
-
-            ForkResolutionState::FetchingChain {
-                common_ancestor: _,
-                fork_height: _,
-                peer_addr,
-                peer_height,
-                fetched_up_to,
-                accumulated_blocks: _,
-                started_at: _,
-            } => {
-                // When we're in FetchingChain, the blocks will arrive via handle_blocks
-                // and we'll retry binary search when we have more blocks
-                // For now, just log status
-                info!(
-                    "⏳ Waiting for blocks from peer {} (have up to {}, need up to {})",
-                    peer_addr, fetched_up_to, peer_height
-                );
-                Ok(())
-            }
-
-            ForkResolutionState::ReadyToReorg {
-                common_ancestor,
-                alternate_blocks,
-                started_at,
-            } => {
-                // Check if reorg preparation is taking too long
-                if started_at.elapsed().as_secs() > 60 {
-                    warn!(
-                        "⚠️  Reorg preparation stuck for {}s, resetting",
-                        started_at.elapsed().as_secs()
-                    );
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Err("Reorg preparation stalled".to_string());
-                }
-
-                // Perform the reorganization
-                let reorg_result = self.perform_reorg(common_ancestor, alternate_blocks).await;
-
-                // Always clear fork state after reorg attempt (success or failure)
-                *self.fork_state.write().await = ForkResolutionState::None;
-
-                // Clear consensus peers list - will be refreshed on next periodic check
-                self.consensus_peers.write().await.clear();
-
-                reorg_result?;
-                Ok(())
-            }
-
-            ForkResolutionState::Reorging {
-                from_height: _,
-                to_height: _,
-                started_at,
-            } => {
-                // Check if reorg is taking too long
-                if started_at.elapsed().as_secs() > 60 {
-                    warn!(
-                        "⚠️  Reorg stuck for {}s, resetting",
-                        started_at.elapsed().as_secs()
-                    );
-                    *self.fork_state.write().await = ForkResolutionState::None;
-                    return Err("Reorg operation stalled".to_string());
-                }
-                // Already reorging, wait
                 Ok(())
             }
         }

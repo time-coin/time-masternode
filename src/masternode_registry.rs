@@ -1217,6 +1217,11 @@ impl MasternodeRegistry {
 
     #[allow(dead_code)]
     pub async fn active_count(&self) -> usize {
+        self.count_active().await
+    }
+
+    #[allow(dead_code)]
+    pub async fn count_active(&self) -> usize {
         self.masternodes
             .read()
             .await
@@ -1243,16 +1248,6 @@ impl MasternodeRegistry {
     #[allow(dead_code)]
     pub async fn count(&self) -> usize {
         self.masternodes.read().await.len()
-    }
-
-    #[allow(dead_code)]
-    pub async fn count_active(&self) -> usize {
-        self.masternodes
-            .read()
-            .await
-            .values()
-            .filter(|info| info.is_active)
-            .count()
     }
 
     #[allow(dead_code)]
