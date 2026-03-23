@@ -4,16 +4,14 @@
 //! Generate one with `time-cli masternodegenkey` and add it to time.conf as
 //! `masternodeprivkey=<base58check-encoded key>`.
 
-use sha2::{Digest, Sha256};
-
-const BASE58_ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+use crate::crypto::base58;
 
 /// Decode a base58check-encoded masternode private key.
 ///
 /// Format: 1-byte prefix (0x80) + 32-byte Ed25519 secret key + 4-byte checksum
 /// Returns the 32-byte secret key bytes on success.
 pub fn decode_masternode_key(base58_key: &str) -> Result<[u8; 32], String> {
-    let bytes = decode_base58(base58_key).map_err(|e| format!("Invalid base58: {}", e))?;
+    let bytes = base58::decode(base58_key).map_err(|e| format!("Invalid base58: {}", e))?;
 
     // Expected: 1 (prefix) + 32 (key) + 4 (checksum) = 37 bytes
     if bytes.len() != 37 {
@@ -33,11 +31,9 @@ pub fn decode_masternode_key(base58_key: &str) -> Result<[u8; 32], String> {
 
     // Verify checksum (first 4 bytes of double-SHA256)
     let payload = &bytes[..33]; // prefix + key
-    let hash1 = Sha256::digest(payload);
-    let hash2 = Sha256::digest(hash1);
-    let checksum = &hash2[..4];
+    let checksum = base58::checksum(payload);
 
-    if &bytes[33..37] != checksum {
+    if bytes[33..37] != checksum {
         return Err("Invalid masternode key checksum".to_string());
     }
 
@@ -55,71 +51,10 @@ pub fn encode_masternode_key(secret_key: &[u8; 32]) -> String {
     payload.extend_from_slice(secret_key);
 
     // Checksum: first 4 bytes of double-SHA256
-    let hash1 = Sha256::digest(&payload);
-    let hash2 = Sha256::digest(hash1);
-    payload.extend_from_slice(&hash2[..4]);
+    let cs = base58::checksum(&payload);
+    payload.extend_from_slice(&cs);
 
-    encode_base58(&payload)
-}
-
-fn encode_base58(data: &[u8]) -> String {
-    let mut digits: Vec<u8> = Vec::new();
-
-    for &byte in data {
-        let mut carry = byte as u32;
-        for d in digits.iter_mut() {
-            carry += (*d as u32) << 8;
-            *d = (carry % 58) as u8;
-            carry /= 58;
-        }
-        while carry > 0 {
-            digits.push((carry % 58) as u8);
-            carry /= 58;
-        }
-    }
-
-    let mut result = String::new();
-    for &byte in data {
-        if byte == 0 {
-            result.push('1');
-        } else {
-            break;
-        }
-    }
-
-    for &d in digits.iter().rev() {
-        result.push(BASE58_ALPHABET[d as usize] as char);
-    }
-
-    result
-}
-
-fn decode_base58(s: &str) -> Result<Vec<u8>, String> {
-    let mut bytes: Vec<u8> = Vec::new();
-
-    for ch in s.chars() {
-        let idx = BASE58_ALPHABET
-            .iter()
-            .position(|&c| c == ch as u8)
-            .ok_or_else(|| format!("Invalid base58 character: {}", ch))? as u32;
-
-        let mut carry = idx;
-        for b in bytes.iter_mut() {
-            carry += (*b as u32) * 58;
-            *b = (carry & 0xFF) as u8;
-            carry >>= 8;
-        }
-        while carry > 0 {
-            bytes.push((carry & 0xFF) as u8);
-            carry >>= 8;
-        }
-    }
-
-    let leading_ones = s.chars().take_while(|&c| c == '1').count();
-    let mut result = vec![0u8; leading_ones];
-    result.extend(bytes.iter().rev());
-
-    Ok(result)
+    base58::encode(&payload)
 }
 
 #[cfg(test)]
@@ -141,7 +76,7 @@ mod tests {
 
     #[test]
     fn test_decode_wrong_length() {
-        let encoded = encode_base58(&[0x80, 1, 2, 3]);
+        let encoded = base58::encode(&[0x80, 1, 2, 3]);
         assert!(decode_masternode_key(&encoded).is_err());
     }
 
@@ -150,15 +85,15 @@ mod tests {
         let mut payload = vec![0x80];
         payload.extend_from_slice(&[42u8; 32]);
         payload.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // bad checksum
-        let encoded = encode_base58(&payload);
+        let encoded = base58::encode(&payload);
         assert!(decode_masternode_key(&encoded).is_err());
     }
 
     #[test]
     fn test_base58_roundtrip() {
         let data = vec![0x80, 1, 2, 3, 4, 5];
-        let encoded = encode_base58(&data);
-        let decoded = decode_base58(&encoded).unwrap();
+        let encoded = base58::encode(&data);
+        let decoded = base58::decode(&encoded).unwrap();
         assert_eq!(data, decoded);
     }
 }

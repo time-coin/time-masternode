@@ -22,52 +22,7 @@ use std::{
 
 const DASHBOARD_VERSION: &str = "1.0.0";
 
-/// Read RPC credentials from the .cookie file in the data directory.
-fn read_cookie_file(testnet: bool) -> Option<(String, String)> {
-    let data_dir = if testnet {
-        dirs::home_dir()?.join(".timecoin").join("testnet")
-    } else {
-        dirs::home_dir()?.join(".timecoin")
-    };
-    let cookie_path = data_dir.join(".cookie");
-    let contents = std::fs::read_to_string(&cookie_path).ok()?;
-    let (user, pass) = contents.trim().split_once(':')?;
-    Some((user.to_string(), pass.to_string()))
-}
-
-/// Read RPC credentials from time.conf as a fallback.
-fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
-    let data_dir = if testnet {
-        dirs::home_dir()?.join(".timecoin").join("testnet")
-    } else {
-        dirs::home_dir()?.join(".timecoin")
-    };
-    let conf_path = data_dir.join("time.conf");
-    let contents = std::fs::read_to_string(&conf_path).ok()?;
-    let mut user = None;
-    let mut pass = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            match key.trim() {
-                "rpcuser" => user = Some(value.trim().to_string()),
-                "rpcpassword" => pass = Some(value.trim().to_string()),
-                _ => {}
-            }
-        }
-    }
-    Some((user?, pass?))
-}
-
-/// Resolve RPC credentials: try .cookie file first, then time.conf.
-fn resolve_credentials(testnet: bool) -> (String, String) {
-    read_cookie_file(testnet)
-        .or_else(|| read_conf_credentials(testnet))
-        .unwrap_or_default()
-}
+use timed::rpc::credentials::resolve_credentials;
 
 /// Check ~/.timecoin/time.conf for testnet=1 to auto-detect network preference.
 fn conf_prefers_testnet() -> bool {
@@ -485,6 +440,14 @@ impl App {
 
         // Insert local node as first entry in peer list
         if let Some(ref mn) = self.data.masternode {
+            // Remove the local node from the RPC peer list to avoid duplication
+            if !mn.address.is_empty() {
+                let local_ip = mn.address.split(':').next().unwrap_or(&mn.address);
+                self.data.peers.retain(|p| {
+                    let peer_ip = p.addr.split(':').next().unwrap_or(&p.addr);
+                    peer_ip != local_ip
+                });
+            }
             let local_height = self.data.blockchain.as_ref().map(|b| b.blocks).unwrap_or(0);
             let local_peer = PeerInfo {
                 addr: if mn.address.is_empty() {

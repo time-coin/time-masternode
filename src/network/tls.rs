@@ -128,10 +128,11 @@ impl TlsConfig {
     }
 }
 
-/// Custom certificate verifier for P2P networks with self-signed certificates
-/// WARNING: This accepts ANY certificate - suitable for P2P but not client-server
+/// Custom certificate verifier for P2P networks with self-signed certificates.
+/// WARNING: This accepts ANY certificate — suitable for P2P but not client-server.
+/// Also used by `http_client` for RPC connections to nodes with self-signed certs.
 #[derive(Debug)]
-struct AcceptAnyCertVerifier;
+pub struct AcceptAnyCertVerifier;
 
 impl rustls::client::danger::ServerCertVerifier for AcceptAnyCertVerifier {
     fn verify_server_cert(

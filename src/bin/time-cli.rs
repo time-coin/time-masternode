@@ -542,78 +542,7 @@ async fn main() {
     }
 }
 
-/// Read RPC credentials from the .cookie file in the data directory.
-/// Read rpctls setting from time.conf (defaults to true, matching server default).
-fn read_conf_rpctls(testnet: bool) -> bool {
-    let data_dir = if testnet {
-        match dirs::home_dir() {
-            Some(d) => d.join(".timecoin").join("testnet"),
-            None => return true,
-        }
-    } else {
-        match dirs::home_dir() {
-            Some(d) => d.join(".timecoin"),
-            None => return true,
-        }
-    };
-    let conf_path = data_dir.join("time.conf");
-    let contents = match std::fs::read_to_string(&conf_path) {
-        Ok(c) => c,
-        Err(_) => return true, // default: TLS on
-    };
-    let mut rpctls = true; // server default
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "rpctls" {
-                rpctls = value.trim() != "0";
-            }
-        }
-    }
-    rpctls
-}
-
-fn read_cookie_file(testnet: bool) -> Option<(String, String)> {
-    let data_dir = if testnet {
-        dirs::home_dir()?.join(".timecoin").join("testnet")
-    } else {
-        dirs::home_dir()?.join(".timecoin")
-    };
-    let cookie_path = data_dir.join(".cookie");
-    let contents = std::fs::read_to_string(&cookie_path).ok()?;
-    let (user, pass) = contents.trim().split_once(':')?;
-    Some((user.to_string(), pass.to_string()))
-}
-
-/// Read RPC credentials from time.conf as a fallback.
-fn read_conf_credentials(testnet: bool) -> Option<(String, String)> {
-    let data_dir = if testnet {
-        dirs::home_dir()?.join(".timecoin").join("testnet")
-    } else {
-        dirs::home_dir()?.join(".timecoin")
-    };
-    let conf_path = data_dir.join("time.conf");
-    let contents = std::fs::read_to_string(&conf_path).ok()?;
-    let mut user = None;
-    let mut pass = None;
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            match key.trim() {
-                "rpcuser" => user = Some(value.trim().to_string()),
-                "rpcpassword" => pass = Some(value.trim().to_string()),
-                _ => {}
-            }
-        }
-    }
-    Some((user?, pass?))
-}
+use timed::rpc::credentials::{read_conf_rpctls, read_cookie_file, read_conf_credentials};
 
 async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Build HTTP client: always accept self-signed certs (P2P nodes use self-signed RPC certs).
