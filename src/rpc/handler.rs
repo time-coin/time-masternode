@@ -1687,7 +1687,7 @@ impl RpcHandler {
                         "blockhash": block_hash,
                         "blockheight": height,
                         "blocktime": block_time,
-                        "time": block_time,
+                        "time": tx.timestamp,
                     });
 
                     if let Some(f) = fee {
