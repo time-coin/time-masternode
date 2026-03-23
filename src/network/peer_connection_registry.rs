@@ -4,6 +4,8 @@
 
 #![allow(dead_code)]
 
+type PendingPingMap = HashMap<String, Vec<(u64, std::time::Instant)>>;
+
 use crate::consensus::ConsensusEngine;
 use crate::network::message::NetworkMessage;
 use dashmap::DashMap;
@@ -63,7 +65,7 @@ pub struct PeerConnectionRegistry {
     // Map of peer IP to their latest ping RTT in seconds
     peer_ping_times: Arc<RwLock<HashMap<String, f64>>>,
     // Map of peer IP to pending ping send times (nonce -> sent_at) for RTT calculation
-    pending_pings: Arc<RwLock<HashMap<String, Vec<(u64, std::time::Instant)>>>>,
+    pending_pings: Arc<RwLock<PendingPingMap>>,
     // Map of peer IP to their chain tip (height + hash)
     peer_chain_tips: Arc<RwLock<HashMap<String, ChainTip>>>,
     // Pending responses for request/response pattern
