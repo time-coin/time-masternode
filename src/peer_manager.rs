@@ -121,16 +121,16 @@ impl PeerManager {
         let discovery_url = self.network_type.peer_discovery_url();
         info!("🔍 Discovering peers from {}", discovery_url);
 
-        let client = crate::http_client::HttpClient::new()
-            .with_timeout(Duration::from_secs(10));
-
-        match client.get(discovery_url).await {
-            Ok(response) => {
-                if let Ok(peer_list) = response.json::<Vec<String>>() {
+        // Use curl to fetch peer list (avoids rustls/CDN TLS issues)
+        match tokio::process::Command::new("curl")
+            .args(["-sL", "--max-time", "10", discovery_url])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                if let Ok(peer_list) = serde_json::from_slice::<Vec<String>>(&output.stdout) {
                     let mut added = 0;
                     for peer_addr in peer_list {
-                        // API now returns IPs without ports, add to candidates as-is
-                        // The connection logic will add the appropriate port based on network type
                         if self.add_peer_candidate(peer_addr.clone()).await {
                             added += 1;
                         }
@@ -142,8 +142,12 @@ impl PeerManager {
                     Ok(())
                 }
             }
+            Ok(output) => {
+                warn!("⚠️  Failed to connect to discovery server: curl exited {}", output.status);
+                Ok(())
+            }
             Err(e) => {
-                warn!("⚠️  Failed to connect to discovery server: {}", e);
+                warn!("⚠️  Failed to run curl: {}", e);
                 Ok(())
             }
         }

@@ -159,13 +159,15 @@ impl PartitionDetector {
         let default_port = self.network_type.default_p2p_port();
         let mut candidates: Vec<String> = Vec::new();
 
-        // 1. Fetch fresh peers from the discovery API.
+        // 1. Fetch fresh peers from the discovery API (via curl to avoid rustls/CDN issues).
         let discovery_url = self.network_type.peer_discovery_url();
-        let client = crate::http_client::HttpClient::new()
-            .with_timeout(std::time::Duration::from_secs(10));
-        match client.get(discovery_url).await {
-            Ok(resp) => {
-                if let Ok(peers) = resp.json::<Vec<String>>() {
+        match tokio::process::Command::new("curl")
+            .args(["-sL", "--max-time", "10", discovery_url])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                if let Ok(peers) = serde_json::from_slice::<Vec<String>>(&output.stdout) {
                     for peer in peers {
                         let addr = if peer.contains(':') {
                             peer
@@ -175,6 +177,9 @@ impl PartitionDetector {
                         candidates.push(addr);
                     }
                 }
+            }
+            Ok(output) => {
+                tracing::debug!("Partition recovery: curl failed with status {}", output.status);
             }
             Err(e) => {
                 tracing::debug!("Partition recovery: discovery API unreachable: {}", e);

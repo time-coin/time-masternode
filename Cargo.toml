@@ -32,7 +32,8 @@ tokio = { version = "1.38", features = [
     "time",
     "sync",
     "macros",
-    "signal"
+    "signal",
+    "process"
 ], default-features = false }
 serde = { version = "1.0", features = ["derive"], default-features = false }
 serde_json = "1.0"
