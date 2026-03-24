@@ -191,7 +191,7 @@ echo     time-cli getpeerinfo
 echo     time-cli masternodestatus
 echo.
 echo   Configuration: notepad "%DATA_DIR%\time.conf"
-echo   Dashboard:     cargo run --bin time-dashboard --features dashboard
+echo   Dashboard:     scripts\\dashboard.bat
 echo.
 echo   To update later: scripts\update.bat %NETWORK%
 echo.

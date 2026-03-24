@@ -359,9 +359,11 @@ status in a single view:
 ```bash
 # Linux
 bash scripts/dashboard.sh
+```
 
-# Windows
-cargo run --bin time-dashboard --features dashboard
+```
+REM Windows
+scripts\dashboard.bat
 ```
 
 **Tabs** (switch with `1`–`5` or arrow keys):
