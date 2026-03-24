@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`TransactionFinalized` spam while syncing**: When a node was hundreds of blocks behind, peers would send `TransactionFinalized` messages referencing UTXOs created by blocks the node hadn't received yet. Every message was logged as `⚠️ Rejecting TransactionFinalized ... input not in storage`, generating noise and wasting CPU. The handler now drops `TransactionFinalized` messages immediately when `blockchain.is_syncing()` is true; peers re-broadcast once the node catches up.
 
+### Fixed — Fork Resolution: Common Ancestor Search Always Failing
+
+- **`BlockHashResponse` not routed to response channels**: The common ancestor search (`find_and_resolve_fork`) works by sending `GetBlockHash(height)` to a peer and awaiting the `BlockHashResponse` on a oneshot channel. However, when the response arrived in the inbound message loop, it fell through to the `_` catch-all which called `MessageHandler` — which returns `Ok(None)` and silently drops the response. The waiting channel never received anything, so every iteration timed out after 3 seconds. After 3 consecutive timeouts the search aborted with "Aborting common ancestor search: 3 consecutive failures". Fixed by explicitly matching `BlockHashResponse` in the server's inbound message loop and calling `peer_registry.handle_response()` to dispatch it to the waiting oneshot channel.
+
+### Fixed — Message Too Large on Block Range Responses
+
+- **`MAX_FRAME_SIZE` increased from 8 MB to 16 MB**: Block range responses containing ~1000+ zstd-compressed blocks could exceed 8 MB, causing "Message too large" errors and failed sync responses. 16 MB gives headroom for large ranges while still bounding per-peer buffer allocation.
+- **Unbounded `GetBlockRange` in fork handler**: When `ChainWorkResponse` detected a peer with a better chain, it sent a single `GetBlockRange { start: fork_height, end: peer_height }` that could span thousands of blocks. The response would exceed the frame limit. The fork handler now caps the first batch to 50 blocks; subsequent batches are fetched by the normal sync path once the initial gap is filled.
+
 ### Fixed — Parallel Sync Deadlock (missing first chunk)
 
 - **Sync stall at specific height**: When the peer assigned the first block chunk (e.g. 15132–15181) was unresponsive or couldn't serve that range, the parallel sync buffered hundreds of valid blocks from other peers but made no height progress. On the 30 s timeout it called `clear_pending_blocks()` — **destroying all the valid buffered blocks** — then reset `next_request_height` back to `current_height + 1` and retried with a single fallback peer. The fallback was chosen only from peers *not* already in `sync_peers`; when all connected peers were in `sync_peers` the fallback list was empty and the node gave up immediately. Two fixes applied:
