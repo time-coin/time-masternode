@@ -20,7 +20,9 @@ service_name() {
 }
 
 cd ~/time-masternode
-git stash
+# Discard any local modifications (e.g. CRLF line-ending differences that
+# confuse git stash) and pull cleanly.
+git checkout -- .
 git pull origin main
 git log -1
 
