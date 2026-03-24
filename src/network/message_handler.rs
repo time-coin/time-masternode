@@ -3709,8 +3709,9 @@ impl MessageHandler {
             }
         }
 
-        // Try to add blocks sequentially
+        // Try to add blocks sequentially, buffering any that are ahead of our tip
         let mut added = 0;
+        let mut buffered = 0;
         let mut skipped = 0;
         let mut fork_detected = false;
 
@@ -3726,6 +3727,19 @@ impl MessageHandler {
                     warn!(
                         "⚠️ [{}] Whitelisted peer {} sent corrupt block - data quality issue!",
                         self.direction, self.peer_ip
+                    );
+                }
+                continue;
+            }
+
+            // If block is ahead of our tip + 1, buffer it for later application
+            let current_height = context.blockchain.get_height();
+            if block.header.height > current_height + 1 {
+                if context.blockchain.buffer_sync_block(block.clone()).await {
+                    buffered += 1;
+                    debug!(
+                        "📦 [{}] Buffered ahead-of-tip block {} from {} (our height: {})",
+                        self.direction, block.header.height, self.peer_ip, current_height
                     );
                 }
                 continue;
@@ -3873,29 +3887,33 @@ impl MessageHandler {
                 warn!("⚠️ [{}] Post-batch flush failed: {}", self.direction, e);
             }
 
-            info!(
-                "✅ [{}] Added {} blocks from {} (skipped {})",
-                self.direction, added, self.peer_ip, skipped
-            );
-        } else if skipped > 0 && !fork_detected {
-            // No blocks added — check if we're behind and need to request missing blocks
-            let current_height = context.blockchain.get_height();
-            if start_height > current_height + 1 {
+            // After successfully adding blocks, drain any buffered blocks that are now sequential
+            let drained = context.blockchain.drain_pending_blocks().await;
+            if drained > 0 {
+                added += drained as usize;
                 info!(
-                    "📥 [{}] Blocks {}-{} are ahead of our height {} — requesting missing blocks from {}",
-                    self.direction, start_height, end_height, current_height, self.peer_ip
+                    "📦 [{}] Drained {} buffered blocks after batch from {}",
+                    self.direction, drained, self.peer_ip
                 );
-                let sync_msg = NetworkMessage::GetBlocks(current_height + 1, end_height);
-                if let Err(e) = context
-                    .peer_registry
-                    .send_to_peer(&self.peer_ip, sync_msg)
-                    .await
-                {
-                    warn!("Failed to request missing blocks: {}", e);
-                }
+            }
+
+            let pending = context.blockchain.pending_block_count().await;
+            info!(
+                "✅ [{}] Added {} blocks from {} (skipped {}, buffered {}, pending {})",
+                self.direction, added, self.peer_ip, skipped, buffered, pending
+            );
+        } else if (skipped > 0 || buffered > 0) && !fork_detected {
+            if buffered > 0 {
+                let pending = context.blockchain.pending_block_count().await;
+                info!(
+                    "📦 [{}] Buffered {} blocks from {} for parallel sync ({} pending total)",
+                    self.direction, buffered, self.peer_ip, pending
+                );
             } else {
+                // No blocks added or buffered
+                let current_height = context.blockchain.get_height();
                 warn!(
-                    "⚠️ [{}] No blocks added from {} - all {} blocks skipped (likely not sequential with our chain at height {})",
+                    "⚠️ [{}] No blocks added from {} - all {} blocks skipped (our height {})",
                     self.direction,
                     self.peer_ip,
                     skipped,
