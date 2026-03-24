@@ -2125,23 +2125,27 @@ async fn handle_peer(
                                             peer.addr
                                         );
 
-                                        // Check for fork and request blocks if needed
+                                        // Check for fork and request the first batch of missing blocks.
+                                        // Cap to 50 blocks to stay well within the 16MB frame limit;
+                                        // subsequent batches will be fetched by the normal sync path.
                                         if let Some(fork_height) = blockchain.detect_fork(*height, *tip_hash).await {
                                             tracing::warn!(
                                                 "🔀 Fork detected at height {} with {}, requesting blocks",
                                                 fork_height, peer.addr
                                             );
 
+                                            let batch_end = (*height).min(fork_height + 49);
                                             let request = NetworkMessage::GetBlockRange {
                                                 start_height: fork_height,
-                                                end_height: *height,
+                                                end_height: batch_end,
                                             };
                                             let _ = peer_registry.send_to_peer(&ip_str, request).await;
                                         }
                                     }
                                 }
-                                NetworkMessage::ChainWorkAtResponse { .. } => {
-                                    // Handle via response system - handled by request/response pattern
+                                NetworkMessage::ChainWorkAtResponse { .. }
+                                | NetworkMessage::BlockHashResponse { .. } => {
+                                    // Handle via response system - dispatched to waiting oneshot channels
                                     peer_registry.handle_response(&ip_str, msg).await;
                                 }
                                 NetworkMessage::ChainTipResponse { .. } => {
