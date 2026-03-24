@@ -32,6 +32,7 @@ pub struct PartitionDetector {
     network_type: NetworkType,
     last_block_time: Arc<AtomicU64>,
     is_partitioned: Arc<AtomicBool>,
+    local_ip: Option<String>,
 }
 
 impl PartitionDetector {
@@ -42,6 +43,7 @@ impl PartitionDetector {
         bootstrap_peers: Vec<String>,
         network_type: NetworkType,
         last_block_time: Arc<AtomicU64>,
+        local_ip: Option<String>,
     ) -> Self {
         Self {
             peer_registry,
@@ -51,6 +53,7 @@ impl PartitionDetector {
             network_type,
             last_block_time,
             is_partitioned: Arc::new(AtomicBool::new(false)),
+            local_ip,
         }
     }
 
@@ -203,6 +206,14 @@ impl PartitionDetector {
 
         candidates.sort();
         candidates.dedup();
+
+        // Filter out self-connections
+        if let Some(ref local_ip) = self.local_ip {
+            candidates.retain(|addr| {
+                let ip = addr.split(':').next().unwrap_or(addr.as_str());
+                ip != local_ip.as_str()
+            });
+        }
 
         tracing::info!(
             "🔄 Partition recovery: trying {} bootstrap peers, {} known masternodes",

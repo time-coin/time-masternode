@@ -1476,6 +1476,7 @@ async fn main() {
             config.network.bootstrap_peers.clone(),
             network_type,
             last_block_time.clone(),
+            local_ip.clone(),
         );
         tokio::spawn(async move { detector.run().await });
     }
