@@ -1676,9 +1676,21 @@ impl Blockchain {
                 let batch_timeout = std::time::Duration::from_secs(30);
                 let mut last_height = current;
                 let mut made_progress = false;
+                let mut gap_requested = false;
 
                 while batch_start_time.elapsed() < batch_timeout {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+                    // Periodically try to drain the buffer — responses from other
+                    // peers may have filled the gap since the last check.
+                    let drained = self.drain_pending_blocks().await;
+                    if drained > 0 {
+                        tracing::info!(
+                            "📦 Sync loop drained {} buffered blocks",
+                            drained
+                        );
+                    }
+
                     let now_height = self.current_height.load(Ordering::Acquire);
 
                     if now_height >= target {
@@ -1710,11 +1722,78 @@ impl Blockchain {
 
                         last_height = now_height;
                         made_progress = true;
+                        gap_requested = false; // reset — new gap may form
                     }
 
                     // If we've processed all requested blocks (including buffered), request more
                     if now_height >= next_request_height.saturating_sub(1) {
                         break;
+                    }
+
+                    // Early gap detection: if we have buffered blocks but height
+                    // is stuck, a peer failed to deliver its range. Identify the
+                    // missing range and request it from a different peer immediately
+                    // instead of waiting for the full 30s timeout.
+                    if !gap_requested && batch_start_time.elapsed() > std::time::Duration::from_secs(3) {
+                        let pending_count = self.pending_sync_blocks.read().await.len();
+                        if pending_count > 0 && now_height == last_height {
+                            let next_needed = now_height + 1;
+                            let first_buffered = {
+                                let pending = self.pending_sync_blocks.read().await;
+                                pending.keys().next().copied()
+                            };
+
+                            if let Some(first) = first_buffered {
+                                if first > next_needed {
+                                    // There's a gap — find a peer to fill it
+                                    let gap_end = (first - 1).min(next_needed + batch_size - 1);
+                                    // Determine which peer was responsible for this range
+                                    let gap_chunk_idx = ((next_needed - starting_height.max(1))
+                                        as usize)
+                                        .checked_div(batch_size as usize)
+                                        .unwrap_or(0);
+                                    let failed_peer = sync_peers
+                                        .get(gap_chunk_idx)
+                                        .cloned()
+                                        .unwrap_or_default();
+
+                                    // Try any connected peer except the one that failed
+                                    let all_peers =
+                                        if let Some(pr) = self.peer_registry.read().await.as_ref()
+                                        {
+                                            pr.get_compatible_peers().await
+                                        } else {
+                                            vec![]
+                                        };
+                                    let alt_peers: Vec<String> = all_peers
+                                        .into_iter()
+                                        .filter(|p| *p != failed_peer)
+                                        .collect();
+
+                                    if let Some(alt) =
+                                        self.peer_scoring.select_best_peer(&alt_peers).await
+                                    {
+                                        tracing::info!(
+                                            "🔄 Gap detected: blocks {}-{} missing (peer {} didn't respond). Requesting from {}",
+                                            next_needed,
+                                            gap_end,
+                                            failed_peer,
+                                            alt
+                                        );
+                                        if let Some(pr) =
+                                            self.peer_registry.read().await.as_ref()
+                                        {
+                                            let req = NetworkMessage::GetBlocks(
+                                                next_needed,
+                                                gap_end,
+                                            );
+                                            let _ = pr.send_to_peer(&alt, req).await;
+                                        }
+                                        gap_requested = true;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
