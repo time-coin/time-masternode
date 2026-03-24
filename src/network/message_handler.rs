@@ -1866,13 +1866,26 @@ impl MessageHandler {
         end_height: u64,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
-        debug!(
-            "📥 [{}] Received GetBlockRange({}-{}) from {}",
-            self.direction, start_height, end_height, self.peer_ip
-        );
+        // Cap the range to MAX_BLOCKS_PER_RESPONSE regardless of what the peer asked for.
+        // This bounds response size to ~400 KB compressed, keeping memory predictable on
+        // small nodes (responses are never near MAX_FRAME_SIZE). Peers that need more
+        // blocks issue additional GetBlockRange requests.
+        let cap = crate::constants::network::MAX_BLOCKS_PER_RESPONSE;
+        let capped_end = end_height.min(start_height.saturating_add(cap - 1));
+        if capped_end < end_height {
+            tracing::debug!(
+                "📥 [{}] GetBlockRange({}-{}) from {} capped to {}-{}",
+                self.direction, start_height, end_height, self.peer_ip, start_height, capped_end
+            );
+        } else {
+            debug!(
+                "📥 [{}] Received GetBlockRange({}-{}) from {}",
+                self.direction, start_height, end_height, self.peer_ip
+            );
+        }
         let blocks = context
             .blockchain
-            .get_block_range(start_height, end_height)
+            .get_block_range(start_height, capped_end)
             .await;
         Ok(Some(NetworkMessage::BlockRangeResponse(blocks)))
     }
