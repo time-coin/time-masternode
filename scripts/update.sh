@@ -4,7 +4,8 @@ git stash
 git pull origin main
 git log -1
 #cargo clean
-cargo build --release
+#cargo build --release
+cargo build --bin timed
 systemctl stop timed
 systemctl daemon-reload
 rm /usr/local/bin/timed
