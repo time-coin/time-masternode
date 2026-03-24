@@ -1,16 +1,41 @@
 #!/bin/bash
+# Usage: sudo ./update.sh [mainnet|testnet|both]
+# Default: both
+
+NETWORK="${1:-both}"
+
+# Derive service name from network
+service_name() {
+    [[ "$1" == "testnet" ]] && echo "timetd" || echo "timed"
+}
+
 cd ~/time-masternode
 git stash
 git pull origin main
 git log -1
+
 #cargo clean
-#cargo build --release
 cargo build --release --bin timed --bin time-cli
-systemctl stop timed
+
+for NET in mainnet testnet; do
+    [[ "$NETWORK" != "both" && "$NETWORK" != "$NET" ]] && continue
+
+    SVC=$(service_name "$NET")
+
+    echo "==> Updating $NET ($SVC)..."
+    systemctl stop "$SVC"
+done
+
 systemctl daemon-reload
-rm /usr/local/bin/timed
-rm /usr/local/bin/time-cli
+rm -f /usr/local/bin/timed /usr/local/bin/time-cli
 cp ~/time-masternode/target/release/timed /usr/local/bin/timed
 cp ~/time-masternode/target/release/time-cli /usr/local/bin/time-cli
 ls -lh /usr/local/bin/timed  # Should show today's timestamp
-systemctl start timed && journalctl -u timed -f | ccze -A
+
+for NET in mainnet testnet; do
+    [[ "$NETWORK" != "both" && "$NETWORK" != "$NET" ]] && continue
+
+    SVC=$(service_name "$NET")
+    echo "==> Starting $NET ($SVC)..."
+    systemctl start "$SVC" && journalctl -u "$SVC" -f | ccze -A
+done
