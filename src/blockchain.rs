@@ -7302,6 +7302,11 @@ impl Blockchain {
             loop {
                 interval.tick().await;
 
+                // Skip fork detection during sync — focus on catching up
+                if blockchain.is_syncing() {
+                    continue;
+                }
+
                 let our_height = blockchain.get_height();
                 tracing::debug!("🔍 Periodic chain check: our height = {}", our_height);
 
