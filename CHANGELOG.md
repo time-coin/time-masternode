@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/uninstall-masternode.sh`**: Service name was hardcoded to `timed` regardless of network; now correctly uses `timetd` for testnet.
 - **`scripts/uninstall-masternode.sh`**: Removed bogus `timecoin` OS user removal step — the install script runs the daemon as the invoking user, not a dedicated service account.
 
+### Fixed — Parallel Sync Deadlock (missing first chunk)
+
+- **Sync stall at specific height**: When the peer assigned the first block chunk (e.g. 15132–15181) was unresponsive, the parallel sync would buffer hundreds of valid blocks from other peers but make no height progress. On the 30 s timeout it called `clear_pending_blocks()` — **destroying all the valid buffered blocks** — then reset `next_request_height` back to `current_height + 1` and retried with a single fallback peer (often the same unresponsive one). This repeated forever, keeping the node permanently stuck. Fixed by:
+  - Detecting whether a leading gap exists between `current_height + 1` and the first buffered block.
+  - If a gap exists: **preserve the buffer**, reset `next_request_height` to the gap start, and request only the missing range from a fallback peer. Once the gap block is applied, the existing buffered blocks drain automatically.
+  - If no gap exists (empty buffer or buffer starts at the right place): clear stale state and restart normally as before.
+
 ### Fixed — Network Stability (Testnet block 15162 incident)
 
 - **Block size cap in producer**: `get_finalized_transactions_with_fees_for_block` now accumulates serialized transaction sizes and truncates the transaction set once the payload would exceed `MAX_BLOCK_ASSEMBLY_SIZE` (1.9 MB). Previously all finalized transactions were included unconditionally, allowing blocks to grow to 3+ MB and be rejected by every peer's validation check. Excess transactions remain in the finalized pool and are included in the next block.
