@@ -245,6 +245,48 @@ impl MessageHandler {
         }
     }
 
+    /// Trim a block list so that it serializes within the wire frame limit.
+    /// When blocks contain many transactions, even 50 blocks can exceed 8MB.
+    /// We binary-search for the largest prefix that fits.
+    fn trim_blocks_to_frame_limit(mut blocks: Vec<Block>) -> Vec<Block> {
+        if blocks.is_empty() {
+            return blocks;
+        }
+        // Quick check: does the full batch fit?
+        let msg = NetworkMessage::BlocksResponse(blocks.clone());
+        let size = bincode::serialized_size(&msg).unwrap_or(u64::MAX);
+        if size <= crate::network::wire::MAX_FRAME_SIZE as u64 {
+            return blocks;
+        }
+        // Binary search for the largest count that fits
+        let mut lo: usize = 1;
+        let mut hi: usize = blocks.len();
+        let mut best: usize = 0;
+        while lo <= hi {
+            let mid = (lo + hi) / 2;
+            let test_msg = NetworkMessage::BlocksResponse(blocks[..mid].to_vec());
+            let test_size = bincode::serialized_size(&test_msg).unwrap_or(u64::MAX);
+            if test_size <= crate::network::wire::MAX_FRAME_SIZE as u64 {
+                best = mid;
+                lo = mid + 1;
+            } else {
+                if mid == 0 {
+                    break;
+                }
+                hi = mid - 1;
+            }
+        }
+        if best < blocks.len() {
+            warn!(
+                "📦 Trimmed block response from {} to {} blocks to fit frame limit",
+                blocks.len(),
+                best
+            );
+            blocks.truncate(best);
+        }
+        blocks
+    }
+
     /// Get voter weight from masternode registry, defaulting to 1 if not found
     async fn get_voter_weight(registry: &MasternodeRegistry, voter_id: &str) -> u64 {
         match registry.get(voter_id).await {
@@ -1184,6 +1226,11 @@ impl MessageHandler {
             );
         }
 
+        // Ensure the serialized response fits within the frame limit.
+        // 50 blocks is usually ~400KB but blocks with many transactions can
+        // exceed 8MB. Trim from the end until it fits.
+        let blocks = Self::trim_blocks_to_frame_limit(blocks);
+
         Ok(Some(NetworkMessage::BlocksResponse(blocks)))
     }
 
@@ -1887,6 +1934,8 @@ impl MessageHandler {
             .blockchain
             .get_block_range(start_height, capped_end)
             .await;
+        // Ensure the serialized response fits within the frame limit.
+        let blocks = Self::trim_blocks_to_frame_limit(blocks);
         Ok(Some(NetworkMessage::BlockRangeResponse(blocks)))
     }
 
@@ -2628,8 +2677,8 @@ impl MessageHandler {
                                 .map(|info| info.masternode_address != peer_ip)
                                 .unwrap_or(false)
                             {
-                                warn!(
-                                    "❌ [{}] Rejecting masternode from {} — collateral already locked by another",
+                                debug!(
+                                    "⏭️ [{}] Skipping masternode announcement from {} — collateral already locked by another node",
                                     self.direction, peer_ip
                                 );
                                 return Ok(None);
@@ -3965,11 +4014,28 @@ impl MessageHandler {
             );
         } else if (skipped > 0 || buffered > 0) && !fork_detected {
             if buffered > 0 {
-                let pending = context.blockchain.pending_block_count().await;
-                info!(
-                    "📦 [{}] Buffered {} blocks from {} for parallel sync ({} pending total)",
-                    self.direction, buffered, self.peer_ip, pending
-                );
+                // Even when no blocks were added directly, try draining the buffer.
+                // During parallel sync, all received blocks may be ahead-of-tip
+                // (added == 0) but another peer's response may have already filled
+                // the gap. Without this drain, the buffer grows indefinitely and
+                // the node appears stuck.
+                let drained = context.blockchain.drain_pending_blocks().await;
+                if drained > 0 {
+                    if let Err(e) = context.blockchain.flush_storage_async().await {
+                        warn!("⚠️ [{}] Post-drain flush failed: {}", self.direction, e);
+                    }
+                    let pending = context.blockchain.pending_block_count().await;
+                    info!(
+                        "✅ [{}] Drained {} buffered blocks after batch from {} ({} pending remaining)",
+                        self.direction, drained, self.peer_ip, pending
+                    );
+                } else {
+                    let pending = context.blockchain.pending_block_count().await;
+                    info!(
+                        "📦 [{}] Buffered {} blocks from {} for parallel sync ({} pending total)",
+                        self.direction, buffered, self.peer_ip, pending
+                    );
+                }
             } else {
                 // No blocks added or buffered
                 let current_height = context.blockchain.get_height();
