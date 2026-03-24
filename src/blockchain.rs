@@ -17,7 +17,7 @@ use crate::NetworkType;
 use chrono::Utc;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -210,6 +210,9 @@ pub struct Blockchain {
     treasury_balance: Arc<AtomicU64>,
     /// On-chain governance subsystem (proposals + votes).
     governance: Option<Arc<crate::governance::GovernanceState>>,
+    /// Buffer for blocks downloaded ahead of current tip during parallel sync.
+    /// Blocks are stored by height and drained in order as gaps fill in.
+    pending_sync_blocks: Arc<RwLock<BTreeMap<u64, Block>>>,
 }
 
 impl Blockchain {
@@ -318,6 +321,7 @@ impl Blockchain {
             genesis_mismatch_detected: Arc::new(AtomicBool::new(false)),
             treasury_balance: Arc::new(AtomicU64::new(loaded_treasury)),
             governance: None,
+            pending_sync_blocks: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -1568,59 +1572,108 @@ impl Blockchain {
             // The genesis block should be the canonical one loaded from genesis.testnet.json
             // If peers have a different chain, they need to restart with the new genesis
 
-            // Use AI to select the best peer based on historical performance
-            let mut sync_peer =
-                if let Some(ai_peer) = self.peer_scoring.select_best_peer(&connected_peers).await {
-                    tracing::debug!("✓ AI peer selection returned: {}", ai_peer);
-                    ai_peer
-                } else {
-                    // Fallback if AI can't decide
-                    tracing::warn!("⚠️  AI couldn't select peer, using first available");
-                    connected_peers.first().ok_or("No peers available")?.clone()
-                };
+            // Use ALL compatible (consensus) peers for parallel sync, not a fixed limit.
+            // Filter to consensus peers when we have consensus info, otherwise use all compatible.
+            let consensus_peers = self.consensus_peers.read().await.clone();
+            let candidate_peers: Vec<String> = if consensus_peers.is_empty() {
+                // No consensus info yet — use all compatible peers
+                peer_registry.get_compatible_peers().await
+            } else {
+                // Filter to only peers that are in consensus
+                connected_peers
+                    .iter()
+                    .filter(|p| {
+                        let ip = p.split(':').next().unwrap_or(p.as_str());
+                        consensus_peers.iter().any(|cp| {
+                            let cp_ip = cp.split(':').next().unwrap_or(cp.as_str());
+                            cp_ip == ip
+                        })
+                    })
+                    .cloned()
+                    .collect()
+            };
 
-            // Sync loop - keep requesting batches until caught up or timeout
+            // Fallback: if consensus filter left us with no peers, use all compatible
+            let mut sync_peers: Vec<String> = if candidate_peers.is_empty() {
+                tracing::warn!("⚠️  No consensus peers found, falling back to all compatible peers");
+                peer_registry.get_compatible_peers().await
+            } else {
+                candidate_peers
+            };
+
+            if sync_peers.is_empty() {
+                tracing::warn!("⚠️  No compatible peers to sync from");
+                return Err("No compatible peers to sync from".to_string());
+            }
+
+            tracing::info!(
+                "🚀 Parallel sync: using {} peers {:?}",
+                sync_peers.len(),
+                sync_peers
+            );
+
+            // Clear any stale pending blocks from previous sync attempts
+            self.clear_pending_blocks().await;
+
+            // Sync loop - pipeline requests across multiple peers
             let sync_start = std::time::Instant::now();
             let max_sync_time = std::time::Duration::from_secs(PEER_SYNC_TIMEOUT_SECS * 2);
             let starting_height = current;
+            let batch_size = constants::network::MAX_BLOCKS_PER_RESPONSE; // 50 blocks per response
 
             tracing::info!(
-                "📍 Starting sync loop: current={}, target={}, timeout={}s",
+                "📍 Starting parallel sync loop: current={}, target={}, peers={}, timeout={}s",
                 current,
                 target,
+                sync_peers.len(),
                 max_sync_time.as_secs()
             );
 
-            while current < target && sync_start.elapsed() < max_sync_time {
-                // Request next batch of blocks
-                // Always start from 0 when current is 0 (need genesis)
-                // Otherwise start from current + 1 (need next block after our tip)
-                let batch_start = if current == 0 {
-                    if self.get_block(0).is_ok() {
-                        1 // Already have genesis, request block 1+
-                    } else {
-                        0 // Need genesis first
-                    }
-                } else {
-                    current + 1 // Request next block after our tip
-                };
-                let batch_end = (batch_start + constants::network::SYNC_BATCH_SIZE - 1).min(target);
+            // Track the next height to request (may be ahead of current tip due to pipelining)
+            let mut next_request_height = if current == 0 {
+                if self.get_block(0).is_ok() { 1 } else { 0 }
+            } else {
+                current + 1
+            };
 
-                let req = NetworkMessage::GetBlocks(batch_start, batch_end);
-                tracing::debug!(
-                    "📤 Requesting blocks {}-{} from {}",
-                    batch_start,
-                    batch_end,
-                    sync_peer
-                );
-                if let Err(e) = peer_registry.send_to_peer(&sync_peer, req).await {
-                    tracing::warn!("❌ Failed to send GetBlocks to {}: {}", sync_peer, e);
+            while current < target && sync_start.elapsed() < max_sync_time {
+                // Send parallel requests to different peers for different block ranges
+                let mut requests_sent = 0;
+                for (i, peer) in sync_peers.iter().enumerate() {
+                    if next_request_height > target {
+                        break;
+                    }
+
+                    let range_start = next_request_height;
+                    let range_end = (range_start + batch_size - 1).min(target);
+
+                    let req = NetworkMessage::GetBlocks(range_start, range_end);
+                    tracing::debug!(
+                        "📤 [Pipeline {}/{}] Requesting blocks {}-{} from {}",
+                        i + 1,
+                        sync_peers.len(),
+                        range_start,
+                        range_end,
+                        peer
+                    );
+
+                    if let Err(e) = peer_registry.send_to_peer(peer, req).await {
+                        tracing::warn!("❌ Failed to send GetBlocks to {}: {}", peer, e);
+                        continue;
+                    }
+
+                    next_request_height = range_end + 1;
+                    requests_sent += 1;
+                }
+
+                if requests_sent == 0 {
+                    tracing::warn!("⚠️  Failed to send any sync requests");
                     break;
                 }
 
-                // Wait for blocks to arrive with reasonable timeout for network latency
+                // Wait for blocks to arrive and be processed
                 let batch_start_time = std::time::Instant::now();
-                let batch_timeout = std::time::Duration::from_secs(30); // Allow time for network latency
+                let batch_timeout = std::time::Duration::from_secs(30);
                 let mut last_height = current;
                 let mut made_progress = false;
 
@@ -1628,8 +1681,9 @@ impl Blockchain {
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     let now_height = self.current_height.load(Ordering::Acquire);
 
-                    if now_height >= time_expected {
+                    if now_height >= target {
                         tracing::info!("✓ Sync complete at height {}", now_height);
+                        self.clear_pending_blocks().await;
                         return Ok(());
                     }
 
@@ -1639,169 +1693,104 @@ impl Blockchain {
                         let response_time = batch_start_time.elapsed();
 
                         tracing::debug!(
-                            "📈 Block sync progress: {} → {} from {} ({} blocks in {:.2}s)",
+                            "📈 Block sync progress: {} → {} ({} blocks in {:.2}s, {} pending)",
                             last_height,
                             now_height,
-                            sync_peer,
                             blocks_received,
-                            response_time.as_secs_f64()
+                            response_time.as_secs_f64(),
+                            self.pending_sync_blocks.read().await.len()
                         );
 
-                        // Record AI success: peer delivered blocks
-                        self.peer_scoring
-                            .record_success(&sync_peer, response_time, blocks_received * 1000)
-                            .await;
+                        // Record AI success for all sync peers (they all contributed)
+                        for peer in &sync_peers {
+                            self.peer_scoring
+                                .record_success(peer, response_time, blocks_received * 500)
+                                .await;
+                        }
 
                         last_height = now_height;
                         made_progress = true;
                     }
 
-                    // If we received all blocks in this batch, request next batch
-                    if now_height >= batch_end {
+                    // If we've processed all requested blocks (including buffered), request more
+                    if now_height >= next_request_height.saturating_sub(1) {
                         break;
                     }
                 }
 
-                // If no progress after request, try a different peer with exponential backoff
+                // If no progress after request, try fallback peers
                 if !made_progress {
-                    // Record AI failure: peer didn't deliver
-                    self.peer_scoring.record_failure(&sync_peer).await;
+                    for peer in &sync_peers {
+                        self.peer_scoring.record_failure(peer).await;
+                    }
 
                     tracing::warn!(
-                        "⚠️  No progress after requesting blocks {}-{} from {} (timeout after 30s)",
-                        batch_start,
-                        batch_end,
-                        sync_peer
+                        "⚠️  No progress after parallel sync request (timeout after 30s)"
                     );
 
-                    // Try up to 5 different peers with exponential backoff before giving up
-                    let mut tried_peers = {
-                        let mut set = HashSet::new();
-                        set.insert(sync_peer.clone());
-                        set
-                    };
-                    for attempt in 2..=5 {
-                        // Use AI to select next best peer (excluding already tried)
-                        let remaining_peers: Vec<String> = connected_peers
-                            .iter()
-                            .filter(|p| !tried_peers.contains(*p))
-                            .cloned()
-                            .collect();
+                    // Try to rebuild peer list with different peers
+                    let mut tried: HashSet<String> = sync_peers.iter().cloned().collect();
+                    let fallback_peers: Vec<String> = connected_peers
+                        .iter()
+                        .filter(|p| !tried.contains(*p))
+                        .cloned()
+                        .collect();
 
+                    if !fallback_peers.is_empty() {
                         if let Some(alt_peer) =
-                            self.peer_scoring.select_best_peer(&remaining_peers).await
+                            self.peer_scoring.select_best_peer(&fallback_peers).await
                         {
-                            // Exponential backoff: 20s, 30s, 40s, 50s
-                            let retry_timeout_secs = 10 + (attempt * 10);
                             tracing::info!(
-                                "🤖 [AI] Trying alternate peer {} (attempt {}, timeout {}s)",
-                                alt_peer,
-                                attempt,
-                                retry_timeout_secs
+                                "🤖 [AI] Switching to fallback peer: {}",
+                                alt_peer
                             );
+                            tried.insert(alt_peer.clone());
 
-                            let req = NetworkMessage::GetBlocks(batch_start, batch_end);
-                            if let Err(e) = peer_registry.send_to_peer(&alt_peer, req).await {
-                                tracing::warn!(
-                                    "❌ Failed to send GetBlocks to {}: {}",
-                                    alt_peer,
-                                    e
-                                );
-                                tried_peers.insert(alt_peer.clone());
-                                self.peer_scoring.record_failure(&alt_peer).await;
-                                continue;
-                            }
-
-                            // Wait for response with exponential backoff timeout
-                            let retry_start = std::time::Instant::now();
-                            let retry_timeout = std::time::Duration::from_secs(retry_timeout_secs);
-
-                            while retry_start.elapsed() < retry_timeout {
-                                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                                let retry_height = self.current_height.load(Ordering::Acquire);
-
-                                if retry_height > last_height {
-                                    let blocks_received = retry_height - last_height;
-                                    let response_time = retry_start.elapsed();
-
-                                    tracing::info!(
-                                        "✅ [AI] Alternate peer {} delivered {} blocks in {:.2}s!",
-                                        alt_peer,
-                                        blocks_received,
-                                        response_time.as_secs_f64()
-                                    );
-
-                                    // Record AI success
-                                    self.peer_scoring
-                                        .record_success(
-                                            &alt_peer,
-                                            response_time,
-                                            blocks_received * 1000,
-                                        )
-                                        .await;
-
-                                    last_height = retry_height;
-                                    made_progress = true;
-                                    sync_peer = alt_peer.clone(); // Switch to working peer
-                                    break;
-                                }
-                            }
-
-                            if made_progress {
-                                break; // Got blocks, continue with this peer
-                            } else {
-                                self.peer_scoring.record_failure(&alt_peer).await;
-                                tracing::warn!(
-                                    "⚠️  Peer {} did not respond within {}s",
-                                    alt_peer,
-                                    retry_timeout_secs
-                                );
-                            }
-
-                            tried_peers.insert(alt_peer);
-                        } else {
-                            tracing::warn!(
-                                "⚠️  No more alternate peers available (tried {} peers)",
-                                tried_peers.len()
-                            );
-                            break;
+                            // Reset request height to current tip and try with new peer
+                            let reset_height = self.current_height.load(Ordering::Acquire);
+                            next_request_height = reset_height + 1;
+                            sync_peers = vec![alt_peer];
+                            self.clear_pending_blocks().await;
+                            continue;
                         }
                     }
-                }
 
-                // If no progress after trying multiple peers, give up
-                if !made_progress && current == starting_height {
-                    tracing::warn!(
-                        "⚠️  No progress after trying multiple peers - they may not have blocks {} yet",
-                        batch_start
-                    );
-                    break;
+                    // No progress and no fallback peers
+                    if current == starting_height {
+                        tracing::warn!(
+                            "⚠️  No progress after trying all peers - blocks may not exist yet"
+                        );
+                        break;
+                    }
                 }
 
                 // Update current height for next iteration
                 current = self.current_height.load(Ordering::Acquire);
 
-                // Flush storage at batch boundary — per-block flushes are skipped during sync
+                // Flush storage at batch boundary
                 if made_progress {
                     if let Err(e) = self.flush_storage_async().await {
                         tracing::warn!("⚠️  Batch flush failed: {}", e);
                     }
-                    // Sleep briefly so the tokio runtime can poll I/O and service
-                    // RPC, timers, etc. yield_now() is insufficient on 1-worker runtimes.
                     tokio::time::sleep(std::time::Duration::from_millis(1)).await;
                 }
 
                 // Log progress periodically
                 let elapsed = sync_start.elapsed().as_secs();
                 if elapsed > 0 && elapsed % 30 == 0 {
+                    let pending_count = self.pending_sync_blocks.read().await.len();
                     tracing::info!(
-                        "⏳ Still syncing... height {} / {} ({}s elapsed)",
+                        "⏳ Still syncing... height {} / {} ({} pending, {}s elapsed)",
                         current,
-                        time_expected,
+                        target,
+                        pending_count,
                         elapsed
                     );
                 }
             }
+
+            // Clean up any remaining buffered blocks
+            self.clear_pending_blocks().await;
         } else {
             tracing::warn!("⚠️  Peer registry not available - cannot sync from peers");
         }
@@ -1827,6 +1816,94 @@ impl Blockchain {
             "Peers don't have blocks beyond {} (time-based target: {})",
             final_height, time_expected
         ))
+    }
+
+    /// Buffer a block for later application during parallel sync.
+    /// Returns true if the block was buffered, false if it was a duplicate.
+    pub async fn buffer_sync_block(&self, block: Block) -> bool {
+        let height = block.header.height;
+        let mut pending = self.pending_sync_blocks.write().await;
+        // Cap buffer size to prevent memory issues (~500 blocks ≈ 50-75MB)
+        if pending.len() >= 500 {
+            debug!("📦 Pending block buffer full (500), dropping block {}", height);
+            return false;
+        }
+        if pending.contains_key(&height) {
+            return false; // Already have this height
+        }
+        pending.insert(height, block);
+        true
+    }
+
+    /// Drain pending blocks that are sequential from our current tip.
+    /// Returns the number of blocks applied.
+    pub async fn drain_pending_blocks(&self) -> u64 {
+        let mut applied = 0u64;
+        loop {
+            let current = self.current_height.load(Ordering::Acquire);
+            let next_needed = current + 1;
+
+            // Take the next block from the buffer if available
+            let block = {
+                let mut pending = self.pending_sync_blocks.write().await;
+                pending.remove(&next_needed)
+            };
+
+            let Some(block) = block else {
+                break;
+            };
+
+            // Apply the block
+            let blockchain = self.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                tokio::runtime::Handle::current()
+                    .block_on(async { blockchain.add_block_with_fork_handling(block).await })
+            })
+            .await;
+
+            match result {
+                Ok(Ok(true)) => {
+                    applied += 1;
+                }
+                Ok(Ok(false)) => {
+                    // Block already exists or not sequential — stop draining
+                    break;
+                }
+                Ok(Err(e)) => {
+                    warn!("❌ Failed to apply buffered block {}: {}", next_needed, e);
+                    break;
+                }
+                Err(e) => {
+                    warn!("❌ Buffered block {} task panicked: {}", next_needed, e);
+                    break;
+                }
+            }
+        }
+
+        if applied > 0 {
+            // Flush after draining batch
+            if let Err(e) = self.flush_storage_async().await {
+                warn!("⚠️ Post-drain flush failed: {}", e);
+            }
+            debug!("📦 Drained {} buffered blocks", applied);
+        }
+
+        applied
+    }
+
+    /// Get the number of pending buffered blocks
+    pub async fn pending_block_count(&self) -> usize {
+        self.pending_sync_blocks.read().await.len()
+    }
+
+    /// Clear the pending block buffer (used when sync completes or is cancelled)
+    pub async fn clear_pending_blocks(&self) {
+        let mut pending = self.pending_sync_blocks.write().await;
+        let count = pending.len();
+        pending.clear();
+        if count > 0 {
+            debug!("🧹 Cleared {} pending sync blocks", count);
+        }
     }
 
     /// Sync from a specific peer (used when we detect a fork and want the consensus chain)
@@ -8841,6 +8918,7 @@ impl Clone for Blockchain {
             genesis_mismatch_detected: self.genesis_mismatch_detected.clone(),
             treasury_balance: self.treasury_balance.clone(),
             governance: self.governance.clone(),
+            pending_sync_blocks: self.pending_sync_blocks.clone(),
         }
     }
 }
