@@ -5,7 +5,7 @@ git pull origin main
 git log -1
 #cargo clean
 #cargo build --release
-cargo build --bin timed
+cargo build --release --bin timed --bin time-cli
 systemctl stop timed
 systemctl daemon-reload
 rm /usr/local/bin/timed
