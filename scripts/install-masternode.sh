@@ -60,12 +60,6 @@ LOG_DIR="$DATA_DIR/logs"
 VERSION="1.2.0"
 REWARD_ADDRESS=""
 
-# Ensure Rust/cargo is in PATH from the start (handles both direct and sudo invocations)
-export PATH="$HOME/.cargo/bin:$PATH"
-if [ -f "$HOME/.cargo/env" ]; then
-    source "$HOME/.cargo/env"
-fi
-
 #------------------------------------------------------------------------------
 # Helper Functions
 #------------------------------------------------------------------------------
@@ -120,6 +114,9 @@ check_root() {
     fi
 
     # If cargo is already installed, ensure it's in PATH immediately
+    if [ -f "$HOME/.cargo/env" ]; then
+        source "$HOME/.cargo/env"
+    fi
     if [ -d "$HOME/.cargo/bin" ]; then
         export PATH="$HOME/.cargo/bin:$PATH"
     fi
@@ -424,10 +421,10 @@ build_binaries() {
         exit 1
     fi
     
-    # Build in release mode
+    # Build in release mode (only the daemon and CLI binaries)
     print_info "This may take several minutes..."
-    
-    if ! cargo build --release; then
+
+    if ! cargo build --release --bin timed --bin time-cli; then
         print_error "Build failed"
         exit 1
     fi
@@ -654,7 +651,7 @@ create_systemd_service() {
 
     cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
-Description=TIME Coin Masternode
+Description=TIME Coin Masternode (${NETWORK})
 After=network-online.target
 Wants=network-online.target
 
