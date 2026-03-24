@@ -30,8 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed — Message Too Large on Block Range Responses
 
-- **`MAX_FRAME_SIZE` increased from 8 MB to 16 MB**: Block range responses containing ~1000+ zstd-compressed blocks could exceed 8 MB, causing "Message too large" errors and failed sync responses. 16 MB gives headroom for large ranges while still bounding per-peer buffer allocation.
-- **Unbounded `GetBlockRange` in fork handler**: When `ChainWorkResponse` detected a peer with a better chain, it sent a single `GetBlockRange { start: fork_height, end: peer_height }` that could span thousands of blocks. The response would exceed the frame limit. The fork handler now caps the first batch to 50 blocks; subsequent batches are fetched by the normal sync path once the initial gap is filled.
+- **`GetBlockRange` responder now enforces `MAX_BLOCKS_PER_RESPONSE` (50 blocks)**: `handle_get_block_range` previously served the full requested range with no cap. A peer (or our own fork handler) could request thousands of blocks and receive a 9 MB+ response. The responder now silently clamps `end_height` to `start_height + 49`, keeping responses under ~400 KB compressed. `MAX_FRAME_SIZE` remains at 8 MB.
+- **Unbounded `GetBlockRange` in fork handler**: When `ChainWorkResponse` detected a peer with a better chain, it sent a single `GetBlockRange { start: fork_height, end: peer_height }` that could span thousands of blocks. The fork handler now caps the first batch to 50 blocks; subsequent batches are fetched by the normal sync path once the initial gap is filled.
 
 ### Fixed — Parallel Sync Deadlock (missing first chunk)
 
