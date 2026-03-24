@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Windows Tooling
+
+- **`scripts/install-masternode.bat`**: Automated Windows installer — checks prerequisites (Git, Rust, VS Build Tools), clones/updates the repo, builds release binaries, generates `time.conf` with random RPC credentials, adds binaries to `PATH`, and opens the P2P firewall port. Mirrors `install-masternode.sh`. Usage: `scripts\install-masternode.bat [mainnet|testnet]`.
+- **`scripts/update.bat`**: Windows update script — pulls latest code, rebuilds, stops the running node, copies new binaries, and restarts. Supports `mainnet`, `testnet`, or `both` (default). Usage: `scripts\update.bat [mainnet|testnet|both]`.
+- **`scripts/dashboard.bat`**: Windows TUI dashboard launcher — sets up the cargo `PATH` and runs `time-dashboard`. Usage: `scripts\dashboard.bat`.
+- **`scripts/uninstall-masternode.bat`**: Windows uninstaller — stops the running process and NSSM service (if present), removes the firewall rule, and deletes binaries. Preserves blockchain data and wallet by default; prints manual `rmdir` commands for a full wipe. Usage: `scripts\uninstall-masternode.bat [mainnet|testnet]`.
+- **`MASTERNODE_GUIDE.md` Windows Setup section**: New section covering automated installation (`install-masternode.bat`), manual build, running as a service (NSSM), updating, uninstalling, and firewall configuration.
+
+### Fixed — Scripts
+
+- **`scripts/uninstall-masternode.sh`**: Service name was hardcoded to `timed` regardless of network; now correctly uses `timetd` for testnet.
+- **`scripts/uninstall-masternode.sh`**: Removed bogus `timecoin` OS user removal step — the install script runs the daemon as the invoking user, not a dedicated service account.
+
 ### Fixed — Network Stability (Testnet block 15162 incident)
 
 - **Block size cap in producer**: `get_finalized_transactions_with_fees_for_block` now accumulates serialized transaction sizes and truncates the transaction set once the payload would exceed `MAX_BLOCK_ASSEMBLY_SIZE` (1.9 MB). Previously all finalized transactions were included unconditionally, allowing blocks to grow to 3+ MB and be rejected by every peer's validation check. Excess transactions remain in the finalized pool and are included in the next block.
