@@ -162,8 +162,7 @@ impl PartitionDetector {
         // 1. Fetch fresh peers from the discovery API.
         let discovery_url = self.network_type.peer_discovery_url();
         let client = crate::http_client::HttpClient::new()
-            .with_timeout(std::time::Duration::from_secs(10))
-            .with_accept_invalid_certs(true);
+            .with_timeout(std::time::Duration::from_secs(10));
         match client.get(discovery_url).await {
             Ok(resp) => {
                 if let Ok(peers) = resp.json::<Vec<String>>() {

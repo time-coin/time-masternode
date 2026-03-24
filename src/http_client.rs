@@ -9,6 +9,7 @@
 
 use crate::network::tls::AcceptAnyCertVerifier;
 use rustls::pki_types::ServerName;
+use rustls::RootCertStore;
 use serde::de::DeserializeOwned;
 use std::sync::Arc;
 use std::time::Duration;
@@ -192,14 +193,21 @@ impl HttpClient {
         request: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, String> {
-        // Accept any certificate — the daemon uses message-level Ed25519 auth,
-        // and RPC nodes use self-signed certs. No need for webpki root store.
-        // ALPN is required for Vercel/CDN hosts that would otherwise trigger
-        // TLS renegotiation, which rustls does not support.
-        let mut tls_config = rustls::ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(AcceptAnyCertVerifier))
-            .with_no_client_auth();
+        let mut tls_config = if self.accept_invalid_certs {
+            // P2P / RPC nodes use self-signed certs — skip verification.
+            rustls::ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(AcceptAnyCertVerifier))
+                .with_no_client_auth()
+        } else {
+            // External HTTPS (e.g. peer discovery API) — use webpki root CAs
+            // so the TLS handshake looks like a normal client to CDN hosts.
+            let mut root_store = RootCertStore::empty();
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
         tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
         let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));

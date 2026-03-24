@@ -122,8 +122,7 @@ impl PeerManager {
         info!("🔍 Discovering peers from {}", discovery_url);
 
         let client = crate::http_client::HttpClient::new()
-            .with_timeout(Duration::from_secs(10))
-            .with_accept_invalid_certs(true);
+            .with_timeout(Duration::from_secs(10));
 
         match client.get(discovery_url).await {
             Ok(response) => {
