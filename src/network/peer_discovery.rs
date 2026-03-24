@@ -56,13 +56,22 @@ impl PeerDiscovery {
         }
     }
 
-    /// Fetch peers from the discovery API
+    /// Fetch peers from the discovery API using curl.
+    /// We shell out to curl because rustls cannot negotiate TLS with some CDN
+    /// hosts (Vercel). curl uses the system TLS stack which handles this fine.
     async fn fetch_from_api(&self) -> Result<Vec<DiscoveredPeer>, String> {
-        let client = crate::http_client::HttpClient::new()
-            .with_timeout(std::time::Duration::from_secs(10));
+        let output = tokio::process::Command::new("curl")
+            .args(["-sL", "--max-time", "10", &self.discovery_url])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run curl: {}", e))?;
 
-        let response = client.get(&self.discovery_url).await?;
-        let peer_list: Vec<String> = response.json()?;
+        if !output.status.success() {
+            return Err(format!("curl failed with status {}", output.status));
+        }
+
+        let peer_list: Vec<String> = serde_json::from_slice(&output.stdout)
+            .map_err(|e| format!("JSON parse error: {}", e))?;
 
         Ok(self.parse_peer_list(peer_list))
     }

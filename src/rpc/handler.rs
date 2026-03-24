@@ -6055,11 +6055,19 @@ impl RpcHandler {
 async fn fetch_official_peer_ips(
     url: &str,
 ) -> Result<std::collections::HashSet<std::net::IpAddr>, String> {
-    let client = crate::http_client::HttpClient::new()
-        .with_timeout(std::time::Duration::from_secs(10));
+    // Use curl to fetch peer list (avoids rustls/CDN TLS issues)
+    let output = tokio::process::Command::new("curl")
+        .args(["-sL", "--max-time", "10", url])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run curl: {}", e))?;
 
-    let response = client.get(url).await?;
-    let raw: Vec<String> = response.json()?;
+    if !output.status.success() {
+        return Err(format!("curl failed with status {}", output.status));
+    }
+
+    let raw: Vec<String> = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("JSON parse error: {}", e))?;
 
     let mut ips = std::collections::HashSet::new();
     for entry in raw {
