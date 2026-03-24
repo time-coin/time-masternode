@@ -69,6 +69,7 @@ subtle = "2.5"                                      # Constant-time comparisons
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }  # TLS for encrypted transport
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }  # TLS library (ring-only, no aws-lc-sys)
 rustls-pemfile = "2.1"                             # PEM file parsing
+webpki-roots = "0.26"                              # Root CA certs for external HTTPS connections
 rcgen = "0.13"                                      # Self-signed cert generation
 bytes = "1.5"                                       # Byte buffer utilities
 

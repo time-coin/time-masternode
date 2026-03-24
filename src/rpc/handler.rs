@@ -6056,8 +6056,7 @@ async fn fetch_official_peer_ips(
     url: &str,
 ) -> Result<std::collections::HashSet<std::net::IpAddr>, String> {
     let client = crate::http_client::HttpClient::new()
-        .with_timeout(std::time::Duration::from_secs(10))
-        .with_accept_invalid_certs(true);
+        .with_timeout(std::time::Duration::from_secs(10));
 
     let response = client.get(url).await?;
     let raw: Vec<String> = response.json()?;
