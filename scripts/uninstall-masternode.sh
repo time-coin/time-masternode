@@ -25,8 +25,11 @@ if [[ "$NETWORK" != "mainnet" && "$NETWORK" != "testnet" ]]; then
 fi
 
 # Configuration
-SERVICE_NAME="timed"
-SERVICE_USER="timecoin"
+if [[ "$NETWORK" == "testnet" ]]; then
+    SERVICE_NAME="timetd"
+else
+    SERVICE_NAME="timed"
+fi
 BIN_DIR="/usr/local/bin"
 
 # Use /root/.timecoin as base directory
@@ -78,7 +81,6 @@ confirm_uninstall() {
     echo "  • Service: ${SERVICE_NAME}"
     echo "  • Binaries: $BIN_DIR/timed, $BIN_DIR/time-cli"
     echo "  • Config: $CONFIG_DIR"
-    echo "  • User: $SERVICE_USER"
     echo ""
     echo -e "${YELLOW}Data directory will be preserved: $DATA_DIR${NC}"
     echo -e "${YELLOW}(Remove manually if you want to delete blockchain data)${NC}"
@@ -156,17 +158,6 @@ remove_logs() {
     fi
 }
 
-remove_user() {
-    print_step "Removing service user..."
-    
-    if id "$SERVICE_USER" &>/dev/null; then
-        userdel "$SERVICE_USER"
-        print_success "User $SERVICE_USER removed"
-    else
-        print_warn "User $SERVICE_USER not found"
-    fi
-}
-
 print_data_info() {
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -199,7 +190,6 @@ print_summary() {
     echo "  • Binaries: timed, time-cli"
     echo "  • Configuration"
     echo "  • Logs"
-    echo "  • Service user"
     echo ""
 }
 
@@ -215,8 +205,7 @@ main() {
     remove_binaries
     remove_config
     remove_logs
-    remove_user
-    
+
     # Summary
     print_summary
     print_data_info
