@@ -1,7 +1,7 @@
 # TIME Coin — Linux Installation Guide
 
 **Version**: 1.2.0
-**Last Updated**: 2026-03-15
+**Last Updated**: 2026-03-24
 
 This guide walks you through installing and running a TIME Coin masternode on a
 fresh Linux server. Follow it from top to bottom for a production-ready node.
@@ -117,6 +117,26 @@ time-cli getblockchaininfo       # query the node
 
 Both networks can run simultaneously on the same host — the ports and data directories are non-overlapping.
 
+### Running both networks on the same server
+
+You can run mainnet and testnet side by side. Just run the installer twice:
+
+```bash
+sudo ./scripts/install-masternode.sh mainnet
+sudo ./scripts/install-masternode.sh testnet
+```
+
+Each gets its own systemd service, config, and data directory. Manage them
+independently:
+
+```bash
+systemctl start timed    # mainnet
+systemctl start timetd   # testnet
+```
+
+On a 2-CPU / 4 GB server, both run comfortably. If memory pressure appears as
+the chain grows, reduce the sled cache size in each network's `time.conf`.
+
 That's it — your masternode is running. By default it starts as a **Free tier**
 node (no collateral required) and begins earning rewards immediately.
 
@@ -167,7 +187,7 @@ rustc --version    # should print 1.75+
 ```bash
 git clone https://github.com/time-coin/time-masternode.git
 cd time-masternode
-cargo build --release
+cargo build --release --bin timed --bin time-cli
 ```
 
 Build takes roughly one minute. Binaries land in `target/release/`.
@@ -473,15 +493,33 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 
 ## 7. Upgrading
 
+### With update.sh (Recommended)
+
+The `update.sh` script pulls the latest code, rebuilds, and restarts the service:
+
+```bash
+cd ~/time-masternode
+
+# Update both networks (default)
+sudo bash scripts/update.sh
+
+# Update only testnet
+sudo bash scripts/update.sh testnet
+
+# Update only mainnet
+sudo bash scripts/update.sh mainnet
+```
+
 ### With the install script
+
+Re-running the install script on an existing installation upgrades in place
+(existing config files are preserved):
 
 ```bash
 cd time-masternode
 git pull origin main
 sudo ./scripts/install-masternode.sh mainnet   # or testnet
 ```
-
-The script detects an existing installation and upgrades in place.
 
 ### Manual upgrade
 
@@ -492,9 +530,9 @@ sudo systemctl stop timetd   # testnet (if running)
 # Back up wallet first!
 cp ~/.timecoin/time-wallet.dat ~/time-wallet-backup.dat
 
-cd time-masternode
+cd ~/time-masternode
 git pull origin main
-cargo build --release
+cargo build --release --bin timed --bin time-cli
 
 sudo cp target/release/timed /usr/local/bin/
 sudo cp target/release/time-cli /usr/local/bin/
@@ -875,4 +913,4 @@ Your IP should appear in the returned JSON array.
 ---
 
 **Version**: 1.2.0
-**Last Updated**: 2026-03-15
+**Last Updated**: 2026-03-24
