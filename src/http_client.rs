@@ -25,6 +25,7 @@ pub struct HttpClient {
 /// HTTP response from a request.
 pub struct HttpResponse {
     pub status: u16,
+    pub headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
@@ -48,6 +49,15 @@ impl HttpResponse {
     /// Check if the response status is 2xx.
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
+    }
+
+    /// Get the value of a header (case-insensitive).
+    pub fn header(&self, name: &str) -> Option<&str> {
+        let name_lower = name.to_ascii_lowercase();
+        self.headers
+            .iter()
+            .find(|(k, _)| k.to_ascii_lowercase() == name_lower)
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -98,45 +108,58 @@ impl HttpClient {
         body: Option<Vec<u8>>,
         basic_auth: Option<(&str, &str)>,
     ) -> Result<HttpResponse, String> {
-        let (scheme, host, port, path) = parse_url(url)?;
-        let use_tls = scheme == "https";
+        let mut current_url = url.to_string();
+        let max_redirects = 5;
 
-        // Build the HTTP request
-        let mut request = format!("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n", method, path, host);
+        for _ in 0..max_redirects {
+            let (scheme, host, port, path) = parse_url(&current_url)?;
+            let use_tls = scheme == "https";
 
-        if let Some(ref body) = body {
-            request.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
-        }
+            // Build the HTTP request
+            let mut request = format!("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n", method, path, host);
 
-        if let Some((user, pass)) = basic_auth {
-            let credentials = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                format!("{}:{}", user, pass),
-            );
-            request.push_str(&format!("Authorization: Basic {}\r\n", credentials));
-        }
-
-        request.push_str("\r\n");
-
-        // Connect with timeout
-        let addr = format!("{}:{}", host, port);
-        let result = tokio::time::timeout(self.timeout, async {
-            let stream = TcpStream::connect(&addr)
-                .await
-                .map_err(|e| format!("TCP connect to {}: {}", addr, e))?;
-
-            if use_tls {
-                self.do_tls_request(stream, &host, &request, body.as_deref()).await
-            } else {
-                self.do_plain_request(stream, &request, body.as_deref()).await
+            if let Some(ref body) = body {
+                request.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
             }
-        })
-        .await;
 
-        match result {
-            Ok(inner) => inner,
-            Err(_) => Err(format!("Request to {} timed out after {:?}", url, self.timeout)),
+            if let Some((user, pass)) = basic_auth {
+                let credentials = base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    format!("{}:{}", user, pass),
+                );
+                request.push_str(&format!("Authorization: Basic {}\r\n", credentials));
+            }
+
+            request.push_str("\r\n");
+
+            // Connect with timeout
+            let addr = format!("{}:{}", host, port);
+            let response = tokio::time::timeout(self.timeout, async {
+                let stream = TcpStream::connect(&addr)
+                    .await
+                    .map_err(|e| format!("TCP connect to {}: {}", addr, e))?;
+
+                if use_tls {
+                    self.do_tls_request(stream, &host, &request, body.as_deref()).await
+                } else {
+                    self.do_plain_request(stream, &request, body.as_deref()).await
+                }
+            })
+            .await
+            .map_err(|_| format!("Request to {} timed out after {:?}", current_url, self.timeout))??;
+
+            // Follow redirects (301, 302, 303, 307, 308)
+            if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+                if let Some(location) = extract_location_header(&response) {
+                    current_url = location;
+                    continue;
+                }
+            }
+
+            return Ok(response);
         }
+
+        Err(format!("Too many redirects for {}", url))
     }
 
     async fn do_plain_request(
@@ -171,10 +194,13 @@ impl HttpClient {
     ) -> Result<HttpResponse, String> {
         // Accept any certificate — the daemon uses message-level Ed25519 auth,
         // and RPC nodes use self-signed certs. No need for webpki root store.
-        let tls_config = rustls::ClientConfig::builder()
+        // ALPN is required for Vercel/CDN hosts that would otherwise trigger
+        // TLS renegotiation, which rustls does not support.
+        let mut tls_config = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCertVerifier))
             .with_no_client_auth();
+        tls_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
         let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
         let server_name = ServerName::try_from(host.to_owned())
@@ -204,6 +230,11 @@ impl HttpClient {
             .map_err(|e| e.to_string())?;
         parse_http_response(&response_buf)
     }
+}
+
+/// Extract the Location header value from an HTTP redirect response.
+fn extract_location_header(response: &HttpResponse) -> Option<String> {
+    response.header("location").map(|s| s.to_string())
 }
 
 /// Parse a URL into (scheme, host, port, path).
@@ -236,7 +267,7 @@ fn parse_url(url: &str) -> Result<(String, String, u16, String), String> {
     Ok((scheme.to_string(), host, port, path.to_string()))
 }
 
-/// Parse raw HTTP response bytes into status code + body.
+/// Parse raw HTTP response bytes into status code + headers + body.
 fn parse_http_response(data: &[u8]) -> Result<HttpResponse, String> {
     // Find end of headers
     let header_end = data
@@ -247,11 +278,10 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, String> {
     let header_str =
         std::str::from_utf8(&data[..header_end]).map_err(|_| "Non-UTF8 HTTP headers")?;
 
+    let mut lines = header_str.lines();
+
     // Parse status line: "HTTP/1.1 200 OK"
-    let status_line = header_str
-        .lines()
-        .next()
-        .ok_or("Empty HTTP response")?;
+    let status_line = lines.next().ok_or("Empty HTTP response")?;
 
     let status = status_line
         .split_whitespace()
@@ -260,16 +290,21 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, String> {
         .parse::<u16>()
         .map_err(|_| format!("Invalid status code in: {}", status_line))?;
 
-    let body_start = header_end + 4;
+    // Parse headers
+    let mut headers = Vec::new();
+    let mut is_chunked = false;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = name.trim().to_string();
+            let value = value.trim().to_string();
+            if name.eq_ignore_ascii_case("transfer-encoding") && value.to_ascii_lowercase().contains("chunked") {
+                is_chunked = true;
+            }
+            headers.push((name, value));
+        }
+    }
 
-    // Check for chunked transfer encoding
-    let is_chunked = header_str
-        .lines()
-        .any(|line| {
-            line.to_ascii_lowercase()
-                .starts_with("transfer-encoding:")
-                && line.to_ascii_lowercase().contains("chunked")
-        });
+    let body_start = header_end + 4;
 
     let body = if is_chunked {
         decode_chunked(&data[body_start..])?
@@ -277,7 +312,7 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, String> {
         data[body_start..].to_vec()
     };
 
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse { status, headers, body })
 }
 
 /// Decode chunked transfer encoding.
