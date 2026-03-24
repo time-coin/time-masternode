@@ -73,8 +73,8 @@ impl NetworkType {
     #[allow(dead_code)]
     pub fn peer_discovery_url(&self) -> &str {
         match self {
-            NetworkType::Mainnet => "http://time-coin.io/api/peers",
-            NetworkType::Testnet => "http://time-coin.io/api/testnet/peers",
+            NetworkType::Mainnet => "https://time-coin.io/api/peers",
+            NetworkType::Testnet => "https://time-coin.io/api/testnet/peers",
         }
     }
 }
