@@ -1,29 +1,154 @@
-# 🏆 TIME Coin Masternode Guide
+# TIME Coin Masternode Guide
+
+> Last updated: 2026-03-24
 
 ## Overview
 
 TIME Coin supports tiered masternodes with locked collateral (Dash-style). Configuration uses two files: `time.conf` (daemon settings and private key) and `masternode.conf` (collateral info). The daemon handles registration on startup.
 
-> **First time?** See **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** for
-> the step-by-step installation and setup guide. This document covers
-> masternode **operations** — tiers, collateral, rewards, and management.
+> **Linux users:** See **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** for
+> the step-by-step installation guide. This document covers masternode
+> **operations** — tiers, collateral, rewards, monitoring, and management.
+>
+> **Windows users:** See the [Windows Setup](#windows-setup) section below.
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Free Tier (No Collateral)
 
 Set `masternode=1` in `time.conf` and start the daemon — that's it. The node
 begins earning rewards immediately.
 
-See **[LINUX_INSTALLATION.md](LINUX_INSTALLATION.md)** for full installation
-steps.
-
 ### Staked Tier (Bronze/Silver/Gold)
 
 See **[LINUX_INSTALLATION.md §5.3](LINUX_INSTALLATION.md#53-staked-tiers-bronze--silver--gold)**
 for the step-by-step collateral setup process.
+
+---
+
+## Windows Setup
+
+### Prerequisites
+
+- **Git for Windows**: https://git-scm.com/download/win
+- **Rust**: https://rustup.rs (download and run `rustup-init.exe`, accept defaults)
+- **Visual Studio Build Tools**: Install "Desktop development with C++" workload
+
+### Automated Installation (Recommended)
+
+The install script handles cloning, building, config generation, and firewall
+setup in one step. Open a **Command Prompt or PowerShell** and run:
+
+```
+cd %USERPROFILE%
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
+
+REM Testnet (recommended for first-time setup)
+scripts\install-masternode.bat testnet
+
+REM — or —
+
+REM Mainnet (production)
+scripts\install-masternode.bat mainnet
+```
+
+The script will:
+1. Check that Git and Rust are installed (and tell you how to install them if not)
+2. Clone or update the repository
+3. Build release binaries (`timed.exe`, `time-cli.exe`)
+4. Create the data directory and generate a `time.conf` with random RPC credentials
+5. Copy binaries and add them to `PATH`
+6. Add a Windows Firewall inbound rule for the P2P port
+
+After installation, edit your config to set a reward address:
+```
+notepad %APPDATA%\timecoin\time.conf          REM mainnet
+notepad %APPDATA%\timecoin\testnet\time.conf  REM testnet
+```
+
+### Manual Install and Build
+
+If you prefer manual control, open a terminal (PowerShell or Command Prompt):
+
+```
+cd %USERPROFILE%
+git clone https://github.com/time-coin/time-masternode.git
+cd time-masternode
+cargo build --release --bin timed --bin time-cli
+```
+
+### Run
+
+```
+REM Testnet
+target\release\timed.exe --testnet
+
+REM Mainnet
+target\release\timed.exe
+```
+
+### Data Directories
+
+| Network | Directory |
+|---------|-----------|
+| Mainnet | `%APPDATA%\timecoin\` |
+| Testnet | `%APPDATA%\timecoin\testnet\` |
+
+### Configuration
+
+Create or edit `%APPDATA%\timecoin\time.conf`:
+
+```ini
+masternode=1
+masternodeprivkey=<your-key>
+reward_address=<your-wallet-address>
+```
+
+For testnet, edit `%APPDATA%\timecoin\testnet\time.conf` and add `testnet=1`.
+
+### Running as a Windows Service
+
+Use **NSSM** (Non-Sucking Service Manager) to run `timed` as a background
+service:
+
+```
+nssm install timed "%USERPROFILE%\time-masternode\target\release\timed.exe"
+nssm start timed
+```
+
+For testnet, install a separate service:
+
+```
+nssm install timetd "%USERPROFILE%\time-masternode\target\release\timed.exe" "--testnet"
+nssm start timetd
+```
+
+### Updating (Windows)
+
+```
+cd %USERPROFILE%\time-masternode
+scripts\update.bat testnet
+```
+
+Or update both networks: `scripts\update.bat`
+
+The script pulls latest code, rebuilds, stops the running node, copies new
+binaries, and restarts.
+
+### Firewall
+
+Open the P2P port (PowerShell as admin):
+
+```powershell
+# Mainnet
+netsh advfirewall firewall add rule name="TIME P2P" dir=in action=allow protocol=tcp localport=24000
+
+# Testnet
+netsh advfirewall firewall add rule name="TIME P2P Testnet" dir=in action=allow protocol=tcp localport=24100
+```
 
 ---
 
@@ -220,6 +345,74 @@ time-cli masternodelist
 
 # Check locked collaterals
 time-cli listlockedcollaterals
+```
+
+---
+
+## Monitoring Your Node
+
+### TUI Dashboard
+
+TIME Coin includes a built-in terminal dashboard that displays real-time node
+status in a single view:
+
+```bash
+# Linux
+bash scripts/dashboard.sh
+
+# Windows
+cargo run --bin time-dashboard --features dashboard
+```
+
+**Tabs** (switch with `1`–`5` or arrow keys):
+
+| Tab | Shows |
+|-----|-------|
+| **Overview** | Chain height, sync progress, wallet balance, peer count, masternode info |
+| **Masternode** | Your node's tier/uptime, full network masternode list with status |
+| **Mempool** | Pending and finalized transactions, fee details, transaction inspector |
+| **Blocks** | Recent blocks with height, hash, timestamp, tx count, reward |
+| **Governance** | Active proposals — vote directly from the dashboard |
+
+**Keys:** `q` quit · `↑↓` scroll · `Enter` expand detail · `1`–`5` jump to tab
+
+The dashboard auto-detects which network is running (by checking `.cookie`
+files) and reads RPC credentials from `time.conf` automatically.
+
+### CLI Commands
+
+```bash
+# Node status
+time-cli getblockchaininfo       # Chain height, sync progress, consensus
+time-cli getnetworkinfo           # Version, connections
+time-cli getpeerinfo              # Connected peers with latency and tier
+
+# Masternode
+time-cli masternodestatus         # Your node's status, tier, uptime
+time-cli masternodelist           # All registered masternodes
+time-cli masternodelist true      # Include inactive masternodes
+
+# Wallet
+time-cli getbalance               # Available balance
+time-cli getwalletinfo            # Balance, locked, available, tx count
+time-cli listtransactions         # Recent transactions
+
+# Collateral
+time-cli listlockedcollaterals    # Show locked collateral UTXOs
+time-cli masternoderegstatus      # Registration eligibility check
+```
+
+### Log Monitoring
+
+```bash
+# Linux (systemd)
+journalctl -u timed -f                  # mainnet live
+journalctl -u timetd -f                 # testnet live
+journalctl -u timed -n 200 --no-pager   # last 200 lines
+
+# Windows (logs in data directory)
+type %APPDATA%\timecoin\debug.log
+type %APPDATA%\timecoin\testnet\debug.log
 ```
 
 ---
@@ -580,6 +773,43 @@ time-cli listunspent
 2. **Collateral spent:** Run `listlockedcollaterals` — verify it's locked
 3. **Rotation:** With many masternodes, you receive rewards periodically
 4. **Just registered:** Wait 1 hour for eligibility
+
+---
+
+## Upgrading
+
+### Linux
+
+```bash
+cd ~/time-masternode
+
+# Update both networks (default)
+sudo bash scripts/update.sh
+
+# Update only testnet
+sudo bash scripts/update.sh testnet
+
+# Update only mainnet
+sudo bash scripts/update.sh mainnet
+```
+
+### Windows
+
+```
+cd %USERPROFILE%\time-masternode
+
+REM Update both networks
+scripts\update.bat
+
+REM Update only testnet
+scripts\update.bat testnet
+
+REM Update only mainnet
+scripts\update.bat mainnet
+```
+
+Both scripts pull the latest code, rebuild, stop the node, copy new binaries,
+and restart.
 
 ---
 
