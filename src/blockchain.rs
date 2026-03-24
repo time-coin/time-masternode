@@ -1728,8 +1728,28 @@ impl Blockchain {
                         "⚠️  No progress after parallel sync request (timeout after 30s)"
                     );
 
+                    // Determine the actual missing range.  Other peers may have already
+                    // buffered blocks above the gap — keep them and only re-request what
+                    // is missing rather than wiping the whole buffer and starting over.
+                    let current_tip = self.current_height.load(Ordering::Acquire);
+                    let next_needed = current_tip + 1;
+                    let first_buffered = {
+                        let pending = self.pending_sync_blocks.read().await;
+                        pending.keys().next().copied()
+                    };
+
+                    // If we have buffered blocks starting above the gap, keep them and
+                    // only request the missing leading range from a different peer.
+                    // If there is no gap (buffer is empty or starts exactly where we
+                    // need it), clear stale state and restart normally.
+                    let has_gap = matches!(first_buffered, Some(first) if first > next_needed);
+                    if !has_gap {
+                        self.clear_pending_blocks().await;
+                    }
+                    next_request_height = next_needed;
+
                     // Try to rebuild peer list with different peers
-                    let mut tried: HashSet<String> = sync_peers.iter().cloned().collect();
+                    let tried: HashSet<String> = sync_peers.iter().cloned().collect();
                     let fallback_peers: Vec<String> = connected_peers
                         .iter()
                         .filter(|p| !tried.contains(*p))
@@ -1740,17 +1760,20 @@ impl Blockchain {
                         if let Some(alt_peer) =
                             self.peer_scoring.select_best_peer(&fallback_peers).await
                         {
+                            let missing_end = first_buffered
+                                .map(|f| (f - 1).min(next_needed + batch_size - 1))
+                                .unwrap_or(next_needed + batch_size - 1)
+                                .min(target);
                             tracing::info!(
-                                "🤖 [AI] Switching to fallback peer: {}",
+                                "🤖 [AI] Requesting missing range {}-{} from fallback peer: {}",
+                                next_needed,
+                                missing_end,
                                 alt_peer
                             );
-                            tried.insert(alt_peer.clone());
-
-                            // Reset request height to current tip and try with new peer
-                            let reset_height = self.current_height.load(Ordering::Acquire);
-                            next_request_height = reset_height + 1;
+                            // Switch to the single fallback peer for the missing range.
+                            // Do NOT clear pending blocks — valid buffered blocks above
+                            // the gap are preserved and will drain once the gap is filled.
                             sync_peers = vec![alt_peer];
-                            self.clear_pending_blocks().await;
                             continue;
                         }
                     }
