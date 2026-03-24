@@ -1748,17 +1748,42 @@ impl Blockchain {
                     }
                     next_request_height = next_needed;
 
-                    // Try to rebuild peer list with different peers
-                    let tried: HashSet<String> = sync_peers.iter().cloned().collect();
-                    let fallback_peers: Vec<String> = connected_peers
-                        .iter()
-                        .filter(|p| !tried.contains(*p))
-                        .cloned()
-                        .collect();
+                    // Build a retry peer list for the missing range.
+                    //
+                    // When has_gap: the peers responsible for the missing leading chunk
+                    // are sync_peers[0..gap_chunks]. Exclude only those — any other
+                    // connected peer (including the rest of sync_peers) may have those
+                    // blocks and should be tried.
+                    //
+                    // When no gap: all current sync_peers failed to make progress, so
+                    // only try peers that weren't in the last round.
+                    let retry_peers: Vec<String> = if has_gap {
+                        let gap_chunks = first_buffered
+                            .map(|f| {
+                                ((f - next_needed) as usize)
+                                    .div_ceil(batch_size as usize)
+                            })
+                            .unwrap_or(1)
+                            .min(sync_peers.len());
+                        let failed: HashSet<String> =
+                            sync_peers.iter().take(gap_chunks).cloned().collect();
+                        connected_peers
+                            .iter()
+                            .filter(|p| !failed.contains(*p))
+                            .cloned()
+                            .collect()
+                    } else {
+                        let tried: HashSet<String> = sync_peers.iter().cloned().collect();
+                        connected_peers
+                            .iter()
+                            .filter(|p| !tried.contains(*p))
+                            .cloned()
+                            .collect()
+                    };
 
-                    if !fallback_peers.is_empty() {
+                    if !retry_peers.is_empty() {
                         if let Some(alt_peer) =
-                            self.peer_scoring.select_best_peer(&fallback_peers).await
+                            self.peer_scoring.select_best_peer(&retry_peers).await
                         {
                             let missing_end = first_buffered
                                 .map(|f| (f - 1).min(next_needed + batch_size - 1))

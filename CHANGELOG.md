@@ -20,12 +20,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`scripts/uninstall-masternode.sh`**: Service name was hardcoded to `timed` regardless of network; now correctly uses `timetd` for testnet.
 - **`scripts/uninstall-masternode.sh`**: Removed bogus `timecoin` OS user removal step — the install script runs the daemon as the invoking user, not a dedicated service account.
 
+### Fixed — Transaction Processing During Sync
+
+- **`TransactionFinalized` spam while syncing**: When a node was hundreds of blocks behind, peers would send `TransactionFinalized` messages referencing UTXOs created by blocks the node hadn't received yet. Every message was logged as `⚠️ Rejecting TransactionFinalized ... input not in storage`, generating noise and wasting CPU. The handler now drops `TransactionFinalized` messages immediately when `blockchain.is_syncing()` is true; peers re-broadcast once the node catches up.
+
 ### Fixed — Parallel Sync Deadlock (missing first chunk)
 
-- **Sync stall at specific height**: When the peer assigned the first block chunk (e.g. 15132–15181) was unresponsive, the parallel sync would buffer hundreds of valid blocks from other peers but make no height progress. On the 30 s timeout it called `clear_pending_blocks()` — **destroying all the valid buffered blocks** — then reset `next_request_height` back to `current_height + 1` and retried with a single fallback peer (often the same unresponsive one). This repeated forever, keeping the node permanently stuck. Fixed by:
-  - Detecting whether a leading gap exists between `current_height + 1` and the first buffered block.
-  - If a gap exists: **preserve the buffer**, reset `next_request_height` to the gap start, and request only the missing range from a fallback peer. Once the gap block is applied, the existing buffered blocks drain automatically.
-  - If no gap exists (empty buffer or buffer starts at the right place): clear stale state and restart normally as before.
+- **Sync stall at specific height**: When the peer assigned the first block chunk (e.g. 15132–15181) was unresponsive or couldn't serve that range, the parallel sync buffered hundreds of valid blocks from other peers but made no height progress. On the 30 s timeout it called `clear_pending_blocks()` — **destroying all the valid buffered blocks** — then reset `next_request_height` back to `current_height + 1` and retried with a single fallback peer. The fallback was chosen only from peers *not* already in `sync_peers`; when all connected peers were in `sync_peers` the fallback list was empty and the node gave up immediately. Two fixes applied:
+  1. **Preserve the buffer on gap**: detect whether there are buffered blocks above `current_height + 1`. If yes, keep them and only re-request the missing leading range. Once the gap is filled the buffered blocks drain automatically.
+  2. **Expanded fallback pool**: when a gap exists, the retry candidate list is now built from ALL connected peers minus only the specific peer(s) assigned to the failing leading chunk — instead of only peers outside `sync_peers`. This ensures a retry peer is always available even when all connected peers participated in the original sync round.
 
 ### Fixed — Network Stability (Testnet block 15162 incident)
 

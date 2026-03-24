@@ -984,6 +984,15 @@ async fn handle_peer(
                                     }
                                 }
                                 NetworkMessage::TransactionFinalized { txid, tx } => {
+                                    // Drop mempool transactions while syncing — the UTXOs they
+                                    // reference likely don't exist in our local UTXO set yet, so
+                                    // every validation would fail with "input not in storage".
+                                    // The peer will re-broadcast once we're caught up.
+                                    if blockchain.is_syncing() {
+                                        tracing::debug!("⏭️ Skipping TransactionFinalized {} — node is syncing", hex::encode(*txid));
+                                        continue;
+                                    }
+
                                     // Dedup: skip if we've already processed this finalization
                                     let already_seen = seen_tx_finalized.check_and_insert(txid).await;
                                     if already_seen {
