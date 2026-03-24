@@ -350,6 +350,54 @@ impl MessageHandler {
             }
         }
 
+        // SYNC GATE: During initial sync, only process messages essential for syncing.
+        // This keeps the node laser-focused on catching up before doing anything else.
+        if context.blockchain.is_syncing() {
+            let is_sync_essential = matches!(
+                msg,
+                // Liveness
+                NetworkMessage::Ping { .. }
+                | NetworkMessage::Pong { .. }
+                // Block sync (the actual sync work)
+                | NetworkMessage::GetBlocks(_, _)
+                | NetworkMessage::BlocksResponse(_)
+                | NetworkMessage::BlockRangeResponse(_)
+                | NetworkMessage::BlockResponse(_)
+                | NetworkMessage::BlockRequest(_)
+                | NetworkMessage::BlockAnnouncement(_)
+                | NetworkMessage::BlockInventory(_)
+                | NetworkMessage::GetBlockHeight
+                | NetworkMessage::BlockHeightResponse(_)
+                | NetworkMessage::GetBlockRange { .. }
+                | NetworkMessage::GetBlockHash(_)
+                | NetworkMessage::BlockHashResponse { .. }
+                // Chain tip discovery
+                | NetworkMessage::GetChainTip
+                | NetworkMessage::ChainTipResponse { .. }
+                // Genesis verification
+                | NetworkMessage::GetGenesisHash
+                | NetworkMessage::GenesisHashResponse(_)
+                | NetworkMessage::RequestGenesis
+                | NetworkMessage::GenesisAnnouncement(_)
+                // Peer discovery (need peers to sync from)
+                | NetworkMessage::GetPeers
+                | NetworkMessage::PeersResponse(_)
+                | NetworkMessage::PeerExchange(_)
+                // Fork alerts (need to know if we're on wrong chain)
+                | NetworkMessage::ForkAlert { .. }
+            );
+
+            if !is_sync_essential {
+                debug!(
+                    "⏸️ [{}] Deferring {} from {} (syncing)",
+                    self.direction,
+                    msg.message_type(),
+                    self.peer_ip
+                );
+                return Ok(None);
+            }
+        }
+
         let result = match msg {
             // === Health Check Messages ===
             NetworkMessage::Ping {

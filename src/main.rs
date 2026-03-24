@@ -1270,6 +1270,7 @@ async fn main() {
         // Start peer exchange task (for masternode discovery)
         let peer_connection_registry_clone = peer_connection_registry.clone();
         let shutdown_token_clone = shutdown_token.clone();
+        let peer_exchange_blockchain = blockchain.clone();
         let peer_exchange_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
             loop {
@@ -1279,6 +1280,10 @@ async fn main() {
                         break;
                     }
                     _ = interval.tick() => {
+                        // Skip during sync — focus on catching up
+                        if peer_exchange_blockchain.is_syncing() {
+                            continue;
+                        }
                         // Request masternodes from all connected peers for peer exchange
                         tracing::debug!("📤 Broadcasting GetMasternodes to all peers");
                         peer_connection_registry_clone
@@ -1294,6 +1299,7 @@ async fn main() {
         let health_registry = registry.clone();
         let health_peer_manager = peer_manager.clone();
         let health_shutdown = shutdown_token.clone();
+        let health_blockchain = blockchain.clone();
         let health_handle = tokio::spawn(async move {
             // Wait for peers to connect before first health check
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
@@ -1305,6 +1311,10 @@ async fn main() {
                         break;
                     }
                     _ = interval.tick() => {
+                        // Skip during sync — focus on catching up
+                        if health_blockchain.is_syncing() {
+                            continue;
+                        }
                         // Check network health
                         let health = health_registry.check_network_health().await;
 
@@ -1378,10 +1388,17 @@ async fn main() {
         let mn_for_announcement = mn.clone();
         let peer_registry_for_announcement = peer_connection_registry.clone();
         let registry_for_announcement = registry.clone();
+        let announcement_blockchain = blockchain.clone();
 
         let announcement_handle = tokio::spawn(async move {
-            // Wait 10 seconds for initial peer connections
-            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+            // Wait for initial sync to complete before announcing
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                if !announcement_blockchain.is_syncing() {
+                    break;
+                }
+                tracing::debug!("⏸️ Deferring masternode announcement (still syncing)");
+            }
 
             let daemon_started_at = registry_for_announcement.get_started_at();
 
@@ -1407,6 +1424,10 @@ async fn main() {
             // so that an on-chain registration that upgrades Free→Bronze is propagated.
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                // Skip during sync (e.g., if a re-sync was triggered)
+                if announcement_blockchain.is_syncing() {
+                    continue;
+                }
                 let current_mn = registry_for_announcement
                     .get(&mn_for_announcement.address)
                     .await
@@ -1871,6 +1892,11 @@ async fn main() {
                 // Run integrity check every 10 minutes (block time)
                 tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
 
+                // Skip during sync — chain is incomplete
+                if blockchain_for_integrity.is_syncing() {
+                    continue;
+                }
+
                 tracing::debug!("🔍 Running periodic chain integrity check...");
                 match blockchain_for_integrity.validate_chain_integrity().await {
                     Ok(corrupt_blocks) => {
@@ -2207,6 +2233,11 @@ async fn main() {
                 _ = interval.tick() => {
                     // Regular 1-second check (fallback for leader timeout, chain tip refresh)
                 }
+            }
+
+            // Skip block production entirely while syncing — focus on catching up
+            if block_blockchain.is_syncing() {
+                continue;
             }
 
             // CRITICAL BOOTSTRAP FIX: Periodically request chain tips from peers
