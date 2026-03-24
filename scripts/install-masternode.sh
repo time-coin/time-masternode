@@ -60,6 +60,12 @@ LOG_DIR="$DATA_DIR/logs"
 VERSION="1.2.0"
 REWARD_ADDRESS=""
 
+# Ensure Rust/cargo is in PATH from the start (handles both direct and sudo invocations)
+export PATH="$HOME/.cargo/bin:$PATH"
+if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+fi
+
 #------------------------------------------------------------------------------
 # Helper Functions
 #------------------------------------------------------------------------------
