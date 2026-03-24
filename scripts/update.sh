@@ -4,15 +4,15 @@
 
 NETWORK="${1:-both}"
 
-# Ensure cargo is in PATH (sudo may not inherit user's PATH)
-REAL_HOME="${HOME:-/root}"
-if [ "$SUDO_USER" ] && [ "$SUDO_USER" != "root" ]; then
-    REAL_HOME=$(eval echo "~$SUDO_USER")
-fi
-if [ -f "$REAL_HOME/.cargo/env" ]; then
-    source "$REAL_HOME/.cargo/env"
-fi
-export PATH="$REAL_HOME/.cargo/bin:$PATH"
+# Ensure cargo is in PATH (sudo doesn't inherit user's PATH).
+# install-masternode.sh installs Rust to /root/.cargo/, so check there first.
+for CARGO_HOME in /root "$HOME" ; do
+    if [ -f "$CARGO_HOME/.cargo/env" ]; then
+        source "$CARGO_HOME/.cargo/env"
+        break
+    fi
+done
+export PATH="/root/.cargo/bin:$HOME/.cargo/bin:$PATH"
 
 # Derive service name from network
 service_name() {

@@ -240,7 +240,22 @@ install_rust() {
     # Explicit PATH export — belt-and-suspenders in case source didn't work
     export PATH="$HOME/.cargo/bin:$PATH"
     
-    # Ensure cargo is in PATH for future shell sessions (.bashrc + .profile)
+    # Ensure cargo is in PATH for ALL future sessions, including non-interactive
+    # shells (sudo, cron, scripts). /etc/profile.d/ is the most reliable way.
+    if [ ! -f /etc/profile.d/cargo.sh ]; then
+        cat > /etc/profile.d/cargo.sh << 'CARGO_EOF'
+# Added by TIME Coin install-masternode.sh
+if [ -f /root/.cargo/env ]; then
+    . /root/.cargo/env
+elif [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+fi
+CARGO_EOF
+        chmod 644 /etc/profile.d/cargo.sh
+        print_info "Added cargo to PATH via /etc/profile.d/cargo.sh"
+    fi
+
+    # Also add to .bashrc and .profile as fallback
     for rc_file in "$HOME/.bashrc" "$HOME/.profile"; do
         if ! grep -q 'cargo/env' "$rc_file" 2>/dev/null; then
             echo '. "$HOME/.cargo/env"' >> "$rc_file"
