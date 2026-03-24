@@ -138,6 +138,20 @@ Or update both networks: `scripts\update.bat`
 The script pulls latest code, rebuilds, stops the running node, copies new
 binaries, and restarts.
 
+### Uninstalling (Windows)
+
+```
+cd %USERPROFILE%\time-masternode
+scripts\uninstall-masternode.bat testnet
+```
+
+Or for mainnet: `scripts\uninstall-masternode.bat` (defaults to mainnet)
+
+The script stops the running process, removes any NSSM service, deletes the
+firewall rule, and removes the binaries. **Blockchain data and your wallet
+are preserved** — you will be shown the commands to delete them manually if
+you want a full wipe.
+
 ### Firewall
 
 Open the P2P port (PowerShell as admin):
