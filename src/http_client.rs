@@ -149,11 +149,17 @@ impl HttpClient {
             .await
             .map_err(|_| format!("Request to {} timed out after {:?}", current_url, self.timeout))??;
 
-            // Follow redirects (301, 302, 303, 307, 308)
+            // Follow redirects (301, 302, 303, 307, 308), but only within
+            // the same scheme. Never upgrade HTTP → HTTPS automatically;
+            // callers that want TLS should use an https:// URL directly.
             if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
                 if let Some(location) = extract_location_header(&response) {
-                    current_url = location;
-                    continue;
+                    let same_scheme = location.starts_with(&format!("{}://", scheme));
+                    let relative = !location.contains("://");
+                    if same_scheme || relative {
+                        current_url = location;
+                        continue;
+                    }
                 }
             }
 
