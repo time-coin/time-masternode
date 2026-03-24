@@ -322,6 +322,44 @@ INFO 🌐 Network: testnet (P2P: 0.0.0.0:24100, RPC: 127.0.0.1:24101)
 INFO ✅ Registered as active masternode
 ```
 
+### TUI Dashboard
+
+TIME Coin includes a terminal dashboard that displays real-time node status.
+It connects to your node's RPC and shows blockchain info, peers, masternode
+status, mempool, recent blocks, and governance proposals — all in one view.
+
+**Build and run:**
+```bash
+cd ~/time-masternode
+bash scripts/dashboard.sh
+```
+
+Or run directly:
+```bash
+cargo run --bin time-dashboard --features dashboard
+```
+
+**Tabs** (switch with `1`–`5` or left/right arrow keys):
+
+| Tab | Shows |
+|-----|-------|
+| **Overview** | Chain height, sync progress, wallet balance, peer count, masternode status |
+| **Masternode** | Local masternode tier/uptime, full network masternode list with status |
+| **Mempool** | Pending and finalized transactions, fee details, transaction inspector |
+| **Blocks** | Recent blocks with height, hash, timestamp, tx count, reward |
+| **Governance** | Active proposals, voting status, vote directly from the dashboard |
+
+**Keyboard shortcuts:**
+- `q` — quit
+- `↑`/`↓` — scroll lists
+- `Enter` — expand detail view (blocks, mempool transactions)
+- `1`–`5` — jump to tab
+
+The dashboard auto-detects whether mainnet or testnet is running by checking
+which network has an active `.cookie` file. If both are running, it connects
+to whichever was started most recently. RPC credentials are read automatically
+from `time.conf`.
+
 ---
 
 ## 5. Masternode Configuration
