@@ -100,7 +100,16 @@ impl DeterministicBlockGenerator {
                 };
 
                 if reward > 0 {
-                    masternode_rewards.push((mn.wallet_address.clone(), reward));
+                    // Merge if same wallet address already in list (multiple
+                    // masternodes can share a reward address)
+                    if let Some(entry) = masternode_rewards
+                        .iter_mut()
+                        .find(|(a, _)| a == &mn.wallet_address)
+                    {
+                        entry.1 += reward;
+                    } else {
+                        masternode_rewards.push((mn.wallet_address.clone(), reward));
+                    }
                     distributed += reward;
                 }
             }

@@ -4736,9 +4736,12 @@ impl MessageHandler {
             return Err("Reward distribution doesn't spend coinbase".to_string());
         }
 
-        if reward_dist.outputs.len() != block.masternode_rewards.len() {
+        // Output count may differ from masternode_rewards count when multiple
+        // masternodes share a reward address (entries are merged in newer code).
+        // Only reject if outputs exceed metadata entries (more outputs than expected).
+        if reward_dist.outputs.len() > block.masternode_rewards.len() {
             return Err(format!(
-                "Reward distribution has {} outputs but masternode_rewards has {} entries",
+                "Reward distribution has {} outputs but masternode_rewards has only {} entries",
                 reward_dist.outputs.len(),
                 block.masternode_rewards.len()
             ));
