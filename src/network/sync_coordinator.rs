@@ -419,7 +419,7 @@ mod tests {
 
         // Next sync should be queued (at limit)
         let result = coordinator
-            .request_sync(format!("192.168.2.1"), 0, 100, SyncSource::Periodic)
+            .request_sync("192.168.2.1".to_string(), 0, 100, SyncSource::Periodic)
             .await;
         assert_eq!(result, Ok(false));
     }

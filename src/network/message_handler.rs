@@ -1026,10 +1026,7 @@ impl MessageHandler {
             NetworkMessage::ConnectivityWarning { message } => {
                 // A remote masternode has probed our P2P port and found it unreachable.
                 // Log a prominent warning so the operator knows they need to fix this.
-                warn!(
-                    "🚨 CONNECTIVITY WARNING from {}: {}",
-                    self.peer_ip, message
-                );
+                warn!("🚨 CONNECTIVITY WARNING from {}: {}", self.peer_ip, message);
                 warn!("🔌 Your node's P2P port is not publicly reachable from the internet.");
                 warn!("   To earn block rewards you need a VPS or server with a static public IP");
                 warn!("   and an open P2P port (mainnet: 24000, testnet: 24100).");
@@ -1937,7 +1934,12 @@ impl MessageHandler {
         if capped_end < end_height {
             tracing::debug!(
                 "📥 [{}] GetBlockRange({}-{}) from {} capped to {}-{}",
-                self.direction, start_height, end_height, self.peer_ip, start_height, capped_end
+                self.direction,
+                start_height,
+                end_height,
+                self.peer_ip,
+                start_height,
+                capped_end
             );
         } else {
             debug!(
@@ -3330,10 +3332,12 @@ impl MessageHandler {
         // Find the most popular alternative hash
         let mut best_alt_votes = 0u32;
         let mut best_alt_peer: Option<String> = None;
-        for (count, peer) in hash_counts.values() {
+        let mut best_alt_hash: Option<[u8; 32]> = None;
+        for (hash, (count, peer)) in &hash_counts {
             if *count > best_alt_votes {
                 best_alt_votes = *count;
                 best_alt_peer = Some(peer.clone());
+                best_alt_hash = Some(*hash);
             }
         }
 
@@ -3351,8 +3355,15 @@ impl MessageHandler {
             // Simple majority: alt_votes > total / 2
             ("simple majority", best_alt_votes * 2 > total_votes)
         } else {
-            // Plurality: alt has more votes than us
-            ("plurality", best_alt_votes > our_hash_votes)
+            // Plurality: alt has more votes than us, or tied with lowest hash winning.
+            // Lowest-hash tiebreaker ensures deterministic resolution in 2-node networks.
+            let tied_and_lower = best_alt_votes == our_hash_votes
+                && best_alt_votes > 0
+                && best_alt_hash.is_some_and(|alt| alt < our_hash);
+            (
+                "plurality",
+                best_alt_votes > our_hash_votes || tied_and_lower,
+            )
         };
 
         info!(
@@ -3759,7 +3770,10 @@ impl MessageHandler {
                                 2 => 300,
                                 _ => 600,
                             };
-                            (now.duration_since(last_time) >= Duration::from_secs(interval), count)
+                            (
+                                now.duration_since(last_time) >= Duration::from_secs(interval),
+                                count,
+                            )
                         }
                     }
                     None => (true, 0u32),
@@ -3784,7 +3798,8 @@ impl MessageHandler {
 
                     if our_chain_count >= 3 && our_chain_count > behind_count {
                         let new_count = alert_count + 1;
-                        fork_alert_rate_limit().insert(self.peer_ip.clone(), (now, new_count, peer_height));
+                        fork_alert_rate_limit()
+                            .insert(self.peer_ip.clone(), (now, new_count, peer_height));
                         let next_interval = match new_count {
                             0..=1 => 120,
                             2 => 300,
@@ -4101,10 +4116,7 @@ impl MessageHandler {
                 let current_height = context.blockchain.get_height();
                 warn!(
                     "⚠️ [{}] No blocks added from {} - all {} blocks skipped (our height {})",
-                    self.direction,
-                    self.peer_ip,
-                    skipped,
-                    current_height
+                    self.direction, self.peer_ip, skipped, current_height
                 );
             }
         }
@@ -5236,7 +5248,10 @@ pub async fn probe_masternode_reachability(
             ),
         };
         if let Err(e) = peer_registry.send_to_peer(&peer_ip, warning_msg).await {
-            debug!("Could not deliver ConnectivityWarning to {}: {}", peer_ip, e);
+            debug!(
+                "Could not deliver ConnectivityWarning to {}: {}",
+                peer_ip, e
+            );
         }
     }
 
