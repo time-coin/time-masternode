@@ -970,8 +970,9 @@ impl MasternodeRegistry {
     }
 
     /// Returns addresses of masternodes that need a reachability probe:
-    /// - Not yet probed, OR
-    /// - Last probe was more than REACHABILITY_RECHECK_SECS ago.
+    ///  - Not yet probed, OR
+    ///  - Last probe was more than REACHABILITY_RECHECK_SECS ago.
+    ///
     /// Only returns nodes that are currently active (inactive nodes aren't earning anyway).
     pub async fn get_nodes_needing_reachability_probe(&self) -> Vec<String> {
         let now = std::time::SystemTime::now()
