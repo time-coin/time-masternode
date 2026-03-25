@@ -277,7 +277,7 @@ See [GOVERNANCE.md](GOVERNANCE.md) for the full governance reference.
 
 Masternode configuration uses two files:
 - **`time.conf`** — daemon settings and masternode private key
-- **`masternode.conf`** — collateral info (alias, IP, txid, vout)
+- **`masternode.conf`** — collateral info (alias, txid, vout)
 
 ### time.conf Settings
 
@@ -296,8 +296,8 @@ Generate a key with `time-cli masternode genkey`. If omitted, the node uses its 
 ### masternode.conf Format
 
 ```
-# alias  IP:port  collateral_txid  collateral_vout
-mn1  69.167.168.176:24100  abc123def456...  0
+# alias  collateral_txid  collateral_vout
+mn1  abc123def456...  0
 ```
 
 ### Free Tier (No Collateral)
@@ -319,7 +319,7 @@ masternodeprivkey=5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
 
 In `masternode.conf`:
 ```
-mn1 69.167.168.176:24100 abc123def456789012345678901234567890123456789012345678901234abcd 0
+mn1 abc123def456789012345678901234567890123456789012345678901234abcd 0
 ```
 
 ---

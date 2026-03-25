@@ -698,8 +698,8 @@ txindex=1
 ### `masternode.conf` (collateral entries)
 
 ```
-# alias  IP:port  collateral_txid  collateral_vout
-mn1 1.2.3.4:24000 abc123...def456 0
+# alias  collateral_txid  collateral_vout
+mn1 abc123...def456 0
 ```
 
 Only needed for staked tiers (Bronze/Silver/Gold). Free tier nodes do not

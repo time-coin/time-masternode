@@ -207,8 +207,8 @@ time-cli listunspent
 
 **Step 4: Update masternode.conf**
 ```
-# Format: alias IP:port collateral_txid collateral_vout
-mn1 <your_ip>:24100 <txid from step 3> 0
+# Format: alias collateral_txid collateral_vout
+mn1 <txid from step 3> 0
 ```
 
 **Step 5: Restart and Verify**
@@ -445,8 +445,8 @@ txindex=1
 
 Collateral is configured in `masternode.conf`:
 ```
-# Format: alias IP:port collateral_txid collateral_vout
-mn1 1.2.3.4:24000 abc123...def456 0
+# Format: alias collateral_txid collateral_vout
+mn1 abc123...def456 0
 ```
 
 ---

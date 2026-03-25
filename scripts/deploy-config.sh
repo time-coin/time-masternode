@@ -84,10 +84,10 @@ fi
 if [ ! -f "$MN_CONF" ]; then
     cat > "$MN_CONF" <<EOF
 # TIME Coin Masternode Configuration
-# Format: alias IP:port collateral_txid collateral_vout
+# Format: alias collateral_txid collateral_vout
 #
 # Example:
-#   mn1 1.2.3.4:${PORT} abc123...def456 0
+#   mn1 abc123...def456 0
 #
 # Steps:
 #   1. Generate key:    time-cli masternode genkey

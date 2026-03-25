@@ -210,18 +210,18 @@ REM ─── Write masternode.conf ──────────────�
 echo Writing masternode.conf...
 
 if not "%COLLATERAL_TXID%"=="" (
-    set "MN_LINE=mn1 0.0.0.0:%MN_PORT% %COLLATERAL_TXID% %COLLATERAL_VOUT%"
+    set "MN_LINE=mn1 %COLLATERAL_TXID% %COLLATERAL_VOUT%"
     (
         echo # TIME Coin Masternode Configuration
-        echo # Format: alias IP:port collateral_txid collateral_vout
+        echo # Format: alias collateral_txid collateral_vout
         echo !MN_LINE!
     ) > "%MN_CONF_FILE%"
     echo [OK] masternode.conf updated with collateral
 ) else if not exist "%MN_CONF_FILE%" (
     (
         echo # TIME Coin Masternode Configuration
-        echo # Format: alias IP:port collateral_txid collateral_vout
-        echo # Example: mn1 1.2.3.4:%MN_PORT% abc123...def456 0
+        echo # Format: alias collateral_txid collateral_vout
+        echo # Example: mn1 abc123...def456 0
     ) > "%MN_CONF_FILE%"
     echo [OK] Created masternode.conf template
 ) else (
