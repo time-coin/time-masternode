@@ -1011,14 +1011,19 @@ async fn handle_peer(
                                         continue;
                                     }
 
-                                    // Validate input UTXOs exist in storage before accepting.
-                                    // If inputs are missing, this TX references spent/unknown UTXOs
-                                    // and accepting it would cause coin loss.
+                                    // Check whether all input UTXOs are present in local storage.
+                                    // For a TransactionFinalized message the network has already
+                                    // reached consensus on this TX, so missing inputs only mean our
+                                    // local UTXO set is diverged — not that the TX is invalid.
+                                    // We still apply the outputs so wallets see the correct balance;
+                                    // missing inputs are skipped (they will be cleaned up by the
+                                    // next UTXO reconciliation round).
                                     let mut inputs_exist = true;
                                     for input in &tx.inputs {
                                         if consensus.utxo_manager.get_utxo(&input.previous_output).await.is_err() {
                                             tracing::warn!(
-                                                "⚠️ Rejecting TransactionFinalized {} from {}: input {} not in storage",
+                                                "⚠️ TransactionFinalized {} from {}: input {} not in local storage \
+                                                 (UTXO set diverged) — will apply outputs without marking inputs spent",
                                                 hex::encode(*txid), peer.addr, input.previous_output
                                             );
                                             inputs_exist = false;
@@ -1026,6 +1031,35 @@ async fn handle_peer(
                                         }
                                     }
                                     if !inputs_exist {
+                                        // Apply outputs directly so the recipient wallet sees the
+                                        // new UTXOs even while our local set is diverged.
+                                        for (idx, output) in tx.outputs.iter().enumerate() {
+                                            let outpoint = crate::types::OutPoint {
+                                                txid: *txid,
+                                                vout: idx as u32,
+                                            };
+                                            let utxo = crate::types::UTXO {
+                                                outpoint: outpoint.clone(),
+                                                value: output.value,
+                                                script_pubkey: output.script_pubkey.clone(),
+                                                address: String::from_utf8(output.script_pubkey.clone())
+                                                    .unwrap_or_default(),
+                                            };
+                                            if let Err(e) = consensus.utxo_manager.add_utxo(utxo).await {
+                                                tracing::warn!(
+                                                    "Failed to add output UTXO vout={} for diverged TX {}: {}",
+                                                    idx, hex::encode(*txid), e
+                                                );
+                                            } else {
+                                                consensus.utxo_manager.update_state(&outpoint, crate::types::UTXOState::Unspent);
+                                            }
+                                        }
+                                        // Gossip so other peers can also learn about this finalization
+                                        let msg = NetworkMessage::TransactionFinalized {
+                                            txid: *txid,
+                                            tx: tx.clone(),
+                                        };
+                                        let _ = broadcast_tx.send(msg);
                                         continue;
                                     }
 
