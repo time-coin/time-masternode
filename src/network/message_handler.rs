@@ -2673,15 +2673,29 @@ impl MessageHandler {
                         }
                         if utxo_manager.is_collateral_locked(&outpoint) {
                             let existing = utxo_manager.get_locked_collateral(&outpoint);
-                            if existing
-                                .map(|info| info.masternode_address != peer_ip)
-                                .unwrap_or(false)
-                            {
-                                debug!(
-                                    "⏭️ [{}] Skipping masternode announcement from {} — collateral already locked by another node",
-                                    self.direction, peer_ip
-                                );
-                                return Ok(None);
+                            if let Some(ref info) = existing {
+                                if info.masternode_address != peer_ip {
+                                    warn!(
+                                        "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim collateral {} already locked by {}",
+                                        self.direction, peer_ip, outpoint,
+                                        info.masternode_address
+                                    );
+                                    // Temp-ban the offending peer (30 min)
+                                    if let Some(blacklist) = &context.blacklist {
+                                        if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>() {
+                                            let mut bl = blacklist.write().await;
+                                            bl.add_temp_ban(
+                                                ip,
+                                                std::time::Duration::from_secs(1800),
+                                                &format!(
+                                                    "Collateral theft attempt: tried to claim {} owned by {}",
+                                                    outpoint, info.masternode_address
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    return Ok(None);
+                                }
                             }
                         }
                         debug!(
