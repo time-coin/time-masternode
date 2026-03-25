@@ -413,15 +413,15 @@ impl RpcHandler {
 
         let mut peers: Vec<Value> = Vec::with_capacity(masternodes.len());
         for mn in &masternodes {
-            // Look up the peer's actual reported height and ping time from the connection registry
-            let (height, pingtime) = if mn.is_active {
-                if let Some(ref pr) = peer_registry {
-                    let h = pr.get_peer_height(&mn.masternode.address).await.unwrap_or(0);
-                    let p = pr.get_peer_ping_time(&mn.masternode.address).await;
-                    (h, p)
-                } else {
-                    (0u64, None)
-                }
+            // Look up the peer's actual reported height and ping time from the
+            // connection registry.  Previously this was gated behind is_active
+            // (gossip liveness), which meant newly-connected peers showed no
+            // height or ping until 3+ peers had gossiped about them.  Now we
+            // always check the registry — if we have a live connection, show it.
+            let (height, pingtime) = if let Some(ref pr) = peer_registry {
+                let h = pr.get_peer_height(&mn.masternode.address).await.unwrap_or(0);
+                let p = pr.get_peer_ping_time(&mn.masternode.address).await;
+                (h, p)
             } else {
                 (0u64, None)
             };
