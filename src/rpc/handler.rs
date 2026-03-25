@@ -282,18 +282,42 @@ impl RpcHandler {
         };
         let height = self.blockchain.get_height();
         let best_hash = self.blockchain.get_block_hash(height).unwrap_or([0u8; 32]);
+        let is_syncing = self.blockchain.is_syncing();
 
         // Get real average finality time from consensus engine
         let avg_finality_ms = self.consensus.get_avg_finality_time_ms();
 
+        // Best-effort sync progress: ask the peer registry for the highest
+        // known peer tip so wallets can show a progress estimate.
+        let peer_tip = if let Some(registry) = self.blockchain.get_peer_registry().await {
+            let peers = registry.get_connected_peers().await;
+            let mut max_tip = height;
+            for peer in &peers {
+                if let Some(h) = registry.get_peer_height(peer).await {
+                    if h > max_tip {
+                        max_tip = h;
+                    }
+                }
+            }
+            max_tip
+        } else {
+            height
+        };
+        let verification_progress = if is_syncing && peer_tip > 0 {
+            (height as f64 / peer_tip as f64).min(1.0)
+        } else {
+            1.0
+        };
+
         Ok(json!({
             "chain": chain,
             "blocks": height,
-            "headers": height,
+            "headers": peer_tip,
             "bestblockhash": hex::encode(best_hash),
             "difficulty": 1.0,
             "mediantime": chrono::Utc::now().timestamp(),
-            "verificationprogress": 1.0,
+            "verificationprogress": verification_progress,
+            "initialblockdownload": is_syncing,
             "chainwork": format!("{:064x}", height),
             "pruned": false,
             "consensus": "TimeVote + TimeLock",
@@ -419,7 +443,10 @@ impl RpcHandler {
             // height or ping until 3+ peers had gossiped about them.  Now we
             // always check the registry — if we have a live connection, show it.
             let (height, pingtime) = if let Some(ref pr) = peer_registry {
-                let h = pr.get_peer_height(&mn.masternode.address).await.unwrap_or(0);
+                let h = pr
+                    .get_peer_height(&mn.masternode.address)
+                    .await
+                    .unwrap_or(0);
                 let p = pr.get_peer_ping_time(&mn.masternode.address).await;
                 (h, p)
             } else {
@@ -2459,9 +2486,7 @@ impl RpcHandler {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&pubkey_bytes);
 
-        self.consensus
-            .utxo_manager
-            .register_pubkey(address, arr);
+        self.consensus.utxo_manager.register_pubkey(address, arr);
 
         tracing::debug!("📬 Registered pubkey for address {}", address);
 
@@ -6067,8 +6092,8 @@ async fn fetch_official_peer_ips(
         return Err(format!("curl failed with status {}", output.status));
     }
 
-    let raw: Vec<String> = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("JSON parse error: {}", e))?;
+    let raw: Vec<String> =
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("JSON parse error: {}", e))?;
 
     let mut ips = std::collections::HashSet::new();
     for entry in raw {
