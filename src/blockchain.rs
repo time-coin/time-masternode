@@ -3097,6 +3097,7 @@ impl Blockchain {
             MasternodeTier::Free,
         ];
         let mut total_pool_distributed = 0u64;
+        let mut rounding_dust = 0u64; // satoshis unspent due to integer division; goes to treasury
 
         for tier in &tiers {
             let tier_pool = tier.pool_allocation();
@@ -3152,12 +3153,9 @@ impl Blockchain {
             }
 
             let mut distributed = 0u64;
-            for (i, (mn, _)) in tier_nodes.iter().take(recipient_count).enumerate() {
-                let share = if i == recipient_count - 1 {
-                    tier_pool - distributed // Last gets remainder
-                } else {
-                    per_node
-                };
+            for (mn, _) in tier_nodes.iter().take(recipient_count) {
+                // Every recipient gets exactly per_node; rounding remainder goes to treasury
+                let share = per_node;
                 // Merge into existing entry if same wallet address (handles both
                 // producer merging AND multiple masternodes sharing a reward address)
                 if let Some(entry) = rewards
@@ -3170,17 +3168,28 @@ impl Blockchain {
                 }
                 distributed += share;
             }
+            // Any undistributed satoshis from integer division go to treasury
+            let tier_dust = tier_pool - distributed;
+            if tier_dust > 0 {
+                rounding_dust += tier_dust;
+            }
             total_pool_distributed += distributed;
         }
 
+        // Rounding dust: satoshis unspent due to integer division of tier pools.
+        // Subtract from total_reward so the coinbase output matches the sum of
+        // reward outputs. The dust is credited to treasury in add_block().
+        let total_reward = total_reward - rounding_dust;
+
         tracing::info!(
-            "💰 Block {}: {} TIME — producer {} TIME, pools {} TIME to {} node(s) [{} eligible]",
+            "💰 Block {}: {} TIME — producer {} TIME, pools {} TIME to {} node(s) [{} eligible]{}",
             next_height,
             total_reward / 100_000_000,
             producer_share / 100_000_000,
             total_pool_distributed / 100_000_000,
             rewards.len().saturating_sub(1),
-            eligible_pool.len()
+            eligible_pool.len(),
+            if rounding_dust > 0 { format!(", {} sat rounding dust → treasury", rounding_dust) } else { String::new() }
         );
 
         if rewards.is_empty() {
