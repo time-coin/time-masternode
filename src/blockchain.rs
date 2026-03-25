@@ -3158,14 +3158,13 @@ impl Blockchain {
                 } else {
                     per_node
                 };
-                // Merge into producer entry if same wallet address
-                if producer_wallet.as_ref() == Some(&mn.masternode.wallet_address) {
-                    if let Some(entry) = rewards
-                        .iter_mut()
-                        .find(|(a, _)| a == &mn.masternode.wallet_address)
-                    {
-                        entry.1 += share;
-                    }
+                // Merge into existing entry if same wallet address (handles both
+                // producer merging AND multiple masternodes sharing a reward address)
+                if let Some(entry) = rewards
+                    .iter_mut()
+                    .find(|(a, _)| a == &mn.masternode.wallet_address)
+                {
+                    entry.1 += share;
                 } else {
                     rewards.push((mn.masternode.wallet_address.clone(), share));
                 }
@@ -5274,10 +5273,12 @@ impl Blockchain {
             ));
         }
 
-        // Verify outputs match masternode_rewards metadata
-        if reward_dist.outputs.len() != block.masternode_rewards.len() {
+        // Verify outputs match masternode_rewards metadata.
+        // Output count may differ from masternode_rewards count when multiple
+        // masternodes share a reward address (entries are merged in newer code).
+        if reward_dist.outputs.len() > block.masternode_rewards.len() {
             return Err(format!(
-                "Block {} reward distribution has {} outputs but masternode_rewards has {} entries",
+                "Block {} reward distribution has {} outputs but masternode_rewards has only {} entries",
                 block.header.height,
                 reward_dist.outputs.len(),
                 block.masternode_rewards.len()
@@ -5285,22 +5286,31 @@ impl Blockchain {
         }
 
         // Verify each output matches metadata (position-independent to handle
-        // blocks stored with sorted masternode_rewards from older code)
-        let rewards_map: std::collections::HashMap<&str, u64> = block
-            .masternode_rewards
-            .iter()
-            .map(|(a, v)| (a.as_str(), *v))
-            .collect();
+        // blocks stored with sorted masternode_rewards from older code).
+        // Sum entries for the same address — multiple masternodes can share a
+        // reward address, creating duplicate entries in both masternode_rewards
+        // and transaction outputs.
+        let mut rewards_map: std::collections::HashMap<&str, u64> =
+            std::collections::HashMap::new();
+        for (a, v) in &block.masternode_rewards {
+            *rewards_map.entry(a.as_str()).or_insert(0) += v;
+        }
 
+        // Also sum transaction outputs by address for comparison
+        let mut outputs_map: std::collections::HashMap<String, u64> =
+            std::collections::HashMap::new();
         for output in &reward_dist.outputs {
-            let output_addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+            let addr = String::from_utf8_lossy(&output.script_pubkey).to_string();
+            *outputs_map.entry(addr).or_insert(0) += output.value;
+        }
 
+        for (output_addr, output_total) in &outputs_map {
             match rewards_map.get(output_addr.as_str()) {
                 Some(&expected_amount) => {
-                    if output.value != expected_amount {
+                    if *output_total != expected_amount {
                         return Err(format!(
                             "Block {} reward output amount mismatch for {}: expected {}, got {}",
-                            block.header.height, output_addr, expected_amount, output.value
+                            block.header.height, output_addr, expected_amount, output_total
                         ));
                     }
                 }
