@@ -726,6 +726,10 @@ impl UTXOStateManager {
                 skipped_collateral += 1;
                 continue;
             }
+            // Fetch address before removing so we can clean up address_index
+            if let Some(utxo) = self.storage.get_utxo(&outpoint).await {
+                self.remove_from_address_index(&utxo.address, &outpoint);
+            }
             if let Err(e) = self.storage.remove_utxo(&outpoint).await {
                 tracing::warn!("Failed to remove UTXO during reconciliation: {}", e);
             }
