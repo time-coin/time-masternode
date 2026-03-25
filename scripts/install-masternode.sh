@@ -615,11 +615,10 @@ EOF
 # TIME Coin Masternode Configuration
 #
 # Format (one entry per line):
-#   alias  IP:port  collateral_txid  collateral_vout
+#   alias  collateral_txid  collateral_vout
 #
 # Fields:
 #   alias            - A name for this masternode (e.g., mn1)
-#   IP:port          - Your masternode's public IP and port
 #   collateral_txid  - Transaction ID of your collateral deposit
 #   collateral_vout  - Output index of your collateral (usually 0)
 #
@@ -639,7 +638,7 @@ EOF
 #   5. Add a line below and restart timed
 #
 # Example:
-# mn1 ${EXTERNAL_IP}:${P2P_PORT} abc123def456789012345678901234567890123456789012345678901234abcd 0
+# mn1 abc123def456789012345678901234567890123456789012345678901234abcd 0
 EOF
         chown root:root "$MN_CONF"
         chmod 640 "$MN_CONF"

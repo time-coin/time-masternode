@@ -311,13 +311,12 @@ if [ -n "$COLLATERAL_TXID" ]; then
         MN_PORT="24000"
     fi
 
-    MN_IP="${PUBLIC_IP:-0.0.0.0}"
-    MN_LINE="mn1 ${MN_IP}:${MN_PORT} ${COLLATERAL_TXID} ${COLLATERAL_VOUT}"
+    MN_LINE="mn1 ${COLLATERAL_TXID} ${COLLATERAL_VOUT}"
 
     if [ ! -f "$MN_CONF_FILE" ] || ! grep -q "^mn1 " "$MN_CONF_FILE" 2>/dev/null; then
         cat > "$MN_CONF_FILE" <<EOF
 # TIME Coin Masternode Configuration
-# Format: alias IP:port collateral_txid collateral_vout
+# Format: alias collateral_txid collateral_vout
 $MN_LINE
 EOF
     else
@@ -328,10 +327,10 @@ EOF
 elif [ ! -f "$MN_CONF_FILE" ]; then
     cat > "$MN_CONF_FILE" <<EOF
 # TIME Coin Masternode Configuration
-# Format: alias IP:port collateral_txid collateral_vout
+# Format: alias collateral_txid collateral_vout
 #
 # Example:
-#   mn1 1.2.3.4:24100 abc123...def456 0
+#   mn1 abc123...def456 0
 #
 # Add your collateral line and restart timed.
 EOF

@@ -156,7 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed — Config Migration (time.conf + masternode.conf)
 - **BREAKING: Configuration migrated from config.toml to time.conf + masternode.conf** (Dash-style)
   - `time.conf`: key=value format for daemon settings (`masternode=1`, `masternodeprivkey=`, `testnet=1`, etc.)
-  - `masternode.conf`: collateral entries (`alias IP:port txid vout`)
+  - `masternode.conf`: collateral entries (`alias txid vout`)
   - Legacy config.toml still supported but deprecated; daemon logs a warning
 - **Legacy TOML path now also loads masternode.conf and masternodeprivkey from time.conf**
   - Existing deployments using `--config config.toml` work without changes

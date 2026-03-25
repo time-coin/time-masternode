@@ -66,8 +66,8 @@ REM Deploy masternode.conf
 if not exist "%MN_CONF%" (
     (
         echo # TIME Coin Masternode Configuration
-        echo # Format: alias IP:port collateral_txid collateral_vout
-        echo # Example: mn1 1.2.3.4:!PORT! abc123...def456 0
+        echo # Format: alias collateral_txid collateral_vout
+        echo # Example: mn1 abc123...def456 0
     ) > "%MN_CONF%"
     echo ✅ Created masternode.conf at: %MN_CONF%
 ) else (

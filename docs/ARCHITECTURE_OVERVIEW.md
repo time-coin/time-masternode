@@ -184,7 +184,7 @@
 
 - **Replaced certificate-based key system** with single `masternodeprivkey` in `time.conf`
 - **`masternode genkey` RPC/CLI command**: generates base58check-encoded Ed25519 private key
-- **masternode.conf simplified**: 4-field format (alias, IP:port, txid, vout) — key is in time.conf, not masternode.conf
+- **masternode.conf simplified**: 3-field format (alias, txid, vout) — key and IP are in time.conf, not masternode.conf
 - **Certificate system removed**: no more `MASTERNODE_AUTHORITY_PUBKEY`, `verify_masternode_certificate()`, or website registration
 - **Backward compatibility**: old 5/6-field masternode.conf formats still parsed (extra fields ignored)
 
