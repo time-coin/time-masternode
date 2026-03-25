@@ -25,6 +25,14 @@ const MIN_PARTICIPATION_SECS: u64 = 600; // 10 minutes minimum participation (pr
 const AUTO_REMOVE_AFTER_SECS: u64 = 3600; // Auto-remove masternodes with no peer reports for 1 hour
 const STARTUP_GRACE_PERIOD_SECS: u64 = 120; // Skip auto-removal during first 2 minutes after startup
 
+// Reachability probe constants
+/// TCP connect timeout for probing a peer's P2P port
+const REACHABILITY_PROBE_TIMEOUT_SECS: u64 = 10;
+/// How long a reachability result is cached before re-probing (10 minutes)
+const REACHABILITY_RECHECK_SECS: u64 = 600;
+/// Grace period after registration before reachability is enforced for rewards (5 minutes)
+const REACHABILITY_GRACE_PERIOD_SECS: u64 = 300;
+
 /// Network health status levels
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HealthStatus {
@@ -113,6 +121,25 @@ pub struct MasternodeInfo {
     /// A masternode is active if seen by MIN_PEER_REPORTS different peers recently
     #[serde(skip)]
     pub peer_reports: Arc<DashMap<String, u64>>,
+
+    /// Whether this masternode's P2P port is publicly reachable from the outside.
+    /// Set to true when an outbound connection succeeds (we dialed them), or after a
+    /// successful reverse-probe for inbound-only connections.  Nodes that are only
+    /// reachable inbound (behind NAT/firewall with no port forwarding) are excluded
+    /// from block rewards because they are not contributing full network services.
+    #[serde(default)]
+    pub is_publicly_reachable: bool,
+
+    /// Unix timestamp of the last reachability probe attempt (not serialized).
+    /// Used to rate-limit re-probing to once per REACHABILITY_RECHECK_SECS.
+    #[serde(skip)]
+    pub reachability_checked_at: u64,
+
+    /// Unix timestamp when this masternode was first seen (registered).
+    /// Used for the reachability grace period: newly connected nodes get
+    /// REACHABILITY_GRACE_PERIOD_SECS before the reachability check is enforced.
+    #[serde(skip)]
+    pub first_seen_at: u64,
 }
 
 pub struct MasternodeRegistry {
@@ -175,6 +202,9 @@ impl MasternodeRegistry {
                     let mut updated_info = info;
                     updated_info.masternode.address = ip_only.clone();
                     updated_info.peer_reports = Arc::new(DashMap::new());
+                    // Set first_seen_at to now so nodes loaded from disk get a grace period
+                    // before the reachability check is enforced (probe runs after 5 min warm-up).
+                    updated_info.first_seen_at = now;
                     // Accumulate outstanding uptime from the previous session before marking inactive
                     if updated_info.is_active
                         && updated_info.uptime_start > 0
@@ -569,6 +599,9 @@ impl MasternodeRegistry {
             registration_height: current_h, // Anti-sybil: track when node first appeared
             registration_source: RegistrationSource::Handshake,
             peer_reports: Arc::new(DashMap::new()),
+            is_publicly_reachable: false, // Must pass reachability probe before earning rewards
+            reachability_checked_at: 0,
+            first_seen_at: now,
         };
 
         // Persist to disk
@@ -833,25 +866,36 @@ impl MasternodeRegistry {
     /// Get ALL active masternodes eligible for the weighted reward pool (§10.4).
     /// Paid tiers (Bronze/Silver/Gold) are always eligible.
     /// Free tier requires maturity gate on mainnet.
+    /// All tiers require bidirectional network reachability: nodes behind NAT/firewall
+    /// that cannot accept inbound connections are excluded from block rewards.
     pub async fn get_eligible_pool_nodes(&self, current_height: u64) -> Vec<MasternodeInfo> {
         let maturity_required = match self.network {
             crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
             crate::NetworkType::Testnet => 0,
         };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         self.masternodes
             .read()
             .await
             .values()
             .filter(|info| {
-                info.is_active
-                    && (
-                        // Paid tiers always eligible
-                        !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
-                        // Free tier requires maturity
-                        || info.registration_height == 0
-                        || current_height.saturating_sub(info.registration_height)
-                            >= maturity_required
-                    )
+                if !info.is_active {
+                    return false;
+                }
+                // Reachability requirement: node must have confirmed bidirectional connectivity.
+                // New nodes get a grace period before this is enforced so they have time to be probed.
+                let within_grace_period = info.first_seen_at > 0
+                    && now.saturating_sub(info.first_seen_at) < REACHABILITY_GRACE_PERIOD_SECS;
+                if !within_grace_period && !info.is_publicly_reachable {
+                    return false;
+                }
+                // Free tier maturity gate
+                !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                    || info.registration_height == 0
+                    || current_height.saturating_sub(info.registration_height) >= maturity_required
             })
             .cloned()
             .collect()
@@ -895,6 +939,56 @@ impl MasternodeRegistry {
             Some(info) => Self::is_mature_for_sortition(info, current_height, self.network),
             None => true,
         }
+    }
+
+    /// Mark a masternode as publicly reachable (or not) based on a TCP probe result.
+    /// Called after an outbound connection succeeds (always reachable) or after a
+    /// reverse-probe of an inbound-only connection.
+    pub async fn set_publicly_reachable(&self, address: &str, reachable: bool) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(address) {
+            let changed = info.is_publicly_reachable != reachable;
+            info.is_publicly_reachable = reachable;
+            info.reachability_checked_at = now;
+            if changed {
+                if reachable {
+                    info!("🌐 Masternode {} is now publicly reachable — eligible for rewards", address);
+                } else {
+                    warn!(
+                        "⚠️  Masternode {} failed reachability probe — not publicly reachable. \
+                         Excluded from block rewards until bidirectional connectivity is confirmed.",
+                        address
+                    );
+                }
+                self.store_masternode(address, info).ok();
+            }
+        }
+    }
+
+    /// Returns addresses of masternodes that need a reachability probe:
+    /// - Not yet probed, OR
+    /// - Last probe was more than REACHABILITY_RECHECK_SECS ago.
+    /// Only returns nodes that are currently active (inactive nodes aren't earning anyway).
+    pub async fn get_nodes_needing_reachability_probe(&self) -> Vec<String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let nodes = self.masternodes.read().await;
+        nodes
+            .values()
+            .filter(|info| {
+                info.is_active
+                    && (info.reachability_checked_at == 0
+                        || now.saturating_sub(info.reachability_checked_at)
+                            >= REACHABILITY_RECHECK_SECS)
+            })
+            .map(|info| info.masternode.address.clone())
+            .collect()
     }
 
     /// Get active masternodes that are currently connected
@@ -1527,6 +1621,61 @@ impl MasternodeRegistry {
             loop {
                 interval.tick().await;
                 registry.broadcast_status_gossip(&peer_registry).await;
+            }
+        });
+    }
+
+    /// Start the periodic reachability prober task.
+    ///
+    /// Every `REACHABILITY_RECHECK_SECS` seconds this task re-probes any active
+    /// masternodes whose last probe is stale.  Nodes that are reachable via outbound
+    /// connections stay marked reachable as long as the connection remains open;
+    /// inbound-only nodes are re-tested so that nodes that fix their port forwarding
+    /// eventually become reward-eligible again.
+    ///
+    /// `registry_arc` must be the same `Arc` that is shared across the node; pass it
+    /// in explicitly because `MasternodeRegistry` is not itself wrapped in an Arc here.
+    pub fn start_reachability_prober(
+        registry_arc: Arc<Self>,
+        peer_registry: Arc<crate::network::peer_connection_registry::PeerConnectionRegistry>,
+    ) {
+        tokio::spawn(async move {
+            // Wait 5 minutes before the first probe pass (let connections stabilise)
+            tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
+                REACHABILITY_RECHECK_SECS,
+            ));
+            loop {
+                interval.tick().await;
+                let candidates = registry_arc.get_nodes_needing_reachability_probe().await;
+                if candidates.is_empty() {
+                    continue;
+                }
+                tracing::debug!(
+                    "🔍 Reachability prober: checking {} node(s)",
+                    candidates.len()
+                );
+                let network = registry_arc.network();
+                for addr in candidates {
+                    // Skip nodes that have an outbound connection — they're already reachable.
+                    let ip_only = addr.split(':').next().unwrap_or(&addr).to_string();
+                    if peer_registry.is_outbound(&ip_only) {
+                        // Outbound means we can reach them — no TCP probe needed.
+                        registry_arc.set_publicly_reachable(&ip_only, true).await;
+                        continue;
+                    }
+                    let registry_clone = Arc::clone(&registry_arc);
+                    let peer_registry_clone = Arc::clone(&peer_registry);
+                    tokio::spawn(async move {
+                        crate::network::message_handler::probe_masternode_reachability(
+                            ip_only,
+                            network,
+                            registry_clone,
+                            peer_registry_clone,
+                        )
+                        .await;
+                    });
+                }
             }
         });
     }

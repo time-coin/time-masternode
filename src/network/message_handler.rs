@@ -1023,6 +1023,21 @@ impl MessageHandler {
                 Ok(None)
             }
 
+            NetworkMessage::ConnectivityWarning { message } => {
+                // A remote masternode has probed our P2P port and found it unreachable.
+                // Log a prominent warning so the operator knows they need to fix this.
+                warn!(
+                    "🚨 CONNECTIVITY WARNING from {}: {}",
+                    self.peer_ip, message
+                );
+                warn!("🔌 Your node's P2P port is not publicly reachable from the internet.");
+                warn!("   To earn block rewards you need a VPS or server with a static public IP");
+                warn!("   and an open P2P port (mainnet: 24000, testnet: 24100).");
+                warn!("   Home connections with NAT/firewall that block inbound connections are");
+                warn!("   not eligible for rewards — only outbound-only nodes see this message.");
+                Ok(None)
+            }
+
             // === Messages not handled here ===
             _ => {
                 debug!(
@@ -2878,6 +2893,37 @@ impl MessageHandler {
                     );
                 }
             }
+        }
+
+        // === Reachability check ===
+        // If this is an outbound connection (we dialed them), they are by definition
+        // publicly reachable — mark immediately so they qualify for rewards.
+        //
+        // If this is an inbound connection (they connected to us), we must probe
+        // their P2P port to verify they accept inbound connections too. Nodes that
+        // only connect outbound (Windows/home users behind NAT) cannot serve the
+        // network fully and are excluded from block rewards until the probe succeeds.
+        let is_outbound = self.direction == ConnectionDirection::Outbound;
+        if is_outbound {
+            context
+                .masternode_registry
+                .set_publicly_reachable(&peer_ip, true)
+                .await;
+        } else {
+            // Spawn a background probe so we don't block message processing.
+            let registry_clone = Arc::clone(&context.masternode_registry);
+            let peer_registry_clone = Arc::clone(&context.peer_registry);
+            let probe_addr = peer_ip.clone();
+            let network = context.masternode_registry.network();
+            tokio::spawn(async move {
+                probe_masternode_reachability(
+                    probe_addr,
+                    network,
+                    registry_clone,
+                    peer_registry_clone,
+                )
+                .await;
+            });
         }
 
         Ok(None)
@@ -5125,6 +5171,76 @@ impl MessageHandler {
 
         Ok(None)
     }
+}
+
+/// Probe a masternode's P2P port to verify it is publicly reachable.
+///
+/// Called when a masternode connects to us **inbound** (they initiated the TCP
+/// connection, so we don't yet know whether their port accepts inbound connections).
+/// We attempt a TCP connect to their announced P2P address with a short timeout.
+///
+/// On success: marks the node as publicly reachable (reward-eligible).
+/// On failure: marks the node as not reachable and sends a `ConnectivityWarning`
+///             back over the existing connection explaining the issue.
+pub async fn probe_masternode_reachability(
+    peer_ip: String,
+    network: crate::NetworkType,
+    registry: Arc<MasternodeRegistry>,
+    peer_registry: Arc<PeerConnectionRegistry>,
+) {
+    use tokio::net::TcpStream;
+    use tokio::time::timeout;
+
+    let port = network.default_p2p_port();
+    let target = format!("{}:{}", peer_ip, port);
+
+    debug!(
+        "🔍 Probing reachability of masternode {} ({})",
+        peer_ip, target
+    );
+
+    let probe_result = timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(&target),
+    )
+    .await;
+
+    let reachable = matches!(probe_result, Ok(Ok(_)));
+
+    if reachable {
+        debug!(
+            "✅ Reachability probe succeeded for {} — bidirectional connectivity confirmed",
+            peer_ip
+        );
+    } else {
+        let reason = match &probe_result {
+            Err(_) => "connection timed out".to_string(),
+            Ok(Err(e)) => format!("connection refused or failed: {}", e),
+            Ok(Ok(_)) => unreachable!(),
+        };
+        warn!(
+            "🚫 Reachability probe FAILED for {} ({}): {} — excluded from block rewards",
+            peer_ip, target, reason
+        );
+
+        // Send a warning to the peer so it appears in their logs
+        let warning_msg = crate::network::message::NetworkMessage::ConnectivityWarning {
+            message: format!(
+                "Your node at {} is not publicly reachable on port {} ({}). \
+                 Block rewards require full bidirectional connectivity. \
+                 Please run your masternode on a VPS or dedicated server with a static public IP \
+                 and ensure port {} is open for inbound TCP connections. \
+                 Home connections behind NAT/firewall without UPnP or port forwarding \
+                 cannot participate in block rewards.",
+                peer_ip, port, reason, port
+            ),
+        };
+        if let Err(e) = peer_registry.send_to_peer(&peer_ip, warning_msg).await {
+            debug!("Could not deliver ConnectivityWarning to {}: {}", peer_ip, e);
+        }
+    }
+
+    registry.set_publicly_reachable(&peer_ip, reachable).await;
 }
 
 #[cfg(test)]

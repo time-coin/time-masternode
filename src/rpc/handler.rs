@@ -2707,6 +2707,7 @@ impl RpcHandler {
                         "registered_at": mn.masternode.registered_at,
                         "is_active": mn.is_active,
                         "is_connected": is_connected,
+                        "is_publicly_reachable": mn.is_publicly_reachable,
                         "uptime_start": mn.uptime_start,
                         "total_uptime": computed_uptime,
                         "daemon_started_at": mn.daemon_started_at,

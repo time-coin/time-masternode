@@ -147,6 +147,8 @@ struct MasternodeListEntry {
     tier: String,
     is_active: bool,
     is_connected: bool,
+    #[serde(default)]
+    is_publicly_reachable: bool,
     collateral: f64,
     total_uptime: u64,
     #[serde(default)]
@@ -1090,6 +1092,14 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
+                let reach_style = if mn.is_publicly_reachable {
+                    Style::default().fg(Color::Green)
+                } else if mn.is_connected {
+                    // Connected but not yet confirmed reachable (still probing or behind NAT)
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 // Use daemon_started_at for real remote uptime, fall back to local total_uptime
                 let uptime_secs = if mn.daemon_started_at > 0 {
                     now_secs.saturating_sub(mn.daemon_started_at)
@@ -1118,6 +1128,8 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(mn.tier.clone()).style(Style::default().fg(tier_color)),
                     Cell::from(if mn.is_active { "✓" } else { "✗" }).style(active_style),
                     Cell::from(if mn.is_connected { "✓" } else { "✗" }).style(conn_style),
+                    Cell::from(if mn.is_publicly_reachable { "✓" } else { "✗" })
+                        .style(reach_style),
                     Cell::from(uptime_str),
                 ])
             })
@@ -1130,11 +1142,12 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                 Constraint::Length(10),
                 Constraint::Length(8),
                 Constraint::Length(10),
+                Constraint::Length(9),
                 Constraint::Length(10),
             ],
         )
         .header(
-            Row::new(vec!["Address", "Tier", "Active", "Connected", "Uptime"]).style(
+            Row::new(vec!["Address", "Tier", "Active", "Connected", "Reachable", "Uptime"]).style(
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),

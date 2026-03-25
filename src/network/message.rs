@@ -292,6 +292,13 @@ pub enum NetworkMessage {
         proposals: Vec<crate::governance::GovernanceProposal>,
         votes: Vec<crate::governance::GovernanceVote>,
     },
+    /// Sent by a masternode to a peer whose P2P port is not publicly reachable.
+    /// Informs the operator they need full bidirectional connectivity (e.g. a VPS)
+    /// to participate in block rewards.
+    ConnectivityWarning {
+        /// Human-readable explanation of the connectivity problem and how to fix it.
+        message: String,
+    },
     /// Placeholder for messages from newer protocol versions that we can't parse
     UnknownMessage,
 }
@@ -473,6 +480,7 @@ impl NetworkMessage {
             NetworkMessage::GovernanceVote(_) => "GovernanceVote",
             NetworkMessage::GetGovernanceState => "GetGovernanceState",
             NetworkMessage::GovernanceStateResponse { .. } => "GovernanceStateResponse",
+            NetworkMessage::ConnectivityWarning { .. } => "ConnectivityWarning",
         }
     }
 

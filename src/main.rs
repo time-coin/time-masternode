@@ -3962,6 +3962,15 @@ async fn main() {
             registry.start_report_cleanup(peer_connection_registry.clone());
             tracing::info!("✓ Gossip-based masternode status tracking started");
 
+            // Start periodic reachability prober — identifies inbound-only nodes (behind NAT/
+            // firewall) and excludes them from block rewards until bidirectional connectivity
+            // is confirmed. Runs every 10 minutes after an initial 5-minute warm-up delay.
+            MasternodeRegistry::start_reachability_prober(
+                Arc::clone(&registry),
+                peer_connection_registry.clone(),
+            );
+            tracing::info!("✓ Masternode reachability prober started (10-minute interval)");
+
             // Share TimeLock resources with peer connection registry for outbound connections
             peer_connection_registry
                 .set_timelock_resources(
