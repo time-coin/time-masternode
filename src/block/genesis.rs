@@ -148,6 +148,7 @@ impl GenesisBlock {
                     gold: 0,
                 },
                 block_reward: 10_000_000_000, // 100 TIME
+                total_fees: 0,
                 // All 6 masternodes active; sorted alphabetically, bits set MSB→LSB:
                 //   bit7=165.232.154.150, bit6=165.84.215.117, bit5=178.128.199.144,
                 //   bit4=50.28.104.50,    bit3=64.91.241.10,   bit2=69.167.168.176

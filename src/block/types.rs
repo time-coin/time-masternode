@@ -47,8 +47,7 @@ pub fn calculate_merkle_root_legacy(txs: &[Transaction]) -> Hash256 {
     let hashes: Vec<Hash256> = txs
         .iter()
         .map(|tx| {
-            let json =
-                serde_json::to_string(tx).expect("JSON serialization should succeed");
+            let json = serde_json::to_string(tx).expect("JSON serialization should succeed");
             sha2::Sha256::digest(json.as_bytes()).into()
         })
         .collect();
@@ -157,6 +156,11 @@ pub struct BlockHeader {
     /// Without this, a valid VRF proof could be paired with tampered content.
     #[serde(default)]
     pub producer_signature: Vec<u8>,
+    /// Total transaction fees collected in this block (satoshis).
+    /// Zero for blocks with no user transactions; defaults to 0 for
+    /// pre-v1.3 blocks that were stored before this field existed.
+    #[serde(default)]
+    pub total_fees: u64,
 }
 
 impl Block {

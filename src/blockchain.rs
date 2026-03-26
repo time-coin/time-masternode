@@ -208,6 +208,11 @@ pub struct Blockchain {
     /// On-chain treasury balance in satoshis. Funded by slashed collateral,
     /// disbursed via governance-approved coinbase outputs. Not a UTXO — pure state.
     treasury_balance: Arc<AtomicU64>,
+    /// Governance-adjustable block emission rate (satoshis per block).
+    /// Defaults to BLOCK_REWARD_SATOSHIS (100 TIME); updated atomically by
+    /// EmissionRateChange governance proposals. In-memory only — re-applied
+    /// from stored proposals on restart (same as FeeScheduleChange).
+    active_block_reward: Arc<AtomicU64>,
     /// On-chain governance subsystem (proposals + votes).
     governance: Option<Arc<crate::governance::GovernanceState>>,
     /// Buffer for blocks downloaded ahead of current tip during parallel sync.
@@ -320,6 +325,7 @@ impl Blockchain {
             reward_violations: Arc::new(DashMap::new()),
             genesis_mismatch_detected: Arc::new(AtomicBool::new(false)),
             treasury_balance: Arc::new(AtomicU64::new(loaded_treasury)),
+            active_block_reward: Arc::new(AtomicU64::new(BLOCK_REWARD_SATOSHIS)),
             governance: None,
             pending_sync_blocks: Arc::new(RwLock::new(BTreeMap::new())),
         }
@@ -394,6 +400,32 @@ impl Blockchain {
             amount,
             recipient,
             new_bal
+        );
+        Ok(())
+    }
+
+    /// Return the current governance-approved block emission rate (satoshis/block).
+    /// Use this everywhere instead of the `BLOCK_REWARD_SATOSHIS` constant so that
+    /// an `EmissionRateChange` governance proposal takes effect without a restart.
+    pub fn get_current_block_reward(&self) -> u64 {
+        self.active_block_reward.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Apply an `EmissionRateChange` governance proposal.
+    fn apply_emission_rate_change(&self, new_satoshis_per_block: u64) -> Result<(), String> {
+        const MIN_REWARD: u64 = 10 * 100_000_000;      // 10 TIME minimum
+        const MAX_REWARD: u64 = 10_000 * 100_000_000;  // 10,000 TIME maximum
+        if new_satoshis_per_block < MIN_REWARD || new_satoshis_per_block > MAX_REWARD {
+            return Err(format!(
+                "EmissionRateChange: {new_satoshis_per_block} satoshis/block is outside allowed range [{MIN_REWARD}, {MAX_REWARD}]"
+            ));
+        }
+        self.active_block_reward
+            .store(new_satoshis_per_block, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            "🏛️  Governance: emission rate updated to {} satoshis/block ({:.1} TIME/block)",
+            new_satoshis_per_block,
+            new_satoshis_per_block as f64 / 100_000_000.0
         );
         Ok(())
     }
@@ -1011,6 +1043,7 @@ impl Blockchain {
             attestation_root: [0u8; 32],
             masternode_tiers: tier_counts,
             block_reward: GENESIS_REWARD,
+            total_fees: 0,
             active_masternodes_bitmap: bitmap,
             liveness_recovery: Some(false),
             vrf_output: [0u8; 32],
@@ -1595,7 +1628,9 @@ impl Blockchain {
 
             // Fallback: if consensus filter left us with no peers, use all compatible
             let mut sync_peers: Vec<String> = if candidate_peers.is_empty() {
-                tracing::warn!("⚠️  No consensus peers found, falling back to all compatible peers");
+                tracing::warn!(
+                    "⚠️  No consensus peers found, falling back to all compatible peers"
+                );
                 peer_registry.get_compatible_peers().await
             } else {
                 candidate_peers
@@ -1631,7 +1666,11 @@ impl Blockchain {
 
             // Track the next height to request (may be ahead of current tip due to pipelining)
             let mut next_request_height = if current == 0 {
-                if self.get_block(0).is_ok() { 1 } else { 0 }
+                if self.get_block(0).is_ok() {
+                    1
+                } else {
+                    0
+                }
             } else {
                 current + 1
             };
@@ -1685,10 +1724,7 @@ impl Blockchain {
                     // peers may have filled the gap since the last check.
                     let drained = self.drain_pending_blocks().await;
                     if drained > 0 {
-                        tracing::info!(
-                            "📦 Sync loop drained {} buffered blocks",
-                            drained
-                        );
+                        tracing::info!("📦 Sync loop drained {} buffered blocks", drained);
                     }
 
                     let now_height = self.current_height.load(Ordering::Acquire);
@@ -1734,7 +1770,9 @@ impl Blockchain {
                     // is stuck, a peer failed to deliver its range. Identify the
                     // missing range and request it from a different peer immediately
                     // instead of waiting for the full 30s timeout.
-                    if !gap_requested && batch_start_time.elapsed() > std::time::Duration::from_secs(3) {
+                    if !gap_requested
+                        && batch_start_time.elapsed() > std::time::Duration::from_secs(3)
+                    {
                         let pending_count = self.pending_sync_blocks.read().await.len();
                         if pending_count > 0 && now_height == last_height {
                             let next_needed = now_height + 1;
@@ -1752,19 +1790,17 @@ impl Blockchain {
                                         as usize)
                                         .checked_div(batch_size as usize)
                                         .unwrap_or(0);
-                                    let failed_peer = sync_peers
-                                        .get(gap_chunk_idx)
-                                        .cloned()
-                                        .unwrap_or_default();
+                                    let failed_peer =
+                                        sync_peers.get(gap_chunk_idx).cloned().unwrap_or_default();
 
                                     // Try any connected peer except the one that failed
-                                    let all_peers =
-                                        if let Some(pr) = self.peer_registry.read().await.as_ref()
-                                        {
-                                            pr.get_compatible_peers().await
-                                        } else {
-                                            vec![]
-                                        };
+                                    let all_peers = if let Some(pr) =
+                                        self.peer_registry.read().await.as_ref()
+                                    {
+                                        pr.get_compatible_peers().await
+                                    } else {
+                                        vec![]
+                                    };
                                     let alt_peers: Vec<String> = all_peers
                                         .into_iter()
                                         .filter(|p| *p != failed_peer)
@@ -1780,13 +1816,9 @@ impl Blockchain {
                                             failed_peer,
                                             alt
                                         );
-                                        if let Some(pr) =
-                                            self.peer_registry.read().await.as_ref()
-                                        {
-                                            let req = NetworkMessage::GetBlocks(
-                                                next_needed,
-                                                gap_end,
-                                            );
+                                        if let Some(pr) = self.peer_registry.read().await.as_ref() {
+                                            let req =
+                                                NetworkMessage::GetBlocks(next_needed, gap_end);
                                             let _ = pr.send_to_peer(&alt, req).await;
                                         }
                                         gap_requested = true;
@@ -1838,10 +1870,7 @@ impl Blockchain {
                     // only try peers that weren't in the last round.
                     let retry_peers: Vec<String> = if has_gap {
                         let gap_chunks = first_buffered
-                            .map(|f| {
-                                ((f - next_needed) as usize)
-                                    .div_ceil(batch_size as usize)
-                            })
+                            .map(|f| ((f - next_needed) as usize).div_ceil(batch_size as usize))
                             .unwrap_or(1)
                             .min(sync_peers.len());
                         let failed: HashSet<String> =
@@ -1952,7 +1981,10 @@ impl Blockchain {
         let mut pending = self.pending_sync_blocks.write().await;
         // Cap buffer size to prevent memory issues (~500 blocks ≈ 50-75MB)
         if pending.len() >= 500 {
-            debug!("📦 Pending block buffer full (500), dropping block {}", height);
+            debug!(
+                "📦 Pending block buffer full (500), dropping block {}",
+                height
+            );
             return false;
         }
         if pending.contains_key(&height) {
@@ -3060,7 +3092,8 @@ impl Blockchain {
 
         // Calculate rewards: base_reward + fees_from_finalized_txs_in_this_block
         // §10.4 Unified model: 30 TIME leader bonus + 5 TIME treasury + 65 TIME per-tier pools
-        let base_reward = BLOCK_REWARD_SATOSHIS;
+        // Use governance-adjustable emission rate (defaults to BLOCK_REWARD_SATOSHIS = 100 TIME).
+        let base_reward = self.get_current_block_reward();
         let treasury_share = constants::blockchain::TREASURY_POOL_SATOSHIS;
         let total_reward = base_reward + finalized_txs_fees - treasury_share; // coinbase outputs (no treasury UTXO)
         let producer_share = PRODUCER_REWARD_SATOSHIS + finalized_txs_fees; // Leader gets 30 TIME + all fees
@@ -3189,7 +3222,11 @@ impl Blockchain {
             total_pool_distributed / 100_000_000,
             rewards.len().saturating_sub(1),
             eligible_pool.len(),
-            if rounding_dust > 0 { format!(", {} sat rounding dust → treasury", rounding_dust) } else { String::new() }
+            if rounding_dust > 0 {
+                format!(", {} sat rounding dust → treasury", rounding_dust)
+            } else {
+                String::new()
+            }
         );
 
         if rewards.is_empty() {
@@ -3441,6 +3478,7 @@ impl Blockchain {
                 merkle_root,
                 timestamp: aligned_timestamp,
                 block_reward: total_reward,
+                total_fees: finalized_txs_fees,
                 leader: producer_address.unwrap_or_default(),
                 attestation_root: [0u8; 32],
                 masternode_tiers: tier_counts,
@@ -4164,6 +4202,18 @@ impl Blockchain {
                                 self.execute_fee_schedule_change(*new_min_fee, new_tiers.clone())
                             {
                                 tracing::error!("🏛️  FeeScheduleChange execution failed: {e}");
+                            } else {
+                                gov.mark_executed(&proposal.id).await;
+                            }
+                        }
+                        ProposalPayload::EmissionRateChange {
+                            new_satoshis_per_block,
+                            ..
+                        } => {
+                            if let Err(e) =
+                                self.apply_emission_rate_change(*new_satoshis_per_block)
+                            {
+                                tracing::error!("🏛️  EmissionRateChange execution failed: {e}");
                             } else {
                                 gov.mark_executed(&proposal.id).await;
                             }
@@ -5488,7 +5538,8 @@ impl Blockchain {
         if unknown_non_producer_paid > 0 {
             // Some recipients have deregistered — we can only verify the total
             // non-producer payout is within the overall tier-pool budget.
-            let total_non_producer_paid: u64 = tier_paid.values().sum::<u64>() + unknown_non_producer_paid;
+            let total_non_producer_paid: u64 =
+                tier_paid.values().sum::<u64>() + unknown_non_producer_paid;
             if total_non_producer_paid > total_tier_budget {
                 return Err(format!(
                     "Block {} total non-producer payout {} exceeds total tier budget {}",
@@ -5541,7 +5592,10 @@ impl Blockchain {
                             tracing::warn!(
                                 "⚠️ Block {} Free tier: per-node payout {} below minimum {}, \
                                  but {} satoshis were distributed",
-                                block.header.height, per_node, MIN_POOL_PAYOUT_SATOSHIS, paid
+                                block.header.height,
+                                per_node,
+                                MIN_POOL_PAYOUT_SATOSHIS,
+                                paid
                             );
                         }
                         continue;
@@ -5572,8 +5626,7 @@ impl Blockchain {
         // When deregistered recipients exist (fallback path), min uses rolled_up=0
         // (only require base PRODUCER_REWARD) while max uses total_tier_budget override.
         let rolled_up_for_max = rolled_up_to_producer_max_override.unwrap_or(rolled_up_to_producer);
-        let expected_producer_min =
-            PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
+        let expected_producer_min = PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
         let expected_producer_max =
             PRODUCER_REWARD_SATOSHIS + calculated_fees + rolled_up_for_max + SATOSHIS_PER_TIME;
 
@@ -6565,11 +6618,17 @@ impl Blockchain {
                                     gap_start, gap_end,
                                 );
                                 if let Err(e) = registry.send_to_peer(peer, req).await {
-                                    tracing::warn!("Failed to request gap range from {}: {}", peer, e);
+                                    tracing::warn!(
+                                        "Failed to request gap range from {}: {}",
+                                        peer,
+                                        e
+                                    );
                                 } else {
                                     tracing::info!(
                                         "📥 Requested missing blocks {}-{} from {}",
-                                        gap_start, gap_end, peer
+                                        gap_start,
+                                        gap_end,
+                                        peer
                                     );
                                 }
                             }
@@ -7718,8 +7777,7 @@ impl Blockchain {
         {
             let current_state = self.fork_state.read().await;
             match &*current_state {
-                ForkResolutionState::ReadyToReorg { .. }
-                | ForkResolutionState::Reorging { .. } => {
+                ForkResolutionState::ReadyToReorg { .. } | ForkResolutionState::Reorging { .. } => {
                     tracing::debug!(
                         "🚫 Skipping handle_fork() from {} — reorg already committed/in-progress",
                         peer_addr
@@ -8444,8 +8502,9 @@ impl Blockchain {
                         started_at: std::time::Instant::now(),
                     };
 
-                    let reorg_result =
-                        self.perform_reorg(common_ancestor, sorted_reorg_blocks).await;
+                    let reorg_result = self
+                        .perform_reorg(common_ancestor, sorted_reorg_blocks)
+                        .await;
 
                     // Always clear fork state after reorg attempt
                     *self.fork_state.write().await = ForkResolutionState::None;
@@ -9068,6 +9127,7 @@ impl Clone for Blockchain {
             reward_violations: self.reward_violations.clone(),
             genesis_mismatch_detected: self.genesis_mismatch_detected.clone(),
             treasury_balance: self.treasury_balance.clone(),
+            active_block_reward: self.active_block_reward.clone(),
             governance: self.governance.clone(),
             pending_sync_blocks: self.pending_sync_blocks.clone(),
         }

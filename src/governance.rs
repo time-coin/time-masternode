@@ -92,6 +92,16 @@ pub enum ProposalPayload {
         new_min_fee: u64,
         new_tiers: Vec<(u64, u64)>,
     },
+    /// Adjust the per-block emission rate.
+    ///
+    /// `new_satoshis_per_block` must be in the range [10 TIME, 10,000 TIME]
+    /// (1_000_000_000 – 1_000_000_000_000 satoshis). The change takes effect on
+    /// the block after the proposal is executed. The 30/5/65 internal split
+    /// proportions remain fixed; only the total pie size changes.
+    EmissionRateChange {
+        new_satoshis_per_block: u64,
+        description: String,
+    },
 }
 
 // ── Proposal status ───────────────────────────────────────────────────────────
@@ -363,6 +373,24 @@ impl GovernanceState {
                             "fee tiers must be ordered ascending by upper_bound".to_string()
                         );
                     }
+                }
+            }
+            ProposalPayload::EmissionRateChange {
+                new_satoshis_per_block,
+                description,
+            } => {
+                const MIN_REWARD: u64 = 10 * 100_000_000;      // 10 TIME
+                const MAX_REWARD: u64 = 10_000 * 100_000_000;  // 10,000 TIME
+                if *new_satoshis_per_block < MIN_REWARD || *new_satoshis_per_block > MAX_REWARD {
+                    return Err(format!(
+                        "new_satoshis_per_block {new_satoshis_per_block} outside allowed range [{MIN_REWARD}, {MAX_REWARD}]"
+                    ));
+                }
+                if description.len() > MAX_DESCRIPTION_LEN {
+                    return Err(format!(
+                        "Description too long ({} bytes, max {MAX_DESCRIPTION_LEN})",
+                        description.len()
+                    ));
                 }
             }
         }

@@ -324,7 +324,9 @@ impl RpcHandler {
             "finality_mechanism": "TimeVote consensus",
             "instant_finality": true,
             "average_finality_time_ms": avg_finality_ms,
-            "block_time_seconds": 600
+            "block_time_seconds": 600,
+            "emission_satoshis_per_block": self.blockchain.get_current_block_reward(),
+            "emission_time_per_block": self.blockchain.get_current_block_reward() as f64 / 100_000_000.0
         }))
     }
 
@@ -393,6 +395,7 @@ impl RpcHandler {
             "nTx": block.transactions.len(),
             "confirmations": (self.blockchain.get_height() as i64 - height as i64 + 1).max(0),
             "block_reward": block.header.block_reward,
+            "fees": block.header.total_fees,
             "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
                 json!({ "address": addr, "amount": amount })
             }).collect::<Vec<_>>(),
@@ -5168,10 +5171,34 @@ impl RpcHandler {
                     new_tiers,
                 }
             }
+            "emission_rate_change" => {
+                // Accept new_time_per_block (decimal TIME) or new_satoshis_per_block (integer)
+                let new_satoshis_per_block = if let Some(time_val) =
+                    obj.get("new_time_per_block").and_then(Value::as_f64)
+                {
+                    (time_val * 100_000_000.0) as u64
+                } else {
+                    obj.get("new_satoshis_per_block")
+                        .and_then(Value::as_u64)
+                        .ok_or_else(|| RpcError {
+                            code: -32602,
+                            message: "Missing new_time_per_block or new_satoshis_per_block".into(),
+                        })?
+                };
+                let description = obj
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                ProposalPayload::EmissionRateChange {
+                    new_satoshis_per_block,
+                    description,
+                }
+            }
             other => {
                 return Err(RpcError {
                     code: -32602,
-                    message: format!("Unknown proposal type: {other}"),
+                    message: format!("Unknown proposal type: {other}. Valid types: treasury_spend, fee_schedule_change, emission_rate_change"),
                 })
             }
         };
@@ -5338,9 +5365,8 @@ impl RpcHandler {
             .map(|p| {
                 let type_str = match &p.payload {
                     crate::governance::ProposalPayload::TreasurySpend { .. } => "treasury_spend",
-                    crate::governance::ProposalPayload::FeeScheduleChange { .. } => {
-                        "fee_schedule_change"
-                    }
+                    crate::governance::ProposalPayload::FeeScheduleChange { .. } => "fee_schedule_change",
+                    crate::governance::ProposalPayload::EmissionRateChange { .. } => "emission_rate_change",
                 };
                 let status_str = match &p.status {
                     crate::governance::ProposalStatus::Active => "active".to_string(),
@@ -5421,6 +5447,15 @@ impl RpcHandler {
                 "new_min_fee": *new_min_fee as f64 / 100_000_000.0,
                 "new_min_fee_satoshis": new_min_fee,
                 "new_tiers": new_tiers,
+            }),
+            crate::governance::ProposalPayload::EmissionRateChange {
+                new_satoshis_per_block,
+                description,
+            } => json!({
+                "type": "emission_rate_change",
+                "new_time_per_block": *new_satoshis_per_block as f64 / 100_000_000.0,
+                "new_satoshis_per_block": new_satoshis_per_block,
+                "description": description,
             }),
         };
 
