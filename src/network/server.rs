@@ -521,7 +521,6 @@ async fn handle_peer(
     // Get WebSocket tx event sender for real-time wallet notifications
     let ws_tx_event_sender = peer_registry.get_tx_event_sender().await;
 
-    tracing::info!("🔌 New peer connection from: {}", peer.addr);
     let _connection_start = std::time::Instant::now();
 
     // Wrap with TLS if configured
@@ -536,6 +535,9 @@ async fn handle_peer(
     if let Some(tls) = tls_config {
         match tls.accept_server(stream).await {
             Ok(tls_stream) => {
+                // Log only after TLS succeeds — plain TCP probes (reachability checks)
+                // would otherwise spam the log with connections that immediately fail TLS.
+                tracing::info!("🔌 New peer connection from: {}", peer.addr);
                 tracing::debug!("🔒 TLS established for inbound {}", peer.addr);
                 let peer_addr = peer.addr.clone();
                 // Spawn a single I/O bridge task that owns the TLS stream

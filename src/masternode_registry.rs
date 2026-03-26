@@ -456,13 +456,18 @@ impl MasternodeRegistry {
                             tracing::warn!(
                                 "⚠️ Collateral {} is already in use by masternode {} — \
                                  rejected claim from {} (migration cooldown: {}s remaining)",
-                                outpoint, old_addr, masternode.address, remaining
+                                outpoint,
+                                old_addr,
+                                masternode.address,
+                                remaining
                             );
                         } else {
                             tracing::debug!(
                                 "Collateral {} cooldown active ({}s remaining) — \
                                  ignoring repeat claim from {}",
-                                outpoint, remaining, masternode.address
+                                outpoint,
+                                remaining,
+                                masternode.address
                             );
                         }
                         return Err(RegistryError::InvalidCollateral);
@@ -821,7 +826,10 @@ impl MasternodeRegistry {
     /// Used by reward validation to classify entries in block.masternode_rewards
     /// without needing to know which masternodes were active at production time.
     /// Returns None if the wallet address is not in the current registry.
-    pub async fn tier_for_wallet(&self, wallet_address: &str) -> Option<crate::types::MasternodeTier> {
+    pub async fn tier_for_wallet(
+        &self,
+        wallet_address: &str,
+    ) -> Option<crate::types::MasternodeTier> {
         self.masternodes
             .read()
             .await
@@ -941,6 +949,31 @@ impl MasternodeRegistry {
         }
     }
 
+    /// Atomically claim a reachability probe slot for `address`.
+    ///
+    /// Returns `true` if the caller should proceed with a probe (and stamps
+    /// `reachability_checked_at` to now to prevent duplicate probes).
+    /// Returns `false` if a probe was performed recently (within
+    /// `REACHABILITY_RECHECK_SECS`) and no new probe is needed yet.
+    pub async fn try_claim_reachability_probe(&self, address: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(address) {
+            if info.reachability_checked_at > 0
+                && now.saturating_sub(info.reachability_checked_at) < REACHABILITY_RECHECK_SECS
+            {
+                return false; // recently probed, skip
+            }
+            info.reachability_checked_at = now; // claim the slot
+            true
+        } else {
+            false // unknown node, nothing to probe
+        }
+    }
+
     /// Mark a masternode as publicly reachable (or not) based on a TCP probe result.
     /// Called after an outbound connection succeeds (always reachable) or after a
     /// reverse-probe of an inbound-only connection.
@@ -956,7 +989,10 @@ impl MasternodeRegistry {
             info.reachability_checked_at = now;
             if changed {
                 if reachable {
-                    info!("🌐 Masternode {} is now publicly reachable — eligible for rewards", address);
+                    info!(
+                        "🌐 Masternode {} is now publicly reachable — eligible for rewards",
+                        address
+                    );
                 } else {
                     warn!(
                         "⚠️  Masternode {} failed reachability probe — not publicly reachable. \
@@ -1643,9 +1679,8 @@ impl MasternodeRegistry {
         tokio::spawn(async move {
             // Wait 5 minutes before the first probe pass (let connections stabilise)
             tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(
-                REACHABILITY_RECHECK_SECS,
-            ));
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_secs(REACHABILITY_RECHECK_SECS));
             loop {
                 interval.tick().await;
                 let candidates = registry_arc.get_nodes_needing_reachability_probe().await;

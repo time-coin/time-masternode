@@ -2913,19 +2913,28 @@ impl MessageHandler {
                 .await;
         } else {
             // Spawn a background probe so we don't block message processing.
-            let registry_clone = Arc::clone(&context.masternode_registry);
-            let peer_registry_clone = Arc::clone(&context.peer_registry);
-            let probe_addr = peer_ip.clone();
-            let network = context.masternode_registry.network();
-            tokio::spawn(async move {
-                probe_masternode_reachability(
-                    probe_addr,
-                    network,
-                    registry_clone,
-                    peer_registry_clone,
-                )
-                .await;
-            });
+            // Rate-limited: try_claim_reachability_probe returns false if a probe
+            // was already performed within REACHABILITY_RECHECK_SECS (10 min), so
+            // we don't fire a new TCP probe on every 60-second announcement.
+            if context
+                .masternode_registry
+                .try_claim_reachability_probe(&peer_ip)
+                .await
+            {
+                let registry_clone = Arc::clone(&context.masternode_registry);
+                let peer_registry_clone = Arc::clone(&context.peer_registry);
+                let probe_addr = peer_ip.clone();
+                let network = context.masternode_registry.network();
+                tokio::spawn(async move {
+                    probe_masternode_reachability(
+                        probe_addr,
+                        network,
+                        registry_clone,
+                        peer_registry_clone,
+                    )
+                    .await;
+                });
+            }
         }
 
         Ok(None)
