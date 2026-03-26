@@ -1926,14 +1926,17 @@ impl RpcHandler {
                     }
                 }
 
-                // Check inputs for any of our addresses
+                // Check inputs for any of our addresses.
+                // Track whether any inputs could NOT be resolved (tx_index miss)
+                // so we can fall back to output-only consolidation detection below.
                 let mut sent: u64 = 0;
                 let mut send_address = String::new();
+                let mut unresolved_inputs = 0usize;
                 for input in &tx.inputs {
                     let spent_txid = input.previous_output.txid;
                     let spent_vout = input.previous_output.vout;
 
-                    if let Some(ref txi) = self.blockchain.tx_index {
+                    let resolved = if let Some(ref txi) = self.blockchain.tx_index {
                         if let Some(loc) = txi.get_location(&spent_txid) {
                             if let Ok(src_block) = self.blockchain.get_block(loc.block_height) {
                                 if let Some(src_tx) = src_block.transactions.get(loc.tx_index) {
@@ -1949,10 +1952,24 @@ impl RpcHandler {
                                                 send_address = src_addr;
                                             }
                                         }
+                                        true // resolved (even if not ours)
+                                    } else {
+                                        false
                                     }
+                                } else {
+                                    false
                                 }
+                            } else {
+                                false
                             }
+                        } else {
+                            false // tx_index has no entry for this input's source txid
                         }
+                    } else {
+                        false // no tx_index at all
+                    };
+                    if !resolved {
+                        unresolved_inputs += 1;
                     }
                 }
 
@@ -1966,17 +1983,25 @@ impl RpcHandler {
                         continue;
                     }
 
-                    // Detect consolidation: all outputs go to one of our tracked addresses
-                    let all_outputs_to_self = sent > 0
-                        && received > 0
+                    // Detect consolidation: all outputs go to one of our tracked addresses.
+                    // The primary signal is sent > 0 (inputs resolved via tx_index).
+                    // Fallback: if ALL inputs were unresolvable (tx_index miss after resync)
+                    // but ALL outputs land on wallet addresses, treat as consolidation to avoid
+                    // incorrectly reporting the receive as income.
+                    let outputs_all_to_self = received > 0
                         && tx.outputs.iter().all(|o| {
                             let addr = String::from_utf8_lossy(&o.script_pubkey).to_string();
                             addr_set.contains(&addr)
                         });
+                    let all_outputs_to_self = sent > 0 && outputs_all_to_self;
+                    let likely_consolidation_no_index = sent == 0
+                        && unresolved_inputs > 0
+                        && unresolved_inputs == tx.inputs.len()
+                        && outputs_all_to_self;
 
                     let category = if tx_idx <= 1 {
                         "generate"
-                    } else if all_outputs_to_self {
+                    } else if all_outputs_to_self || likely_consolidation_no_index {
                         "consolidate"
                     } else if sent > 0 {
                         "send"
