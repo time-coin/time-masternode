@@ -399,6 +399,60 @@ impl MasternodeRegistry {
         drop(local_addr_guard);
 
         if let Some(ref outpoint) = masternode.collateral_outpoint {
+            let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+
+            // ── Canonical-anchor check ────────────────────────────────────────────
+            // The first address to register a collateral outpoint (either via on-chain
+            // MasternodeReg tx or via gossip) becomes the permanent "anchor" stored in
+            // sled under `collateral_anchor:{outpoint_key}`.  Any subsequent gossip
+            // claim from a *different* address is rejected outright — regardless of
+            // registered_at timestamp — so that a bad actor cannot gain higher-tier
+            // rewards by copying someone else's collateral outpoint.
+            //
+            // Legitimate IP migrations (same operator, new IP) must use an on-chain
+            // MasternodeReg special transaction that is verified with the owner's
+            // private key (see apply_masternode_reg / validate_masternode_reg).
+            let anchor_db_key = format!("collateral_anchor:{}", outpoint_key);
+            let anchor_addr: Option<String> = self
+                .db
+                .get(anchor_db_key.as_bytes())
+                .ok()
+                .flatten()
+                .and_then(|v| String::from_utf8(v.to_vec()).ok());
+
+            if let Some(ref canonical) = anchor_addr {
+                let canonical_ip = canonical.split(':').next().unwrap_or(canonical);
+                let incoming_ip = masternode.address.split(':').next().unwrap_or(&masternode.address);
+                if canonical_ip != incoming_ip {
+                    // Different address — check if the existing in-memory entry is on-chain
+                    let existing_is_onchain = nodes
+                        .get(canonical_ip)
+                        .map(|i| matches!(i.registration_source, RegistrationSource::OnChain(_)))
+                        .unwrap_or(false);
+
+                    if existing_is_onchain {
+                        tracing::warn!(
+                            "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                             already anchored on-chain to {}",
+                            masternode.address,
+                            outpoint,
+                            canonical
+                        );
+                    } else {
+                        tracing::warn!(
+                            "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                             already anchored (first filed) to {}",
+                            masternode.address,
+                            outpoint,
+                            canonical
+                        );
+                    }
+                    return Err(RegistryError::CollateralAlreadyLocked);
+                }
+                // Same address → legitimate reconnect, fall through
+            }
+            // ── End canonical-anchor check ────────────────────────────────────────
+
             let mut old_addr_to_remove = None;
             for (addr, info) in nodes.iter() {
                 if addr != &masternode.address {
@@ -420,6 +474,23 @@ impl MasternodeRegistry {
                         outpoint
                     );
                     return Err(RegistryError::InvalidCollateral);
+                }
+
+                // If the existing registration is on-chain, never allow gossip migration.
+                // Only an on-chain MasternodeReg tx (with signature proof) can override it.
+                let existing_is_onchain = nodes
+                    .get(&old_addr)
+                    .map(|i| matches!(i.registration_source, RegistrationSource::OnChain(_)))
+                    .unwrap_or(false);
+                if existing_is_onchain {
+                    tracing::warn!(
+                        "🛡️ Rejected gossip migration for on-chain collateral {}: \
+                         {} cannot override on-chain registration of {} via gossip",
+                        outpoint,
+                        masternode.address,
+                        old_addr
+                    );
+                    return Err(RegistryError::CollateralAlreadyLocked);
                 }
 
                 // Only migrate if the incoming announcement is at least as recent as
@@ -445,7 +516,6 @@ impl MasternodeRegistry {
                 // Cooldown: refuse to migrate the same outpoint more than once per 60 s.
                 // This stops two peers gossiping competing IPs from flip-flopping indefinitely.
                 const MIGRATION_COOLDOWN_SECS: u64 = 60;
-                let outpoint_key = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
                 if let Some(last_migrated) = self.collateral_migration_times.get(&outpoint_key) {
                     let elapsed = now.saturating_sub(*last_migrated);
                     if elapsed < MIGRATION_COOLDOWN_SECS {
@@ -473,7 +543,7 @@ impl MasternodeRegistry {
                         return Err(RegistryError::InvalidCollateral);
                     }
                 }
-                self.collateral_migration_times.insert(outpoint_key, now);
+                self.collateral_migration_times.insert(outpoint_key.clone(), now);
 
                 tracing::info!(
                     "🔄 Masternode IP migration: collateral {} moving from {} to {}",
@@ -485,6 +555,24 @@ impl MasternodeRegistry {
                 // Remove old entry from persistent storage
                 let key = format!("masternode:{}", old_addr);
                 let _ = self.db.remove(key.as_bytes());
+
+                // Update the canonical anchor to track the new address after a valid migration
+                let _ = self.db.insert(
+                    anchor_db_key.as_bytes(),
+                    masternode.address.as_bytes(),
+                );
+            } else if anchor_addr.is_none() && masternode.tier != crate::types::MasternodeTier::Free {
+                // First time this collateral outpoint appears — write the canonical anchor.
+                // Only anchor paid tiers (Bronze+); Free nodes have no collateral to protect.
+                let _ = self.db.insert(
+                    anchor_db_key.as_bytes(),
+                    masternode.address.as_bytes(),
+                );
+                tracing::debug!(
+                    "📌 Collateral anchor set: {} → {} (first registration)",
+                    outpoint,
+                    masternode.address
+                );
             }
         }
 
@@ -2450,7 +2538,7 @@ impl MasternodeRegistry {
         let height = self
             .current_height
             .load(std::sync::atomic::Ordering::Relaxed);
-        let _ = utxo_manager.lock_collateral(outpoint, address.clone(), height, tier.collateral());
+        let _ = utxo_manager.lock_collateral(outpoint.clone(), address.clone(), height, tier.collateral());
 
         // Register in the registry (insert or update existing entry)
         self.register(masternode, payout_address.to_string())
@@ -2461,6 +2549,32 @@ impl MasternodeRegistry {
         if let Some(info) = nodes.get_mut(&address) {
             info.registration_source = RegistrationSource::OnChain(height);
             self.store_masternode(&address, info)?;
+        }
+        drop(nodes);
+
+        // Write (or overwrite) the canonical anchor for this collateral outpoint.
+        // On-chain registrations are authoritative: they include a signature proving
+        // the registrant controls the collateral private key.  This anchor ensures
+        // that future gossip claims from a different IP are rejected.
+        let outpoint_key = format!(
+            "{}:{}",
+            hex::encode(outpoint.txid),
+            outpoint.vout
+        );
+        let anchor_db_key = format!("collateral_anchor:{}", outpoint_key);
+        if let Err(e) = self.db.insert(anchor_db_key.as_bytes(), address.as_bytes()) {
+            tracing::warn!(
+                "⚠️ Failed to write on-chain collateral anchor for {}: {}",
+                outpoint_key,
+                e
+            );
+        } else {
+            tracing::info!(
+                "📌 On-chain collateral anchor set: {} → {} (height {})",
+                outpoint_key,
+                address,
+                height
+            );
         }
 
         Ok(())
