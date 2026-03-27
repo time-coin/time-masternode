@@ -583,6 +583,12 @@ impl MasternodeRegistry {
                 );
             }
 
+            // Reset any collateral miss count on re-registration.
+            // A live connection proves the node is back — don't carry over stale
+            // miss counts that were accumulated while we were syncing (when the
+            // collateral UTXO wasn't in our local set yet).
+            self.collateral_miss_counts.remove(&masternode.address);
+
             // Update on disk
             self.store_masternode(&masternode.address, existing)?;
 
@@ -611,6 +617,10 @@ impl MasternodeRegistry {
 
         // Persist to disk
         self.store_masternode(&masternode.address, &info)?;
+
+        // Clear any stale miss count for this address (may exist from a prior
+        // registration cycle that was cleaned up during sync).
+        self.collateral_miss_counts.remove(&masternode.address);
 
         nodes.insert(masternode.address.clone(), info);
         let total_masternodes = nodes.len();
