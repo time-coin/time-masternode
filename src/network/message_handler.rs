@@ -2676,7 +2676,15 @@ impl MessageHandler {
                 }
             };
 
-            // Verify collateral UTXO on-chain
+            // During initial sync (height far behind peers), skip collateral verification.
+            // The UTXO set is incomplete/empty so verification would reject every staked
+            // masternode, preventing us from syncing from the best peers.  Collateral will
+            // be verified once we catch up.
+            let our_height = context.blockchain.get_height();
+            let still_syncing = our_height < 100;
+
+            // Verify collateral UTXO on-chain (skip during initial sync)
+            if !still_syncing {
             if let Some(utxo_manager) = &context.utxo_manager {
                 match utxo_manager.get_utxo(&outpoint).await {
                     Ok(utxo) => {
@@ -2761,6 +2769,12 @@ impl MessageHandler {
                     self.direction, peer_ip
                 );
                 return Ok(None);
+            }
+            } else {
+                info!(
+                    "⏳ [{}] Accepting {:?} masternode {} provisionally (height {} — syncing, collateral check deferred)",
+                    self.direction, tier, peer_ip, our_height
+                );
             }
 
             // Create masternode with verified collateral
