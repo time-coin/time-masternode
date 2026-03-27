@@ -143,7 +143,10 @@ impl PeerManager {
                 }
             }
             Ok(output) => {
-                warn!("⚠️  Failed to connect to discovery server: curl exited {}", output.status);
+                warn!(
+                    "⚠️  Failed to connect to discovery server: curl exited {}",
+                    output.status
+                );
                 Ok(())
             }
             Err(e) => {

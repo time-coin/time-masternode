@@ -13,12 +13,12 @@ use ratatui::{
     Frame, Terminal,
 };
 use serde::{Deserialize, Serialize};
-use timed::http_client::HttpClient;
 use std::{
     error::Error,
     io,
     time::{Duration, Instant},
 };
+use timed::http_client::HttpClient;
 
 const DASHBOARD_VERSION: &str = "1.0.0";
 
@@ -510,7 +510,10 @@ impl App {
         } else {
             None
         };
-        let response = self.client.post_json(&self.rpc_url, &request, auth).await
+        let response = self
+            .client
+            .post_json(&self.rpc_url, &request, auth)
+            .await
             .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
         // Get raw response text for debugging
@@ -923,7 +926,9 @@ fn render_network(f: &mut Frame, area: Rect, app: &App) {
             let status_marker = if peer.active { "●" } else { "○" };
 
             let row_style = if is_local {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else if peer.active && !peer.inbound {
                 Style::default().fg(Color::Green)
             } else if peer.active {
@@ -1128,8 +1133,12 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
                     Cell::from(mn.tier.clone()).style(Style::default().fg(tier_color)),
                     Cell::from(if mn.is_active { "✓" } else { "✗" }).style(active_style),
                     Cell::from(if mn.is_connected { "✓" } else { "✗" }).style(conn_style),
-                    Cell::from(if mn.is_publicly_reachable { "✓" } else { "✗" })
-                        .style(reach_style),
+                    Cell::from(if mn.is_publicly_reachable {
+                        "✓"
+                    } else {
+                        "✗"
+                    })
+                    .style(reach_style),
                     Cell::from(uptime_str),
                 ])
             })
@@ -1147,7 +1156,15 @@ fn render_masternode(f: &mut Frame, area: Rect, app: &App) {
             ],
         )
         .header(
-            Row::new(vec!["Address", "Tier", "Active", "Connected", "Reachable", "Uptime"]).style(
+            Row::new(vec![
+                "Address",
+                "Tier",
+                "Active",
+                "Connected",
+                "Reachable",
+                "Uptime",
+            ])
+            .style(
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),

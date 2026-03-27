@@ -179,7 +179,10 @@ impl PartitionDetector {
                 }
             }
             Ok(output) => {
-                tracing::debug!("Partition recovery: curl failed with status {}", output.status);
+                tracing::debug!(
+                    "Partition recovery: curl failed with status {}",
+                    output.status
+                );
             }
             Err(e) => {
                 tracing::debug!("Partition recovery: discovery API unreachable: {}", e);

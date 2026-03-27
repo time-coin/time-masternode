@@ -542,7 +542,7 @@ async fn main() {
     }
 }
 
-use timed::rpc::credentials::{read_conf_rpctls, read_cookie_file, read_conf_credentials};
+use timed::rpc::credentials::{read_conf_credentials, read_conf_rpctls, read_cookie_file};
 
 async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Build HTTP client: always accept self-signed certs (P2P nodes use self-signed RPC certs).
@@ -771,7 +771,10 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         Ok(r) => r,
         Err(e) if rpc_url.starts_with("https://") => {
             let http_url = rpc_url.replacen("https://", "http://", 1);
-            eprintln!("⚠️  HTTPS RPC failed ({}); retrying over plain HTTP — check rpctlscert/rpctlskey", e);
+            eprintln!(
+                "⚠️  HTTPS RPC failed ({}); retrying over plain HTTP — check rpctlscert/rpctlskey",
+                e
+            );
             client.post_json(&http_url, &request, auth).await?
         }
         Err(e) => return Err(e.into()),
@@ -785,7 +788,9 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("HTTP error: {}", response.status).into());
     }
 
-    let rpc_response: RpcResponse = response.json().map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let rpc_response: RpcResponse = response
+        .json()
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     if let Some(error) = rpc_response.error {
         return Err(format!("RPC error {}: {}", error.code, error.message).into());
