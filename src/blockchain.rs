@@ -1607,6 +1607,8 @@ impl Blockchain {
 
             // Use ALL compatible (consensus) peers for parallel sync, not a fixed limit.
             // Filter to consensus peers when we have consensus info, otherwise use all compatible.
+            // CRITICAL: Also filter to peers whose known chain tip is >= target — a peer at our
+            // own height cannot serve the blocks we need, and picking it wastes 30s timeouts.
             let consensus_peers = self.consensus_peers.read().await.clone();
             let candidate_peers: Vec<String> = if consensus_peers.is_empty() {
                 // No consensus info yet — use all compatible peers
@@ -1635,6 +1637,35 @@ impl Blockchain {
             } else {
                 candidate_peers
             };
+
+            // Filter sync_peers to only those with a known chain tip above our current height.
+            // Peers at or below our height cannot serve the blocks we need.
+            // Fall back to the full list only if filtering leaves us with nothing.
+            let peers_with_needed_blocks: Vec<String> = {
+                let mut filtered = Vec::new();
+                for peer in &sync_peers {
+                    if let Some((peer_tip, _)) = peer_registry.get_peer_chain_tip(peer).await {
+                        if peer_tip > current {
+                            filtered.push(peer.clone());
+                        }
+                    } else {
+                        // No chain tip cached — include conservatively (peer may have blocks)
+                        filtered.push(peer.clone());
+                    }
+                }
+                filtered
+            };
+            if !peers_with_needed_blocks.is_empty()
+                && peers_with_needed_blocks.len() < sync_peers.len()
+            {
+                tracing::debug!(
+                    "🔍 Filtered sync peers: {} → {} (removed peers at/below height {})",
+                    sync_peers.len(),
+                    peers_with_needed_blocks.len(),
+                    current
+                );
+                sync_peers = peers_with_needed_blocks;
+            }
 
             if sync_peers.is_empty() {
                 tracing::warn!("⚠️  No compatible peers to sync from");
@@ -1868,25 +1899,37 @@ impl Blockchain {
                     //
                     // When no gap: all current sync_peers failed to make progress, so
                     // only try peers that weren't in the last round.
-                    let retry_peers: Vec<String> = if has_gap {
-                        let gap_chunks = first_buffered
-                            .map(|f| ((f - next_needed) as usize).div_ceil(batch_size as usize))
-                            .unwrap_or(1)
-                            .min(sync_peers.len());
-                        let failed: HashSet<String> =
-                            sync_peers.iter().take(gap_chunks).cloned().collect();
-                        connected_peers
-                            .iter()
-                            .filter(|p| !failed.contains(*p))
-                            .cloned()
-                            .collect()
-                    } else {
-                        let tried: HashSet<String> = sync_peers.iter().cloned().collect();
-                        connected_peers
-                            .iter()
-                            .filter(|p| !tried.contains(*p))
-                            .cloned()
-                            .collect()
+                    // Build retry peer candidates, excluding failed/already-tried peers.
+                    // Also exclude peers whose known chain tip is at or below next_needed —
+                    // they cannot serve the missing blocks and will just waste timeout budget.
+                    let retry_peers: Vec<String> = {
+                        let excluded: HashSet<String> = if has_gap {
+                            let gap_chunks = first_buffered
+                                .map(|f| {
+                                    ((f - next_needed) as usize).div_ceil(batch_size as usize)
+                                })
+                                .unwrap_or(1)
+                                .min(sync_peers.len());
+                            sync_peers.iter().take(gap_chunks).cloned().collect()
+                        } else {
+                            sync_peers.iter().cloned().collect()
+                        };
+                        let mut candidates = Vec::new();
+                        for p in connected_peers.iter() {
+                            if excluded.contains(p) {
+                                continue;
+                            }
+                            // Skip peers known to be at or below the height we need
+                            if let Some((peer_tip, _)) =
+                                peer_registry.get_peer_chain_tip(p).await
+                            {
+                                if peer_tip < next_needed {
+                                    continue;
+                                }
+                            }
+                            candidates.push(p.clone());
+                        }
+                        candidates
                     };
 
                     if !retry_peers.is_empty() {
