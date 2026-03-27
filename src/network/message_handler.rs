@@ -3551,6 +3551,27 @@ impl MessageHandler {
         message: String,
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
+        let is_syncing = context.blockchain.is_syncing();
+
+        if is_syncing {
+            // We already know we're behind and are actively catching up.
+            // Update peer chain tip so sync_from_peers can use this peer,
+            // but suppress all warnings and redundant GetBlocks requests.
+            debug!(
+                "🚨 [{}] FORK ALERT from {} (suppressed — already syncing): {}",
+                self.direction, self.peer_ip, message
+            );
+            context
+                .peer_registry
+                .update_peer_chain_tip(&self.peer_ip, consensus_height, consensus_hash)
+                .await;
+            context
+                .peer_registry
+                .set_peer_height(&self.peer_ip, consensus_height)
+                .await;
+            return Ok(None);
+        }
+
         warn!(
             "🚨 [{}] FORK ALERT from {}: {}",
             self.direction, self.peer_ip, message

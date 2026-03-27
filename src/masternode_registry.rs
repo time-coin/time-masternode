@@ -566,7 +566,7 @@ impl MasternodeRegistry {
             if !existing.is_active && should_activate {
                 existing.is_active = true;
                 existing.uptime_start = now;
-                info!(
+                debug!(
                     "✅ Registered masternode {} (total: {}) - Tier: {:?}, now ACTIVE at timestamp {}",
                     masternode.address,
                     total_masternodes,
@@ -615,7 +615,7 @@ impl MasternodeRegistry {
         nodes.insert(masternode.address.clone(), info);
         let total_masternodes = nodes.len();
 
-        info!(
+        debug!(
             "✅ Registered masternode {} (total: {}) - NEW - Tier: {:?}, Reward address: {}, Active at timestamp: {}",
             masternode.address,
             total_masternodes,
