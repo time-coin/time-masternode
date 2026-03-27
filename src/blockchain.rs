@@ -4444,16 +4444,15 @@ impl Blockchain {
                 Ok((*block_arc).clone())
             }
             Err(_) => {
-                // Migration path: the `total_fees: u64` field was appended to BlockHeader in
-                // v1.3. Old blocks stored before this change are missing the trailing 8 bytes.
-                // Bincode reads fields sequentially, so we can recover by appending 8 zero bytes
-                // (total_fees = 0) and retrying. On success, re-store in the new format so future
-                // reads are fast and this branch is never hit again for this block.
-                let mut legacy_data = data.to_vec();
-                legacy_data.extend_from_slice(&[0u8; 8]); // total_fees = 0u64 (little-endian)
+                // Migration path: the `total_fees: u64` field was appended to BlockHeader
+                // in v1.3.  Old blocks stored before this change are missing those 8 bytes
+                // in the MIDDLE of the serialized Block (between producer_signature and
+                // transactions).  We cannot simply append bytes; instead we deserialize
+                // with a LegacyBlock type that omits total_fees and convert.
+                use crate::network::wire::deserialize_legacy_block;
 
-                match bincode::deserialize::<Block>(&legacy_data) {
-                    Ok(block) => {
+                match deserialize_legacy_block(&data) {
+                    Some(block) => {
                         tracing::info!(
                             "🔄 Block {} migrated to v1.3 format (total_fees field added)",
                             height
@@ -4462,7 +4461,11 @@ impl Blockchain {
                         if let Ok(new_serialized) = bincode::serialize(&block) {
                             let data_to_store = if self.compress_blocks {
                                 let compressed = crate::storage::compress_block(&new_serialized);
-                                if compressed.len() < new_serialized.len() { compressed } else { new_serialized }
+                                if compressed.len() < new_serialized.len() {
+                                    compressed
+                                } else {
+                                    new_serialized
+                                }
                             } else {
                                 new_serialized
                             };
@@ -4472,9 +4475,8 @@ impl Blockchain {
                         self.block_cache.put(height, block_arc.clone());
                         Ok((*block_arc).clone())
                     }
-                    Err(e) => {
-                        tracing::error!("⚠️ Block {} failed deserialization: {}", height, e);
-                        // Delete corrupted block for re-fetch from peers
+                    None => {
+                        tracing::error!("⚠️ Block {} failed deserialization", height);
                         tracing::warn!(
                             "🔄 CORRUPTED BLOCK RECOVERY: Deleting corrupted block {} for re-fetch from peers",
                             height

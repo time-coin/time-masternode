@@ -242,6 +242,7 @@ mod tests {
                 vrf_proof: vec![],
                 vrf_score: 0,
                 producer_signature: vec![],
+                total_fees: 0,
             },
             transactions: vec![],
             masternode_rewards: vec![],
