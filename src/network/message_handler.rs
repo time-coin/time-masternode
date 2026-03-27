@@ -3737,7 +3737,7 @@ impl MessageHandler {
                         return Ok(None);
                     }
                     // Far behind (>10 blocks) — accept from any peer to break deadlock
-                    info!(
+                    debug!(
                         "🔓 [{}] Accepting blocks from {} despite non-consensus (gap {} > 10, need to catch up)",
                         self.direction, self.peer_ip, height_gap
                     );
@@ -3802,7 +3802,11 @@ impl MessageHandler {
                     None => (true, 0u32),
                 };
 
-                if should_alert {
+                // Don't send fork alerts while we are still syncing: we haven't
+                // seen the full chain yet, so we are not a reliable consensus
+                // authority.  Our "our_height" is a local minimum, not a network
+                // consensus view.
+                if should_alert && !context.blockchain.is_syncing() {
                     let all_peers = context.peer_registry.get_compatible_peers().await;
                     let mut our_chain_count: usize = 1; // Count ourselves
                     let mut behind_count: usize = 0;

@@ -4360,11 +4360,17 @@ impl Blockchain {
         }
 
         // Phase 3.3: Cleanup invalid collaterals after block processing
-        // This ensures masternodes with spent collateral are automatically deregistered
-        let cleanup_count = self
-            .masternode_registry
-            .cleanup_invalid_collaterals(&self.utxo_manager)
-            .await;
+        // This ensures masternodes with spent collateral are automatically deregistered.
+        // Skip during sync: collateral UTXOs for masternodes registered in later blocks
+        // haven't been indexed yet, producing false positives that deregister every
+        // masternode on every block while we're catching up.
+        let cleanup_count = if is_syncing {
+            0
+        } else {
+            self.masternode_registry
+                .cleanup_invalid_collaterals(&self.utxo_manager)
+                .await
+        };
 
         if cleanup_count > 0 {
             tracing::warn!(
