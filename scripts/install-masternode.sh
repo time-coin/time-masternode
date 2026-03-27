@@ -470,14 +470,27 @@ install_binaries() {
         exit 1
     fi
     
-    # Copy binaries
-    cp "$PROJECT_DIR/target/release/timed" "$BIN_DIR/"
-    cp "$PROJECT_DIR/target/release/time-cli" "$BIN_DIR/"
-    
+    # Copy binaries — skip if already installed (avoids "Text file busy" when
+    # a running instance holds the binary; restart the service to pick up new builds)
+    if [ ! -f "$BIN_DIR/timed" ]; then
+        cp "$PROJECT_DIR/target/release/timed" "$BIN_DIR/"
+    else
+        print_info "timed already exists at $BIN_DIR/timed — skipping copy (restart service to pick up new build)"
+    fi
+    if [ ! -f "$BIN_DIR/time-cli" ]; then
+        cp "$PROJECT_DIR/target/release/time-cli" "$BIN_DIR/"
+    else
+        print_info "time-cli already exists at $BIN_DIR/time-cli — skipping copy"
+    fi
+
     # Also copy time-dashboard if it was built
     if [ -f "$PROJECT_DIR/target/release/time-dashboard" ]; then
-        cp "$PROJECT_DIR/target/release/time-dashboard" "$BIN_DIR/"
-        chmod 755 "$BIN_DIR/time-dashboard"
+        if [ ! -f "$BIN_DIR/time-dashboard" ]; then
+            cp "$PROJECT_DIR/target/release/time-dashboard" "$BIN_DIR/"
+            chmod 755 "$BIN_DIR/time-dashboard"
+        else
+            print_info "time-dashboard already exists at $BIN_DIR/time-dashboard — skipping copy"
+        fi
     fi
     
     # Set permissions
