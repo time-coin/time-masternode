@@ -3552,14 +3552,21 @@ impl MessageHandler {
         context: &MessageContext,
     ) -> Result<Option<NetworkMessage>, String> {
         let is_syncing = context.blockchain.is_syncing();
+        let our_height = context.blockchain.get_height();
 
-        if is_syncing {
+        // Suppress fork alerts when the node is clearly still catching up.
+        // `is_syncing` is only true during sync_from_peers(); inbound-pushed blocks
+        // leave it false even while hundreds of blocks behind. Use a height-gap check
+        // as the broader gate so we don't WARN during normal catch-up.
+        let significantly_behind = consensus_height > our_height + 10;
+
+        if is_syncing || significantly_behind {
             // We already know we're behind and are actively catching up.
             // Update peer chain tip so sync_from_peers can use this peer,
             // but suppress all warnings and redundant GetBlocks requests.
             debug!(
-                "🚨 [{}] FORK ALERT from {} (suppressed — already syncing): {}",
-                self.direction, self.peer_ip, message
+                "🚨 [{}] FORK ALERT from {} (suppressed — catching up, our height {} vs consensus {}): {}",
+                self.direction, self.peer_ip, our_height, consensus_height, message
             );
             context
                 .peer_registry
