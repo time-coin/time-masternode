@@ -465,6 +465,22 @@ impl MasternodeRegistry {
                 }
             }
             if let Some(old_addr) = old_addr_to_remove {
+                // Collateral is already claimed by a different IP.
+                // Paid tiers (Bronze+) MUST use an on-chain MasternodeReg tx to claim
+                // or migrate collateral. Gossip cannot move collateral between IPs because
+                // different nodes see gossip in different order, leading to split registries.
+                if masternode.tier != crate::types::MasternodeTier::Free {
+                    tracing::warn!(
+                        "🛡️ Collateral {} is registered to {} — {} must file an on-chain \
+                         MasternodeReg tx to claim it (gossip migration blocked for paid tiers)",
+                        outpoint,
+                        old_addr,
+                        masternode.address
+                    );
+                    return Err(RegistryError::CollateralAlreadyLocked);
+                }
+
+                // Free tier: no collateral to protect, allow migration with cooldown
                 // Never let a remote peer steal the local masternode's collateral
                 let old_ip = old_addr.split(':').next().unwrap_or(&old_addr);
                 if local_ip.as_deref() == Some(old_ip) {
@@ -476,65 +492,16 @@ impl MasternodeRegistry {
                     return Err(RegistryError::InvalidCollateral);
                 }
 
-                // If the existing registration is on-chain, never allow gossip migration.
-                // Only an on-chain MasternodeReg tx (with signature proof) can override it.
-                let existing_is_onchain = nodes
-                    .get(&old_addr)
-                    .map(|i| matches!(i.registration_source, RegistrationSource::OnChain(_)))
-                    .unwrap_or(false);
-                if existing_is_onchain {
-                    tracing::warn!(
-                        "🛡️ Rejected gossip migration for on-chain collateral {}: \
-                         {} cannot override on-chain registration of {} via gossip",
-                        outpoint,
-                        masternode.address,
-                        old_addr
-                    );
-                    return Err(RegistryError::CollateralAlreadyLocked);
-                }
-
-                // Only migrate if the incoming announcement is at least as recent as
-                // the existing entry's registration. Stale gossip from the old IP can
-                // never win back a migration it lost.
-                let existing_registered_at = nodes
-                    .get(&old_addr)
-                    .map(|i| i.masternode.registered_at)
-                    .unwrap_or(0);
-                if masternode.registered_at < existing_registered_at {
-                    tracing::warn!(
-                        "⚠️ Collateral {} is already in use by masternode {} — \
-                         rejected claim from {} (stale announcement: registered_at {} < current {})",
-                        outpoint,
-                        old_addr,
-                        masternode.address,
-                        masternode.registered_at,
-                        existing_registered_at
-                    );
-                    return Err(RegistryError::InvalidCollateral);
-                }
-
                 // Cooldown: refuse to migrate the same outpoint more than once per 60 s.
-                // This stops two peers gossiping competing IPs from flip-flopping indefinitely.
                 const MIGRATION_COOLDOWN_SECS: u64 = 60;
                 if let Some(last_migrated) = self.collateral_migration_times.get(&outpoint_key) {
                     let elapsed = now.saturating_sub(*last_migrated);
                     if elapsed < MIGRATION_COOLDOWN_SECS {
                         let remaining = MIGRATION_COOLDOWN_SECS - elapsed;
-                        // Only WARN once per cooldown window (first 2s after the initial block).
-                        // After that, demote to debug to avoid spam from multiple gossip relays.
                         if elapsed < 2 {
-                            tracing::warn!(
-                                "⚠️ Collateral {} is already in use by masternode {} — \
-                                 rejected claim from {} (migration cooldown: {}s remaining)",
-                                outpoint,
-                                old_addr,
-                                masternode.address,
-                                remaining
-                            );
-                        } else {
                             tracing::debug!(
-                                "Collateral {} cooldown active ({}s remaining) — \
-                                 ignoring repeat claim from {}",
+                                "Free-tier collateral {} cooldown ({}s remaining) — \
+                                 ignoring claim from {}",
                                 outpoint,
                                 remaining,
                                 masternode.address
@@ -546,21 +513,14 @@ impl MasternodeRegistry {
                 self.collateral_migration_times.insert(outpoint_key.clone(), now);
 
                 tracing::info!(
-                    "🔄 Masternode IP migration: collateral {} moving from {} to {}",
+                    "🔄 Free-tier IP migration: {} moving from {} to {}",
                     outpoint,
                     old_addr,
                     masternode.address
                 );
                 nodes.remove(&old_addr);
-                // Remove old entry from persistent storage
                 let key = format!("masternode:{}", old_addr);
                 let _ = self.db.remove(key.as_bytes());
-
-                // Update the canonical anchor to track the new address after a valid migration
-                let _ = self.db.insert(
-                    anchor_db_key.as_bytes(),
-                    masternode.address.as_bytes(),
-                );
             } else if anchor_addr.is_none() && masternode.tier != crate::types::MasternodeTier::Free {
                 // First time this collateral outpoint appears — write the canonical anchor.
                 // Only anchor paid tiers (Bronze+); Free nodes have no collateral to protect.
@@ -2961,10 +2921,14 @@ mod tests {
         utxo_manager.unlock_collateral(&outpoint).unwrap();
         utxo_manager.spend_utxo(&outpoint).await.unwrap();
 
-        // Run cleanup
+        // Run cleanup — miss threshold is 3 consecutive misses before deregistration
+        registry.cleanup_invalid_collaterals(&utxo_manager).await;
+        assert_eq!(registry.count().await, 1, "Should still be registered after 1 miss");
+        registry.cleanup_invalid_collaterals(&utxo_manager).await;
+        assert_eq!(registry.count().await, 1, "Should still be registered after 2 misses");
         let cleanup_count = registry.cleanup_invalid_collaterals(&utxo_manager).await;
 
-        // Masternode should be removed
+        // Masternode should be removed after 3 consecutive misses
         assert_eq!(cleanup_count, 1);
         assert_eq!(registry.count().await, 0);
     }

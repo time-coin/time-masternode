@@ -1640,13 +1640,17 @@ impl Blockchain {
 
             // Filter sync_peers to only those with a known chain tip above our current height.
             // Peers at or below our height cannot serve the blocks we need.
-            // Fall back to the full list only if filtering leaves us with nothing.
             let peers_with_needed_blocks: Vec<String> = {
                 let mut filtered = Vec::new();
                 for peer in &sync_peers {
                     if let Some((peer_tip, _)) = peer_registry.get_peer_chain_tip(peer).await {
                         if peer_tip > current {
                             filtered.push(peer.clone());
+                        } else {
+                            tracing::debug!(
+                                "🔍 Skipping peer {} for sync (tip {} <= our height {})",
+                                peer, peer_tip, current
+                            );
                         }
                     } else {
                         // No chain tip cached — include conservatively (peer may have blocks)
@@ -1655,21 +1659,30 @@ impl Blockchain {
                 }
                 filtered
             };
-            if !peers_with_needed_blocks.is_empty()
-                && peers_with_needed_blocks.len() < sync_peers.len()
-            {
-                tracing::debug!(
+            if peers_with_needed_blocks.len() < sync_peers.len() {
+                tracing::info!(
                     "🔍 Filtered sync peers: {} → {} (removed peers at/below height {})",
                     sync_peers.len(),
                     peers_with_needed_blocks.len(),
                     current
                 );
-                sync_peers = peers_with_needed_blocks;
             }
+            // Use filtered list unconditionally — if empty, request fresh tips and abort
+            sync_peers = peers_with_needed_blocks;
 
             if sync_peers.is_empty() {
-                tracing::warn!("⚠️  No compatible peers to sync from");
-                return Err("No compatible peers to sync from".to_string());
+                // All peers have cached tips at or below our height.
+                // Request fresh chain tips so the next sync coordinator cycle has current data.
+                tracing::warn!(
+                    "⚠️  No peers with blocks above height {} — requesting fresh chain tips",
+                    current
+                );
+                for peer_ip in &peer_registry.get_connected_peers().await {
+                    let _ = peer_registry
+                        .send_to_peer(peer_ip, NetworkMessage::GetChainTip)
+                        .await;
+                }
+                return Err("No peers with blocks above our height".to_string());
             }
 
             tracing::info!(
@@ -2684,17 +2697,23 @@ impl Blockchain {
                     );
 
                     if consensus_height > our_height && !already_syncing {
-                        // We're behind - sync to longer chain. Gate through the sync coordinator
-                        // so the 60s per-peer throttle prevents back-to-back retries to the same peer.
-                        let approved = self
-                            .sync_coordinator
-                            .request_sync(
-                                _sync_peer.clone(),
-                                our_height + 1,
-                                consensus_height,
-                                crate::network::sync_coordinator::SyncSource::Periodic,
-                            )
-                            .await;
+                        // We're behind - sync to longer chain.
+                        // When significantly behind (>10 blocks), skip per-peer throttle
+                        // since sync_from_peers selects its own peers internally.
+                        let blocks_behind = consensus_height - our_height;
+                        let approved = if blocks_behind > 10 {
+                            // Significantly behind: skip throttle, just check not already syncing
+                            Ok(true)
+                        } else {
+                            self.sync_coordinator
+                                .request_sync(
+                                    _sync_peer.clone(),
+                                    our_height + 1,
+                                    consensus_height,
+                                    crate::network::sync_coordinator::SyncSource::Periodic,
+                                )
+                                .await
+                        };
 
                         match approved {
                             Ok(true) => {
@@ -2702,7 +2721,7 @@ impl Blockchain {
                                     "📥 Starting sync: {} → {} ({} blocks behind)",
                                     our_height,
                                     consensus_height,
-                                    consensus_height - our_height
+                                    blocks_behind
                                 );
                                 let blockchain_clone = Arc::clone(&self);
                                 tokio::spawn(async move {
