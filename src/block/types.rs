@@ -184,8 +184,6 @@ impl Block {
         hasher.update(self.header.vrf_score.to_le_bytes());
         // Include active masternodes bitmap (consensus-critical field)
         hasher.update(&self.header.active_masternodes_bitmap);
-        // Include total_fees (consensus-critical: part of block content)
-        hasher.update(self.header.total_fees.to_le_bytes());
         // Explicitly NOT including masternode_tiers - it's metadata only
 
         hasher.finalize().into()
