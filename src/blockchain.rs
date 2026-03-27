@@ -2297,6 +2297,20 @@ impl Blockchain {
         peer_ip: &str,
         registry: &crate::network::peer_connection_registry::PeerConnectionRegistry,
     ) -> Result<u64, String> {
+        // Defer to handle_fork() if it is already working on this fork.
+        // handle_fork() owns the state machine and calls perform_reorg() which sets
+        // fork_state = Reorging before touching storage.  Running our own rollback
+        // concurrently would corrupt the chain.
+        {
+            let state = self.fork_state.read().await;
+            if !matches!(*state, ForkResolutionState::None) {
+                return Err(format!(
+                    "Skipping find_and_resolve_fork: handle_fork() already active (state: {:?})",
+                    std::mem::discriminant(&*state)
+                ));
+            }
+        }
+
         let our_height = self.current_height.load(Ordering::Acquire);
 
         // Get peer's chain tip
@@ -2547,9 +2561,20 @@ impl Blockchain {
             common_ancestor
         );
 
-        self.rollback_to_height(common_ancestor).await?;
+        // Set Reorging state before touching storage so that concurrent
+        // add_block_with_fork_handling() calls see the state and back off.
+        *self.fork_state.write().await = ForkResolutionState::Reorging {
+            from_height: our_height,
+            to_height: common_ancestor,
+            started_at: std::time::Instant::now(),
+        };
 
-        Ok(common_ancestor)
+        let result = self.rollback_to_height(common_ancestor).await;
+
+        // Always reset fork_state regardless of rollback outcome.
+        *self.fork_state.write().await = ForkResolutionState::None;
+
+        result.map(|_| common_ancestor)
     }
 
     /// Phase 3 Step 3: Spawn sync coordinator background task
