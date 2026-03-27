@@ -251,10 +251,18 @@ impl HttpClient {
         tls_stream.flush().await.map_err(|e| e.to_string())?;
 
         let mut response_buf = Vec::new();
-        tls_stream
-            .read_to_end(&mut response_buf)
-            .await
-            .map_err(|e| e.to_string())?;
+        match tls_stream.read_to_end(&mut response_buf).await {
+            Ok(_) => {}
+            Err(e) => {
+                // Tolerate missing TLS close_notify: many HTTP servers (including
+                // our own RPC server) close TCP without sending it.  The HTTP
+                // response is self-framed (Content-Length / chunked), so if we
+                // already have data the response is complete.
+                if response_buf.is_empty() {
+                    return Err(e.to_string());
+                }
+            }
+        }
         parse_http_response(&response_buf)
     }
 }
