@@ -872,9 +872,15 @@ impl PeerConnection {
             } => {
                 self.handle_pong(*nonce, *timestamp, *height).await?;
                 // Push RTT to registry via both paths for reliability
-                config.peer_registry.record_pong_received(&self.peer_ip, *nonce).await;
+                config
+                    .peer_registry
+                    .record_pong_received(&self.peer_ip, *nonce)
+                    .await;
                 if let Some(rtt_secs) = self.get_ping_rtt().await {
-                    config.peer_registry.set_peer_ping_time(&self.peer_ip, rtt_secs).await;
+                    config
+                        .peer_registry
+                        .set_peer_ping_time(&self.peer_ip, rtt_secs)
+                        .await;
                 }
                 return Ok(());
             }
@@ -1019,7 +1025,10 @@ impl PeerConnection {
         // Send initial ping
         match self.send_ping(config.blockchain.as_ref()).await {
             Ok(nonce) => {
-                config.peer_registry.record_ping_sent(&self.peer_ip, nonce).await;
+                config
+                    .peer_registry
+                    .record_ping_sent(&self.peer_ip, nonce)
+                    .await;
             }
             Err(e) => {
                 error!(

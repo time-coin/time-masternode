@@ -3853,7 +3853,7 @@ impl MessageHandler {
     ) -> Result<Option<NetworkMessage>, String> {
         let block_count = blocks.len();
         if block_count == 0 {
-            debug!(
+            info!(
                 "📥 [{}] Received empty blocks response from {}",
                 self.direction, self.peer_ip
             );

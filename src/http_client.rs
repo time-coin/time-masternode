@@ -117,10 +117,16 @@ impl HttpClient {
             let use_tls = scheme == "https";
 
             // Build the HTTP request
-            let mut request = format!("{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n", method, path, host);
+            let mut request = format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n",
+                method, path, host
+            );
 
             if let Some(ref body) = body {
-                request.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", body.len()));
+                request.push_str(&format!(
+                    "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                    body.len()
+                ));
             }
 
             if let Some((user, pass)) = basic_auth {
@@ -141,13 +147,20 @@ impl HttpClient {
                     .map_err(|e| format!("TCP connect to {}: {}", addr, e))?;
 
                 if use_tls {
-                    self.do_tls_request(stream, &host, &request, body.as_deref()).await
+                    self.do_tls_request(stream, &host, &request, body.as_deref())
+                        .await
                 } else {
-                    self.do_plain_request(stream, &request, body.as_deref()).await
+                    self.do_plain_request(stream, &request, body.as_deref())
+                        .await
                 }
             })
             .await
-            .map_err(|_| format!("Request to {} timed out after {:?}", current_url, self.timeout))??;
+            .map_err(|_| {
+                format!(
+                    "Request to {} timed out after {:?}",
+                    current_url, self.timeout
+                )
+            })??;
 
             // Follow redirects (301, 302, 303, 307, 308), but only within
             // the same scheme. Never upgrade HTTP → HTTPS automatically;
@@ -311,7 +324,9 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, String> {
         if let Some((name, value)) = line.split_once(':') {
             let name = name.trim().to_string();
             let value = value.trim().to_string();
-            if name.eq_ignore_ascii_case("transfer-encoding") && value.to_ascii_lowercase().contains("chunked") {
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+            {
                 is_chunked = true;
             }
             headers.push((name, value));
@@ -326,7 +341,11 @@ fn parse_http_response(data: &[u8]) -> Result<HttpResponse, String> {
         data[body_start..].to_vec()
     };
 
-    Ok(HttpResponse { status, headers, body })
+    Ok(HttpResponse {
+        status,
+        headers,
+        body,
+    })
 }
 
 /// Decode chunked transfer encoding.
@@ -349,8 +368,8 @@ fn decode_chunked(data: &[u8]) -> Result<Vec<u8>, String> {
             .map_err(|_| "Non-UTF8 chunk size")?
             .trim();
 
-        let chunk_size =
-            usize::from_str_radix(size_str, 16).map_err(|_| format!("Invalid chunk size: {}", size_str))?;
+        let chunk_size = usize::from_str_radix(size_str, 16)
+            .map_err(|_| format!("Invalid chunk size: {}", size_str))?;
 
         if chunk_size == 0 {
             break; // Final chunk
