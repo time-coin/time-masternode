@@ -97,11 +97,21 @@ pub async fn read_message<R: AsyncRead + Unpin>(
     let message: NetworkMessage = match bincode::deserialize(&payload) {
         Ok(msg) => msg,
         Err(e) => {
-            tracing::debug!(
-                "⚠️ Received unrecognized message ({} bytes), skipping: {}",
-                payload.len(),
-                e
-            );
+            if payload.len() > 1000 {
+                // Large payloads that fail are likely BlocksResponse from peers
+                // running older code without the total_fees field in BlockHeader.
+                tracing::warn!(
+                    "⚠️ Failed to deserialize large message ({} bytes) — peer may be running incompatible code: {}",
+                    payload.len(),
+                    e
+                );
+            } else {
+                tracing::debug!(
+                    "⚠️ Received unrecognized message ({} bytes), skipping: {}",
+                    payload.len(),
+                    e
+                );
+            }
             NetworkMessage::UnknownMessage
         }
     };
