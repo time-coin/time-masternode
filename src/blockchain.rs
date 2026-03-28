@@ -3194,17 +3194,15 @@ impl Blockchain {
         // NOTE: Treasury deposit happens in add_block(), not here, to avoid
         // double-deposit when the producer's own node processes the block.
 
-        // Build reward list: producer first, then per-tier pool recipients
+        // Build reward list.
+        // §10.4 Two distribution modes:
+        //   All-Free mode (no paid-tier nodes in eligible pool):
+        //     5 TIME → treasury (handled in add_block), 95 TIME split equally among
+        //     up to MAX_FREE_TIER_RECIPIENTS free nodes. No separate producer bonus.
+        //   Tier-based mode (at least one paid-tier node present):
+        //     30 TIME leader bonus + 65 TIME tier pools + 5 TIME treasury.
         let mut rewards: Vec<(String, u64)> = Vec::new();
 
-        // 1. Block producer leader bonus (30 TIME + fees)
-        if let Some(ref wallet) = producer_wallet {
-            rewards.push((wallet.clone(), producer_share));
-        }
-
-        // 2. Per-tier pools: Gold=25, Silver=18, Bronze=14, Free=8 TIME
-        //    Within each tier, fairness bonus determines who gets paid this block.
-        //    Equal share per recipient within a tier (no weight differentiation within same tier).
         let eligible_pool = self
             .masternode_registry
             .get_eligible_pool_nodes(next_height)
@@ -3216,74 +3214,42 @@ impl Blockchain {
             .await;
 
         use crate::types::MasternodeTier;
-        let tiers = [
-            MasternodeTier::Gold,
-            MasternodeTier::Silver,
-            MasternodeTier::Bronze,
-            MasternodeTier::Free,
-        ];
-        let mut total_pool_distributed = 0u64;
-        let mut rounding_dust = 0u64; // satoshis unspent due to integer division; goes to treasury
 
-        for tier in &tiers {
-            let tier_pool = tier.pool_allocation();
+        let has_paid_tier_nodes = eligible_pool
+            .iter()
+            .any(|mn| mn.masternode.tier != MasternodeTier::Free);
 
-            // Collect nodes of this tier with fairness bonus (uncapped)
-            let mut tier_nodes: Vec<_> = eligible_pool
+        let total_reward = if !has_paid_tier_nodes && !eligible_pool.is_empty() {
+            // ── All-Free mode ─────────────────────────────────────────────────
+            // All 95 TIME (total_reward) split equally among up to 25 free nodes,
+            // sorted by fairness bonus so nodes waiting longest are paid first.
+            let mut free_nodes: Vec<_> = eligible_pool
                 .iter()
-                .filter(|mn| mn.masternode.tier == *tier)
                 .map(|mn| {
                     let blocks_without = blocks_without_reward_map
                         .get(&mn.masternode.address)
                         .copied()
                         .unwrap_or(0);
-                    let fairness_bonus = blocks_without / 10; // uncapped
+                    let fairness_bonus = blocks_without / 10;
                     (mn, fairness_bonus)
                 })
                 .collect();
-
-            // Empty tiers: full pool goes to block producer
-            if tier_nodes.is_empty() {
-                if let Some(entry) = rewards.first_mut() {
-                    entry.1 += tier_pool;
-                }
-                total_pool_distributed += tier_pool;
-                continue;
-            }
-
-            // Sort by fairness bonus DESC, then address ASC for deterministic tiebreaking
-            tier_nodes.sort_by(|a, b| {
+            free_nodes.sort_by(|a, b| {
                 b.1.cmp(&a.1)
                     .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
             });
-
-            // Paid tiers: single winner. Free tier: share among up to MAX_FREE_TIER_RECIPIENTS.
-            let is_free_tier = matches!(tier, MasternodeTier::Free);
-            let recipient_count = if is_free_tier {
-                tier_nodes
-                    .len()
-                    .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS)
-            } else {
-                1
-            };
-
-            let per_node = tier_pool / recipient_count as u64;
-
-            // Skip tier if per-node share is below minimum payout
-            if per_node < MIN_POOL_PAYOUT_SATOSHIS {
-                if let Some(entry) = rewards.first_mut() {
-                    entry.1 += tier_pool;
-                }
-                total_pool_distributed += tier_pool;
-                continue;
-            }
-
+            let recipient_count = free_nodes
+                .len()
+                .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS);
+            let per_node = total_reward / recipient_count as u64;
             let mut distributed = 0u64;
-            for (mn, _) in tier_nodes.iter().take(recipient_count) {
-                // Every recipient gets exactly per_node; rounding remainder goes to treasury
-                let share = per_node;
-                // Merge into existing entry if same wallet address (handles both
-                // producer merging AND multiple masternodes sharing a reward address)
+            for (i, (mn, _)) in free_nodes.iter().take(recipient_count).enumerate() {
+                // Last recipient absorbs rounding remainder so total == total_reward exactly.
+                let share = if i == recipient_count - 1 {
+                    total_reward - distributed
+                } else {
+                    per_node
+                };
                 if let Some(entry) = rewards
                     .iter_mut()
                     .find(|(a, _)| a == &mn.masternode.wallet_address)
@@ -3294,33 +3260,118 @@ impl Blockchain {
                 }
                 distributed += share;
             }
-            // Any undistributed satoshis from integer division go to treasury
-            let tier_dust = tier_pool - distributed;
-            if tier_dust > 0 {
-                rounding_dust += tier_dust;
+            tracing::info!(
+                "💰 Block {}: {} TIME (all-Free) — {} TIME each to {} node(s) [{} eligible]",
+                next_height,
+                total_reward / 100_000_000,
+                per_node / 100_000_000,
+                recipient_count,
+                eligible_pool.len(),
+            );
+            total_reward // no rounding dust in all-free mode
+        } else {
+            // ── Tier-based mode ───────────────────────────────────────────────
+            // Producer gets 30 TIME leader bonus + fees. Per-tier pools distributed
+            // to eligible winners; empty tiers roll up to producer.
+            if let Some(ref wallet) = producer_wallet {
+                rewards.push((wallet.clone(), producer_share));
             }
-            total_pool_distributed += distributed;
-        }
 
-        // Rounding dust: satoshis unspent due to integer division of tier pools.
-        // Subtract from total_reward so the coinbase output matches the sum of
-        // reward outputs. The dust is credited to treasury in add_block().
-        let total_reward = total_reward - rounding_dust;
+            let tiers = [
+                MasternodeTier::Gold,
+                MasternodeTier::Silver,
+                MasternodeTier::Bronze,
+                MasternodeTier::Free,
+            ];
+            let mut total_pool_distributed = 0u64;
+            let mut rounding_dust = 0u64;
 
-        tracing::info!(
-            "💰 Block {}: {} TIME — producer {} TIME, pools {} TIME to {} node(s) [{} eligible]{}",
-            next_height,
-            total_reward / 100_000_000,
-            producer_share / 100_000_000,
-            total_pool_distributed / 100_000_000,
-            rewards.len().saturating_sub(1),
-            eligible_pool.len(),
-            if rounding_dust > 0 {
-                format!(", {} sat rounding dust → treasury", rounding_dust)
-            } else {
-                String::new()
+            for tier in &tiers {
+                let tier_pool = tier.pool_allocation();
+
+                let mut tier_nodes: Vec<_> = eligible_pool
+                    .iter()
+                    .filter(|mn| mn.masternode.tier == *tier)
+                    .map(|mn| {
+                        let blocks_without = blocks_without_reward_map
+                            .get(&mn.masternode.address)
+                            .copied()
+                            .unwrap_or(0);
+                        let fairness_bonus = blocks_without / 10;
+                        (mn, fairness_bonus)
+                    })
+                    .collect();
+
+                // Empty tiers: full pool goes to block producer
+                if tier_nodes.is_empty() {
+                    if let Some(entry) = rewards.first_mut() {
+                        entry.1 += tier_pool;
+                    }
+                    total_pool_distributed += tier_pool;
+                    continue;
+                }
+
+                tier_nodes.sort_by(|a, b| {
+                    b.1.cmp(&a.1)
+                        .then_with(|| a.0.masternode.address.cmp(&b.0.masternode.address))
+                });
+
+                let is_free_tier = matches!(tier, MasternodeTier::Free);
+                let recipient_count = if is_free_tier {
+                    tier_nodes
+                        .len()
+                        .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS)
+                } else {
+                    1
+                };
+
+                let per_node = tier_pool / recipient_count as u64;
+
+                if per_node < MIN_POOL_PAYOUT_SATOSHIS {
+                    if let Some(entry) = rewards.first_mut() {
+                        entry.1 += tier_pool;
+                    }
+                    total_pool_distributed += tier_pool;
+                    continue;
+                }
+
+                let mut distributed = 0u64;
+                for (mn, _) in tier_nodes.iter().take(recipient_count) {
+                    let share = per_node;
+                    if let Some(entry) = rewards
+                        .iter_mut()
+                        .find(|(a, _)| a == &mn.masternode.wallet_address)
+                    {
+                        entry.1 += share;
+                    } else {
+                        rewards.push((mn.masternode.wallet_address.clone(), share));
+                    }
+                    distributed += share;
+                }
+                let tier_dust = tier_pool - distributed;
+                if tier_dust > 0 {
+                    rounding_dust += tier_dust;
+                }
+                total_pool_distributed += distributed;
             }
-        );
+
+            let adjusted_reward = total_reward - rounding_dust;
+            tracing::info!(
+                "💰 Block {}: {} TIME — producer {} TIME, pools {} TIME to {} node(s) [{} eligible]{}",
+                next_height,
+                adjusted_reward / 100_000_000,
+                producer_share / 100_000_000,
+                total_pool_distributed / 100_000_000,
+                rewards.len().saturating_sub(1),
+                eligible_pool.len(),
+                if rounding_dust > 0 {
+                    format!(", {} sat rounding dust → treasury", rounding_dust)
+                } else {
+                    String::new()
+                }
+            );
+            adjusted_reward
+        };
 
         if rewards.is_empty() {
             return Err(format!(
@@ -5788,6 +5839,58 @@ impl Blockchain {
         // (e.g., a peer computed fees slightly differently due to UTXO lookup order).
         // When deregistered recipients exist (fallback path), min uses rolled_up=0
         // (only require base PRODUCER_REWARD) while max uses total_tier_budget override.
+
+        // ── All-Free detection ────────────────────────────────────────────────
+        // When no paid-tier nodes exist, the block uses all-Free distribution:
+        // 95 TIME split evenly among ≤MAX_FREE_TIER_RECIPIENTS free nodes.
+        // The producer receives ~95/N TIME (not 30 TIME), so the normal min check
+        // would incorrectly reject these valid blocks. Detect and validate separately.
+        let paid_tier_total: u64 = tier_paid
+            .iter()
+            .filter(|(t, _)| **t != MasternodeTier::Free)
+            .map(|(_, v)| *v)
+            .sum();
+
+        if producer_received < PRODUCER_REWARD_SATOSHIS && paid_tier_total == 0 {
+            // All-Free block: total distributed should equal 95 TIME (block_reward - treasury).
+            let free_paid = tier_paid
+                .get(&MasternodeTier::Free)
+                .copied()
+                .unwrap_or(0);
+            let total_distributed =
+                producer_received + free_paid + unknown_non_producer_paid;
+            let expected_total = block
+                .header
+                .block_reward
+                .saturating_sub(crate::constants::blockchain::TREASURY_POOL_SATOSHIS);
+            let tolerance = MAX_FREE_TIER_RECIPIENTS as u64; // ≤1 sat rounding per recipient
+            if total_distributed.abs_diff(expected_total) > tolerance {
+                return Err(format!(
+                    "Block {} all-Free distribution: total paid {} satoshis, \
+                     expected {} (block_reward - treasury)",
+                    block.header.height, total_distributed, expected_total
+                ));
+            }
+            let active_recipients = block
+                .masternode_rewards
+                .iter()
+                .filter(|(_, v)| *v > 0)
+                .count();
+            if active_recipients > MAX_FREE_TIER_RECIPIENTS {
+                return Err(format!(
+                    "Block {} all-Free: {} recipients exceeds max {}",
+                    block.header.height, active_recipients, MAX_FREE_TIER_RECIPIENTS
+                ));
+            }
+            tracing::debug!(
+                "Block {} validated as all-Free: {} TIME to {} recipients",
+                block.header.height,
+                total_distributed / SATOSHIS_PER_TIME,
+                active_recipients,
+            );
+            return Ok(());
+        }
+
         let rolled_up_for_max = rolled_up_to_producer_max_override.unwrap_or(rolled_up_to_producer);
         let expected_producer_min = PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
         let expected_producer_max =
