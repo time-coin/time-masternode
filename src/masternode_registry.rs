@@ -769,8 +769,18 @@ impl MasternodeRegistry {
             )
         };
 
-        if is_handshake {
-            // Handshake-registered (Free-tier) nodes have no collateral stake and are
+        // Check if node has collateral (paid tier) — if so, never remove on disconnect
+        // regardless of registration source. Gossip-announced Bronze+ nodes use Handshake
+        // source but should persist just like on-chain registrations.
+        let has_collateral = {
+            masternodes
+                .get(address)
+                .and_then(|i| i.masternode.collateral_outpoint.as_ref())
+                .is_some()
+        };
+
+        if is_handshake && !has_collateral {
+            // Handshake-registered Free-tier nodes have no collateral stake and are
             // considered transient visitors. Remove them entirely from the registry on
             // disconnect so they cannot inflate the quorum weight denominator while absent.
             masternodes.remove(address);
