@@ -359,7 +359,9 @@ The key property: UTXOs enter `SpentPending` **before** voting begins, so double
 
 ### 11.1 Block Reward Distribution
 
-Every 10-minute checkpoint block distributes exactly **100 TIME** to network participants:
+Every 10-minute checkpoint block distributes exactly **100 TIME** to network participants. The distribution mode depends on whether any paid-tier masternodes are active.
+
+**Tier-Based Mode** (at least one Bronze/Silver/Gold node present):
 
 | Recipient | Amount | Mechanism |
 |-----------|-------:|-----------|
@@ -371,7 +373,17 @@ Every 10-minute checkpoint block distributes exactly **100 TIME** to network par
 | **Free pool** | 8 TIME | Shared among ≤25 active Free nodes |
 | **Total** | **100 TIME** | Per block |
 
-Transaction fees are collected separately and added to the block producer's reward on top of the 30 TIME base.
+Transaction fees are added to the block producer's reward on top of the 30 TIME base.
+
+**All-Free Mode** (no paid-tier nodes present):
+
+| Recipient | Amount | Mechanism |
+|-----------|-------:|-----------|
+| **Treasury** | 5 TIME | On-chain governance fund |
+| **Free pool** | 95 TIME | Shared equally among ≤25 Free nodes (sorted by fairness bonus) |
+| **Total** | **100 TIME** | Per block |
+
+In all-Free mode there is no separate producer/leader bonus. The block producer is one of the Free nodes sharing the 95 TIME pool. Transaction fees are added to the Free pool.
 
 ### 11.2 Tier Pool Winner Selection
 
@@ -381,7 +393,11 @@ If no eligible node exists for a tier (e.g., no Gold masternodes), that tier's p
 
 ### 11.3 Free Tier Pool
 
-Up to **25 Free-tier nodes** share the 8 TIME pool equally each block. All active Free-tier nodes that meet the maturity requirement are eligible. The per-node reward decreases as more Free nodes join (8 TIME ÷ n nodes) and increases as nodes leave, naturally self-regulating participation incentives.
+**In tier-based mode:** Up to **25 Free-tier nodes** share the 8 TIME pool equally each block. All active Free-tier nodes that meet the maturity requirement are eligible. The per-node reward decreases as more Free nodes join (8 TIME ÷ n nodes) and increases as nodes leave, naturally self-regulating participation incentives.
+
+**In all-Free mode:** Up to **25 Free-tier nodes** share the 95 TIME pool equally each block, sorted by fairness bonus (longest-waiting nodes paid first). The block producer receives no separate leader bonus — they are simply one of the pool recipients.
+
+In both modes there is no minimum per-node payout threshold. Every eligible node receives its share regardless of how small that share is.
 
 ### 11.4 Emission Schedule
 
@@ -573,10 +589,11 @@ TimeProof certificates make finality objective and portable — a payment confir
 | Finality threshold | 67% AVS weight | BFT-safe majority |
 | Fallback threshold | 51% AVS weight | Stall recovery |
 | Block reward | 100 TIME | Fixed, no halving |
-| Producer bonus | 30 TIME | Plus fees |
-| Treasury per block | 5 TIME | Governance fund |
+| Producer bonus | 30 TIME | Plus fees (tier-based mode only) |
+| Treasury per block | 5 TIME | Governance fund (both modes) |
+| All-Free pool | 95 TIME | When no paid-tier nodes present |
 | Free maturity gate | 72 blocks | ~12 h, mainnet only |
-| Max recipients / Free pool | 25 | Per block |
+| Max recipients / Free pool | 25 | Per block (both modes) |
 | Max reorg depth | 100 blocks | ~16.7 hours |
 | Stall timeout | 30 s | TimeGuard trigger |
 | Max fallback rounds | 5 | Then TimeLock recovery |
@@ -590,12 +607,25 @@ TimeProof certificates make finality objective and portable — a payment confir
 
 ## Appendix B — Masternode Tier Summary
 
+**Tier-Based Mode** (at least one paid-tier node present):
+
 | Tier | Collateral | Weight | Pool | Recipients |
 |------|----------:|-------:|-----:|:----------:|
-| Free | 0 TIME | 1× | 8 TIME | Up to 25, shared |
+| Free | 0 TIME | 1× | 8 TIME | Up to 25, shared equally |
 | Bronze | 1,000 TIME | 10× | 14 TIME | 1 winner |
 | Silver | 10,000 TIME | 100× | 18 TIME | 1 winner |
 | Gold | 100,000 TIME | 1,000× | 25 TIME | 1 winner |
+
+Plus 30 TIME leader bonus (+ fees) to the block producer and 5 TIME to treasury.
+
+**All-Free Mode** (no paid-tier nodes present):
+
+| Pool | Amount | Recipients |
+|------|-------:|:----------:|
+| Free pool | 95 TIME | Up to 25, shared equally |
+| Treasury | 5 TIME | On-chain fund |
+
+No separate leader bonus. The block producer is one of the Free pool recipients.
 
 ## Appendix C — UTXO State Transitions
 

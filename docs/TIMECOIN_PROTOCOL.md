@@ -819,13 +819,18 @@ Fees are the sum of included archived transactions’ fees for the slot.
 
 ### 10.4 Payout split
 
-**Per-Tier Pool Model (35 TIME Leader + 65 TIME across 4 Tier Pools):**
+The distribution mode depends on whether any paid-tier (Bronze/Silver/Gold) masternodes are active.
+
+---
+
+**Mode A — Tier-Based Distribution** (at least one paid-tier node present):
 
 ```
 Total Reward = 100 TIME + transaction_fees
 
 Distribution:
-  35 TIME + transaction_fees → Block Producer (VRF-selected proposer)
+   5 TIME → Treasury (on-chain governance fund)
+  30 TIME + transaction_fees → Block Producer (VRF-selected proposer)
   65 TIME → Four independent tier pools:
     Gold pool:   25 TIME — shared equally among active Gold masternodes
     Silver pool: 18 TIME — shared equally among active Silver masternodes
@@ -834,7 +839,26 @@ Distribution:
 
 The block producer also receives a tier pool share (merged into their output).
 Their total = leader_bonus + tier_pool_share.
+If a tier has no active nodes, its pool goes to the block producer.
 ```
+
+---
+
+**Mode B — All-Free Distribution** (no paid-tier nodes present):
+
+```
+Total Reward = 100 TIME + transaction_fees
+
+Distribution:
+   5 TIME → Treasury (on-chain governance fund)
+  95 TIME + transaction_fees → Free pool, split equally among up to 25
+             eligible Free nodes (sorted by fairness bonus, longest-waiting first)
+
+There is no separate producer/leader bonus in this mode. The block producer
+is simply one of the Free nodes sharing the pool.
+```
+
+---
 
 **Rotation via Fairness Bonus:**
 
@@ -844,16 +868,18 @@ When a tier has more active nodes than `MAX_TIER_RECIPIENTS` (25), nodes are sel
 fairness_bonus = blocks_without_pool_reward / 10
 Selection: sort by fairness_bonus DESC, then address ASC (deterministic tiebreak)
 Take top 25 per tier → distribute tier_pool / recipient_count equally
-Minimum payout: 1 TIME per node (if share < 1 TIME, remainder goes to producer)
 ```
+
+There is no minimum per-node payout threshold — any share amount, however small, is a valid reward output.
 
 Payout MUST be represented as one or more on-chain reward transactions included in the checkpoint block (coinbase-style).
 
-**Example Distribution (8 masternodes: 2 Gold, 1 Silver, 2 Bronze, 3 Free):**
+**Example Distribution — Tier-Based (8 masternodes: 2 Gold, 1 Silver, 2 Bronze, 3 Free):**
 ```
 Block producer: Bronze node A (won VRF sortition)
 
-Leader bonus: 35 TIME + fees
+Treasury: 5 TIME
+Leader bonus: 30 TIME + fees
 
 Gold pool (25 TIME ÷ 2 nodes):
 - Gold node A:   12.5 TIME
@@ -863,13 +889,26 @@ Silver pool (18 TIME ÷ 1 node):
 - Silver node A: 18 TIME
 
 Bronze pool (14 TIME ÷ 2 nodes):
-- Bronze node A: 7 TIME (producer — merged with leader bonus = 42 TIME + fees)
+- Bronze node A: 7 TIME (producer — merged with leader bonus = 37 TIME + fees)
 - Bronze node B: 7 TIME
 
 Free pool (8 TIME ÷ 3 nodes):
 - Free node A:   2.67 TIME
 - Free node B:   2.67 TIME
 - Free node C:   2.66 TIME (remainder)
+```
+
+**Example Distribution — All-Free (5 Free nodes, no paid tier):**
+```
+Block producer: Free node C (won VRF sortition)
+
+Treasury: 5 TIME
+Free pool (95 TIME ÷ 5 nodes, sorted by fairness bonus):
+- Free node A:   19 TIME  (waiting longest)
+- Free node B:   19 TIME
+- Free node C:   19 TIME  (producer — no separate leader bonus)
+- Free node D:   19 TIME
+- Free node E:   19 TIME
 ```
 
 ---
@@ -1288,7 +1327,7 @@ pub struct UTXOEntry {
     pub txid: Hash256,
     pub output_index: u32,
     pub value: u64,
-    pub script: bytes,
+    pub script: bytes,  // P2PKH script locking to a TIME1... wallet address
 }
 
 pub struct InitialValidatorEntry {
@@ -1298,6 +1337,8 @@ pub struct InitialValidatorEntry {
     pub tier_weight: u16,
 }
 ```
+
+**Genesis UTXO addressing:** The `script` field of each `UTXOEntry` MUST encode a standard P2PKH script locking the output to a TIME wallet address (bech32m `TIME1…` format — see §23 for address encoding). IP addresses MUST NOT be used as UTXO recipients. Genesis-block UTXOs are real, spendable on-chain outputs from block 0 and are indistinguishable from UTXOs created by normal transactions.
 
 ### 19.2 Bootstrap Procedure (Chicken-Egg Problem)
 **Challenge:** AVS is required to validate, but AVS membership is on-chain.
@@ -1698,12 +1739,15 @@ This economic model is subject to community consensus. Future governance proposa
 
 ### 25.4 Reward Distribution
 
-**Per Block (35/65 Per-Tier Split — see §10.4 for normative specification):**
+Two distribution modes apply depending on whether paid-tier nodes are present (see §10.4 for the normative specification).
+
+**Tier-Based Distribution (at least one paid-tier node — see §10.4 for normative spec):**
 ```
 Total Reward = 100 TIME + transaction_fees
 
 Distribution:
-  35 TIME + transaction_fees → Block Producer (VRF-selected proposer)
+   5 TIME → Treasury
+  30 TIME + transaction_fees → Block Producer (VRF-selected proposer)
   65 TIME → Four independent tier pools:
     Gold:   25 TIME    Silver: 18 TIME
     Bronze: 14 TIME    Free:    8 TIME
@@ -1713,6 +1757,20 @@ Within each tier:
 - Max 25 recipients per tier per block
 - Fairness rotation: longest-waiting nodes selected first
 - If tier is empty, its pool goes to the block producer
+- No minimum per-node threshold — any share amount is valid
+```
+
+**All-Free Distribution (no paid-tier nodes present):**
+```
+Total Reward = 100 TIME + transaction_fees
+
+Distribution:
+   5 TIME → Treasury
+  95 TIME + transaction_fees → Free pool, split equally among up to 25
+             eligible Free nodes (sorted by fairness bonus)
+
+No separate producer/leader bonus. The block producer is one of the Free
+nodes sharing the pool.
 ```
 
 **Anti-Sybil Maturity Gate:**
@@ -1727,26 +1785,35 @@ Paid tiers (Bronze/Silver/Gold) have no maturity requirement — their collatera
 provides sufficient sybil resistance.
 ```
 
-**Example: Large Network (500 nodes: 5 Gold, 20 Silver, 75 Bronze, 400 Free):**
+**Example: Large Network — Tier-Based (500 nodes: 5 Gold, 20 Silver, 75 Bronze, 400 Free):**
 ```
 Block producer: Silver node (won VRF sortition)
-- Leader bonus: 35 TIME + fees
+- Treasury: 5 TIME
+- Leader bonus: 30 TIME + fees
 - Silver pool share: 18 / 20 = 0.9 TIME
-- Total: 35.9 TIME + fees
+- Total: 30.9 TIME + fees
 
 Gold pool: 25 TIME ÷ 5 = 5 TIME each
 Silver pool: 18 TIME ÷ 20 = 0.9 TIME each (19 non-producers)
 Bronze pool: 14 TIME ÷ 25 = 0.56 TIME each (top 25 of 75, rotated by fairness)
-Free pool: 8 TIME ÷ 8 = 1 TIME each (top 8 of 400, rotated by fairness)
+Free pool: 8 TIME ÷ 25 = 0.32 TIME each (top 25 of 400, rotated by fairness)
 
-Next block: different 25 Bronze and 8 Free nodes selected via fairness rotation.
-All Bronze nodes paid within ~3 blocks. All Free nodes paid within ~50 blocks.
+Next block: different 25 Bronze and 25 Free nodes selected via fairness rotation.
+All Bronze nodes paid within ~3 blocks. All Free nodes paid within ~16 blocks.
+```
+
+**Example: All-Free Network (10 Free nodes, no paid tier):**
+```
+Block producer: Free node A (won VRF sortition)
+- Treasury: 5 TIME
+- Free pool: 95 TIME ÷ 10 = 9.5 TIME each (all 10 nodes paid, no leader bonus)
 ```
 
 **Fair APY Design:**
-- Leader bonus incentivizes block production via VRF competition
+- Treasury receives 5 TIME every block regardless of network composition
+- Leader bonus (tier-based mode) incentivizes block production via VRF competition
 - Per-tier pools guarantee each tier has a dedicated reward allocation
-- Equal share within tier prevents micro-transactions from weight disparity
+- All-Free mode maximizes earnings for Free nodes when no paid tier is present
 - Fairness rotation ensures every node gets paid in turn (no starvation)
 - Anti-sybil maturity gate prevents rapid Free-tier node spinning
 

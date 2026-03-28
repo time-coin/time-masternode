@@ -415,12 +415,20 @@ Transactions achieve **deterministic finality** during the Voting phase via Time
 
 ### Block Rewards
 
-- **Base Reward**: 100 TIME per block, split as:
-  - 30 TIME → block producer (leader bonus)
-  - 5 TIME → treasury pool (on-chain state, not a UTXO)
+- **Base Reward**: 100 TIME per block. Distribution depends on whether paid-tier nodes are present:
+
+**Tier-based mode** (at least one Bronze/Silver/Gold node):
+  - 5 TIME → treasury
+  - 30 TIME + fees → block producer (leader bonus)
   - 65 TIME → per-tier pools (Gold 25 / Silver 18 / Bronze 14 / Free 8)
-- **Tier pool winner**: Paid tiers award their full pool to one VRF-selected winner; Free tier splits among up to 25 recipients
-- **Transaction Fees**: Added to block reward pool
+  - Paid tier pools each award their full amount to a single fairness-rotation winner
+  - Free tier splits equally among up to 25 recipients (no minimum per-node threshold)
+
+**All-Free mode** (no paid-tier nodes present):
+  - 5 TIME → treasury
+  - 95 TIME + fees → Free pool, split equally among up to 25 Free nodes (sorted by fairness bonus)
+  - No separate leader bonus; the block producer is one of the 25 pool recipients
+
 - **Fairness bonus**: Nodes that haven't recently received a reward get a linearly increasing selection weight (`blocks_without_reward / 10`)
 
 See [docs/TIMECOIN_PROTOCOL.md#253-reward-distribution](docs/TIMECOIN_PROTOCOL.md#253-reward-distribution) for detailed examples.
