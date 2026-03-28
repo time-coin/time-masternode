@@ -551,23 +551,32 @@ Eligibility chain:
 
 ### How Rewards Work
 
-Each block distributes 100 TIME + transaction fees:
+The distribution mode depends on whether any paid-tier (Bronze/Silver/Gold) masternodes are active.
 
-- **35 TIME + fees** → Block producer (VRF-selected leader bonus)
+**Tier-Based Mode** (at least one paid-tier node present):
+
+- **5 TIME** → Treasury (on-chain governance fund)
+- **30 TIME + fees** → Block producer (VRF-selected leader bonus)
 - **65 TIME** → Four per-tier pools (Gold=25, Silver=18, Bronze=14, Free=8)
 
 Within each tier's pool, rewards are divided equally among selected recipients. The block producer also receives their tier's pool share. If a tier has no active nodes, its pool goes to the block producer instead.
 
+**All-Free Mode** (no paid-tier nodes present):
+
+- **5 TIME** → Treasury
+- **95 TIME + fees** → Free pool, split equally among up to 25 eligible Free nodes (sorted by fairness bonus, longest-waiting first)
+
+There is no separate producer/leader bonus in all-Free mode — the block producer is simply one of the Free nodes sharing the pool.
+
 ### Fairness Rotation
 
-When a tier has more active nodes than the per-block cap of 25, a fairness bonus ensures every node eventually gets paid — no starvation, no dust outputs:
+When there are more eligible nodes than the per-block cap of 25, a fairness bonus ensures every node eventually gets paid:
 
 1. **Fairness bonus** per node: `blocks_since_last_paid / 10` — computed on-chain by scanning `masternode_rewards` in recent blocks (up to 1,000 blocks back); deterministic across all validators
 2. **Sort** eligible nodes by fairness bonus (descending), then address (ascending) as a deterministic tiebreaker
 3. **Select** top 25 nodes; distribute `tier_pool / recipient_count` equally
-4. **Minimum payout guard**: if `tier_pool / recipients < 1 TIME`, the pool goes to the block producer to prevent dust outputs
 
-All nodes in a tier receive payment within `ceil(tier_count / 25)` blocks.
+There is no minimum per-node payout threshold — any share amount, however small, is valid. All nodes in a tier receive payment within `ceil(tier_count / 25)` blocks.
 
 #### Free Tier Maturity Gate
 
@@ -575,14 +584,34 @@ On mainnet, Free-tier nodes must be registered for ≥ 72 blocks (~12 hours) bef
 
 ### Example Scenarios
 
-#### Small Network (1 Gold, 2 Silver, 3 Bronze, 4 Free)
+#### All-Free Network (8 Free nodes, no paid tier)
+
+```
+Block producer: Free node C (won VRF)
+- Treasury: 5 TIME
+
+Free pool (95 TIME ÷ 8 nodes, sorted by fairness bonus):
+- Free node A: 11.875 TIME  (waiting longest)
+- Free node B: 11.875 TIME
+- Free node C: 11.875 TIME  (producer — no separate leader bonus)
+- Free node D: 11.875 TIME
+- Free node E: 11.875 TIME
+- Free node F: 11.875 TIME
+- Free node G: 11.875 TIME
+- Free node H: 11.875 TIME
+
+Every node is paid every block.
+```
+
+#### Small Tier-Based Network (1 Gold, 2 Silver, 3 Bronze, 4 Free)
 
 ```
 Block producer: Silver node A (won VRF)
-- Leader bonus: 35 TIME + fees
+- Treasury: 5 TIME
+- Leader bonus: 30 TIME + fees
 
 Gold pool (25 TIME ÷ 1):    Gold A = 25 TIME
-Silver pool (18 TIME ÷ 2):  Silver A = 9 TIME (merged with leader = 44 TIME)
+Silver pool (18 TIME ÷ 2):  Silver A = 9 TIME (merged with leader = 39 TIME)
                              Silver B = 9 TIME
 Bronze pool (14 TIME ÷ 3):  Bronze A = 4.67, B = 4.67, C = 4.66 TIME
 Free pool (8 TIME ÷ 4):     Free A = 2, B = 2, C = 2, D = 2 TIME
@@ -590,23 +619,16 @@ Free pool (8 TIME ÷ 4):     Free A = 2, B = 2, C = 2, D = 2 TIME
 Every node is paid every block.
 ```
 
-#### Large Network (5 Gold, 20 Silver, 75 Bronze, 400 Free)
+#### Large Tier-Based Network (5 Gold, 20 Silver, 75 Bronze, 400 Free)
 
 ```
+Treasury: 5 TIME
 Gold pool (25 ÷ 5):     5 TIME each   — all paid every block
 Silver pool (18 ÷ 20):  0.9 TIME each — all paid every block
 Bronze pool (14 ÷ 25):  0.56 TIME each — top 25 of 75 by fairness
                           All 75 rotate through in 3 blocks
-Free pool (8 ÷ 8):      1 TIME each   — top 8 of 400 by fairness
-                          All 400 rotate through in 50 blocks (~8.3 hours)
-```
-
-#### Extreme Scale (10,000 Free nodes)
-
-```
-Free pool: 8 TIME ÷ 8 = 1 TIME each  (max 8 recipients — enforced by 1 TIME minimum)
-Rotation:  Each node paid every ~1,250 blocks (~8.7 days)
-Per payment: 1 TIME (meaningful, not dust)
+Free pool (8 ÷ 25):     0.32 TIME each — top 25 of 400 by fairness
+                          All 400 rotate through in ~16 blocks
 ```
 
 ### Consensus Safety
@@ -627,12 +649,13 @@ Each node tracks reward-distribution violations per block producer address (life
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `PRODUCER_REWARD_SATOSHIS` | 35 × 10⁸ | Leader bonus (35 TIME) |
+| `PRODUCER_REWARD_SATOSHIS` | 30 × 10⁸ | Leader bonus (30 TIME, tier-based mode) |
+| `TREASURY_REWARD_SATOSHIS` | 5 × 10⁸ | Treasury allocation (5 TIME, both modes) |
+| `ALL_FREE_POOL_SATOSHIS` | 95 × 10⁸ | Free pool in all-Free mode (95 TIME) |
 | `GOLD_POOL_SATOSHIS` | 25 × 10⁸ | Gold tier pool (25 TIME) |
 | `SILVER_POOL_SATOSHIS` | 18 × 10⁸ | Silver tier pool (18 TIME) |
 | `BRONZE_POOL_SATOSHIS` | 14 × 10⁸ | Bronze tier pool (14 TIME) |
-| `FREE_POOL_SATOSHIS` | 8 × 10⁸ | Free tier pool (8 TIME) |
-| `MIN_POOL_PAYOUT_SATOSHIS` | 10⁸ | Minimum 1 TIME per recipient |
+| `FREE_POOL_SATOSHIS` | 8 × 10⁸ | Free tier pool in tier-based mode (8 TIME) |
 | `MAX_TIER_RECIPIENTS` | 25 | Max recipients per tier per block |
 | `FREE_MATURITY_BLOCKS` | 72 | Free tier maturity gate (mainnet) |
 | `REWARD_VIOLATION_THRESHOLD` | 3 | Strikes before producer is marked misbehaving |
