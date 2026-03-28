@@ -27,7 +27,6 @@ use tracing::{debug, info, warn};
 const BLOCK_TIME_SECONDS: i64 = constants::blockchain::BLOCK_TIME_SECONDS;
 const BLOCK_REWARD_SATOSHIS: u64 = constants::blockchain::BLOCK_REWARD_SATOSHIS;
 const PRODUCER_REWARD_SATOSHIS: u64 = constants::blockchain::PRODUCER_REWARD_SATOSHIS;
-const MIN_POOL_PAYOUT_SATOSHIS: u64 = constants::blockchain::MIN_POOL_PAYOUT_SATOSHIS;
 
 /// Number of reward-distribution violations before a producer is considered misbehaving
 const REWARD_VIOLATION_THRESHOLD: u64 = 3;
@@ -3327,14 +3326,6 @@ impl Blockchain {
 
                 let per_node = tier_pool / recipient_count as u64;
 
-                if per_node < MIN_POOL_PAYOUT_SATOSHIS {
-                    if let Some(entry) = rewards.first_mut() {
-                        entry.1 += tier_pool;
-                    }
-                    total_pool_distributed += tier_pool;
-                    continue;
-                }
-
                 let mut distributed = 0u64;
                 for (mn, _) in tier_nodes.iter().take(recipient_count) {
                     let share = per_node;
@@ -5663,8 +5654,8 @@ impl Blockchain {
         calculated_fees: u64,
     ) -> Result<(), String> {
         use crate::constants::blockchain::{
-            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, MIN_POOL_PAYOUT_SATOSHIS,
-            PRODUCER_REWARD_SATOSHIS, SATOSHIS_PER_TIME,
+            GOLD_POOL_SATOSHIS, MAX_FREE_TIER_RECIPIENTS, PRODUCER_REWARD_SATOSHIS,
+            SATOSHIS_PER_TIME,
         };
         use crate::types::MasternodeTier;
 
@@ -5791,27 +5782,11 @@ impl Blockchain {
                 // In both cases, total paid to the tier must equal the pool allocation
                 // (within 1 satoshi per recipient for integer-division rounding).
                 let recipient_count = if matches!(tier, MasternodeTier::Free) {
-                    // Estimate recipient count from amount — Free shares pool evenly.
-                    // Allow up to MAX_FREE_TIER_RECIPIENTS.
+                    // Free tier: pool split among ≤ MAX_FREE_TIER_RECIPIENTS nodes.
+                    // No minimum per-node threshold — always distribute regardless of amount.
                     let per_node = pool / MAX_FREE_TIER_RECIPIENTS as u64;
-                    if per_node < MIN_POOL_PAYOUT_SATOSHIS {
-                        // Per-node payout below minimum. Whether the pool rolled up to the
-                        // producer or was distributed anyway depends on what the block actually did.
-                        if paid == 0 {
-                            // Nothing distributed — pool rolled to producer.
-                            rolled_up_to_producer += pool;
-                        } else {
-                            // Block distributed the pool despite per-node being below minimum.
-                            // Accept it (don't add to rolled_up_to_producer since it wasn't rolled up).
-                            tracing::warn!(
-                                "⚠️ Block {} Free tier: per-node payout {} below minimum {}, \
-                                 but {} satoshis were distributed",
-                                block.header.height,
-                                per_node,
-                                MIN_POOL_PAYOUT_SATOSHIS,
-                                paid
-                            );
-                        }
+                    if per_node == 0 {
+                        // Pool is smaller than MAX_FREE_TIER_RECIPIENTS satoshis — accept as-is.
                         continue;
                     }
                     // Accept any split ≤ MAX_FREE_TIER_RECIPIENTS
