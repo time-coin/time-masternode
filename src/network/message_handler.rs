@@ -2700,18 +2700,30 @@ impl MessageHandler {
                             let existing = utxo_manager.get_locked_collateral(&outpoint);
                             if let Some(ref info) = existing {
                                 if info.masternode_address != peer_ip {
-                                    warn!(
-                                        "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim collateral {} already locked by {}",
-                                        self.direction, peer_ip, outpoint,
-                                        info.masternode_address
-                                    );
-                                    // Temp-ban the offending peer (30 min)
+                                    // Rate-limit warn to once per 10 minutes per peer to avoid spam
+                                    static THEFT_WARN_TIMES: std::sync::OnceLock<
+                                        dashmap::DashMap<String, std::time::Instant>,
+                                    > = std::sync::OnceLock::new();
+                                    let warn_map = THEFT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
+                                    let should_warn = warn_map
+                                        .get(&peer_ip)
+                                        .map(|t| t.elapsed().as_secs() >= 600)
+                                        .unwrap_or(true);
+                                    if should_warn {
+                                        warn_map.insert(peer_ip.clone(), std::time::Instant::now());
+                                        warn!(
+                                            "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim collateral {} already locked by {}",
+                                            self.direction, peer_ip, outpoint,
+                                            info.masternode_address
+                                        );
+                                    }
+                                    // Ban the offending peer for 24h
                                     if let Some(blacklist) = &context.blacklist {
                                         if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>() {
                                             let mut bl = blacklist.write().await;
                                             bl.add_temp_ban(
                                                 ip,
-                                                std::time::Duration::from_secs(1800),
+                                                std::time::Duration::from_secs(86400),
                                                 &format!(
                                                     "Collateral theft attempt: tried to claim {} owned by {}",
                                                     outpoint, info.masternode_address
