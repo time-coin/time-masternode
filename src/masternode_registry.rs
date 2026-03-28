@@ -424,28 +424,33 @@ impl MasternodeRegistry {
                 let canonical_ip = canonical.split(':').next().unwrap_or(canonical);
                 let incoming_ip = masternode.address.split(':').next().unwrap_or(&masternode.address);
                 if canonical_ip != incoming_ip {
-                    // Different address — check if the existing in-memory entry is on-chain
-                    let existing_is_onchain = nodes
-                        .get(canonical_ip)
-                        .map(|i| matches!(i.registration_source, RegistrationSource::OnChain(_)))
-                        .unwrap_or(false);
-
-                    if existing_is_onchain {
-                        tracing::warn!(
-                            "🛡️ Collateral hijack rejected: {} tried to claim {} \
-                             already anchored on-chain to {}",
-                            masternode.address,
-                            outpoint,
-                            canonical
-                        );
-                    } else {
-                        tracing::warn!(
-                            "🛡️ Collateral hijack rejected: {} tried to claim {} \
-                             already anchored (first filed) to {}",
-                            masternode.address,
-                            outpoint,
-                            canonical
-                        );
+                    // Rate-limit the WARN to once per 5 minutes per (outpoint, claimant) pair
+                    // to avoid spam when a rejected node keeps gossiping.
+                    let spam_key = format!("hijack_warn:{}:{}", outpoint_key, incoming_ip);
+                    let last_warned = self.collateral_migration_times.get(&spam_key).map(|v| *v).unwrap_or(0);
+                    if now.saturating_sub(last_warned) >= 300 {
+                        self.collateral_migration_times.insert(spam_key, now);
+                        let existing_is_onchain = nodes
+                            .get(canonical_ip)
+                            .map(|i| matches!(i.registration_source, RegistrationSource::OnChain(_)))
+                            .unwrap_or(false);
+                        if existing_is_onchain {
+                            tracing::warn!(
+                                "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                                 already anchored on-chain to {}",
+                                masternode.address,
+                                outpoint,
+                                canonical
+                            );
+                        } else {
+                            tracing::warn!(
+                                "🛡️ Collateral hijack rejected: {} tried to claim {} \
+                                 already anchored (first filed) to {}",
+                                masternode.address,
+                                outpoint,
+                                canonical
+                            );
+                        }
                     }
                     return Err(RegistryError::CollateralAlreadyLocked);
                 }
