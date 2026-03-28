@@ -1019,8 +1019,14 @@ impl Blockchain {
             } else {
                 0 // Other masternodes are listed as eligible but receive 0 in genesis
             };
-            // Use the actual masternode address, not reward_address (which may be unset)
-            masternode_rewards.push((info.masternode.address.clone(), reward_amount));
+            // Use wallet_address so genesis rewards are spendable by the recipient.
+            // Fall back to IP address only if wallet_address is unset (shouldn't happen).
+            let reward_addr = if !info.masternode.wallet_address.is_empty() {
+                info.masternode.wallet_address.clone()
+            } else {
+                info.masternode.address.clone()
+            };
+            masternode_rewards.push((reward_addr, reward_amount));
         }
 
         tracing::info!(
@@ -5078,6 +5084,39 @@ impl Blockchain {
         // are created by the reward distribution transaction (transaction index 1).
         // We do NOT create separate UTXOs from the masternode_rewards array to avoid
         // double-counting rewards.
+        //
+        // EXCEPTION: genesis block (height 0) has no transactions, so we create UTXOs
+        // directly from masternode_rewards using the block hash as the synthetic txid.
+        if block.header.height == 0 && block.transactions.is_empty() {
+            for (vout, (address, amount)) in block.masternode_rewards.iter().enumerate() {
+                if *amount == 0 || address.is_empty() {
+                    continue;
+                }
+                let utxo = UTXO {
+                    outpoint: OutPoint {
+                        txid: block_hash,
+                        vout: vout as u32,
+                    },
+                    value: *amount,
+                    script_pubkey: address.as_bytes().to_vec(),
+                    address: address.clone(),
+                };
+                if let Err(e) = self.utxo_manager.add_utxo(utxo).await {
+                    tracing::warn!(
+                        "⚠️  Could not add genesis reward UTXO for {} in genesis block: {:?}",
+                        address,
+                        e
+                    );
+                } else {
+                    utxos_created += 1;
+                    tracing::info!(
+                        "💰 Genesis UTXO created: {} TIME → {}",
+                        amount / 100_000_000,
+                        address
+                    );
+                }
+            }
+        }
 
         tracing::debug!(
             "📊 Block {} has {} masternode reward recipients (metadata)",
