@@ -980,8 +980,19 @@ impl Blockchain {
             registered.len()
         );
 
-        if registered.is_empty() {
-            return Err("Cannot generate genesis: no masternodes registered".to_string());
+        // ── MINIMUM MASTERNODE GUARD ─────────────────────────────────────────────
+        // Require at least 3 masternodes before producing genesis.
+        // A lone node that starts early must not be able to claim the entire
+        // genesis reward for itself — the network would accept it and the other
+        // nodes would be locked out of their share permanently.
+        const MIN_GENESIS_MASTERNODES: usize = 3;
+        if registered.len() < MIN_GENESIS_MASTERNODES {
+            return Err(format!(
+                "Cannot generate genesis: only {} masternode(s) registered, minimum is {}. \
+                 Wait for more nodes to connect before genesis can be produced.",
+                registered.len(),
+                MIN_GENESIS_MASTERNODES
+            ));
         }
 
         // Create bitmap with all registered masternodes
@@ -6908,6 +6919,29 @@ impl Blockchain {
                     return Err(format!(
                         "Premature genesis block rejected: launch time has not been reached \
                          ({remaining}s remaining). This block was produced by an old node before launch."
+                    ));
+                }
+            }
+
+            // MINIMUM MASTERNODE GUARD: refuse a genesis block that was produced by
+            // too few masternodes.  A lone (or early) node that raced to produce genesis
+            // before others connected would capture the full block reward, permanently
+            // locking every later node out of their share.  We enforce the same floor
+            // here that generate_dynamic_genesis() enforces on production.
+            {
+                const MIN_GENESIS_MASTERNODES: u32 = 3;
+                let mn_count = block.header.masternode_tiers.total();
+                if mn_count < MIN_GENESIS_MASTERNODES {
+                    tracing::warn!(
+                        "🛡️ Rejected under-subscribed genesis block ({} masternode(s), need ≥{}): {}",
+                        mn_count,
+                        MIN_GENESIS_MASTERNODES,
+                        hex::encode(&block.hash()[..8])
+                    );
+                    return Err(format!(
+                        "Genesis block rejected: only {mn_count} masternode(s) participated, \
+                         minimum is {MIN_GENESIS_MASTERNODES}. \
+                         This block was produced before enough nodes had connected."
                     ));
                 }
             }
