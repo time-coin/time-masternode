@@ -790,6 +790,37 @@ async fn handle_peer(
                                             let request_genesis_msg = NetworkMessage::RequestGenesis;
                                             let _ = peer_registry.send_to_peer(&ip_str, request_genesis_msg).await;
                                         }
+                                        // Spawn periodic ping task for RTT measurement on this inbound connection.
+                                        // Without this, ping times would only be tracked for outbound connections.
+                                        {
+                                            let ping_ip = ip_str.clone();
+                                            let ping_registry = Arc::clone(&peer_registry);
+                                            let ping_blockchain = Arc::clone(&blockchain);
+                                            tokio::spawn(async move {
+                                                let mut interval = tokio::time::interval(
+                                                    std::time::Duration::from_secs(30),
+                                                );
+                                                // Skip the immediate tick — let the connection settle first.
+                                                interval.tick().await;
+                                                loop {
+                                                    interval.tick().await;
+                                                    if !ping_registry.is_connected(&ping_ip) {
+                                                        break;
+                                                    }
+                                                    let nonce = rand::random::<u64>();
+                                                    let height = ping_blockchain.get_height();
+                                                    let msg = crate::network::message::NetworkMessage::Ping {
+                                                        nonce,
+                                                        timestamp: chrono::Utc::now().timestamp(),
+                                                        height: Some(height),
+                                                    };
+                                                    ping_registry.record_ping_sent(&ping_ip, nonce).await;
+                                                    if ping_registry.send_to_peer(&ping_ip, msg).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                            });
+                                        }
                                         continue;
                                     }
                                     _ => {
