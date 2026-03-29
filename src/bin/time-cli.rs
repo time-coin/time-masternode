@@ -147,7 +147,10 @@ enum Commands {
     // ============================================================
     /// Get wallet balance
     #[command(next_help_heading = "Wallet")]
-    GetBalance,
+    GetBalance {
+        /// Address to query (defaults to this node's reward address)
+        address: Option<String>,
+    },
 
     /// Get wallet information
     #[command(next_help_heading = "Wallet")]
@@ -635,7 +638,13 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
             ("createrawtransaction", json!([inputs_json, outputs_json]))
         }
         Commands::DecodeRawTransaction { hex } => ("decoderawtransaction", json!([hex])),
-        Commands::GetBalance => ("getbalance", json!([])),
+        Commands::GetBalance { address } => {
+            if let Some(addr) = address {
+                ("getbalance", json!([addr]))
+            } else {
+                ("getbalance", json!([]))
+            }
+        }
         Commands::ListUnspent {
             limit,
             minconf,
@@ -802,8 +811,13 @@ async fn run_command(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         } else if args.compact {
             println!("{}", serde_json::to_string(&result)?);
         } else {
-            // Default: pretty JSON (like Bitcoin)
-            println!("{}", serde_json::to_string_pretty(&result)?);
+            // Default: pretty JSON (like Bitcoin).
+            // Bare string results print without quotes, matching Bitcoin CLI behaviour.
+            if let Some(s) = result.as_str() {
+                println!("{}", s);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            }
         }
     }
 
@@ -852,7 +866,7 @@ fn print_human_readable(
         Commands::GetBlockHash { .. } => {
             println!("Block Hash: {}", result.as_str().unwrap_or("N/A"));
         }
-        Commands::GetBalance => {
+        Commands::GetBalance { .. } => {
             if let Some(obj) = result.as_object() {
                 let balance = obj.get("balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let locked = obj.get("locked").and_then(|v| v.as_f64()).unwrap_or(0.0);

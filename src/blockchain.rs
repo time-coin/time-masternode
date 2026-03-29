@@ -1158,6 +1158,36 @@ impl Blockchain {
 
         self.current_height.store(0, Ordering::Release);
 
+        // Create UTXOs for genesis rewards.
+        // generate_dynamic_genesis bypasses add_block, so we must create these
+        // directly here — otherwise getbalance always shows 0.
+        for (vout, (address, amount)) in genesis.masternode_rewards.iter().enumerate() {
+            if *amount == 0 || address.is_empty() {
+                continue;
+            }
+            let utxo = UTXO {
+                outpoint: OutPoint {
+                    txid: genesis_hash,
+                    vout: vout as u32,
+                },
+                value: *amount,
+                script_pubkey: address.as_bytes().to_vec(),
+                address: address.clone(),
+            };
+            match self.utxo_manager.add_utxo(utxo).await {
+                Ok(()) => tracing::info!(
+                    "💰 Genesis UTXO created: {} TIME → {}",
+                    amount / 100_000_000,
+                    address
+                ),
+                Err(e) => tracing::warn!(
+                    "⚠️ Could not add genesis reward UTXO for {}: {:?}",
+                    address,
+                    e
+                ),
+            }
+        }
+
         tracing::info!("🎉 Dynamic genesis block stored successfully (height: 0)");
 
         Ok(())
