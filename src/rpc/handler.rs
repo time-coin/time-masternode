@@ -1421,13 +1421,23 @@ impl RpcHandler {
                     _ => (false, "unavailable"),
                 };
 
-                let confirmations = self
-                    .blockchain
-                    .tx_index
-                    .as_ref()
-                    .and_then(|idx| idx.get_location(&u.outpoint.txid))
-                    .map(|loc| current_height.saturating_sub(loc.block_height) + 1)
-                    .unwrap_or(0);
+                let confirmations = {
+                    let from_index = self
+                        .blockchain
+                        .tx_index
+                        .as_ref()
+                        .and_then(|idx| idx.get_location(&u.outpoint.txid))
+                        .map(|loc| current_height.saturating_sub(loc.block_height) + 1);
+                    if let Some(c) = from_index {
+                        c
+                    } else if u.outpoint.txid == self.blockchain.genesis_hash() {
+                        // Genesis UTXOs use the genesis block hash as txid (no real tx).
+                        // Genesis is at height 0, so confirmations = current_height + 1.
+                        current_height + 1
+                    } else {
+                        0
+                    }
+                };
 
                 if confirmations >= min_conf && confirmations <= max_conf {
                     filtered.push(json!({
@@ -1519,14 +1529,23 @@ impl RpcHandler {
         use std::collections::HashMap;
         let mut address_map: HashMap<String, (u64, usize, u64)> = HashMap::new();
 
+        let genesis_hash = self.blockchain.genesis_hash();
         for utxo in utxos.iter() {
-            let confirmations = self
-                .blockchain
-                .tx_index
-                .as_ref()
-                .and_then(|idx| idx.get_location(&utxo.outpoint.txid))
-                .map(|loc| current_height.saturating_sub(loc.block_height) + 1)
-                .unwrap_or(0);
+            let confirmations = {
+                let from_index = self
+                    .blockchain
+                    .tx_index
+                    .as_ref()
+                    .and_then(|idx| idx.get_location(&utxo.outpoint.txid))
+                    .map(|loc| current_height.saturating_sub(loc.block_height) + 1);
+                if let Some(c) = from_index {
+                    c
+                } else if utxo.outpoint.txid == genesis_hash {
+                    current_height + 1
+                } else {
+                    0
+                }
+            };
 
             let entry = address_map
                 .entry(utxo.address.clone())
