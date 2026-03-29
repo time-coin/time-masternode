@@ -570,12 +570,10 @@ impl Blockchain {
                                     e
                                 );
                             }
-                            // Rebuild treasury balance (5 TIME per non-genesis block)
-                            if height > 0 {
-                                self.treasury_deposit(
-                                    constants::blockchain::TREASURY_POOL_SATOSHIS,
-                                );
-                            }
+                            // Rebuild treasury balance (5 TIME per block, including genesis)
+                            self.treasury_deposit(
+                                constants::blockchain::TREASURY_POOL_SATOSHIS,
+                            );
                         }
                         Err(e) => {
                             tracing::error!(
@@ -996,32 +994,27 @@ impl Blockchain {
             bitmap_count
         );
 
-        // Genesis reward: Only the leader gets the block reward
-        // But ALL masternodes in the bitmap are listed as eligible for future block rewards
+        // Distribute genesis block reward like normal block production:
+        //   All-Free mode: 100 TIME split equally among all registered nodes (up to MAX_FREE_TIER_RECIPIENTS)
+        //   Tier-based mode: proportional by tier reward weight
         const TIME_UNIT: u64 = 100_000_000; // 1 TIME = 100M satoshis
-        const GENESIS_REWARD: u64 = 100 * TIME_UNIT; // 100 TIME for the genesis leader
+        // 95 TIME distributed to masternodes; 5 TIME goes to treasury via add_block (like normal blocks)
+        const GENESIS_REWARD: u64 =
+            100 * TIME_UNIT - constants::blockchain::TREASURY_POOL_SATOSHIS;
 
-        // Sort to find leader (lowest address)
+        // Sort canonically for determinism
         let mut sorted_for_reward = registered.clone();
         sorted_for_reward.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
         let leader = &sorted_for_reward[0];
 
-        // Create masternode rewards - list all masternodes who are eligible going forward
-        // This establishes the reward list for future blocks based on genesis bitmap
-        let mut masternode_rewards: Vec<(String, u64)> = Vec::new();
-        for info in &registered {
-            // Include all eligible masternodes in the reward list
-            // Amount is 0 for non-leaders (they didn't produce this block)
-            // This documents who is eligible for rewards in future blocks
-            let reward_amount = if info.masternode.address == leader.masternode.address {
-                GENESIS_REWARD // Leader gets the block reward
-            } else {
-                0 // Other masternodes are listed as eligible but receive 0 in genesis
-            };
-            // Prefer MasternodeInfo.reward_address (authoritative, always set on registration).
-            // Fall back to masternode.wallet_address (may be empty if loaded from old sled entry).
-            // Last resort: IP address (produces unspendable genesis reward — logged as error).
-            let reward_addr = if !info.reward_address.is_empty() {
+        use crate::types::MasternodeTier;
+        let has_paid_tiers = sorted_for_reward
+            .iter()
+            .any(|info| info.masternode.tier != MasternodeTier::Free);
+
+        // Helper: resolve reward address for a MasternodeInfo
+        let reward_addr_for = |info: &crate::masternode_registry::MasternodeInfo| -> String {
+            if !info.reward_address.is_empty() {
                 info.reward_address.clone()
             } else if !info.masternode.wallet_address.is_empty() {
                 info.masternode.wallet_address.clone()
@@ -1033,25 +1026,66 @@ impl Blockchain {
                     info.masternode.address
                 );
                 info.masternode.address.clone()
-            };
-            masternode_rewards.push((reward_addr, reward_amount));
-        }
+            }
+        };
 
-        // Find the actual wallet address that will receive the genesis reward
-        let leader_reward_addr = masternode_rewards
-            .iter()
-            .find(|(_, amt)| *amt == GENESIS_REWARD)
-            .map(|(addr, _)| addr.as_str())
-            .unwrap_or("(none)");
+        let masternode_rewards: Vec<(String, u64)> = if !has_paid_tiers {
+            // ── All-Free mode: equal split (mirrors validate_pool_distribution) ──
+            let recipient_count = sorted_for_reward
+                .len()
+                .min(constants::blockchain::MAX_FREE_TIER_RECIPIENTS);
+            let per_node = GENESIS_REWARD / recipient_count as u64;
+            let mut distributed = 0u64;
+            sorted_for_reward
+                .iter()
+                .take(recipient_count)
+                .enumerate()
+                .map(|(i, info)| {
+                    let share = if i == recipient_count - 1 {
+                        GENESIS_REWARD - distributed
+                    } else {
+                        per_node
+                    };
+                    distributed += share;
+                    (reward_addr_for(info), share)
+                })
+                .collect()
+        } else {
+            // ── Tier-based mode: proportional by tier weight ──
+            let total_weight: u64 = sorted_for_reward
+                .iter()
+                .map(|info| info.masternode.tier.reward_weight())
+                .sum();
+            let mut distributed = 0u64;
+            sorted_for_reward
+                .iter()
+                .enumerate()
+                .map(|(i, info)| {
+                    let share = if i == sorted_for_reward.len() - 1 {
+                        GENESIS_REWARD - distributed
+                    } else {
+                        (GENESIS_REWARD * info.masternode.tier.reward_weight()) / total_weight
+                    };
+                    distributed += share;
+                    (reward_addr_for(info), share)
+                })
+                .collect()
+        };
+
         tracing::info!(
-            "   Genesis block reward: {} TIME -> {} (leader: {})",
+            "   Genesis block reward: {} TIME split among {} masternodes ({} mode)",
             GENESIS_REWARD / 100_000_000,
-            leader_reward_addr,
-            leader.masternode.address
+            masternode_rewards.len(),
+            if has_paid_tiers { "tier-based" } else { "all-Free equal-split" }
         );
+        for (addr, amt) in &masternode_rewards {
+            if *amt > 0 {
+                tracing::info!("     {} TIME -> {}", amt / 100_000_000, addr);
+            }
+        }
         tracing::info!(
-            "   {} masternodes listed as eligible for future rewards",
-            registered.len()
+            "   Leader (block producer): {}",
+            leader.masternode.address
         );
 
         // Create genesis header
@@ -4322,10 +4356,8 @@ impl Blockchain {
             self.process_special_transactions(&block).await;
         }
 
-        // Deposit treasury allocation for this block (5 TIME per block)
-        if !is_genesis {
-            self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
-        }
+        // Deposit treasury allocation for this block (5 TIME per block, including genesis)
+        self.treasury_deposit(constants::blockchain::TREASURY_POOL_SATOSHIS);
 
         // Check for governance proposals whose voting window closes at this height.
         // Skip during initial sync to avoid executing proposals against a partially-built
