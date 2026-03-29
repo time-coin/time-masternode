@@ -1399,9 +1399,10 @@ impl MasternodeRegistry {
 
     pub async fn set_local_masternode(&self, address: String) {
         *self.local_masternode_address.write().await = Some(address.clone());
-        // Also persist wallet address from the masternode info
+        // Cache the node's own spendable address (wallet_address, not reward_address).
+        // reward_address may be an external GUI wallet whose key is not on this server.
         if let Some(info) = self.masternodes.read().await.get(&address) {
-            *self.local_wallet_address.write().await = Some(info.reward_address.clone());
+            *self.local_wallet_address.write().await = Some(info.masternode.wallet_address.clone());
         }
     }
 

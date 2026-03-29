@@ -1148,7 +1148,9 @@ impl RpcHandler {
         let filter_addr = if let Some(addr) = address {
             addr.to_string()
         } else if let Some(local_mn) = self.registry.get_local_masternode().await {
-            local_mn.reward_address
+            // Use wallet_address — the node's own spendable address.
+            // reward_address may be an external GUI wallet; its UTXOs can't be signed here.
+            local_mn.masternode.wallet_address
         } else if let Some(wallet_addr) = self.registry.get_local_wallet_address().await {
             // Fallback: masternode may have been deregistered but wallet address is still valid
             wallet_addr
@@ -2859,12 +2861,14 @@ impl RpcHandler {
         let nowait = params.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
         let memo = params.get(4).and_then(|v| v.as_str());
 
-        // Use default wallet address
+        // Use the node's own wallet address (the one whose private key lives on
+        // this server).  reward_address may point to an external GUI wallet that
+        // this node cannot sign for, so we must never use it as the spend source.
         let wallet_address = self
             .registry
             .get_local_masternode()
             .await
-            .map(|mn| mn.reward_address)
+            .map(|mn| mn.masternode.wallet_address)
             .ok_or_else(|| RpcError {
                 code: -4,
                 message: "Node is not configured as a masternode - no wallet address".to_string(),
@@ -3819,6 +3823,11 @@ impl RpcHandler {
         if let Some(local_mn) = self.registry.get_local_masternode().await {
             let utxos = self.utxo_manager.list_all_utxos().await;
 
+            // Filter by wallet_address — the address whose private key is on this
+            // server.  reward_address may be an external GUI wallet; showing those
+            // UTXOs would make the balance look non-zero while being unspendable.
+            let spendable_addr = &local_mn.masternode.wallet_address;
+
             // Categorize UTXOs by state
             let mut spendable_balance: u64 = 0;
             let mut locked_collateral: u64 = 0;
@@ -3827,7 +3836,7 @@ impl RpcHandler {
 
             for u in utxos
                 .iter()
-                .filter(|u| u.address == local_mn.reward_address)
+                .filter(|u| &u.address == spendable_addr)
             {
                 utxo_count += 1;
 
