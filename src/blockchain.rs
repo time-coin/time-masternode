@@ -6888,6 +6888,30 @@ impl Blockchain {
                 return Err(format!("Invalid genesis timestamp: {}", e));
             }
 
+            // CLOCK GUARD: refuse a genesis block that claims a future launch timestamp.
+            // An old node (pre-clock-guard code) could pre-generate a valid-looking genesis
+            // with timestamp = launch_time and broadcast it before launch.  We reject it
+            // if our wall clock has not yet reached that timestamp.
+            {
+                let launch_ts = self.genesis_timestamp();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                if now < launch_ts {
+                    let remaining = launch_ts - now;
+                    tracing::warn!(
+                        "🛡️ Rejected premature genesis block (launch in {}s): {}",
+                        remaining,
+                        hex::encode(&block.hash()[..8])
+                    );
+                    return Err(format!(
+                        "Premature genesis block rejected: launch time has not been reached \
+                         ({remaining}s remaining). This block was produced by an old node before launch."
+                    ));
+                }
+            }
+
             tracing::info!(
                 "✅ Received valid genesis block: {} (masternodes: {})",
                 hex::encode(block.hash()),
