@@ -1018,18 +1018,35 @@ impl Blockchain {
             } else {
                 0 // Other masternodes are listed as eligible but receive 0 in genesis
             };
-            // Use wallet_address so genesis rewards are spendable by the recipient.
-            // Fall back to IP address only if wallet_address is unset (shouldn't happen).
-            let reward_addr = if !info.masternode.wallet_address.is_empty() {
+            // Prefer MasternodeInfo.reward_address (authoritative, always set on registration).
+            // Fall back to masternode.wallet_address (may be empty if loaded from old sled entry).
+            // Last resort: IP address (produces unspendable genesis reward — logged as error).
+            let reward_addr = if !info.reward_address.is_empty() {
+                info.reward_address.clone()
+            } else if !info.masternode.wallet_address.is_empty() {
                 info.masternode.wallet_address.clone()
             } else {
+                tracing::error!(
+                    "⚠️ Masternode {} has no reward_address or wallet_address — \
+                     genesis reward will be unspendable (IP used as fallback). \
+                     Set reward_address in time.conf and regenerate genesis.",
+                    info.masternode.address
+                );
                 info.masternode.address.clone()
             };
             masternode_rewards.push((reward_addr, reward_amount));
         }
 
+        // Find the actual wallet address that will receive the genesis reward
+        let leader_reward_addr = masternode_rewards
+            .iter()
+            .find(|(_, amt)| *amt == GENESIS_REWARD)
+            .map(|(addr, _)| addr.as_str())
+            .unwrap_or("(none)");
         tracing::info!(
-            "   Genesis block reward: {} -> 100 TIME (leader)",
+            "   Genesis block reward: {} TIME -> {} (leader: {})",
+            GENESIS_REWARD / 100_000_000,
+            leader_reward_addr,
             leader.masternode.address
         );
         tracing::info!(
@@ -3249,13 +3266,15 @@ impl Blockchain {
                 } else {
                     per_node
                 };
-                if let Some(entry) = rewards
-                    .iter_mut()
-                    .find(|(a, _)| a == &mn.masternode.wallet_address)
-                {
+                let dest = if !mn.reward_address.is_empty() {
+                    mn.reward_address.clone()
+                } else {
+                    mn.masternode.wallet_address.clone()
+                };
+                if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
                     entry.1 += share;
                 } else {
-                    rewards.push((mn.masternode.wallet_address.clone(), share));
+                    rewards.push((dest, share));
                 }
                 distributed += share;
             }
@@ -3329,13 +3348,15 @@ impl Blockchain {
                 let mut distributed = 0u64;
                 for (mn, _) in tier_nodes.iter().take(recipient_count) {
                     let share = per_node;
-                    if let Some(entry) = rewards
-                        .iter_mut()
-                        .find(|(a, _)| a == &mn.masternode.wallet_address)
-                    {
+                    let dest = if !mn.reward_address.is_empty() {
+                        mn.reward_address.clone()
+                    } else {
+                        mn.masternode.wallet_address.clone()
+                    };
+                    if let Some(entry) = rewards.iter_mut().find(|(a, _)| a == &dest) {
                         entry.1 += share;
                     } else {
-                        rewards.push((mn.masternode.wallet_address.clone(), share));
+                        rewards.push((dest, share));
                     }
                     distributed += share;
                 }

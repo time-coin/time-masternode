@@ -1,5 +1,5 @@
 use crate::block::types::{Block, BlockHeader};
-use crate::types::{sort_masternodes_canonical, Hash256, Masternode, Transaction};
+use crate::types::{Hash256, Masternode, Transaction};
 use chrono::Timelike;
 
 pub struct DeterministicBlockGenerator;
@@ -29,7 +29,7 @@ impl DeterministicBlockGenerator {
         previous_hash: Hash256,
         final_transactions: Vec<Transaction>,
         transaction_fees: Vec<u64>, // Actual fees paid for each transaction
-        masternodes: Vec<Masternode>,
+        masternodes: Vec<(Masternode, String)>, // (masternode, reward_address)
         _base_reward: u64, // Ignored, use logarithmic calculation instead
     ) -> Block {
         // Align to 10-minute clock intervals: 0, 10, 20, 30, 40, 50 minutes
@@ -45,7 +45,8 @@ impl DeterministicBlockGenerator {
             .timestamp();
 
         let mut masternodes_sorted = masternodes;
-        sort_masternodes_canonical(&mut masternodes_sorted);
+        // Sort canonically by address (same ordering as sort_masternodes_canonical)
+        masternodes_sorted.sort_by(|(a, _), (b, _)| a.address.cmp(&b.address));
 
         // Phase 1.2: Enforce canonical transaction ordering for deterministic merkle roots
         // All transactions MUST be sorted by txid to ensure all nodes compute identical merkle roots
@@ -77,7 +78,7 @@ impl DeterministicBlockGenerator {
         // Calculate total weight (proportional to collateral for fair APY)
         let total_weight: u64 = masternodes_sorted
             .iter()
-            .map(|mn| mn.tier.reward_weight())
+            .map(|(mn, _)| mn.tier.reward_weight())
             .sum();
 
         // 100% of block rewards go to masternodes
@@ -90,7 +91,7 @@ impl DeterministicBlockGenerator {
         let mut distributed = 0u64;
 
         if total_weight > 0 && !masternodes_sorted.is_empty() {
-            for (i, mn) in masternodes_sorted.iter().enumerate() {
+            for (i, (mn, reward_addr)) in masternodes_sorted.iter().enumerate() {
                 let weight = mn.tier.reward_weight();
                 let reward = if i == masternodes_sorted.len() - 1 {
                     // Last masternode gets remainder to avoid rounding errors
@@ -100,15 +101,17 @@ impl DeterministicBlockGenerator {
                 };
 
                 if reward > 0 {
-                    // Merge if same wallet address already in list (multiple
-                    // masternodes can share a reward address)
-                    if let Some(entry) = masternode_rewards
-                        .iter_mut()
-                        .find(|(a, _)| a == &mn.wallet_address)
-                    {
+                    // Use reward_address (authoritative from MasternodeInfo), fall back to wallet_address
+                    let dest = if !reward_addr.is_empty() {
+                        reward_addr.clone()
+                    } else {
+                        mn.wallet_address.clone()
+                    };
+                    // Merge if same reward address already in list (multiple masternodes can share one)
+                    if let Some(entry) = masternode_rewards.iter_mut().find(|(a, _)| a == &dest) {
                         entry.1 += reward;
                     } else {
-                        masternode_rewards.push((mn.wallet_address.clone(), reward));
+                        masternode_rewards.push((dest, reward));
                     }
                     distributed += reward;
                 }

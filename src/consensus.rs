@@ -2312,6 +2312,17 @@ impl ConsensusEngine {
         active.iter().map(|info| info.masternode.clone()).collect()
     }
 
+    // Returns (Masternode, reward_address) pairs for block reward distribution
+    fn get_masternodes_with_rewards(&self) -> Vec<(Masternode, String)> {
+        let active = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.masternode_registry.list_active())
+        });
+        active
+            .iter()
+            .map(|info| (info.masternode.clone(), info.reward_address.clone()))
+            .collect()
+    }
+
     fn is_masternode(&self, address: &str) -> bool {
         let masternodes = self.get_masternodes();
         masternodes.iter().any(|mn| mn.address == address)
@@ -5081,7 +5092,7 @@ impl ConsensusEngine {
 
         let finalized = self.get_finalized_transactions_with_fees_for_block();
         let (finalized_txs, fees): (Vec<_>, Vec<_>) = finalized.into_iter().unzip();
-        let masternodes = self.get_active_masternodes();
+        let masternodes = self.get_masternodes_with_rewards();
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
@@ -5109,15 +5120,12 @@ impl ConsensusEngine {
         let previous_hash = [0u8; 32];
         let base_reward = 100;
 
-        // Convert to format expected by generator
-        let masternodes: Vec<Masternode> = eligible.iter().map(|(mn, _addr)| mn.clone()).collect();
-
         DeterministicBlockGenerator::generate(
             height,
             previous_hash,
             finalized_txs,
             fees,
-            masternodes,
+            eligible,
             base_reward,
         )
     }
@@ -5127,7 +5135,7 @@ impl ConsensusEngine {
         &self,
         height: u64,
         _timestamp: i64,
-        masternodes: Vec<Masternode>,
+        masternodes: Vec<(Masternode, String)>,
     ) -> Block {
         use crate::block::generator::DeterministicBlockGenerator;
 
