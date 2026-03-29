@@ -2106,14 +2106,20 @@ impl MasternodeRegistry {
                 let key = format!("masternode:{}", address);
                 let _ = self.db.remove(key.as_bytes());
 
-                // Queue collateral unlock
+                // Queue collateral unlock and remove on-chain anchor
                 if let Some(outpoint) = &info.masternode.collateral_outpoint {
                     self.pending_collateral_unlocks
                         .lock()
                         .push(outpoint.clone());
+
+                    // Remove the collateral_anchor so the outpoint can be
+                    // re-registered by a new masternode without being blocked.
+                    let outpoint_str = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+                    let anchor_key = format!("collateral_anchor:{}", outpoint_str);
+                    let _ = self.db.remove(anchor_key.as_bytes());
                 }
 
-                info!("🗑️  Removed masternode {} from registry", address);
+                info!("🗑️  Removed masternode {} from registry (auto-removed after inactivity)", address);
             }
         }
 
