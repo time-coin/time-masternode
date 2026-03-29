@@ -938,6 +938,29 @@ impl Blockchain {
         // - Testnet: December 1, 2025 00:00:00 UTC (1764547200)
         // - Mainnet: April 1, 2026 00:00:00 UTC (1775001600)
         let genesis_timestamp = self.network_type.genesis_timestamp();
+
+        // ── CLOCK GUARD ──────────────────────────────────────────────────────────
+        // Never produce genesis before the official launch time.
+        // If this fires the genesis coordinator in main.rs should have caught it
+        // first, but we enforce the invariant here as a hard stop so no code path
+        // can bypass it (fallback genesis, RPC, tests on mainnet, etc.).
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        if now_secs < genesis_timestamp {
+            let remaining = genesis_timestamp - now_secs;
+            let launch_str = chrono::DateTime::from_timestamp(genesis_timestamp, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| genesis_timestamp.to_string());
+            return Err(format!(
+                "Too early to generate genesis: {remaining}s remaining until launch ({launch_str}). \
+                 The genesis coordinator should be waiting — this is a bug if reached on mainnet."
+            ));
+        }
+        // ── END CLOCK GUARD ──────────────────────────────────────────────────────
+
         tracing::info!(
             "🕐 Using fixed {} genesis timestamp: {} ({})",
             match self.network_type {
@@ -1052,16 +1075,34 @@ impl Blockchain {
                 .collect()
         } else {
             // ── Tier-based mode: proportional by tier weight ──
-            let total_weight: u64 = sorted_for_reward
+            // Paid tiers (Gold/Silver/Bronze) are all included — they each receive
+            // their proportional share. Free tier is capped at MAX_FREE_TIER_RECIPIENTS
+            // to mirror regular block production (where Free nodes share a single pool
+            // split among ≤25 nodes).
+            let free_cap = constants::blockchain::MAX_FREE_TIER_RECIPIENTS;
+            let mut participants: Vec<_> = sorted_for_reward
+                .iter()
+                .filter(|info| info.masternode.tier != MasternodeTier::Free)
+                .collect();
+            let free_participants: Vec<_> = sorted_for_reward
+                .iter()
+                .filter(|info| info.masternode.tier == MasternodeTier::Free)
+                .take(free_cap)
+                .collect();
+            participants.extend(free_participants.iter().copied());
+            // Re-sort by address for determinism
+            participants.sort_by(|a, b| a.masternode.address.cmp(&b.masternode.address));
+
+            let total_weight: u64 = participants
                 .iter()
                 .map(|info| info.masternode.tier.reward_weight())
                 .sum();
             let mut distributed = 0u64;
-            sorted_for_reward
+            participants
                 .iter()
                 .enumerate()
                 .map(|(i, info)| {
-                    let share = if i == sorted_for_reward.len() - 1 {
+                    let share = if i == participants.len() - 1 {
                         GENESIS_REWARD - distributed
                     } else {
                         (GENESIS_REWARD * info.masternode.tier.reward_weight()) / total_weight

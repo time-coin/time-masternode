@@ -1700,6 +1700,46 @@ async fn main() {
             if !blockchain_init.has_genesis() {
                 tracing::info!("🌱 No genesis on network - initiating dynamic generation");
 
+                // ── LAUNCH-TIME CLOCK GUARD ───────────────────────────────────────────
+                // Block here until the official launch time is reached before attempting
+                // genesis generation.  generate_dynamic_genesis() has its own hard stop
+                // too, but this outer wait avoids spamming error logs and lets nodes
+                // synchronise naturally at the moment of launch.
+                {
+                    let launch_ts = blockchain_init.genesis_timestamp();
+                    loop {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs() as i64;
+                        if now >= launch_ts {
+                            break;
+                        }
+                        // Check if a peer already delivered genesis while we were waiting
+                        if blockchain_init.has_genesis() {
+                            tracing::info!("✅ Genesis block received from network before launch time");
+                            break;
+                        }
+                        let remaining = launch_ts - now;
+                        let launch_str = chrono::DateTime::from_timestamp(launch_ts, 0)
+                            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                            .unwrap_or_else(|| launch_ts.to_string());
+                        tracing::info!(
+                            "⏰ Waiting for launch time: {}s remaining until {} ...",
+                            remaining,
+                            launch_str
+                        );
+                        // Sleep in 60s increments so we log progress each minute
+                        let sleep_secs = remaining.min(60) as u64;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(sleep_secs)).await;
+                    }
+                }
+
+                // If genesis arrived from the network during the wait, skip generation
+                if blockchain_init.has_genesis() {
+                    // fall through — the code below already handles this case
+                } else {
+
                 // Wait for masternodes to discover each other with exponential backoff
                 // Start with 30s, then 60s, then 90s - total 180s max wait
                 const DISCOVERY_ROUNDS: u32 = 3;
@@ -1846,6 +1886,7 @@ async fn main() {
                         }
                     }
                 }
+                } // end else (launch time reached, generate locally)
             }
         } else {
             tracing::info!(
