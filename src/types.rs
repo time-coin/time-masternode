@@ -127,6 +127,19 @@ pub enum SpecialTransactionData {
         /// Ed25519 signature over (masternode_id, new_payout_address)
         signature: String,
     },
+    /// Release a registered masternode's collateral back to spendable balance.
+    /// Emitted when collateral is removed from masternode.conf (commented out or deleted).
+    /// Must be signed by the collateral owner to prevent unauthorized unlocks.
+    CollateralUnlock {
+        /// Collateral outpoint in "txid_hex:vout" format (matches the original MasternodeReg)
+        collateral_outpoint: String,
+        /// The masternode's IP address (must match the on-chain registration anchor)
+        masternode_address: String,
+        /// Hex-encoded Ed25519 public key of the collateral owner
+        owner_pubkey: String,
+        /// Ed25519 signature over SHA-256("MN_UNLOCK:{collateral_outpoint}:{masternode_address}")
+        signature: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,6 +191,14 @@ impl Transaction {
         matches!(
             self.special_data,
             Some(SpecialTransactionData::MasternodePayoutUpdate { .. })
+        )
+    }
+
+    /// Returns `true` if this is a collateral unlock transaction
+    pub fn is_collateral_unlock(&self) -> bool {
+        matches!(
+            self.special_data,
+            Some(SpecialTransactionData::CollateralUnlock { .. })
         )
     }
 

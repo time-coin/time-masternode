@@ -5403,6 +5403,55 @@ impl Blockchain {
                     }
                 }
 
+                SpecialTransactionData::CollateralUnlock {
+                    collateral_outpoint,
+                    masternode_address,
+                    owner_pubkey,
+                    signature,
+                } => {
+                    match self
+                        .masternode_registry
+                        .validate_collateral_unlock(
+                            collateral_outpoint,
+                            masternode_address,
+                            owner_pubkey,
+                            signature,
+                        )
+                        .await
+                    {
+                        Ok(outpoint) => {
+                            if let Err(e) = self
+                                .masternode_registry
+                                .apply_collateral_unlock(
+                                    outpoint,
+                                    masternode_address,
+                                    &self.utxo_manager,
+                                )
+                                .await
+                            {
+                                tracing::warn!(
+                                    "⚠️ Failed to apply CollateralUnlock tx {}: {}",
+                                    &txid_hex[..16],
+                                    e
+                                );
+                            } else {
+                                tracing::info!(
+                                    "✅ CollateralUnlock applied: {} (tx {})",
+                                    masternode_address,
+                                    &txid_hex[..16]
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "⚠️ Invalid CollateralUnlock tx {}: {}",
+                                &txid_hex[..16],
+                                e
+                            );
+                        }
+                    }
+                }
+
                 SpecialTransactionData::MasternodePayoutUpdate {
                     masternode_id,
                     new_payout_address,

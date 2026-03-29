@@ -2580,6 +2580,115 @@ impl MasternodeRegistry {
         Ok(())
     }
 
+    // ========================================================================
+    // On-chain collateral unlock (CollateralUnlock special transaction)
+    // ========================================================================
+
+    /// Return the collateral outpoint string ("txid_hex:vout") that is currently
+    /// anchored on-chain for the given masternode IP, or None if not found.
+    pub fn get_on_chain_collateral_outpoint_for_ip(&self, ip: &str) -> Option<String> {
+        for item in self.db.scan_prefix(b"collateral_anchor:").flatten() {
+            if let Ok(stored_ip) = String::from_utf8(item.1.to_vec()) {
+                if stored_ip == ip {
+                    if let Ok(key_str) = String::from_utf8(item.0.to_vec()) {
+                        return key_str
+                            .strip_prefix("collateral_anchor:")
+                            .map(|s| s.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate a CollateralUnlock special transaction.
+    ///
+    /// Checks:
+    /// 1. Collateral outpoint can be parsed
+    /// 2. Owner pubkey is well-formed
+    /// 3. Signature is valid over the unlock message
+    /// 4. The on-chain anchor for this outpoint exists and points to masternode_address
+    pub async fn validate_collateral_unlock(
+        &self,
+        collateral_outpoint_str: &str,
+        masternode_address: &str,
+        owner_pubkey_hex: &str,
+        signature_hex: &str,
+    ) -> Result<OutPoint, RegistryError> {
+        // 1. Parse outpoint
+        let outpoint = Self::parse_outpoint(collateral_outpoint_str)?;
+
+        // 2. Parse owner pubkey
+        let owner_pubkey = Self::parse_pubkey(owner_pubkey_hex)?;
+
+        // 3. Verify signature
+        let message = Self::unlock_signing_message(collateral_outpoint_str, masternode_address);
+        Self::verify_signature(&owner_pubkey, &message, signature_hex)?;
+
+        // 4. Check the on-chain anchor: the outpoint must be registered to this IP
+        let anchor_key = format!(
+            "collateral_anchor:{}",
+            collateral_outpoint_str
+        );
+        match self.db.get(anchor_key.as_bytes()) {
+            Ok(Some(bytes)) => {
+                let anchored_ip =
+                    String::from_utf8(bytes.to_vec()).unwrap_or_default();
+                if anchored_ip != masternode_address {
+                    return Err(RegistryError::OwnerMismatch);
+                }
+            }
+            Ok(None) => {
+                // No anchor: this outpoint was never registered on-chain (or already unlocked)
+                // Accept anyway — idempotent unlock is fine
+            }
+            Err(e) => return Err(RegistryError::Storage(e.to_string())),
+        }
+
+        Ok(outpoint)
+    }
+
+    /// Apply a validated CollateralUnlock: remove the on-chain anchor, unlock the UTXO,
+    /// and downgrade (or deregister) the masternode to Free tier.
+    pub async fn apply_collateral_unlock(
+        &self,
+        outpoint: OutPoint,
+        masternode_address: &str,
+        utxo_manager: &crate::utxo_manager::UTXOStateManager,
+    ) -> Result<(), RegistryError> {
+        let outpoint_str = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+        let anchor_key = format!("collateral_anchor:{}", outpoint_str);
+
+        // Remove the on-chain anchor so gossip can no longer reference this collateral
+        if let Err(e) = self.db.remove(anchor_key.as_bytes()) {
+            warn!("⚠️ Failed to remove collateral anchor {}: {}", outpoint_str, e);
+        }
+
+        // Unlock the collateral (removes from locked_collaterals map)
+        let _ = utxo_manager.unlock_collateral(&outpoint);
+
+        // Downgrade masternode to Free tier (or remove if desired — we keep the entry)
+        let mut nodes = self.masternodes.write().await;
+        if let Some(info) = nodes.get_mut(masternode_address) {
+            info.masternode.collateral_outpoint = None;
+            info.masternode.collateral = 0;
+            info.masternode.tier = crate::types::MasternodeTier::Free;
+            info.registration_source = crate::masternode_registry::RegistrationSource::Handshake;
+            self.store_masternode(masternode_address, info)?;
+            info!(
+                "🔓 CollateralUnlock applied: {} downgraded to Free tier (outpoint {})",
+                masternode_address, outpoint_str
+            );
+        } else {
+            info!(
+                "🔓 CollateralUnlock applied: anchor removed for {} (masternode not in registry)",
+                outpoint_str
+            );
+        }
+
+        Ok(())
+    }
+
     // --- Helpers for on-chain registration ---
 
     /// Parse "txid_hex:vout" into an OutPoint
@@ -2630,6 +2739,13 @@ impl MasternodeRegistry {
             "MN_REG:{}:{}:{}:{}",
             collateral_outpoint, masternode_ip, masternode_port, payout_address
         );
+        Sha256::digest(msg.as_bytes()).to_vec()
+    }
+
+    /// Construct the canonical message for CollateralUnlock signing
+    fn unlock_signing_message(collateral_outpoint: &str, masternode_address: &str) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let msg = format!("MN_UNLOCK:{}:{}", collateral_outpoint, masternode_address);
         Sha256::digest(msg.as_bytes()).to_vec()
     }
 

@@ -1442,6 +1442,136 @@ async fn main() {
             }
         });
         shutdown_manager.register_task(announcement_handle);
+
+        // ── On-chain collateral auto-sync ────────────────────────────────────────
+        // After sync completes, compare masternode.conf collateral with the on-chain
+        // anchor for this IP.  Submit MasternodeReg / CollateralUnlock transactions
+        // as needed so the chain always reflects the current conf state.
+        // Run for all tiers so that a downgrade (paid → Free) also triggers unlock.
+        {
+            let collateral_sync_blockchain = blockchain.clone();
+            let collateral_sync_consensus = consensus_engine.clone();
+            let collateral_sync_registry = registry.clone();
+            let collateral_sync_shutdown = shutdown_token.clone();
+            let mn_for_sync = mn.clone();
+            let wallet_key_for_sync = wallet.signing_key().clone();
+            let p2p_port_for_sync = network_type.default_p2p_port();
+
+            tokio::spawn(async move {
+                // Wait until fully synced before touching the mempool
+                loop {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    if collateral_sync_shutdown.is_cancelled() {
+                        return;
+                    }
+                    if !collateral_sync_blockchain.is_syncing() {
+                        break;
+                    }
+                    tracing::debug!("⏸️ Deferring collateral sync (still syncing)");
+                }
+                // Small extra delay so any block-processing finishes
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                if collateral_sync_shutdown.is_cancelled() {
+                    return;
+                }
+
+                let ip = &mn_for_sync.address;
+
+                // What outpoint is the conf currently advertising?
+                let conf_outpoint: Option<String> =
+                    mn_for_sync.collateral_outpoint.as_ref().map(|op| {
+                        format!("{}:{}", hex::encode(op.txid), op.vout)
+                    });
+
+                // What outpoint does the chain anchor say is registered for this IP?
+                let on_chain_outpoint =
+                    collateral_sync_registry.get_on_chain_collateral_outpoint_for_ip(ip);
+
+                tracing::info!(
+                    "🔗 Collateral sync: on-chain={:?}, conf={:?}",
+                    on_chain_outpoint,
+                    conf_outpoint
+                );
+
+                if on_chain_outpoint == conf_outpoint && conf_outpoint.is_some() {
+                    tracing::info!(
+                        "✓ Collateral already registered on-chain: {}",
+                        conf_outpoint.as_deref().unwrap_or("-")
+                    );
+                    return;
+                }
+
+                // Unlock the old on-chain collateral if it differs from conf
+                if let Some(ref old_outpoint_str) = on_chain_outpoint {
+                    if on_chain_outpoint != conf_outpoint {
+                        tracing::info!(
+                            "📤 Submitting CollateralUnlock for old collateral {}",
+                            old_outpoint_str
+                        );
+                        if let Some(unlock_tx) = build_collateral_unlock_tx(
+                            old_outpoint_str,
+                            ip,
+                            &wallet_key_for_sync,
+                        ) {
+                            match collateral_sync_consensus
+                                .submit_transaction(unlock_tx)
+                                .await
+                            {
+                                Ok(txid) => tracing::info!(
+                                    "✅ CollateralUnlock submitted: {} (tx {})",
+                                    old_outpoint_str,
+                                    hex::encode(txid)
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "⚠️ CollateralUnlock submission failed: {}",
+                                    e
+                                ),
+                            }
+                        }
+                    }
+                }
+
+                // Register the new collateral if conf has one (only for paid tiers)
+                if let Some(ref new_outpoint_str) = conf_outpoint {
+                    if on_chain_outpoint.as_deref() != Some(new_outpoint_str.as_str())
+                        && mn_for_sync.tier != types::MasternodeTier::Free {
+                        tracing::info!(
+                            "📤 Submitting MasternodeReg for collateral {}",
+                            new_outpoint_str
+                        );
+                        if let Some(reg_tx) = build_masternode_reg_tx(
+                            &mn_for_sync,
+                            &wallet_key_for_sync,
+                            p2p_port_for_sync,
+                        ) {
+                            match collateral_sync_consensus
+                                .submit_transaction(reg_tx)
+                                .await
+                            {
+                                Ok(txid) => tracing::info!(
+                                    "✅ MasternodeReg submitted: {} (tx {})",
+                                    new_outpoint_str,
+                                    hex::encode(txid)
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "⚠️ MasternodeReg submission failed: {}",
+                                    e
+                                ),
+                            }
+                        }
+                    }
+                }
+
+                // Handle the "collateral commented out" case: on-chain anchor exists
+                // but conf has no collateral → already handled by the unlock above
+                if on_chain_outpoint.is_some() && conf_outpoint.is_none() {
+                    tracing::info!(
+                        "ℹ️  Collateral removed from conf — CollateralUnlock submitted above"
+                    );
+                }
+            });
+        }
+        // ── End on-chain collateral auto-sync ────────────────────────────────────
     } else {
         // Non-masternode node: still rebuild collateral locks for known peers
         let all_masternodes = registry.list_all().await;
@@ -4370,6 +4500,85 @@ async fn main() {
             println!("\n✓ Core components initialized successfully!");
         }
     }
+}
+
+/// Build a MasternodeReg special transaction for the local masternode.
+/// Returns `None` if the masternode has no collateral outpoint (Free tier).
+fn build_masternode_reg_tx(
+    mn: &types::Masternode,
+    wallet_key: &ed25519_dalek::SigningKey,
+    p2p_port: u16,
+) -> Option<types::Transaction> {
+    use ed25519_dalek::Signer;
+
+    let outpoint = mn.collateral_outpoint.as_ref()?;
+    let outpoint_str = format!("{}:{}", hex::encode(outpoint.txid), outpoint.vout);
+    let owner_pubkey = wallet_key.verifying_key();
+    let owner_pubkey_hex = hex::encode(owner_pubkey.as_bytes());
+
+    let message = {
+        use sha2::{Digest, Sha256};
+        let msg = format!(
+            "MN_REG:{}:{}:{}:{}",
+            outpoint_str, mn.address, p2p_port, mn.wallet_address
+        );
+        Sha256::digest(msg.as_bytes()).to_vec()
+    };
+    let signature = wallet_key.sign(&message);
+    let signature_hex = hex::encode(signature.to_bytes());
+
+    Some(types::Transaction {
+        version: 1,
+        inputs: vec![],
+        outputs: vec![],
+        lock_time: 0,
+        timestamp: chrono::Utc::now().timestamp(),
+        special_data: Some(types::SpecialTransactionData::MasternodeReg {
+            collateral_outpoint: outpoint_str,
+            masternode_ip: mn.address.clone(),
+            masternode_port: p2p_port,
+            payout_address: mn.wallet_address.clone(),
+            owner_pubkey: owner_pubkey_hex,
+            signature: signature_hex,
+        }),
+        encrypted_memo: None,
+    })
+}
+
+/// Build a CollateralUnlock special transaction to release a previously registered collateral.
+/// `collateral_outpoint_str` is "txid_hex:vout".
+fn build_collateral_unlock_tx(
+    collateral_outpoint_str: &str,
+    masternode_address: &str,
+    wallet_key: &ed25519_dalek::SigningKey,
+) -> Option<types::Transaction> {
+    use ed25519_dalek::Signer;
+
+    let owner_pubkey = wallet_key.verifying_key();
+    let owner_pubkey_hex = hex::encode(owner_pubkey.as_bytes());
+
+    let message = {
+        use sha2::{Digest, Sha256};
+        let msg = format!("MN_UNLOCK:{}:{}", collateral_outpoint_str, masternode_address);
+        Sha256::digest(msg.as_bytes()).to_vec()
+    };
+    let signature = wallet_key.sign(&message);
+    let signature_hex = hex::encode(signature.to_bytes());
+
+    Some(types::Transaction {
+        version: 1,
+        inputs: vec![],
+        outputs: vec![],
+        lock_time: 0,
+        timestamp: chrono::Utc::now().timestamp(),
+        special_data: Some(types::SpecialTransactionData::CollateralUnlock {
+            collateral_outpoint: collateral_outpoint_str.to_string(),
+            masternode_address: masternode_address.to_string(),
+            owner_pubkey: owner_pubkey_hex,
+            signature: signature_hex,
+        }),
+        encrypted_memo: None,
+    })
 }
 
 fn setup_logging(
