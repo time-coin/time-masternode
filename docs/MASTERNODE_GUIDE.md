@@ -526,35 +526,46 @@ cp ~/.timecoin/testnet/wallet.dat ~/wallet-testnet-backup-$(date +%Y%m%d).dat
 
 ---
 
-### Recovery if you no longer have the wallet file
+### Recovery if the masternode is deleted without deregistering
 
-If you have deleted the masternode and lost the wallet file, the `CollateralUnlock`
-transaction path is unavailable — it requires a signature from the private key
-that controls the collateral UTXO.
+The collateral UTXO is **never locked at the blockchain protocol level**. The
+lock is application-layer tracking inside the daemon, not an on-chain script
+constraint. This means the coins are always accessible from the wallet that
+holds the private key.
 
-**Your recovery options:**
+In the typical setup, collateral was sent from a separate GUI wallet (not the
+server). That wallet always retains full control of the funds — no action on
+the masternode server is required to spend them.
 
-| Situation | Action |
-|-----------|--------|
-| You have the wallet file | Restore it, restart daemon — auto-unlock happens on startup |
-| You have any backup of the private key | Import into any Ed25519-compatible wallet tool and sign a CollateralUnlock manually |
-| You can spend the collateral UTXO | Spend it in any transaction — the masternode is auto-deregistered within 3 blocks |
-| No wallet backup at all | The collateral coins are unrecoverable (same as losing any private key in any blockchain) |
+**What happens automatically after deletion:**
 
-**Spending the UTXO as a release mechanism:**
+| Time after node goes offline | What happens |
+|------------------------------|-------------|
+| 5 minutes | Gossip reports expire — node becomes inactive |
+| 1 hour | Registry auto-removes the node, releases the application-level lock, removes the on-chain anchor |
 
-If the collateral UTXO is spent on-chain (sent to any address), the daemon
-detects the missing UTXO within 3 blocks and automatically deregisters the
-masternode. You do not need to submit a CollateralUnlock transaction in this case.
-The coins go to the destination address you specified in the spending transaction.
+After 1 hour the masternode is fully cleaned up from the network's registry.
+The collateral UTXO is returned to spendable status in any daemon that was
+tracking it.
+
+**Spending the collateral immediately (no waiting):**
+
+Since the coins are controlled by the originating wallet, you can spend them
+at any time from that wallet. If the daemon on the sending wallet shows the
+UTXO as locked, use:
 
 ```bash
-# Spend the collateral to your reward address to reclaim it
-time-cli sendtoaddress TIME1YourRewardAddress <collateral_amount>
+time-cli unlockorphanedutxos
 ```
 
-Note: the collateral UTXO must not be currently locked. If it shows as locked
-in your wallet, use `time-cli unlockorphanedutxos` first.
+Then send normally. The masternode on the network will be auto-deregistered
+within 3 blocks once the UTXO disappears from the chain.
+
+**If you want to re-use the same server IP with new collateral:**
+Wait for the 1-hour auto-remove to clear the old anchor, or restart the
+daemon with the new collateral in `masternode.conf` — the startup sync will
+submit a `CollateralUnlock` for the old outpoint and `MasternodeReg` for
+the new one.
 
 ---
 
