@@ -465,31 +465,96 @@ time-cli listlockedcollaterals
 
 ---
 
-## Deregistering Your Masternode
+## Deregistering and Unlocking Collateral
 
-To stop your masternode and unlock collateral, edit `time.conf`:
+### Normal case — you have the same node and wallet
+
+Edit `masternode.conf` and comment out the collateral line:
 
 ```
-masternode=0
+# MN1 abc123...txid 0
 ```
 
 Then restart the daemon:
+
 ```bash
 sudo systemctl restart timed
 ```
 
-Your collateral is now unlocked and spendable.
+The daemon detects that the collateral is gone from the conf and automatically
+submits a **CollateralUnlock** transaction to the blockchain. Once that transaction
+is confirmed (next block), your collateral UTXO is freed from the masternode
+registry and can be spent normally.
 
 **⚠️ Warning:** Deregistering stops your masternode and ends reward eligibility.
+
+---
 
 ### Changing Tiers
 
 To upgrade or downgrade your tier:
 
-1. Set `masternode=0` in time.conf and restart (unlocks current collateral)
-2. Create a new collateral UTXO for the new tier amount
-3. Update `masternode.conf` with the new txid and vout
-4. Set `masternode=1` and restart (tier auto-detects from new collateral amount)
+1. Update `masternode.conf` with the new txid and vout (replace the old line)
+2. Restart the daemon
+
+The daemon will automatically:
+- Submit a **CollateralUnlock** for the old collateral
+- Submit a **MasternodeReg** for the new collateral
+
+Tier is auto-detected from the new collateral amount (Bronze = 1 000 TIME,
+Silver = 10 000 TIME, Gold = 100 000 TIME).
+
+---
+
+### Wallet backup is required for collateral recovery
+
+The **CollateralUnlock** transaction is signed by the **wallet private key** that
+owns the collateral UTXO. The key requirement is the **wallet file**, not the
+specific machine. If you reinstall the daemon on a new server:
+
+1. **Restore your wallet backup** to `~/.timecoin/wallet.dat` before starting
+2. The daemon will detect the existing on-chain anchor and submit the appropriate
+   CollateralUnlock or MasternodeReg transactions automatically on startup
+
+**Always back up your wallet file:**
+
+```bash
+cp ~/.timecoin/wallet.dat ~/wallet-backup-$(date +%Y%m%d).dat
+# Or for testnet:
+cp ~/.timecoin/testnet/wallet.dat ~/wallet-testnet-backup-$(date +%Y%m%d).dat
+```
+
+---
+
+### Recovery if you no longer have the wallet file
+
+If you have deleted the masternode and lost the wallet file, the `CollateralUnlock`
+transaction path is unavailable — it requires a signature from the private key
+that controls the collateral UTXO.
+
+**Your recovery options:**
+
+| Situation | Action |
+|-----------|--------|
+| You have the wallet file | Restore it, restart daemon — auto-unlock happens on startup |
+| You have any backup of the private key | Import into any Ed25519-compatible wallet tool and sign a CollateralUnlock manually |
+| You can spend the collateral UTXO | Spend it in any transaction — the masternode is auto-deregistered within 3 blocks |
+| No wallet backup at all | The collateral coins are unrecoverable (same as losing any private key in any blockchain) |
+
+**Spending the UTXO as a release mechanism:**
+
+If the collateral UTXO is spent on-chain (sent to any address), the daemon
+detects the missing UTXO within 3 blocks and automatically deregisters the
+masternode. You do not need to submit a CollateralUnlock transaction in this case.
+The coins go to the destination address you specified in the spending transaction.
+
+```bash
+# Spend the collateral to your reward address to reclaim it
+time-cli sendtoaddress TIME1YourRewardAddress <collateral_amount>
+```
+
+Note: the collateral UTXO must not be currently locked. If it shows as locked
+in your wallet, use `time-cli unlockorphanedutxos` first.
 
 ---
 
@@ -941,7 +1006,7 @@ masternodeprivkey=<base58check_key>
 
 **masternode.conf:**
 ```
-mn1 <ip>:24100 <collateral_txid> <collateral_vout>
+mn1 <collateral_txid> <collateral_vout>
 ```
 
 ### Collateral Requirements

@@ -425,8 +425,9 @@ Staked tiers earn higher rewards and gain governance voting rights.
 
 4. **Add collateral info** to `masternode.conf` (same directory as `time.conf`):
    ```
-   mn1 <your_public_ip>:24100 <txid> <vout>
+   mn1 <txid> <vout>
    ```
+   The node's public IP is read from `externalip=` in `time.conf` — do not include it here.
 
 5. **Add the key to `time.conf`** (if you generated one):
    ```ini

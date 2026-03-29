@@ -852,6 +852,22 @@ impl MasternodeRegistry {
             .map_err(|e| RegistryError::Storage(e.to_string()))?;
 
         let removed = nodes.remove(address);
+
+        // Also remove the collateral_anchor entry for this masternode's outpoint.
+        // This allows the IP to re-register with new collateral after deregistration
+        // (e.g. after a collateral UTXO was spent and the masternode auto-deregistered).
+        if let Some(ref info) = removed {
+            if let Some(ref op) = info.masternode.collateral_outpoint {
+                let outpoint_str = format!("{}:{}", hex::encode(op.txid), op.vout);
+                let anchor_key = format!("collateral_anchor:{}", outpoint_str);
+                let _ = self.db.remove(anchor_key.as_bytes());
+                debug!(
+                    "🔓 Removed collateral anchor {} on masternode deregistration",
+                    outpoint_str
+                );
+            }
+        }
+
         Ok(removed)
     }
 
