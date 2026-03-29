@@ -14,24 +14,36 @@ use timed::http_client::HttpClient;
 Commands:
   Blockchain
     getblockchaininfo      Get blockchain information
-    getblock               Get information about a specific block
+    getblock               Get block by height or hash
     getblockcount          Get the current block count
     getbestblockhash       Get the hash of the best (tip) block
     getblockhash           Get block hash at a given height
+    getblockheader         Get block header by height or hash
     gettxoutsetinfo        Get information about the UTXO set
   Network
     getnetworkinfo         Get network information
     getpeerinfo            Get peer information
   Wallet
-    getbalance             Get wallet balance
+    getbalance             Get wallet balance [address]
     getwalletinfo          Get wallet information
-    getnewaddress          Get a new receiving address
-    listreceivedbyaddress  List addresses with balances
+    getnewaddress          Get this node's reward address
+    getaddressinfo         Get info about an address (ismine, pubkey, etc.)
+    getaddresspubkey       Get the public key for an address
+    listreceivedbyaddress  List addresses with received balances
     listunspent            List unspent transaction outputs
+    listunspentmulti       List unspent UTXOs across multiple addresses
     listtransactions       List recent wallet transactions
     sendtoaddress          Send TIME to an address
     sendfrom               Send TIME from a specific address
     mergeutxos             Merge UTXOs to reduce UTXO set size
+  Payment Requests
+    requestpayment         Create a payment request
+    payrequest             Pay a payment request
+    sendpaymentrequest     Send a payment request to a peer
+    getpaymentrequests     List payment requests for an address
+    respondpaymentrequest  Respond to a payment request
+    cancelpaymentrequest   Cancel a payment request
+    markpaymentrequestviewed  Mark a payment request as viewed
   Transaction
     gettransaction         Get information about a transaction
     getrawtransaction      Get raw transaction data
@@ -39,9 +51,19 @@ Commands:
     decoderawtransaction   Decode a raw transaction
     sendrawtransaction     Send a raw transaction
   Masternode
-    masternodelist         Get masternode information
-    masternodestatus       Get masternode status
-    listlockedcollaterals  List all locked collaterals
+    masternodelist         List all masternodes
+    masternodestatus       Get this node's masternode status
+    masternode genkey      Generate a new masternode key
+    masternode list        List masternodes (alias)
+    masternode status      Get masternode status (alias)
+    listlockedcollaterals  List all locked collateral UTXOs
+  UTXO / Collateral
+    listlockedutxos        List all locked UTXOs
+    unlockutxo             Unlock a specific UTXO (txid vout)
+    unlockorphanedutxos    Unlock UTXOs locked by non-existent transactions
+    forceunlockall         Force-unlock ALL UTXOs (recovery only)
+    clearstuktransactions  Clear stuck/pending transactions
+    cleanuplockedutxos     Clean up stale UTXO locks
   Mempool
     getmempoolinfo         Get memory pool information
     getrawmempool          Get raw memory pool
@@ -51,7 +73,7 @@ Commands:
   Treasury
     gettreasurybalance     Get on-chain treasury balance
   Utility
-    validateaddress        Validate an address
+    validateaddress        Validate a TIME address
     stop                   Stop the daemon
     uptime                 Get daemon uptime
     getinfo                Get general node information
