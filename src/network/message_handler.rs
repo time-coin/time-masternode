@@ -4,6 +4,7 @@
 //! that works regardless of connection direction. Previously, message handling
 //! was duplicated between server.rs (inbound) and peer_connection.rs (outbound).
 
+use crate::address::Address;
 use crate::block::types::calculate_merkle_root;
 use crate::block::types::Block;
 use crate::blockchain::Blockchain;
@@ -2700,38 +2701,83 @@ impl MessageHandler {
                             let existing = utxo_manager.get_locked_collateral(&outpoint);
                             if let Some(ref info) = existing {
                                 if info.masternode_address != peer_ip {
-                                    // Rate-limit warn to once per 10 minutes per peer to avoid spam
-                                    static THEFT_WARN_TIMES: std::sync::OnceLock<
-                                        dashmap::DashMap<String, std::time::Instant>,
-                                    > = std::sync::OnceLock::new();
-                                    let warn_map = THEFT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
-                                    let should_warn = warn_map
-                                        .get(&peer_ip)
-                                        .map(|t| t.elapsed().as_secs() >= 600)
-                                        .unwrap_or(true);
-                                    if should_warn {
-                                        warn_map.insert(peer_ip.clone(), std::time::Instant::now());
+                                    // Conflict: two different IPs claim the same collateral.
+                                    // Arbitrate by on-chain ownership: derive the TIME address
+                                    // from the incoming peer's public key and compare it to
+                                    // the UTXO's recorded address. The one that matches the
+                                    // UTXO is the legitimate owner; the other is the attacker.
+                                    let network = context.blockchain.network_type();
+                                    let peer_time_addr = Address::from_public_key(
+                                        public_key.as_bytes(),
+                                        network,
+                                    )
+                                    .as_string();
+
+                                    if peer_time_addr == utxo.address {
+                                        // Incoming peer owns the UTXO on-chain — the current
+                                        // lock holder is a squatter.  Evict them and allow
+                                        // the legitimate owner through.
+                                        let squatter_ip = info.masternode_address.clone();
                                         warn!(
-                                            "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim collateral {} already locked by {}",
-                                            self.direction, peer_ip, outpoint,
-                                            info.masternode_address
+                                            "🔁 [{}] Evicting squatter {} — legitimate owner {} \
+                                             reclaiming collateral {} (on-chain address: {})",
+                                            self.direction, squatter_ip, peer_ip,
+                                            outpoint, utxo.address
                                         );
-                                    }
-                                    // Ban the offending peer for 24h
-                                    if let Some(blacklist) = &context.blacklist {
-                                        if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>() {
-                                            let mut bl = blacklist.write().await;
-                                            bl.add_temp_ban(
-                                                ip,
-                                                std::time::Duration::from_secs(86400),
-                                                &format!(
-                                                    "Collateral theft attempt: tried to claim {} owned by {}",
-                                                    outpoint, info.masternode_address
-                                                ),
+                                        if let Some(blacklist) = &context.blacklist {
+                                            let squatter_bare = squatter_ip
+                                                .split(':')
+                                                .next()
+                                                .unwrap_or(&squatter_ip);
+                                            if let Ok(ip) = squatter_bare.parse::<std::net::IpAddr>() {
+                                                let mut bl = blacklist.write().await;
+                                                bl.add_temp_ban(
+                                                    ip,
+                                                    std::time::Duration::from_secs(86400),
+                                                    &format!(
+                                                        "Collateral squatting: falsely claimed {} owned by {}",
+                                                        outpoint, peer_ip
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        // Unlock so the legitimate owner can re-lock below
+                                        let _ = utxo_manager.unlock_collateral(&outpoint);
+                                    } else {
+                                        // Incoming peer does NOT own the UTXO — they are
+                                        // the attacker.
+                                        static THEFT_WARN_TIMES: std::sync::OnceLock<
+                                            dashmap::DashMap<String, std::time::Instant>,
+                                        > = std::sync::OnceLock::new();
+                                        let warn_map = THEFT_WARN_TIMES.get_or_init(dashmap::DashMap::new);
+                                        let should_warn = warn_map
+                                            .get(&peer_ip)
+                                            .map(|t| t.elapsed().as_secs() >= 600)
+                                            .unwrap_or(true);
+                                        if should_warn {
+                                            warn_map.insert(peer_ip.clone(), std::time::Instant::now());
+                                            warn!(
+                                                "🚨 [{}] COLLATERAL THEFT ATTEMPT: {} tried to claim \
+                                                 collateral {} owned by {} (on-chain: {})",
+                                                self.direction, peer_ip, outpoint,
+                                                info.masternode_address, utxo.address
                                             );
                                         }
+                                        if let Some(blacklist) = &context.blacklist {
+                                            if let Ok(ip) = peer_ip.parse::<std::net::IpAddr>() {
+                                                let mut bl = blacklist.write().await;
+                                                bl.add_temp_ban(
+                                                    ip,
+                                                    std::time::Duration::from_secs(86400),
+                                                    &format!(
+                                                        "Collateral theft attempt: tried to claim {} owned by {}",
+                                                        outpoint, info.masternode_address
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                        return Ok(None);
                                     }
-                                    return Ok(None);
                                 }
                             }
                         }

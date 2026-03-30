@@ -4793,6 +4793,10 @@ impl Blockchain {
         self.current_height.load(Ordering::Acquire)
     }
 
+    pub fn network_type(&self) -> NetworkType {
+        self.network_type
+    }
+
     /// Check if currently syncing
     pub fn is_syncing(&self) -> bool {
         self.is_syncing.load(Ordering::Acquire)
