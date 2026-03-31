@@ -157,11 +157,19 @@ impl BlockCache {
 
     /// Get the cached block at the given height (if any)
     /// Used for VRF best-proposal comparison
+    ///
+    /// Respects `max_age` expiration — stale peer proposals are ignored.
     pub fn get_by_height(&self, height: u64) -> Option<Block> {
         let cache = self.cache.lock();
+        let now = Instant::now();
         cache
             .iter()
-            .find(|(_, cached)| cached.block.header.height == height)
+            .find(|(_, cached)| {
+                cached.block.header.height == height
+                    && self
+                        .max_age
+                        .map_or(true, |max_age| now.duration_since(cached.cached_at) <= max_age)
+            })
             .map(|(_, cached)| cached.block.clone())
     }
 
@@ -342,6 +350,22 @@ mod tests {
 
         // Should be expired now
         assert!(cache.get(&hash).is_none());
+    }
+
+    #[test]
+    fn test_get_by_height_respects_expiration() {
+        let cache = BlockCache::new_with_expiration(10, Duration::from_millis(50));
+        cache.insert([1u8; 32], create_test_block(42));
+
+        // Should find it immediately
+        assert!(cache.get_by_height(42).is_some());
+
+        // After expiration, get_by_height must return None
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(
+            cache.get_by_height(42).is_none(),
+            "get_by_height must honor max_age — stale peer proposals must not block production"
+        );
     }
 
     #[test]
