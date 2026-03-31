@@ -244,6 +244,7 @@ impl RpcHandler {
             "getproposal" => self.get_proposal(&params_array).await,
             // --- Bitcoin-compatible additions ---
             "getblockheader" => self.get_block_header(&params_array).await,
+            "getpeerblock" => self.get_peer_block(&params_array).await,
             "gettxout" => self.get_txout(&params_array).await,
             "testmempoolaccept" => self.test_mempool_accept(&params_array).await,
             "estimatesmartfee" => self.estimate_smart_fee(&params_array).await,
@@ -5613,6 +5614,84 @@ impl RpcHandler {
             "nTx": block.transactions.len(),
             "difficulty": 1.0,
             "chainwork": format!("{:064x}", height),
+        }))
+    }
+
+    /// `getpeerblock "peer_ip" height`
+    ///
+    /// Fetches a block directly from a connected peer over P2P and returns it.
+    /// Useful for inspecting what genesis (or any block) a peer claims to have
+    /// without needing SSH access to that machine.
+    ///
+    /// # Arguments
+    /// * `peer_ip` — IP address of a currently-connected peer (e.g. "47.82.254.82")
+    /// * `height`  — Block height to fetch (0 = genesis)
+    async fn get_peer_block(&self, params: &[Value]) -> Result<Value, RpcError> {
+        let peer_ip = params
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected peer IP address".to_string(),
+            })?;
+        let height = params
+            .get(1)
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| RpcError {
+                code: -32602,
+                message: "Expected block height (number)".to_string(),
+            })?;
+
+        let registry = self
+            .blockchain
+            .get_peer_registry()
+            .await
+            .ok_or_else(|| RpcError {
+                code: -1,
+                message: "Peer registry not available".to_string(),
+            })?;
+
+        let msg = crate::network::message::NetworkMessage::GetBlocks(height, height);
+        let response = registry
+            .send_and_await_response(peer_ip, msg, 15)
+            .await
+            .map_err(|e| RpcError {
+                code: -1,
+                message: format!("Failed to fetch block from peer {peer_ip}: {e}"),
+            })?;
+
+        let block = match response {
+            crate::network::message::NetworkMessage::BlocksResponse(mut blocks) => blocks
+                .pop()
+                .ok_or_else(|| RpcError {
+                    code: -5,
+                    message: format!("Peer {peer_ip} has no block at height {height}"),
+                })?,
+            crate::network::message::NetworkMessage::BlockResponse(block) => block,
+            other => {
+                return Err(RpcError {
+                    code: -1,
+                    message: format!(
+                        "Unexpected response from peer {peer_ip}: {}",
+                        other.message_type()
+                    ),
+                })
+            }
+        };
+
+        let block_hash = block.hash();
+        Ok(json!({
+            "peer": peer_ip,
+            "height": block.header.height,
+            "hash": hex::encode(block_hash),
+            "previousblockhash": hex::encode(block.header.previous_hash),
+            "time": block.header.timestamp,
+            "merkleroot": hex::encode(block.header.merkle_root),
+            "nTx": block.transactions.len(),
+            "block_reward": block.header.block_reward,
+            "masternode_rewards": block.masternode_rewards.iter().map(|(addr, amount)| {
+                json!({ "address": addr, "amount": amount })
+            }).collect::<Vec<_>>(),
         }))
     }
 
