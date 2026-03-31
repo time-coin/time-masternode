@@ -1971,8 +1971,18 @@ async fn detect_network(prefer_testnet: bool) -> (String, bool) {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().collect();
-    // --testnet flag overrides; otherwise detect from cookie files / time.conf
-    let prefer_testnet = args.iter().any(|a| a == "--testnet") || detect_running_network();
+    // --mainnet or "mainnet" forces mainnet, bypassing auto-detection.
+    // --testnet or "testnet" forces testnet.
+    // Without either flag, auto-detect from cookie files / time.conf (defaults to mainnet).
+    let force_mainnet = args.iter().any(|a| a == "--mainnet" || a == "mainnet");
+    let force_testnet = args.iter().any(|a| a == "--testnet" || a == "testnet");
+    let prefer_testnet = if force_mainnet {
+        false
+    } else if force_testnet {
+        true
+    } else {
+        detect_running_network()
+    };
 
     // Parse command line arguments or auto-detect network
     let (rpc_url, is_testnet) = if let Some(url) = args.iter().find(|a| a.starts_with("http")) {
