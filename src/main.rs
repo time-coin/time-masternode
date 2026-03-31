@@ -3197,8 +3197,10 @@ async fn main() {
                                 next_height,
                             );
                             continue;
-                        } else if existing.header.vrf_score < vrf_score {
-                            // A peer's proposal has a strictly better (lower) VRF score
+                        } else if existing.header.vrf_score < vrf_score && leader_attempt == 0 {
+                            // A peer's proposal has a strictly better (lower) VRF score.
+                            // Only defer on the first attempt — after one timeout window the peer
+                            // has had their chance and failed to produce, so we override.
                             tracing::info!(
                                 "⏭️  Skipping block production for height {}: peer proposal has better VRF score ({} < {})",
                                 next_height,
