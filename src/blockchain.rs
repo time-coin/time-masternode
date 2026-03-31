@@ -6932,18 +6932,27 @@ impl Blockchain {
             // before others connected would capture the full block reward, permanently
             // locking every later node out of their share.  We enforce the same floor
             // here that generate_dynamic_genesis() enforces on production.
+            //
+            // We check BOTH the header tier count AND the actual reward recipients.
+            // The rewards list is the ground-truth participant set — a genesis with
+            // only one reward address is a single-node capture regardless of what
+            // the tier header claims.
             {
                 const MIN_GENESIS_MASTERNODES: u32 = 3;
                 let mn_count = block.header.masternode_tiers.total();
-                if mn_count < MIN_GENESIS_MASTERNODES {
+                let reward_count = block.masternode_rewards.len() as u32;
+                let effective_count = mn_count.min(reward_count);
+                if effective_count < MIN_GENESIS_MASTERNODES {
                     tracing::warn!(
-                        "🛡️ Rejected under-subscribed genesis block ({} masternode(s), need ≥{}): {}",
+                        "🛡️ Rejected under-subscribed genesis block (tier_count={}, reward_recipients={}, need ≥{}): {}",
                         mn_count,
+                        reward_count,
                         MIN_GENESIS_MASTERNODES,
                         hex::encode(&block.hash()[..8])
                     );
                     return Err(format!(
-                        "Genesis block rejected: only {mn_count} masternode(s) participated, \
+                        "Genesis block rejected: only {effective_count} masternode(s) participated \
+                         (tier_count={mn_count}, reward_recipients={reward_count}), \
                          minimum is {MIN_GENESIS_MASTERNODES}. \
                          This block was produced before enough nodes had connected."
                     ));
