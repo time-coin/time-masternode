@@ -6021,10 +6021,10 @@ impl Blockchain {
                 .copied()
                 .unwrap_or(0);
             let total_distributed = producer_received + free_paid;
-            let expected_total = block
-                .header
-                .block_reward
-                .saturating_sub(crate::constants::blockchain::TREASURY_POOL_SATOSHIS);
+            // block.header.block_reward is already net of treasury (= base_reward - treasury_share),
+            // so the all-Free block should distribute exactly block_reward satoshis — no further
+            // treasury deduction.
+            let expected_total = block.header.block_reward;
             let tolerance = MAX_FREE_TIER_RECIPIENTS as u64;
             if total_distributed.abs_diff(expected_total) > tolerance {
                 return Err(format!(
