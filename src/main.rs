@@ -2387,6 +2387,10 @@ async fn main() {
         let mut sync_attempt_count: u32 = 0;
         let mut last_sync_attempt_time = std::time::Instant::now();
 
+        // Rate-limiter for the block-1 integrity check (runs every 60s).
+        let mut last_block1_integrity_check = std::time::Instant::now()
+            - std::time::Duration::from_secs(60); // fire immediately on first iteration
+
         loop {
             tokio::select! {
                 _ = shutdown_token_block.cancelled() => {
@@ -2432,6 +2436,31 @@ async fn main() {
             // Mark start of new block period (only once per period)
             let current_height = block_blockchain.get_height();
             block_registry.update_height(current_height);
+
+            // RUNTIME INTEGRITY CHECK: if our block 1 has <3 unique reward recipients
+            // (produced solo during a bootstrap race) revert to genesis so we can
+            // produce a correct multi-recipient block 1.  Rate-limited to once per 60s.
+            if current_height >= 1
+                && last_block1_integrity_check.elapsed() >= std::time::Duration::from_secs(60)
+            {
+                last_block1_integrity_check = std::time::Instant::now();
+                if let Ok(block1) = block_blockchain.get_block_by_height(1).await {
+                    let unique_recipients: std::collections::HashSet<&str> = block1
+                        .masternode_rewards
+                        .iter()
+                        .map(|(addr, _)| addr.as_str())
+                        .collect();
+                    if unique_recipients.len() < 3 {
+                        tracing::warn!(
+                            "🛡️ [integrity] Block 1 has only {} unique reward recipient(s) \
+                             (need ≥3) — reverting to genesis so a valid block 1 can be produced",
+                            unique_recipients.len()
+                        );
+                        block_blockchain.revert_to_after_genesis().await;
+                        continue;
+                    }
+                }
+            }
 
             // Drain any pending collateral unlocks queued by cleanup tasks
             let unlocked = block_registry.drain_pending_unlocks(&block_utxo_mgr);

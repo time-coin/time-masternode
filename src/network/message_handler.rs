@@ -4230,46 +4230,61 @@ impl MessageHandler {
                         || e.contains("reward_hijack")
                         || e.contains("under-subscribed genesis") =>
                 {
-                    // SECURITY: Peer sent a block with invalid reward distribution
-                    // (e.g. single-payout block 1).  Permanently ban immediately.
-                    error!(
-                        "🚨 [{}] REWARD-HIJACKING BLOCK {} from {} — PERMANENTLY BANNING: {}",
-                        self.direction, block.header.height, self.peer_ip, e
-                    );
-                    if let Some(blacklist) = &context.blacklist {
-                        let bare_ip =
-                            self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
-                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
-                            let mut bl = blacklist.write().await;
-                            bl.add_permanent_ban(
-                                ip,
-                                &format!(
-                                    "Reward-hijacking block {}: {}",
-                                    block.header.height, e
-                                ),
-                            );
-                            error!(
-                                "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
-                                bare_ip
-                            );
+                    // Block 1 specifically: node may have bootstrapped before enough peers
+                    // connected, giving itself a single-payout block 1. This is a reset
+                    // problem, not a deliberate attack — use a soft (non-IP) incompatibility
+                    // mark so the peer can reconnect after resetting, and does not drain
+                    // our quorum pool for block 1 production.
+                    //
+                    // Blocks > 1: the chain is established; single-payout is a clear
+                    // reward-hijacking attempt. Apply a permanent IP ban.
+                    let block_height = block.header.height;
+                    if block_height <= 1 {
+                        warn!(
+                            "🛡️ [{}] Block {} from {} has invalid reward distribution (likely bootstrap race) — soft-marking incompatible: {}",
+                            self.direction, block_height, self.peer_ip, e
+                        );
+                        context
+                            .peer_registry
+                            .mark_incompatible(
+                                &self.peer_ip,
+                                &format!("Bad block {} reward (bootstrap race): {}", block_height, e),
+                                false, // NOT permanent — peer can reconnect after resetting
+                            )
+                            .await;
+                    } else {
+                        // SECURITY: Peer sent a reward-hijacking block on an established chain.
+                        error!(
+                            "🚨 [{}] REWARD-HIJACKING BLOCK {} from {} — PERMANENTLY BANNING: {}",
+                            self.direction, block_height, self.peer_ip, e
+                        );
+                        if let Some(blacklist) = &context.blacklist {
+                            let bare_ip =
+                                self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                            if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                                let mut bl = blacklist.write().await;
+                                bl.add_permanent_ban(
+                                    ip,
+                                    &format!("Reward-hijacking block {}: {}", block_height, e),
+                                );
+                                error!(
+                                    "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
+                                    bare_ip
+                                );
+                            }
                         }
+                        context
+                            .peer_registry
+                            .mark_incompatible(
+                                &self.peer_ip,
+                                &format!("Reward-hijacking block {}: {}", block_height, e),
+                                true, // permanent
+                            )
+                            .await;
                     }
-                    // Mark peer incompatible so sync_from_peers / get_compatible_peers
-                    // stops selecting them even before the next blacklist check.
-                    context
-                        .peer_registry
-                        .mark_incompatible(
-                            &self.peer_ip,
-                            &format!(
-                                "Reward-hijacking block {}: {}",
-                                block.header.height, e
-                            ),
-                            true, // permanent
-                        )
-                        .await;
                     return Err(format!(
-                        "Peer {} permanently banned: sent reward-hijacking block {}",
-                        self.peer_ip, block.header.height
+                        "Peer {} incompatible: sent bad reward-distribution block {}",
+                        self.peer_ip, block_height
                     ));
                 }
                 Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
