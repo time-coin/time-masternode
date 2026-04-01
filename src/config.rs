@@ -100,6 +100,10 @@ pub struct NetworkConfig {
     /// Typically used for trusted masternodes or infrastructure nodes
     #[serde(default)]
     pub whitelisted_peers: Vec<String>,
+    /// When true, ONLY whitelisted peers can connect (all others are rejected).
+    /// Use this to bootstrap a fresh chain with a known set of trusted nodes.
+    #[serde(default)]
+    pub whitelist_only: bool,
 }
 
 impl NetworkConfig {
@@ -570,6 +574,7 @@ impl Config {
                 bootstrap_peers: vec![],
                 blacklisted_peers: vec![],
                 whitelisted_peers: vec![],
+                whitelist_only: false,
             },
             rpc: RpcConfig {
                 enabled: true,
@@ -897,6 +902,9 @@ impl Config {
             }
             if let Some(v) = entries.get("whitelist") {
                 config.network.whitelisted_peers = v.clone();
+            }
+            if let Some(v) = entries.get("whitelistonly") {
+                config.network.whitelist_only = v.last().is_some_and(|s| s == "1");
             }
             if let Some(v) = entries.get("debug") {
                 if let Some(level) = v.last() {

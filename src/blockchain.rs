@@ -859,15 +859,13 @@ impl Blockchain {
                 );
             }
 
-            // REWARD-HIJACK GUARD (blocks above grace period)
-            // Blocks 1–50 are grandfathered (early network bootstrapping allowed
-            // single-payout blocks). Starting at block 51, every block must have
-            // ≥ 3 unique reward recipients.
+            // REWARD-HIJACK GUARD: every block from height 1 upward must have
+            // ≥ 3 unique reward recipients. If any block fails this check the
+            // chain is reverted to genesis so honest blocks can be built from
+            // block 1 onward (fork at block 1).
             if height >= 1 {
                 const MIN_BLOCK_RECIPIENTS: usize = 3;
-                const REWARD_GUARD_START_HEIGHT: u64 = 51;
-                let scan_start = REWARD_GUARD_START_HEIGHT.min(height);
-                for h in scan_start..=height {
+                for h in 1..=height {
                     if let Ok(blk) = self.get_block_by_height(h).await {
                         let unique_recipients: std::collections::HashSet<&str> = blk
                             .masternode_rewards
@@ -877,12 +875,12 @@ impl Blockchain {
                         if unique_recipients.len() < MIN_BLOCK_RECIPIENTS {
                             tracing::error!(
                                 "🛡️ Block {} has only {} unique reward recipient(s) (need ≥{}). \
-                                 Clearing chain so honest blocks can be produced.",
+                                 Reverting to genesis so honest blocks can be produced from block 1.",
                                 h,
                                 unique_recipients.len(),
                                 MIN_BLOCK_RECIPIENTS
                             );
-                            self.clear_all_blocks().await;
+                            self.revert_to_after_genesis().await;
                             return Ok(());
                         }
                     }
@@ -1421,6 +1419,45 @@ impl Blockchain {
 
         tracing::info!(
             "🗑️  Cleared {} blocks, UTXOs, and undo logs from storage. Height reset to 0.",
+            cleared
+        );
+    }
+
+    /// Revert to genesis: keep block 0, delete blocks 1+, reset height to 0.
+    /// Used for the block-1 fork — the genesis block is preserved so the chain
+    /// identity (checkpoint hash, masternode seed) stays intact. Nodes will
+    /// reconnect to peers and build a fresh chain starting at block 1.
+    pub async fn revert_to_after_genesis(&self) {
+        let mut cleared = 0u64;
+        for h in 1..100000u64 {
+            let key = format!("block_{}", h);
+            match self.storage.remove(key.as_bytes()) {
+                Ok(Some(_)) => cleared += 1,
+                _ => {
+                    if h > 1000 && cleared == 0 {
+                        break;
+                    }
+                }
+            }
+            // Clear undo log for this height too
+            let undo_key = format!("undo_{}", h);
+            let _ = self.storage.remove(undo_key.as_bytes());
+        }
+
+        // Reset height to 0 (genesis only)
+        let _ = self.storage.remove("chain_height".as_bytes());
+        self.current_height.store(0, Ordering::Release);
+
+        // Clear UTXOs — they will be rebuilt as new blocks are added
+        if let Err(e) = self.utxo_manager.clear_all().await {
+            tracing::error!("❌ Failed to clear UTXOs during genesis revert: {:?}", e);
+        }
+
+        let _ = self.storage.flush();
+
+        tracing::info!(
+            "🔁 Reverted to genesis: removed {} block(s) and their undo logs. \
+             Height reset to 0. Waiting for peers to build chain from block 1.",
             cleared
         );
     }
@@ -7122,33 +7159,29 @@ impl Blockchain {
                 ));
             }
 
-            // REWARD-HIJACK GUARD (blocks above grace period)
-            // Blocks 1–50 are grandfathered (early network had single-payout blocks).
-            // Starting at block 51, every block must have ≥ 3 unique reward recipients.
-            {
+            // REWARD-HIJACK GUARD: every block from height 1 upward must have
+            // ≥ 3 unique reward recipients (no grace period).
+            if block_height >= 1 {
                 const MIN_BLOCK_RECIPIENTS: usize = 3;
-                const REWARD_GUARD_START_HEIGHT: u64 = 51;
-                if block_height >= REWARD_GUARD_START_HEIGHT {
-                    let unique: std::collections::HashSet<&str> = block
-                        .masternode_rewards
-                        .iter()
-                        .map(|(a, _)| a.as_str())
-                        .collect();
-                    if unique.len() < MIN_BLOCK_RECIPIENTS {
-                        tracing::warn!(
-                            "🛡️ Rejecting block {}: only {} unique reward recipient(s), need ≥{} \
-                             (possible reward-hijacking / outdated node)",
-                            block_height,
-                            unique.len(),
-                            MIN_BLOCK_RECIPIENTS
-                        );
-                        return Err(format!(
-                            "Block {} rejected: only {} unique reward recipient(s), need \
-                             ≥{MIN_BLOCK_RECIPIENTS}. Produced by a node with outdated code.",
-                            block_height,
-                            unique.len()
-                        ));
-                    }
+                let unique: std::collections::HashSet<&str> = block
+                    .masternode_rewards
+                    .iter()
+                    .map(|(a, _)| a.as_str())
+                    .collect();
+                if unique.len() < MIN_BLOCK_RECIPIENTS {
+                    tracing::warn!(
+                        "🛡️ Rejecting block {}: only {} unique reward recipient(s), need ≥{} \
+                         (possible reward-hijacking / outdated node)",
+                        block_height,
+                        unique.len(),
+                        MIN_BLOCK_RECIPIENTS
+                    );
+                    return Err(format!(
+                        "Block {} rejected: only {} unique reward recipient(s), need \
+                         ≥{MIN_BLOCK_RECIPIENTS}. Produced by a node with outdated code.",
+                        block_height,
+                        unique.len()
+                    ));
                 }
             }
 
