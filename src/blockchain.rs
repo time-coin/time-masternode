@@ -1436,7 +1436,7 @@ impl Blockchain {
             return Err("No peer registry available".to_string());
         };
 
-        let connected_peers = registry.get_connected_peers().await;
+        let connected_peers = registry.get_compatible_peers().await;
         if connected_peers.is_empty() {
             return Err("No connected peers to download from".to_string());
         }
@@ -5060,7 +5060,7 @@ impl Blockchain {
             return;
         };
 
-        let peers = peer_registry.get_connected_peers().await;
+        let peers = peer_registry.get_compatible_peers().await;
 
         if peers.is_empty() {
             tracing::warn!("⚠️ No peers available to request missing blocks");
