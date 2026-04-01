@@ -3876,25 +3876,19 @@ impl MessageHandler {
                 );
             }
         } else if peer_height > our_height {
-            // Peer is ahead — accept blocks from peers that are close (≤5 blocks).
-            // For large gaps, check consensus membership BUT allow sync when
-            // the node is far behind (>10 blocks) regardless, to prevent
-            // deadlock when on a minority fork.
+            // Peer is ahead — accept blocks from compatible peers at any gap.
+            // Block validation (reward structure, VRF, etc.) is the real safety gate:
+            // if a peer sends invalid blocks they get banned. The old "reject if gap 6-10
+            // and not in consensus" rule caused a deadlock where a compatible peer that had
+            // advanced past us could neither have its blocks accepted NOR allow us to produce
+            // (because fork-prevention skips production when any compatible peer is ahead).
             let height_gap = peer_height - our_height;
             if height_gap > 5 {
                 let is_consensus_peer =
                     context.blockchain.is_peer_in_consensus(&self.peer_ip).await;
                 if !is_consensus_peer {
-                    if height_gap <= 10 {
-                        warn!(
-                            "🚫 [{}] Ignoring blocks from non-consensus peer {} at height {} (we have {}, gap {})",
-                            self.direction, self.peer_ip, peer_height, our_height, height_gap
-                        );
-                        return Ok(None);
-                    }
-                    // Far behind (>10 blocks) — accept from any peer to break deadlock
                     debug!(
-                        "🔓 [{}] Accepting blocks from {} despite non-consensus (gap {} > 10, need to catch up)",
+                        "🔓 [{}] Accepting blocks from {} despite non-consensus (gap {}, compatible peer — block validation is the safety gate)",
                         self.direction, self.peer_ip, height_gap
                     );
                 }
