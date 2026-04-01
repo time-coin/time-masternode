@@ -2524,6 +2524,28 @@ async fn main() {
                         all_nodes.len()
                     );
                 }
+                // CONSENSUS GUARD: require ≥3 registered masternodes before producing
+                // block 1.  A single node must never be able to produce block 1 alone —
+                // the reward distribution would have only 1 recipient, which violates the
+                // ≥3 recipients rule and would split the chain as other nodes reject it.
+                const MIN_MASTERNODES_FOR_BLOCK1: usize = 3;
+                if all_nodes.len() < MIN_MASTERNODES_FOR_BLOCK1 {
+                    static LAST_WAIT_LOG: std::sync::atomic::AtomicI64 =
+                        std::sync::atomic::AtomicI64::new(0);
+                    let now_secs = chrono::Utc::now().timestamp();
+                    let last = LAST_WAIT_LOG.load(Ordering::Relaxed);
+                    if now_secs - last >= 30 {
+                        LAST_WAIT_LOG.store(now_secs, Ordering::Relaxed);
+                        tracing::info!(
+                            "⏳ Bootstrap: waiting for ≥{} masternodes before producing block 1 \
+                             ({} registered so far)",
+                            MIN_MASTERNODES_FOR_BLOCK1,
+                            all_nodes.len()
+                        );
+                    }
+                    continue;
+                }
+
                 // At height 0 (producing block 1), use ALL registered masternodes
                 // After block 1, the bitmap from block 1 will be used for block 2
                 all_nodes
