@@ -6000,6 +6000,59 @@ impl Blockchain {
         // as the maximum (all pools could theoretically have rolled up).
         let mut rolled_up_to_producer_max_override: Option<u64> = None;
 
+        // ── All-Free early check ──────────────────────────────────────────────
+        // When no paid-tier nodes exist AND the producer received less than their
+        // standard reward, this is an all-Free block: 95 TIME is split evenly among
+        // Free-tier nodes.  The per-tier pool check below would incorrectly reject
+        // this (Free tier pool = 8 TIME, not 95 TIME), so we must detect and validate
+        // it BEFORE the per-tier loop.
+        let paid_tier_total: u64 = tier_paid
+            .iter()
+            .filter(|(t, _)| **t != MasternodeTier::Free)
+            .map(|(_, v)| *v)
+            .sum();
+
+        if producer_received < PRODUCER_REWARD_SATOSHIS
+            && paid_tier_total == 0
+            && unknown_non_producer_paid == 0
+        {
+            let free_paid = tier_paid
+                .get(&MasternodeTier::Free)
+                .copied()
+                .unwrap_or(0);
+            let total_distributed = producer_received + free_paid;
+            let expected_total = block
+                .header
+                .block_reward
+                .saturating_sub(crate::constants::blockchain::TREASURY_POOL_SATOSHIS);
+            let tolerance = MAX_FREE_TIER_RECIPIENTS as u64;
+            if total_distributed.abs_diff(expected_total) > tolerance {
+                return Err(format!(
+                    "Block {} all-Free distribution: total paid {} satoshis, \
+                     expected {} (block_reward - treasury)",
+                    block.header.height, total_distributed, expected_total
+                ));
+            }
+            let active_recipients = block
+                .masternode_rewards
+                .iter()
+                .filter(|(_, v)| *v > 0)
+                .count();
+            if active_recipients > MAX_FREE_TIER_RECIPIENTS {
+                return Err(format!(
+                    "Block {} all-Free: {} recipients exceeds max {}",
+                    block.header.height, active_recipients, MAX_FREE_TIER_RECIPIENTS
+                ));
+            }
+            tracing::debug!(
+                "Block {} validated as all-Free: {} TIME to {} recipients",
+                block.header.height,
+                total_distributed / SATOSHIS_PER_TIME,
+                active_recipients,
+            );
+            return Ok(());
+        }
+
         if unknown_non_producer_paid > 0 {
             // Some recipients have deregistered — we can only verify the total
             // non-producer payout is within the overall tier-pool budget.
@@ -6074,57 +6127,6 @@ impl Blockchain {
         // (e.g., a peer computed fees slightly differently due to UTXO lookup order).
         // When deregistered recipients exist (fallback path), min uses rolled_up=0
         // (only require base PRODUCER_REWARD) while max uses total_tier_budget override.
-
-        // ── All-Free detection ────────────────────────────────────────────────
-        // When no paid-tier nodes exist, the block uses all-Free distribution:
-        // 95 TIME split evenly among ≤MAX_FREE_TIER_RECIPIENTS free nodes.
-        // The producer receives ~95/N TIME (not 30 TIME), so the normal min check
-        // would incorrectly reject these valid blocks. Detect and validate separately.
-        let paid_tier_total: u64 = tier_paid
-            .iter()
-            .filter(|(t, _)| **t != MasternodeTier::Free)
-            .map(|(_, v)| *v)
-            .sum();
-
-        if producer_received < PRODUCER_REWARD_SATOSHIS && paid_tier_total == 0 {
-            // All-Free block: total distributed should equal 95 TIME (block_reward - treasury).
-            let free_paid = tier_paid
-                .get(&MasternodeTier::Free)
-                .copied()
-                .unwrap_or(0);
-            let total_distributed =
-                producer_received + free_paid + unknown_non_producer_paid;
-            let expected_total = block
-                .header
-                .block_reward
-                .saturating_sub(crate::constants::blockchain::TREASURY_POOL_SATOSHIS);
-            let tolerance = MAX_FREE_TIER_RECIPIENTS as u64; // ≤1 sat rounding per recipient
-            if total_distributed.abs_diff(expected_total) > tolerance {
-                return Err(format!(
-                    "Block {} all-Free distribution: total paid {} satoshis, \
-                     expected {} (block_reward - treasury)",
-                    block.header.height, total_distributed, expected_total
-                ));
-            }
-            let active_recipients = block
-                .masternode_rewards
-                .iter()
-                .filter(|(_, v)| *v > 0)
-                .count();
-            if active_recipients > MAX_FREE_TIER_RECIPIENTS {
-                return Err(format!(
-                    "Block {} all-Free: {} recipients exceeds max {}",
-                    block.header.height, active_recipients, MAX_FREE_TIER_RECIPIENTS
-                ));
-            }
-            tracing::debug!(
-                "Block {} validated as all-Free: {} TIME to {} recipients",
-                block.header.height,
-                total_distributed / SATOSHIS_PER_TIME,
-                active_recipients,
-            );
-            return Ok(());
-        }
 
         let rolled_up_for_max = rolled_up_to_producer_max_override.unwrap_or(rolled_up_to_producer);
         let expected_producer_min = PRODUCER_REWARD_SATOSHIS + rolled_up_to_producer; // fees may be 0 if unknown
