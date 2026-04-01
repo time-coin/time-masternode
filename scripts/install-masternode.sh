@@ -66,8 +66,8 @@ REWARD_ADDRESS=""
 
 print_header() {
     echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${BLUE}║       TIME Coin Masternode Installation Script v${VERSION}      ║${NC}"
-    echo -e "${BLUE}║                  Network: ${NETWORK^^}                             ║${NC}"
+    echo -e "${BLUE}║       TIME Coin Masternode Installation Script v${VERSION}        ║${NC}"
+    echo -e "${BLUE}║                  Network: ${NETWORK^^}                            ║${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${BLUE}Network Configuration:${NC}"

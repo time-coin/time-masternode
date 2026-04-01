@@ -2132,6 +2132,42 @@ impl MessageHandler {
                     {
                         warn!("Failed to request blocks for fork resolution: {}", send_err);
                     }
+                } else if e.contains("unique reward recipient")
+                    || e.contains("reward-hijacking")
+                    || e.contains("reward_hijack")
+                    || e.contains("under-subscribed genesis")
+                {
+                    // The peer sent a block that violates the reward distribution
+                    // rules (e.g. single-payout block 1).  This is a permanent
+                    // protocol violation — ban the peer immediately so it cannot
+                    // stall our chain-building.
+                    error!(
+                        "🚨 [{}] Reward-hijacking block {} from {} — PERMANENTLY BANNING: {}",
+                        self.direction, block_height, self.peer_ip, e
+                    );
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip =
+                            self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            let mut bl = blacklist.write().await;
+                            bl.add_permanent_ban(
+                                ip,
+                                &format!(
+                                    "Reward-hijacking block {}: {}",
+                                    block_height, e
+                                ),
+                            );
+                            error!(
+                                "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
+                                bare_ip
+                            );
+                        }
+                    }
+                    // Disconnect by returning an error
+                    return Err(format!(
+                        "Peer {} permanently banned: sent reward-hijacking block {}",
+                        self.peer_ip, block_height
+                    ));
                 } else {
                     warn!(
                         "❌ [{}] Failed to add block {}: {}",
@@ -2221,6 +2257,30 @@ impl MessageHandler {
                     &hex::encode(&peer_genesis_hash[..8]),
                 )
                 .await;
+
+            // Permanently ban the peer in the IP blacklist — a wrong genesis
+            // means this peer is on a completely different chain and will never
+            // be useful to us.
+            if let Some(blacklist) = &context.blacklist {
+                let bare_ip = self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                    let mut bl = blacklist.write().await;
+                    bl.add_permanent_ban(
+                        ip,
+                        &format!(
+                            "Genesis hash mismatch: ours={}, theirs={}",
+                            hex::encode(&our_genesis_hash[..8]),
+                            hex::encode(&peer_genesis_hash[..8])
+                        ),
+                    );
+                    error!(
+                        "🚫 [AI] Permanently banned {} — wrong genesis block (theirs: {}, ours: {})",
+                        bare_ip,
+                        hex::encode(&peer_genesis_hash[..8]),
+                        hex::encode(&our_genesis_hash[..8])
+                    );
+                }
+            }
         }
 
         Ok(None)
@@ -4135,6 +4195,41 @@ impl MessageHandler {
 
                     // Stop processing remaining blocks - let fork resolution handle it
                     break;
+                }
+                Err(e)
+                    if e.contains("unique reward recipient")
+                        || e.contains("reward-hijacking")
+                        || e.contains("reward_hijack")
+                        || e.contains("under-subscribed genesis") =>
+                {
+                    // SECURITY: Peer sent a block with invalid reward distribution
+                    // (e.g. single-payout block 1).  Permanently ban immediately.
+                    error!(
+                        "🚨 [{}] REWARD-HIJACKING BLOCK {} from {} — PERMANENTLY BANNING: {}",
+                        self.direction, block.header.height, self.peer_ip, e
+                    );
+                    if let Some(blacklist) = &context.blacklist {
+                        let bare_ip =
+                            self.peer_ip.split(':').next().unwrap_or(&self.peer_ip);
+                        if let Ok(ip) = bare_ip.parse::<std::net::IpAddr>() {
+                            let mut bl = blacklist.write().await;
+                            bl.add_permanent_ban(
+                                ip,
+                                &format!(
+                                    "Reward-hijacking block {}: {}",
+                                    block.header.height, e
+                                ),
+                            );
+                            error!(
+                                "🚫 [AI] Permanently banned {} — sent invalid reward-distribution block",
+                                bare_ip
+                            );
+                        }
+                    }
+                    return Err(format!(
+                        "Peer {} permanently banned: sent reward-hijacking block {}",
+                        self.peer_ip, block.header.height
+                    ));
                 }
                 Err(e) if e.contains("corrupted") || e.contains("serialization failed") => {
                     // SECURITY: Corrupted block is a SEVERE violation - potential attack
