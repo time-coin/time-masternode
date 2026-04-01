@@ -3253,7 +3253,11 @@ async fn main() {
                     }
                 }
             }
-            if max_peer_height_final > current_height {
+            // Skip fork-prevention at genesis: compatible peers may still report their
+            // old-chain heights (94-96) from pings before we've had a chance to download
+            // and reject their block 1. At height 0 there is no local chain to protect,
+            // so blocking production here would trap the node forever.
+            if current_height > 0 && max_peer_height_final > current_height {
                 tracing::debug!(
                     "🛡️ Fork prevention: peers have height {} > our height {} - syncing instead of producing",
                     max_peer_height_final,
