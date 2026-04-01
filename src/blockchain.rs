@@ -9269,6 +9269,38 @@ impl Blockchain {
             now,
         )?;
 
+        // REWARD-HIJACK PRE-FLIGHT: validate reward distribution on ALL new blocks
+        // BEFORE touching our current chain.  The per-block guard (below) runs after
+        // rollback — if it trips we are left at the ancestor with no local chain.
+        // By running this check now we abort without modifying storage at all.
+        {
+            const MIN_PREFLIGHT_RECIPIENTS: usize = 3;
+            for blk in alternate_blocks.iter() {
+                if blk.header.height >= 1 {
+                    let unique: std::collections::HashSet<&str> = blk
+                        .masternode_rewards
+                        .iter()
+                        .map(|(a, _)| a.as_str())
+                        .collect();
+                    if unique.len() < MIN_PREFLIGHT_RECIPIENTS {
+                        tracing::warn!(
+                            "🛡️ Reorg pre-flight: block {} has only {} unique reward recipient(s), \
+                             need ≥{} — aborting reorg without touching current chain",
+                            blk.header.height,
+                            unique.len(),
+                            MIN_PREFLIGHT_RECIPIENTS
+                        );
+                        return Err(format!(
+                            "Block {} rejected: only {} unique reward recipient(s), need \
+                             ≥{MIN_PREFLIGHT_RECIPIENTS}. Produced by a node with outdated code.",
+                            blk.header.height,
+                            unique.len()
+                        ));
+                    }
+                }
+            }
+        }
+
         // Update state to Reorging
         *self.fork_state.write().await = ForkResolutionState::Reorging {
             from_height: our_height,
