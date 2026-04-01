@@ -849,6 +849,36 @@ impl Blockchain {
                     "⚠️ height > 0 but genesis block not found - chain may be corrupted"
                 );
             }
+
+            // BLOCK 1 REWARD-HIJACK GUARD
+            // Block 1 must have ≥ 3 unique reward recipients — the same floor as
+            // genesis.  A rogue or early-starting node that captured the entire
+            // block 1 reward before others connected must not be allowed to lock
+            // the rest of the network out permanently.  If we detect a hijacked
+            // block 1 on startup, clear the whole chain so honest nodes can
+            // re-produce it with proper reward distribution.
+            if height >= 1 {
+                const MIN_BLOCK1_RECIPIENTS: usize = 3;
+                if let Ok(block1) = self.get_block_by_height(1).await {
+                    let unique_recipients: std::collections::HashSet<&str> = block1
+                        .masternode_rewards
+                        .iter()
+                        .map(|(addr, _)| addr.as_str())
+                        .collect();
+                    if unique_recipients.len() < MIN_BLOCK1_RECIPIENTS {
+                        tracing::error!(
+                            "🛡️ Block 1 reward-hijacking detected: only {} unique reward \
+                             recipient(s) (need ≥{}). Clearing chain so an honest block 1 \
+                             can be produced.",
+                            unique_recipients.len(),
+                            MIN_BLOCK1_RECIPIENTS
+                        );
+                        self.clear_all_blocks().await;
+                        return Ok(());
+                    }
+                }
+            }
+
             self.current_height.store(height, Ordering::Release);
             tracing::info!("✓ Local blockchain verified (height: {})", height);
             return Ok(());
@@ -7008,6 +7038,34 @@ impl Blockchain {
                     "Fork detected: block {} doesn't build on our chain (prev_hash mismatch)",
                     block_height
                 ));
+            }
+
+            // BLOCK 1 REWARD-HIJACK GUARD (mirrors genesis minimum masternode check)
+            // A lone or colluding node that produced block 1 before others connected
+            // — or that modified their code to exclude other masternodes — must not
+            // be able to capture the entire block reward.  Enforce the same ≥3 unique
+            // recipient floor that genesis already enforces.
+            if block_height == 1 {
+                const MIN_BLOCK1_RECIPIENTS: usize = 3;
+                let unique: std::collections::HashSet<&str> = block
+                    .masternode_rewards
+                    .iter()
+                    .map(|(a, _)| a.as_str())
+                    .collect();
+                if unique.len() < MIN_BLOCK1_RECIPIENTS {
+                    tracing::warn!(
+                        "🛡️ Rejecting block 1: only {} unique reward recipient(s), need ≥{} \
+                         (possible reward-hijacking attempt)",
+                        unique.len(),
+                        MIN_BLOCK1_RECIPIENTS
+                    );
+                    return Err(format!(
+                        "Block 1 rejected: only {} unique reward recipient(s), need \
+                         ≥{MIN_BLOCK1_RECIPIENTS}. This block was produced before enough \
+                         masternodes had connected.",
+                        unique.len()
+                    ));
+                }
             }
 
             // Full validation before accepting
