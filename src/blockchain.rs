@@ -7554,11 +7554,14 @@ impl Blockchain {
             return None;
         }
 
-        // CRITICAL: Require a minimum response rate (50%+) to make consensus decisions
-        // If only 33% of peers respond, we may get incorrect consensus (e.g., 4/6 all at height 8)
-        // With low response rates, wait for more responses rather than deciding prematurely
+        // Require a minimum response rate to make consensus decisions.
+        // Normal mode: 50%+ of peers must respond.
+        // Chain restart (height 0): relax to 25% — after banning old-code nodes,
+        // most compatible peers may not have chain tips cached yet.
+        let our_height = self.get_height();
+        let min_response_rate = if our_height == 0 { 0.25 } else { 0.5 };
         let response_rate = peer_tips.len() as f64 / connected_peers.len() as f64;
-        if response_rate < 0.5 {
+        if response_rate < min_response_rate {
             tracing::warn!(
                 "⚠️  Low peer response rate: {}/{} responded ({:.1}%) - waiting for more responses before consensus decision",
                 peer_tips.len(),

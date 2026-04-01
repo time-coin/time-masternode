@@ -3217,12 +3217,16 @@ async fn main() {
             let selected_producer = our_mn;
 
             // Safety checks before producing
-            // Require at least 1/3 of active masternodes as connected peers, with a hard
+            // Require at least 1/3 of COMPATIBLE peers as connected, with a hard
             // floor of 3, to prevent isolated nodes from creating forks.
+            // NOTE: We use compatible peer count (not total active masternodes) because
+            // banned/incompatible nodes should not inflate the quorum threshold.
+            // After a chain restart, most old-code nodes will be banned — the quorum
+            // must reflect only the nodes we can actually talk to.
             let connected_peers = block_peer_registry.get_compatible_peers().await;
-            let active_mn_count = block_registry.count_active().await;
-            let min_peers_required = (active_mn_count / 3).max(3);
-            if connected_peers.len() < min_peers_required {
+            let compatible_count = connected_peers.len();
+            let min_peers_required = (compatible_count / 3).max(3);
+            if compatible_count < min_peers_required {
                 // Rate-limit to once per 30s — this fires every second when syncing
                 static LAST_PEER_WARN: std::sync::atomic::AtomicI64 =
                     std::sync::atomic::AtomicI64::new(0);
@@ -3231,10 +3235,9 @@ async fn main() {
                 if now_secs - last >= 30 {
                     LAST_PEER_WARN.store(now_secs, Ordering::Relaxed);
                     tracing::warn!(
-                        "⚠️ Only {} peer(s) connected (need {}/{} active masternodes) - waiting for more peers before producing",
-                        connected_peers.len(),
+                        "⚠️ Only {} compatible peer(s) (need {}) - waiting for more peers before producing",
+                        compatible_count,
                         min_peers_required,
-                        active_mn_count
                     );
                 }
                 continue;
