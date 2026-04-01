@@ -892,6 +892,12 @@ impl Config {
             if let Some(v) = entries.get("addnode") {
                 config.network.bootstrap_peers = v.clone();
             }
+            if let Some(v) = entries.get("ban") {
+                config.network.blacklisted_peers = v.clone();
+            }
+            if let Some(v) = entries.get("whitelist") {
+                config.network.whitelisted_peers = v.clone();
+            }
             if let Some(v) = entries.get("debug") {
                 if let Some(level) = v.last() {
                     config.logging.level = level.clone();
@@ -1247,6 +1253,13 @@ masternode=1
 # Add seed nodes (one per line, can repeat)
 #addnode=seed1.time-coin.io
 #addnode=seed2.time-coin.io
+
+# Permanently ban IPs (one per line, can repeat)
+#ban=1.2.3.4
+#ban=5.6.7.8
+
+# Whitelist IPs — exempt from rate limits and auto-bans (one per line)
+#whitelist=1.2.3.4
 
 # ─── Logging ─────────────────────────────────────────────────
 # Log level: trace, debug, info, warn, error
