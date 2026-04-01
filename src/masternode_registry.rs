@@ -2025,9 +2025,12 @@ impl MasternodeRegistry {
 
             // Require sufficient report count AND subnet diversity (if network is large enough)
             let meets_count = report_count >= min_reports;
-            let meets_diversity = if total_masternodes >= 5 && report_count >= 2 {
+            let meets_diversity = if total_masternodes > 12 && report_count >= 2 {
                 // Require witnesses from at least 2 distinct /16 subnets to prevent
-                // targeted DDoS against a node's witnesses on the same subnet
+                // targeted DDoS against a node's witnesses on the same subnet.
+                // Only enforce for larger networks (>12 nodes) — small networks with
+                // co-located infrastructure (shared /16 subnets) would otherwise have
+                // nodes stuck inactive despite being fully online and reachable.
                 let mut subnets = std::collections::HashSet::new();
                 for entry in info.peer_reports.iter() {
                     let peer_addr: &String = entry.key();
