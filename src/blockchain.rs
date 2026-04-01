@@ -9,6 +9,7 @@ use crate::consensus::ConsensusEngine;
 use crate::constants;
 use crate::masternode_registry::MasternodeRegistry;
 
+use crate::network::blacklist::IPBlacklist;
 use crate::network::message::NetworkMessage;
 use crate::network::peer_connection_registry::PeerConnectionRegistry;
 use crate::types::{Hash256, OutPoint, Transaction, TxInput, TxOutput, UTXOState, UTXO};
@@ -217,6 +218,8 @@ pub struct Blockchain {
     /// Buffer for blocks downloaded ahead of current tip during parallel sync.
     /// Blocks are stored by height and drained in order as gaps fill in.
     pending_sync_blocks: Arc<RwLock<BTreeMap<u64, Block>>>,
+    /// IP blacklist — sync coordinator uses this to skip banned peers
+    blacklist: Arc<RwLock<Option<Arc<RwLock<IPBlacklist>>>>>,
 }
 
 impl Blockchain {
@@ -327,6 +330,7 @@ impl Blockchain {
             active_block_reward: Arc::new(AtomicU64::new(BLOCK_REWARD_SATOSHIS)),
             governance: None,
             pending_sync_blocks: Arc::new(RwLock::new(BTreeMap::new())),
+            blacklist: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -641,6 +645,11 @@ impl Blockchain {
 
     pub async fn get_peer_registry(&self) -> Option<Arc<PeerConnectionRegistry>> {
         self.peer_registry.read().await.clone()
+    }
+
+    /// Set the IP blacklist so the sync coordinator can skip banned peers
+    pub async fn set_blacklist(&self, blacklist: Arc<RwLock<IPBlacklist>>) {
+        *self.blacklist.write().await = Some(blacklist);
     }
 
     /// Get the list of peers currently on the consensus chain
@@ -1837,6 +1846,24 @@ impl Blockchain {
             }
             // Use filtered list unconditionally — if empty, request fresh tips and abort
             sync_peers = peers_with_needed_blocks;
+
+            // Filter out blacklisted peers — they will always fail or send invalid blocks.
+            if let Some(bl_arc) = self.blacklist.read().await.as_ref().cloned() {
+                let mut bl = bl_arc.write().await;
+                sync_peers.retain(|peer| {
+                    let bare = peer.split(':').next().unwrap_or(peer.as_str());
+                    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                        if bl.is_blacklisted(ip).is_some() {
+                            tracing::debug!(
+                                "🔍 Excluding blacklisted peer {} from sync",
+                                bare
+                            );
+                            return false;
+                        }
+                    }
+                    true
+                });
+            }
 
             if sync_peers.is_empty() {
                 // All peers have cached tips at or below our height.
@@ -9673,6 +9700,7 @@ impl Clone for Blockchain {
             active_block_reward: self.active_block_reward.clone(),
             governance: self.governance.clone(),
             pending_sync_blocks: self.pending_sync_blocks.clone(),
+            blacklist: self.blacklist.clone(),
         }
     }
 }

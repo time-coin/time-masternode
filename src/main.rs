@@ -4158,6 +4158,11 @@ async fn main() {
                 .set_blacklist(server.blacklist.clone())
                 .await;
 
+            // Share blacklist with blockchain so sync_from_peers can skip banned peers
+            blockchain
+                .set_blacklist(server.blacklist.clone())
+                .await;
+
             // CRITICAL: Wire up consensus broadcast callback for TimeVote requests
             // This enables the consensus engine to broadcast vote requests to the network
             let broadcast_registry = peer_connection_registry.clone();
