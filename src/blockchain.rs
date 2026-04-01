@@ -3051,7 +3051,8 @@ impl Blockchain {
                 // Find the best masternode to sync from
                 let mut best_masternode: Option<(String, u64)> = None;
 
-                for peer_ip in &connected_peers {
+                let compatible_peers = peer_registry.get_compatible_peers().await;
+                for peer_ip in &compatible_peers {
                     // Check if this peer is a whitelisted masternode
                     let is_masternode = peer_registry.is_whitelisted(peer_ip).await;
                     if !is_masternode {
