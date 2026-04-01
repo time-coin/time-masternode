@@ -859,31 +859,30 @@ impl Blockchain {
                 );
             }
 
-            // BLOCK 1 REWARD-HIJACK GUARD
-            // Block 1 must have ≥ 3 unique reward recipients — the same floor as
-            // genesis.  A rogue or early-starting node that captured the entire
-            // block 1 reward before others connected must not be allowed to lock
-            // the rest of the network out permanently.  If we detect a hijacked
-            // block 1 on startup, clear the whole chain so honest nodes can
-            // re-produce it with proper reward distribution.
+            // REWARD-HIJACK GUARD (all blocks)
+            // Every non-genesis block must have ≥ 3 unique reward recipients.
+            // Scan ALL stored blocks — if any violate the rule, clear the chain
+            // so honest blocks can be produced.
             if height >= 1 {
-                const MIN_BLOCK1_RECIPIENTS: usize = 3;
-                if let Ok(block1) = self.get_block_by_height(1).await {
-                    let unique_recipients: std::collections::HashSet<&str> = block1
-                        .masternode_rewards
-                        .iter()
-                        .map(|(addr, _)| addr.as_str())
-                        .collect();
-                    if unique_recipients.len() < MIN_BLOCK1_RECIPIENTS {
-                        tracing::error!(
-                            "🛡️ Block 1 reward-hijacking detected: only {} unique reward \
-                             recipient(s) (need ≥{}). Clearing chain so an honest block 1 \
-                             can be produced.",
-                            unique_recipients.len(),
-                            MIN_BLOCK1_RECIPIENTS
-                        );
-                        self.clear_all_blocks().await;
-                        return Ok(());
+                const MIN_BLOCK_RECIPIENTS: usize = 3;
+                for h in 1..=height {
+                    if let Ok(blk) = self.get_block_by_height(h).await {
+                        let unique_recipients: std::collections::HashSet<&str> = blk
+                            .masternode_rewards
+                            .iter()
+                            .map(|(addr, _)| addr.as_str())
+                            .collect();
+                        if unique_recipients.len() < MIN_BLOCK_RECIPIENTS {
+                            tracing::error!(
+                                "🛡️ Block {} has only {} unique reward recipient(s) (need ≥{}). \
+                                 Clearing chain so honest blocks can be produced.",
+                                h,
+                                unique_recipients.len(),
+                                MIN_BLOCK_RECIPIENTS
+                            );
+                            self.clear_all_blocks().await;
+                            return Ok(());
+                        }
                     }
                 }
             }
@@ -7084,29 +7083,29 @@ impl Blockchain {
                 ));
             }
 
-            // BLOCK 1 REWARD-HIJACK GUARD (mirrors genesis minimum masternode check)
-            // A lone or colluding node that produced block 1 before others connected
-            // — or that modified their code to exclude other masternodes — must not
-            // be able to capture the entire block reward.  Enforce the same ≥3 unique
-            // recipient floor that genesis already enforces.
-            if block_height == 1 {
-                const MIN_BLOCK1_RECIPIENTS: usize = 3;
+            // REWARD-HIJACK GUARD (all blocks, not just block 1)
+            // Every non-genesis block must have ≥ 3 unique reward recipients.
+            // Blocks produced by nodes running old code (single-payout) are rejected
+            // outright and the sending peer is permanently banned by the message handler.
+            {
+                const MIN_BLOCK_RECIPIENTS: usize = 3;
                 let unique: std::collections::HashSet<&str> = block
                     .masternode_rewards
                     .iter()
                     .map(|(a, _)| a.as_str())
                     .collect();
-                if unique.len() < MIN_BLOCK1_RECIPIENTS {
+                if unique.len() < MIN_BLOCK_RECIPIENTS {
                     tracing::warn!(
-                        "🛡️ Rejecting block 1: only {} unique reward recipient(s), need ≥{} \
-                         (possible reward-hijacking attempt)",
+                        "🛡️ Rejecting block {}: only {} unique reward recipient(s), need ≥{} \
+                         (possible reward-hijacking / outdated node)",
+                        block_height,
                         unique.len(),
-                        MIN_BLOCK1_RECIPIENTS
+                        MIN_BLOCK_RECIPIENTS
                     );
                     return Err(format!(
-                        "Block 1 rejected: only {} unique reward recipient(s), need \
-                         ≥{MIN_BLOCK1_RECIPIENTS}. This block was produced before enough \
-                         masternodes had connected.",
+                        "Block {} rejected: only {} unique reward recipient(s), need \
+                         ≥{MIN_BLOCK_RECIPIENTS}. Produced by a node with outdated code.",
+                        block_height,
                         unique.len()
                     ));
                 }
