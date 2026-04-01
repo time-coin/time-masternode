@@ -417,6 +417,9 @@ impl NetworkClient {
                         if should_skip(mn_ip) {
                             continue;
                         }
+                        if peer_registry.is_incompatible(mn_ip).await {
+                            continue;
+                        }
                         if connection_manager.is_reconnecting(mn_ip) {
                             continue;
                         }
