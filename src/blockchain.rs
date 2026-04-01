@@ -9325,6 +9325,33 @@ impl Blockchain {
                 }
             }
 
+            // REWARD-HIJACK GUARD: enforce ≥3 unique recipients on every reorg block
+            // from height 1 upward.  The normal guard lives in add_block_with_fork_handling
+            // which is bypassed during reorgs; we must duplicate it here.
+            if block_height >= 1 {
+                const MIN_REORG_RECIPIENTS: usize = 3;
+                let unique: std::collections::HashSet<&str> = block
+                    .masternode_rewards
+                    .iter()
+                    .map(|(a, _)| a.as_str())
+                    .collect();
+                if unique.len() < MIN_REORG_RECIPIENTS {
+                    tracing::warn!(
+                        "🛡️ Reorg block {} rejected: only {} unique reward recipient(s), need ≥{} \
+                         (possible reward-hijacking / outdated node)",
+                        block_height,
+                        unique.len(),
+                        MIN_REORG_RECIPIENTS
+                    );
+                    return Err(format!(
+                        "Block {} rejected: only {} unique reward recipient(s), need \
+                         ≥{MIN_REORG_RECIPIENTS}. Produced by a node with outdated code.",
+                        block_height,
+                        unique.len()
+                    ));
+                }
+            }
+
             self.add_block(block.clone())
                 .await
                 .map_err(|e| format!("Failed to add block {} during reorg: {}", block_height, e))?;

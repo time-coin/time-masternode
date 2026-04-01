@@ -4058,11 +4058,23 @@ impl MessageHandler {
 
                     let peer_ip = self.peer_ip.clone();
                     let blockchain = context.blockchain.clone();
+                    let blacklist_bg = context.blacklist.clone();
+                    let peer_registry_bg = context.peer_registry.clone();
 
                     // Pass blocks to fork handler
                     tokio::spawn(async move {
-                        if let Err(e) = blockchain.handle_fork(blocks, peer_ip).await {
+                        if let Err(e) = blockchain.handle_fork(blocks, peer_ip.clone()).await {
                             warn!("Fork resolution with new blocks failed: {}", e);
+                            if e.contains("unique reward recipient") || e.contains("reward-hijacking") {
+                                error!("🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}", peer_ip, e);
+                                if let Some(bl) = &blacklist_bg {
+                                    let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                                        bl.write().await.add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                                    }
+                                }
+                                peer_registry_bg.mark_incompatible(&peer_ip, &format!("Reward-hijacking reorg chain: {}", e), true).await;
+                            }
                         }
                     });
 
@@ -4189,11 +4201,23 @@ impl MessageHandler {
                     let fork_blocks = blocks.to_vec();
                     let peer_ip = self.peer_ip.clone();
                     let blockchain = context.blockchain.clone();
+                    let blacklist_bg = context.blacklist.clone();
+                    let peer_registry_bg = context.peer_registry.clone();
 
                     // Trigger fork resolution in background
                     tokio::spawn(async move {
-                        if let Err(e) = blockchain.handle_fork(fork_blocks, peer_ip).await {
+                        if let Err(e) = blockchain.handle_fork(fork_blocks, peer_ip.clone()).await {
                             warn!("Fork resolution failed: {}", e);
+                            if e.contains("unique reward recipient") || e.contains("reward-hijacking") {
+                                error!("🚨 Reorg revealed REWARD-HIJACKING chain from {} — PERMANENTLY BANNING: {}", peer_ip, e);
+                                if let Some(bl) = &blacklist_bg {
+                                    let bare = peer_ip.split(':').next().unwrap_or(&peer_ip);
+                                    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                                        bl.write().await.add_permanent_ban(ip, &format!("Reward-hijacking reorg chain: {}", e));
+                                    }
+                                }
+                                peer_registry_bg.mark_incompatible(&peer_ip, &format!("Reward-hijacking reorg chain: {}", e), true).await;
+                            }
                         }
                     });
 
