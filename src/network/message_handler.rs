@@ -2163,6 +2163,16 @@ impl MessageHandler {
                             );
                         }
                     }
+                    // Mark peer incompatible so sync_from_peers / get_compatible_peers
+                    // stops selecting them even before the next blacklist check.
+                    context
+                        .peer_registry
+                        .mark_incompatible(
+                            &self.peer_ip,
+                            &format!("Reward-hijacking block {}: {}", block_height, e),
+                            true, // permanent
+                        )
+                        .await;
                     // Disconnect by returning an error
                     return Err(format!(
                         "Peer {} permanently banned: sent reward-hijacking block {}",
@@ -4226,6 +4236,19 @@ impl MessageHandler {
                             );
                         }
                     }
+                    // Mark peer incompatible so sync_from_peers / get_compatible_peers
+                    // stops selecting them even before the next blacklist check.
+                    context
+                        .peer_registry
+                        .mark_incompatible(
+                            &self.peer_ip,
+                            &format!(
+                                "Reward-hijacking block {}: {}",
+                                block.header.height, e
+                            ),
+                            true, // permanent
+                        )
+                        .await;
                     return Err(format!(
                         "Peer {} permanently banned: sent reward-hijacking block {}",
                         self.peer_ip, block.header.height
