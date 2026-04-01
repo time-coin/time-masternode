@@ -1638,6 +1638,32 @@ impl RpcHandler {
             let block_hash = hex::encode(block.hash());
             let block_time = block.header.timestamp;
 
+            // Genesis block has no transactions — its rewards are stored directly
+            // in block.masternode_rewards and materialised as UTXOs at startup.
+            // Synthesise a history entry so the wallet shows the allocation.
+            if height == 0 && block.transactions.is_empty() {
+                let received: u64 = block
+                    .masternode_rewards
+                    .iter()
+                    .filter(|(addr, _)| addr == &local_address)
+                    .map(|(_, amt)| amt)
+                    .sum();
+                if received > 0 {
+                    transactions.push(json!({
+                        "txid": block_hash,
+                        "category": "genesis",
+                        "amount": received as f64 / 100_000_000.0,
+                        "confirmations": chain_height + 1,
+                        "blockhash": block_hash,
+                        "blockheight": 0u64,
+                        "blocktime": block_time,
+                        "time": block_time,
+                        "memo": "Genesis Allocation",
+                    }));
+                }
+                continue; // no transactions to iterate
+            }
+
             for (tx_idx, tx) in block.transactions.iter().enumerate() {
                 let txid = hex::encode(tx.txid());
 
@@ -1927,6 +1953,27 @@ impl RpcHandler {
 
             let block_hash = hex::encode(block.hash());
             let block_time = block.header.timestamp;
+
+            // Genesis block stores rewards directly in masternode_rewards (no transactions)
+            if height == 0 && block.transactions.is_empty() {
+                for (addr, amount) in &block.masternode_rewards {
+                    if addr_set.contains(addr) && *amount > 0 {
+                        transactions.push(json!({
+                            "txid": block_hash,
+                            "address": addr,
+                            "category": "genesis",
+                            "amount": *amount as f64 / 100_000_000.0,
+                            "confirmations": chain_height + 1,
+                            "blockhash": block_hash,
+                            "blockheight": 0u64,
+                            "blocktime": block_time,
+                            "time": block_time,
+                            "memo": "Genesis Allocation",
+                        }));
+                    }
+                }
+                continue;
+            }
 
             for (tx_idx, tx) in block.transactions.iter().enumerate() {
                 let txid = hex::encode(tx.txid());
