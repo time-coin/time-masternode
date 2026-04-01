@@ -2122,9 +2122,24 @@ impl Blockchain {
                         } else {
                             sync_peers.iter().cloned().collect()
                         };
+                        // Snapshot the blacklist once for the whole loop.
+                        let bl_snap = self.blacklist.read().await.as_ref().cloned();
                         let mut candidates = Vec::new();
                         for p in connected_peers.iter() {
                             if excluded.contains(p) {
+                                continue;
+                            }
+                            // Skip blacklisted peers — they always fail or send invalid blocks.
+                            if let Some(ref bl_arc) = bl_snap {
+                                let bare = p.split(':').next().unwrap_or(p.as_str());
+                                if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+                                    if bl_arc.write().await.is_blacklisted(ip).is_some() {
+                                        continue;
+                                    }
+                                }
+                            }
+                            // Skip peers marked as incompatible (different chain / reward-hijacking).
+                            if peer_registry.is_incompatible(p).await {
                                 continue;
                             }
                             // Skip peers known to be at or below the height we need
