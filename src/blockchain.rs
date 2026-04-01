@@ -1580,6 +1580,42 @@ impl Blockchain {
         // If expected height is far ahead, peer cache is likely stale — don't skip sync
         const MAX_BOOTSTRAP_SHORTCUT_BEHIND: u64 = 10;
 
+        // CHAIN RESTART BYPASS: When at height 0 and the network needs to rebuild,
+        // the time-based target can be far ahead (e.g. 42 blocks) but no valid blocks
+        // exist to sync from — all peers either have bad blocks (single-payout) or are
+        // also at height 0. In this case, skip sync entirely and allow block production.
+        // Without this, the node enters an infinite sync loop: try sync → get bad blocks
+        // → ban sender → try another peer → repeat.
+        if current == 0 && blocks_behind_target > MAX_BOOTSTRAP_SHORTCUT_BEHIND {
+            if let Some(peer_registry) = self.peer_registry.read().await.as_ref() {
+                let compatible_peers = peer_registry.get_compatible_peers().await;
+                // Check if any compatible peer has a chain tip at height 0 (same as us)
+                let mut peers_at_zero = 0u32;
+                let mut peers_ahead = 0u32;
+                for peer_ip in &compatible_peers {
+                    if let Some((height, _)) = peer_registry.get_peer_chain_tip(peer_ip).await {
+                        if height == 0 {
+                            peers_at_zero += 1;
+                        } else {
+                            peers_ahead += 1;
+                        }
+                    }
+                }
+                // If we have peers at height 0 and no valid higher chain exists
+                // (peers "ahead" have only bad blocks), allow production.
+                // The node will reject bad blocks anyway; repeatedly syncing is futile.
+                if peers_at_zero >= 2 {
+                    tracing::info!(
+                        "🔄 Chain restart bypass: {} peers at height 0, {} peers claim ahead \
+                         (likely bad chain). Skipping sync — allowing block production.",
+                        peers_at_zero,
+                        peers_ahead,
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
         // ALWAYS check if peers actually have blocks beyond our height.
         // Even when far behind time-based target, if no peer has more blocks than us,
         // syncing is futile — the blocks need to be produced, not downloaded.
