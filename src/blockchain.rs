@@ -859,13 +859,15 @@ impl Blockchain {
                 );
             }
 
-            // REWARD-HIJACK GUARD (all blocks)
-            // Every non-genesis block must have ≥ 3 unique reward recipients.
-            // Scan ALL stored blocks — if any violate the rule, clear the chain
-            // so honest blocks can be produced.
+            // REWARD-HIJACK GUARD (blocks above grace period)
+            // Blocks 1–50 are grandfathered (early network bootstrapping allowed
+            // single-payout blocks). Starting at block 51, every block must have
+            // ≥ 3 unique reward recipients.
             if height >= 1 {
                 const MIN_BLOCK_RECIPIENTS: usize = 3;
-                for h in 1..=height {
+                const REWARD_GUARD_START_HEIGHT: u64 = 51;
+                let scan_start = REWARD_GUARD_START_HEIGHT.min(height);
+                for h in scan_start..=height {
                     if let Ok(blk) = self.get_block_by_height(h).await {
                         let unique_recipients: std::collections::HashSet<&str> = blk
                             .masternode_rewards
@@ -7119,31 +7121,33 @@ impl Blockchain {
                 ));
             }
 
-            // REWARD-HIJACK GUARD (all blocks, not just block 1)
-            // Every non-genesis block must have ≥ 3 unique reward recipients.
-            // Blocks produced by nodes running old code (single-payout) are rejected
-            // outright and the sending peer is permanently banned by the message handler.
+            // REWARD-HIJACK GUARD (blocks above grace period)
+            // Blocks 1–50 are grandfathered (early network had single-payout blocks).
+            // Starting at block 51, every block must have ≥ 3 unique reward recipients.
             {
                 const MIN_BLOCK_RECIPIENTS: usize = 3;
-                let unique: std::collections::HashSet<&str> = block
-                    .masternode_rewards
-                    .iter()
-                    .map(|(a, _)| a.as_str())
-                    .collect();
-                if unique.len() < MIN_BLOCK_RECIPIENTS {
-                    tracing::warn!(
-                        "🛡️ Rejecting block {}: only {} unique reward recipient(s), need ≥{} \
-                         (possible reward-hijacking / outdated node)",
-                        block_height,
-                        unique.len(),
-                        MIN_BLOCK_RECIPIENTS
-                    );
-                    return Err(format!(
-                        "Block {} rejected: only {} unique reward recipient(s), need \
-                         ≥{MIN_BLOCK_RECIPIENTS}. Produced by a node with outdated code.",
-                        block_height,
-                        unique.len()
-                    ));
+                const REWARD_GUARD_START_HEIGHT: u64 = 51;
+                if block_height >= REWARD_GUARD_START_HEIGHT {
+                    let unique: std::collections::HashSet<&str> = block
+                        .masternode_rewards
+                        .iter()
+                        .map(|(a, _)| a.as_str())
+                        .collect();
+                    if unique.len() < MIN_BLOCK_RECIPIENTS {
+                        tracing::warn!(
+                            "🛡️ Rejecting block {}: only {} unique reward recipient(s), need ≥{} \
+                             (possible reward-hijacking / outdated node)",
+                            block_height,
+                            unique.len(),
+                            MIN_BLOCK_RECIPIENTS
+                        );
+                        return Err(format!(
+                            "Block {} rejected: only {} unique reward recipient(s), need \
+                             ≥{MIN_BLOCK_RECIPIENTS}. Produced by a node with outdated code.",
+                            block_height,
+                            unique.len()
+                        ));
+                    }
                 }
             }
 
