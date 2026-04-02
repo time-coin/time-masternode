@@ -220,6 +220,11 @@ pub struct Blockchain {
     pending_sync_blocks: Arc<RwLock<BTreeMap<u64, Block>>>,
     /// IP blacklist — sync coordinator uses this to skip banned peers
     blacklist: Arc<RwLock<Option<Arc<RwLock<IPBlacklist>>>>>,
+    /// Height of the last locally confirmed block.
+    /// Once a valid block is committed here, no reorg can go below this height.
+    /// This implements BFT-style finality: confirmed blocks are irreversible.
+    /// Reset to 0 by revert_to_after_genesis(); advanced by add_block().
+    last_locally_confirmed_height: Arc<AtomicU64>,
 }
 
 impl Blockchain {
@@ -331,6 +336,7 @@ impl Blockchain {
             governance: None,
             pending_sync_blocks: Arc::new(RwLock::new(BTreeMap::new())),
             blacklist: Arc::new(RwLock::new(None)),
+            last_locally_confirmed_height: Arc::new(AtomicU64::new(loaded_height)),
         }
     }
 
@@ -1573,6 +1579,8 @@ impl Blockchain {
         // Reset height to 0 (genesis only)
         let _ = self.storage.remove("chain_height".as_bytes());
         self.current_height.store(0, Ordering::Release);
+        // Reset finality lock — new chain must be built from scratch.
+        self.last_locally_confirmed_height.store(0, Ordering::Release);
 
         // Clear UTXOs — they will be rebuilt as new blocks are added
         if let Err(e) = self.utxo_manager.clear_all().await {
@@ -4973,6 +4981,11 @@ impl Blockchain {
 
         // Mark block as finalized (TimeVote instant finality achieved)
         self.consensus.record_block_finalized(block_hash);
+
+        // Advance finality lock: once committed, this height can never be reorged below.
+        // Uses a fetch_max so concurrent add_block calls only ever advance, never retreat.
+        self.last_locally_confirmed_height
+            .fetch_max(block.header.height, Ordering::Release);
 
         // Record block for AI predictive sync, transaction analysis, and anomaly detection
         if let Some(ai) = &self.ai_system {
@@ -9501,6 +9514,23 @@ impl Blockchain {
         let our_height = self.get_height();
         let new_height = common_ancestor + alternate_blocks.len() as u64;
 
+        // FINALITY LOCK: Never reorg below the last locally confirmed height.
+        // Once a valid block is committed, honest nodes will not undo it regardless
+        // of chain length.  This implements BFT-style irreversibility: a minority of
+        // honest nodes that have confirmed block N cannot be forced back to genesis
+        // by a longer chain from misbehaving nodes.
+        //
+        // revert_to_after_genesis() resets this to 0 when a corrupt chain is detected,
+        // so a fresh start after a bad-chain purge is always allowed.
+        let last_confirmed = self.last_locally_confirmed_height.load(Ordering::Acquire);
+        if common_ancestor < last_confirmed {
+            return Err(format!(
+                "REJECTED REORG: common ancestor {} is below locally confirmed height {}. \
+                 Honest nodes do not undo confirmed blocks. This peer may be on a competing chain.",
+                common_ancestor, last_confirmed
+            ));
+        }
+
         // CRITICAL SAFETY CHECK: NEVER reorg to a shorter chain.
         // Same-height reorgs ARE allowed for deterministic fork resolution
         // (e.g., lower hash wins at same height). The caller (handle_fork)
@@ -9575,6 +9605,11 @@ impl Blockchain {
             to_height: new_height,
             started_at: std::time::Instant::now(), // NEW: Track start time
         };
+
+        // Temporarily lower the finality lock to the common ancestor so the re-apply
+        // phase can advance it block by block as new blocks are committed.
+        self.last_locally_confirmed_height
+            .store(common_ancestor, Ordering::Release);
 
         // 1. Rollback to common ancestor (use existing method)
         self.rollback_to_height(common_ancestor).await?;
@@ -10099,6 +10134,7 @@ impl Clone for Blockchain {
             governance: self.governance.clone(),
             pending_sync_blocks: self.pending_sync_blocks.clone(),
             blacklist: self.blacklist.clone(),
+            last_locally_confirmed_height: self.last_locally_confirmed_height.clone(),
         }
     }
 }
