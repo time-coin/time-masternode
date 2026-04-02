@@ -6306,7 +6306,31 @@ impl Blockchain {
                 let paid = tier_paid.get(tier).copied().unwrap_or(0);
 
                 if paid == 0 {
-                    // No recipients in this tier — pool should have rolled to producer.
+                    // A tier pool may only roll up to the producer if there are NO
+                    // registered masternodes of that tier (other than the producer).
+                    // If masternodes of this tier ARE registered but received 0, the
+                    // producer stole their pool allocation.
+                    let tier_nodes = self.masternode_registry.list_by_tier(*tier).await;
+                    let non_producer_tier_nodes = tier_nodes
+                        .iter()
+                        .filter(|info| {
+                            let wallet = if !info.reward_address.is_empty() {
+                                &info.reward_address
+                            } else {
+                                &info.masternode.wallet_address
+                            };
+                            wallet != producer_addr
+                                && wallet.as_str() != &producer_wallet
+                        })
+                        .count();
+                    if non_producer_tier_nodes > 0 {
+                        return Err(format!(
+                            "Block {} {:?}-tier pool not distributed: {} registered \
+                             node(s) received 0 — pool cannot roll up to producer",
+                            block.header.height, tier, non_producer_tier_nodes
+                        ));
+                    }
+                    // Genuinely empty tier — pool rolls up.
                     rolled_up_to_producer += pool;
                     continue;
                 }
