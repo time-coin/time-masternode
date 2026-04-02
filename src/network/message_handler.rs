@@ -2388,10 +2388,37 @@ impl MessageHandler {
                     }
                 }
                 Ok(false) => {
-                    debug!(
-                        "⏭️ [{}] Kept our genesis (already lower-or-equal hash) — ignoring peer {}",
-                        self.direction, self.peer_ip
-                    );
+                    // We kept our genesis (ours has lower or equal hash).
+                    // If the peer is already past height 0 they are committed to a
+                    // different chain and convergence is impossible — mark them
+                    // genesis-incompatible so they stop skewing compare_chain_with_peers().
+                    let peer_committed_height = context
+                        .peer_registry
+                        .get_peer_chain_tip(&self.peer_ip)
+                        .await
+                        .map(|(h, _)| h)
+                        .unwrap_or(0);
+                    if peer_committed_height > 0 {
+                        warn!(
+                            "🚫 [{}] Peer {} has different genesis and is committed at height {} \
+                             — marking genesis-incompatible",
+                            self.direction, self.peer_ip, peer_committed_height
+                        );
+                        let our_genesis = hex::encode(&context.blockchain.genesis_hash()[..8]);
+                        context
+                            .peer_registry
+                            .mark_genesis_incompatible(
+                                &self.peer_ip,
+                                &our_genesis,
+                                "committed_to_different_genesis",
+                            )
+                            .await;
+                    } else {
+                        debug!(
+                            "⏭️ [{}] Kept our genesis (already lower hash) — ignoring peer {}",
+                            self.direction, self.peer_ip
+                        );
+                    }
                 }
                 Err(e) => {
                     // Wrong timestamp = peer is on a completely different genesis chain
