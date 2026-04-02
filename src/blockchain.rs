@@ -4657,7 +4657,7 @@ impl Blockchain {
                         block.header.height, paid.len(), MIN_PAID_RECIPIENTS
                     );
                     return Err(format!(
-                        "Block {} rejected: only {} unique paid recipient(s), need ≥{}. \
+                        "Block {} rejected: only {} unique reward recipient(s), need ≥{}. \
                          Zero-amount padding does not count.",
                         block.header.height, paid.len(), MIN_PAID_RECIPIENTS
                     ));
@@ -7194,7 +7194,7 @@ impl Blockchain {
                     MIN_PAID_RECIPIENTS
                 );
                 return Err(format!(
-                    "Block {} rejected: only {} unique paid recipient(s), need ≥{}. \
+                    "Block {} rejected: only {} unique reward recipient(s), need ≥{}. \
                      Zero-amount padding entries do not count.",
                     block.header.height,
                     paid.len(),
