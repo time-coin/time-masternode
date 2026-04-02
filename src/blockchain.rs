@@ -4634,6 +4634,31 @@ impl Blockchain {
         // CRITICAL: Validate block rewards (prevent double-counting bug)
         // Skip for genesis block
         if !is_genesis {
+            // REWARD-HIJACK GUARD: require ≥3 unique addresses with POSITIVE payouts.
+            // This is the authoritative check — it runs for every code path that
+            // commits a non-genesis block (fork handling, reorg, sync, gap-fill).
+            // Zero-amount entries in masternode_rewards are padding and must NOT count.
+            {
+                const MIN_PAID_RECIPIENTS: usize = 3;
+                let paid: std::collections::HashSet<&str> = block
+                    .masternode_rewards
+                    .iter()
+                    .filter(|(_, amt)| *amt > 0)
+                    .map(|(a, _)| a.as_str())
+                    .collect();
+                if paid.len() < MIN_PAID_RECIPIENTS {
+                    tracing::warn!(
+                        "🛡️ add_block: rejecting block {} — only {} paid recipient(s), need ≥{}",
+                        block.header.height, paid.len(), MIN_PAID_RECIPIENTS
+                    );
+                    return Err(format!(
+                        "Block {} rejected: only {} unique paid recipient(s), need ≥{}. \
+                         Zero-amount padding does not count.",
+                        block.header.height, paid.len(), MIN_PAID_RECIPIENTS
+                    ));
+                }
+            }
+
             self.validate_block_rewards(&block).await?;
 
             // Verify producer signature (skip genesis — it has no producer)
