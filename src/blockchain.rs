@@ -1317,6 +1317,11 @@ impl Blockchain {
             .map_err(|e| format!("Candidate genesis structure invalid: {}", e))?;
         GenesisBlock::verify_timestamp(&candidate, self.network_type)
             .map_err(|e| format!("Candidate genesis timestamp invalid: {}", e))?;
+        // CRITICAL: reject any candidate that doesn't match the hardcoded checkpoint.
+        // replace_genesis_if_lower was designed for pre-checkpoint consensus convergence;
+        // now that genesis is fixed, only the canonical hash is ever acceptable.
+        GenesisBlock::verify_checkpoint(&candidate, self.network_type)
+            .map_err(|e| format!("Candidate genesis checkpoint mismatch: {}", e))?;
 
         // ≥3 unique reward recipients (same rule as block 1+)
         let unique_recipients: std::collections::HashSet<&str> = candidate
@@ -7369,6 +7374,21 @@ impl Blockchain {
                          This block was produced before enough nodes had connected."
                     ));
                 }
+            }
+
+            // CRITICAL: Verify genesis hash matches the hardcoded checkpoint.
+            // A fresh node (no genesis stored yet) must reject any genesis from a peer
+            // that doesn't match the canonical checkpoint — otherwise it could persist
+            // an old-chain genesis and all subsequent blocks would silently fork.
+            if let Err(e) = crate::block::genesis::GenesisBlock::verify_checkpoint(
+                &block,
+                self.network_type,
+            ) {
+                tracing::error!(
+                    "🚫 Rejected genesis from peer: checkpoint mismatch — {}",
+                    e
+                );
+                return Err(format!("Genesis checkpoint mismatch: {}", e));
             }
 
             tracing::info!(

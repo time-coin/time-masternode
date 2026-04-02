@@ -3895,6 +3895,24 @@ impl MessageHandler {
             .update_peer_chain_tip(&self.peer_ip, peer_height, peer_hash)
             .await;
 
+        // Spawn background genesis verification for peers we haven't confirmed yet.
+        // This marks old-chain peers as incompatible before sync attempts download their blocks.
+        if !context.peer_registry.is_genesis_confirmed(&self.peer_ip).await {
+            let registry = Arc::clone(&context.peer_registry);
+            let peer_ip = self.peer_ip.clone();
+            let our_genesis_hash = context
+                .blockchain
+                .get_block_by_height(0)
+                .await
+                .map(|b| b.hash())
+                .unwrap_or([0u8; 32]);
+            tokio::spawn(async move {
+                registry
+                    .verify_genesis_compatibility(&peer_ip, our_genesis_hash)
+                    .await;
+            });
+        }
+
         tracing::debug!(
             "[{}] ChainTipResponse from {}: height {} hash {} (our height: {})",
             self.direction,

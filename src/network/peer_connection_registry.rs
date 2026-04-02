@@ -95,6 +95,10 @@ pub struct PeerConnectionRegistry {
     compatible_peers_cache: Arc<RwLock<(Vec<String>, std::time::Instant)>>,
     // Reported connection counts from peer exchange — used for load-aware routing
     peer_load: DashMap<String, u16>,
+    // Peers whose genesis hash has been positively confirmed (same chain as us).
+    // Only peers in this set are used for block sync.
+    // Peers fail into incompatible_peers; unverified peers are verified on first chain tip.
+    genesis_confirmed_peers: Arc<RwLock<HashSet<String>>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -132,6 +136,7 @@ impl PeerConnectionRegistry {
             chain_tip_updated: Arc::new(tokio::sync::Notify::new()),
             compatible_peers_cache: Arc::new(RwLock::new((Vec::new(), std::time::Instant::now()))),
             peer_load: DashMap::new(),
+            genesis_confirmed_peers: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -355,6 +360,8 @@ impl PeerConnectionRegistry {
                     );
                     // Reset fork errors since they're compatible
                     self.reset_fork_errors(peer_ip);
+                    // Record positive confirmation so sync skips re-verification
+                    self.mark_genesis_confirmed(peer_ip).await;
                     true
                 } else {
                     let our_hex = hex::encode(&our_genesis_hash[..8]);
@@ -405,6 +412,22 @@ impl PeerConnectionRegistry {
                 false
             }
         }
+    }
+
+    /// Mark a peer's genesis hash as confirmed (same chain as us).
+    /// Called by verify_genesis_compatibility when the peer's hash matches ours.
+    async fn mark_genesis_confirmed(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip);
+        self.genesis_confirmed_peers
+            .write()
+            .await
+            .insert(ip_only.to_string());
+    }
+
+    /// Returns true if this peer's genesis hash has been positively confirmed.
+    pub async fn is_genesis_confirmed(&self, peer_ip: &str) -> bool {
+        let ip_only = extract_ip(peer_ip);
+        self.genesis_confirmed_peers.read().await.contains(ip_only)
     }
 
     /// Reset fork error count for a peer (called when blocks are successfully added)
@@ -1014,6 +1037,7 @@ impl PeerConnectionRegistry {
 
     /// Clear stale peer data when peer disconnects
     pub async fn clear_peer_data(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip).to_string();
         let mut heights = self.peer_heights.write().await;
         let mut tips = self.peer_chain_tips.write().await;
         let mut ping_times = self.peer_ping_times.write().await;
@@ -1022,6 +1046,8 @@ impl PeerConnectionRegistry {
         tips.remove(peer_ip);
         ping_times.remove(peer_ip);
         pings.remove(peer_ip);
+        // Remove genesis confirmation so reconnecting peer is re-verified
+        self.genesis_confirmed_peers.write().await.remove(&ip_only);
         tracing::debug!(
             "🧹 Cleared stale chain tip data for disconnected peer {}",
             peer_ip
