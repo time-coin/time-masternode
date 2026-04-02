@@ -965,7 +965,17 @@ impl MasternodeRegistry {
     /// Free tier requires maturity gate on mainnet.
     /// All tiers require bidirectional network reachability: nodes behind NAT/firewall
     /// that cannot accept inbound connections are excluded from block rewards.
+    ///
+    /// Two-pass fallback: if strict filtering yields < MIN_PAID_RECIPIENTS (3) nodes,
+    /// the pool is too small to produce a valid block (which requires ≥3 distinct
+    /// non-zero recipients). In that case we widen the net progressively:
+    ///   Pass 1 — reachability + maturity (normal)
+    ///   Pass 2 — maturity only (no reachability requirement)
+    ///   Pass 3 — active only (no reachability or maturity requirement)
+    /// This prevents a deadlock on young chains or heavily-NATted networks while
+    /// the ≥3-recipient rule still guards against single-node reward monopolization.
     pub async fn get_eligible_pool_nodes(&self, current_height: u64) -> Vec<MasternodeInfo> {
+        const MIN_VIABLE_POOL: usize = 3;
         let maturity_required = match self.network {
             crate::NetworkType::Mainnet => crate::constants::blockchain::FREE_MATURITY_BLOCKS,
             crate::NetworkType::Testnet => 0,
@@ -974,28 +984,59 @@ impl MasternodeRegistry {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        self.masternodes
-            .read()
-            .await
+
+        let nodes = self.masternodes.read().await;
+
+        let is_mature = |info: &MasternodeInfo| -> bool {
+            !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
+                || info.registration_height == 0
+                || current_height.saturating_sub(info.registration_height) >= maturity_required
+        };
+        let is_reachable = |info: &MasternodeInfo| -> bool {
+            let within_grace_period = info.first_seen_at > 0
+                && now.saturating_sub(info.first_seen_at) < REACHABILITY_GRACE_PERIOD_SECS;
+            within_grace_period || info.is_publicly_reachable
+        };
+
+        // Pass 1: full filters (normal path).
+        let pass1: Vec<MasternodeInfo> = nodes
             .values()
-            .filter(|info| {
-                if !info.is_active {
-                    return false;
-                }
-                // Reachability requirement: node must have confirmed bidirectional connectivity.
-                // New nodes get a grace period before this is enforced so they have time to be probed.
-                let within_grace_period = info.first_seen_at > 0
-                    && now.saturating_sub(info.first_seen_at) < REACHABILITY_GRACE_PERIOD_SECS;
-                if !within_grace_period && !info.is_publicly_reachable {
-                    return false;
-                }
-                // Free tier maturity gate
-                !matches!(info.masternode.tier, crate::types::MasternodeTier::Free)
-                    || info.registration_height == 0
-                    || current_height.saturating_sub(info.registration_height) >= maturity_required
-            })
+            .filter(|info| info.is_active && is_reachable(info) && is_mature(info))
             .cloned()
-            .collect()
+            .collect();
+        if pass1.len() >= MIN_VIABLE_POOL {
+            return pass1;
+        }
+
+        // Pass 2: drop reachability requirement (handles NAT-heavy networks).
+        let pass2: Vec<MasternodeInfo> = nodes
+            .values()
+            .filter(|info| info.is_active && is_mature(info))
+            .cloned()
+            .collect();
+        if pass2.len() >= MIN_VIABLE_POOL {
+            tracing::debug!(
+                "Eligible pool fallback (pass 2 — no reachability): {} nodes (pass 1 had {})",
+                pass2.len(), pass1.len()
+            );
+            return pass2;
+        }
+
+        // Pass 3: drop maturity too (handles young/bootstrapping chains where no node
+        // has been present for FREE_MATURITY_BLOCKS yet). The ≥3-recipient rule
+        // in the block validator still prevents single-node reward monopolization.
+        let pass3: Vec<MasternodeInfo> = nodes
+            .values()
+            .filter(|info| info.is_active)
+            .cloned()
+            .collect();
+        if pass3.len() > pass1.len() {
+            tracing::debug!(
+                "Eligible pool fallback (pass 3 — active only): {} nodes (pass 1 had {})",
+                pass3.len(), pass1.len()
+            );
+        }
+        pass3
     }
 
     /// Check if a Free-tier masternode is mature enough for VRF sortition.
