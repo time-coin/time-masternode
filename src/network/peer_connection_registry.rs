@@ -99,6 +99,9 @@ pub struct PeerConnectionRegistry {
     // Only peers in this set are used for block sync.
     // Peers fail into incompatible_peers; unverified peers are verified on first chain tip.
     genesis_confirmed_peers: Arc<RwLock<HashSet<String>>>,
+    // Peers currently undergoing genesis verification.
+    // Prevents multiple concurrent GetBlockHash(0) requests to the same peer.
+    pending_genesis_checks: Arc<dashmap::DashSet<String>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -137,6 +140,7 @@ impl PeerConnectionRegistry {
             compatible_peers_cache: Arc::new(RwLock::new((Vec::new(), std::time::Instant::now()))),
             peer_load: DashMap::new(),
             genesis_confirmed_peers: Arc::new(RwLock::new(HashSet::new())),
+            pending_genesis_checks: Arc::new(dashmap::DashSet::new()),
         }
     }
 
@@ -428,6 +432,20 @@ impl PeerConnectionRegistry {
     pub async fn is_genesis_confirmed(&self, peer_ip: &str) -> bool {
         let ip_only = extract_ip(peer_ip);
         self.genesis_confirmed_peers.read().await.contains(ip_only)
+    }
+
+    /// Attempt to claim a genesis verification slot for this peer.
+    /// Returns true if the caller should proceed with verification (slot was free).
+    /// Returns false if another task is already verifying this peer (skip to avoid flooding).
+    pub fn claim_genesis_check(&self, peer_ip: &str) -> bool {
+        let ip_only = extract_ip(peer_ip);
+        self.pending_genesis_checks.insert(ip_only.to_string())
+    }
+
+    /// Release the genesis verification slot for this peer (call when verification completes).
+    pub fn release_genesis_check(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip);
+        self.pending_genesis_checks.remove(ip_only);
     }
 
     /// Reset fork error count for a peer (called when blocks are successfully added)

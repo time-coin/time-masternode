@@ -3897,7 +3897,11 @@ impl MessageHandler {
 
         // Spawn background genesis verification for peers we haven't confirmed yet.
         // This marks old-chain peers as incompatible before sync attempts download their blocks.
-        if !context.peer_registry.is_genesis_confirmed(&self.peer_ip).await {
+        // The pending_genesis_checks guard ensures only one verification runs per peer at a time,
+        // preventing concurrent GetBlockHash(0) floods that cause "Response channel closed" errors.
+        if !context.peer_registry.is_genesis_confirmed(&self.peer_ip).await
+            && context.peer_registry.claim_genesis_check(&self.peer_ip)
+        {
             let registry = Arc::clone(&context.peer_registry);
             let peer_ip = self.peer_ip.clone();
             let our_genesis_hash = context
@@ -3910,6 +3914,7 @@ impl MessageHandler {
                 registry
                     .verify_genesis_compatibility(&peer_ip, our_genesis_hash)
                     .await;
+                registry.release_genesis_check(&peer_ip);
             });
         }
 
