@@ -2394,10 +2394,30 @@ impl MessageHandler {
                     );
                 }
                 Err(e) => {
-                    warn!(
-                        "⚠️ [{}] Candidate genesis from {} rejected: {}",
-                        self.direction, self.peer_ip, e
-                    );
+                    // Wrong timestamp = peer is on a completely different genesis chain
+                    // (e.g. old mainnet genesis timestamp 1775001600 vs our 1775001601).
+                    // Mark them genesis-incompatible so they stop appearing in
+                    // get_compatible_peers() and skewing compare_chain_with_peers().
+                    if e.contains("timestamp") {
+                        warn!(
+                            "🚫 [{}] Peer {} genesis timestamp mismatch — marking genesis-incompatible: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                        let our_genesis = hex::encode(&context.blockchain.genesis_hash()[..8]);
+                        context
+                            .peer_registry
+                            .mark_genesis_incompatible(
+                                &self.peer_ip,
+                                &our_genesis,
+                                "wrong_timestamp",
+                            )
+                            .await;
+                    } else {
+                        warn!(
+                            "⚠️ [{}] Candidate genesis from {} rejected: {}",
+                            self.direction, self.peer_ip, e
+                        );
+                    }
                 }
             }
             return Ok(None);
@@ -2423,7 +2443,23 @@ impl MessageHandler {
                         }
                     }
                     Err(e) => {
-                        warn!("❌ [{}] Failed to add genesis block: {}", self.direction, e);
+                        // Wrong timestamp from a peer we don't have genesis yet — mark incompatible
+                        if e.contains("timestamp") {
+                            warn!(
+                                "🚫 [{}] Peer {} sent genesis with wrong timestamp — marking genesis-incompatible: {}",
+                                self.direction, self.peer_ip, e
+                            );
+                            context
+                                .peer_registry
+                                .mark_genesis_incompatible(
+                                    &self.peer_ip,
+                                    "none",
+                                    "wrong_timestamp",
+                                )
+                                .await;
+                        } else {
+                            warn!("❌ [{}] Failed to add genesis block: {}", self.direction, e);
+                        }
                     }
                 }
             }
@@ -3906,6 +3942,19 @@ impl MessageHandler {
                     }));
                 }
 
+                // At height 0 a hash mismatch means different genesis candidates.
+                // Send RequestGenesis so handle_genesis_announcement can run the
+                // lowest-hash convergence logic (replace_genesis_if_lower).
+                // GetBlocks(0,5) is useless here — peers return empty responses
+                // because block_0 is stored separately, not via GetBlocks.
+                if peer_height == 0 {
+                    info!(
+                        "🔄 [{}] Requesting genesis from {} for height-0 convergence",
+                        self.direction, self.peer_ip
+                    );
+                    return Ok(Some(NetworkMessage::RequestGenesis));
+                }
+
                 // Request blocks for fork resolution
                 let request_from = peer_height.saturating_sub(10);
                 info!(
@@ -4230,6 +4279,23 @@ impl MessageHandler {
                         "🔀 [{}] Fork/divergence detected from {}: {}",
                         self.direction, self.peer_ip, e
                     );
+
+                    // If block 1 has a prev_hash that doesn't match our genesis, the peer
+                    // is on a different chain.  Request their genesis so:
+                    //  - old-chain nodes (wrong timestamp) get marked genesis-incompatible
+                    //    and are excluded from compare_chain_with_peers().
+                    //  - new-chain nodes (correct timestamp, different hash) are handled
+                    //    by replace_genesis_if_lower() convergence.
+                    if block.header.height == 1 && context.blockchain.get_height() == 0
+                        && e.contains("prev_hash")
+                    {
+                        info!(
+                            "🔄 [{}] Block 1 from {} has wrong prev_hash — requesting their genesis \
+                             to determine compatibility",
+                            self.direction, self.peer_ip
+                        );
+                        return Ok(Some(crate::network::message::NetworkMessage::RequestGenesis));
+                    }
 
                     // Track fork errors (for metrics/debugging)
                     let _error_count = context.peer_registry.increment_fork_errors(&self.peer_ip);
