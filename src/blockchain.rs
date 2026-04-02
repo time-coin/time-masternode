@@ -908,9 +908,12 @@ impl Blockchain {
                 const MIN_BLOCK_RECIPIENTS: usize = 3;
                 for h in 1..=height {
                     if let Ok(blk) = self.get_block_by_height(h).await {
+                        // Count only addresses with a POSITIVE payout.
+                        // Zero-amount entries are padding tricks and must not count.
                         let unique_recipients: std::collections::HashSet<&str> = blk
                             .masternode_rewards
                             .iter()
+                            .filter(|(_, amt)| *amt > 0)
                             .map(|(addr, _)| addr.as_str())
                             .collect();
                         if unique_recipients.len() < MIN_BLOCK_RECIPIENTS {
@@ -7057,6 +7060,37 @@ impl Blockchain {
             );
         }
 
+        // REWARD-HIJACK GUARD: non-genesis blocks must have ≥3 unique addresses with
+        // a POSITIVE (non-zero) payout.  Zero-amount entries in masternode_rewards are
+        // padding and must not count toward the quorum floor — an attacker can otherwise
+        // pad [(attacker, 95T), (dummy1, 0), (dummy2, 0)] to bypass the ≥3 check while
+        // redirecting the full block reward to a single address.
+        if block.header.height >= 1 {
+            const MIN_PAID_RECIPIENTS: usize = 3;
+            let paid: std::collections::HashSet<&str> = block
+                .masternode_rewards
+                .iter()
+                .filter(|(_, amt)| *amt > 0)
+                .map(|(a, _)| a.as_str())
+                .collect();
+            if paid.len() < MIN_PAID_RECIPIENTS {
+                tracing::warn!(
+                    "🛡️ Block {} rejected: only {} paid reward recipient(s) (need ≥{}) — \
+                     possible reward-hijack via zero-padding",
+                    block.header.height,
+                    paid.len(),
+                    MIN_PAID_RECIPIENTS
+                );
+                return Err(format!(
+                    "Block {} rejected: only {} unique paid recipient(s), need ≥{}. \
+                     Zero-amount padding entries do not count.",
+                    block.header.height,
+                    paid.len(),
+                    MIN_PAID_RECIPIENTS
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -7283,29 +7317,7 @@ impl Blockchain {
 
             // REWARD-HIJACK GUARD: every block from height 1 upward must have
             // ≥ 3 unique reward recipients (no grace period).
-            if block_height >= 1 {
-                const MIN_BLOCK_RECIPIENTS: usize = 3;
-                let unique: std::collections::HashSet<&str> = block
-                    .masternode_rewards
-                    .iter()
-                    .map(|(a, _)| a.as_str())
-                    .collect();
-                if unique.len() < MIN_BLOCK_RECIPIENTS {
-                    tracing::warn!(
-                        "🛡️ Rejecting block {}: only {} unique reward recipient(s), need ≥{} \
-                         (possible reward-hijacking / outdated node)",
-                        block_height,
-                        unique.len(),
-                        MIN_BLOCK_RECIPIENTS
-                    );
-                    return Err(format!(
-                        "Block {} rejected: only {} unique reward recipient(s), need \
-                         ≥{MIN_BLOCK_RECIPIENTS}. Produced by a node with outdated code.",
-                        block_height,
-                        unique.len()
-                    ));
-                }
-            }
+            // (recipient check enforced inside validate_block for all paths)
 
             // Full validation before accepting
             self.validate_block(&block, Some(expected_prev_hash))?;
@@ -9482,29 +9494,7 @@ impl Blockchain {
             // REWARD-HIJACK GUARD: enforce ≥3 unique recipients on every reorg block
             // from height 1 upward.  The normal guard lives in add_block_with_fork_handling
             // which is bypassed during reorgs; we must duplicate it here.
-            if block_height >= 1 {
-                const MIN_REORG_RECIPIENTS: usize = 3;
-                let unique: std::collections::HashSet<&str> = block
-                    .masternode_rewards
-                    .iter()
-                    .map(|(a, _)| a.as_str())
-                    .collect();
-                if unique.len() < MIN_REORG_RECIPIENTS {
-                    tracing::warn!(
-                        "🛡️ Reorg block {} rejected: only {} unique reward recipient(s), need ≥{} \
-                         (possible reward-hijacking / outdated node)",
-                        block_height,
-                        unique.len(),
-                        MIN_REORG_RECIPIENTS
-                    );
-                    return Err(format!(
-                        "Block {} rejected: only {} unique reward recipient(s), need \
-                         ≥{MIN_REORG_RECIPIENTS}. Produced by a node with outdated code.",
-                        block_height,
-                        unique.len()
-                    ));
-                }
-            }
+            // Paid-recipients check is enforced inside validate_block().
 
             self.add_block(block.clone())
                 .await
