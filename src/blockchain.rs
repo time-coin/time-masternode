@@ -824,6 +824,47 @@ impl Blockchain {
         Ok(false) // No fix needed
     }
 
+    /// Store the hardcoded genesis block for the current network.
+    /// Called during initialization when no valid genesis exists.
+    fn store_hardcoded_genesis(&self) -> Result<(), String> {
+        use crate::block::genesis::GenesisBlock;
+        let genesis = match self.network_type {
+            NetworkType::Testnet => GenesisBlock::testnet_genesis(),
+            NetworkType::Mainnet => GenesisBlock::mainnet_genesis(),
+        };
+        let genesis_hash = genesis.hash();
+        let genesis_bytes = bincode::serialize(&genesis)
+            .map_err(|e| format!("Failed to serialize hardcoded genesis: {}", e))?;
+        self.storage
+            .insert("block_0".as_bytes(), genesis_bytes)
+            .map_err(|e| format!("Failed to store hardcoded genesis: {}", e))?;
+        self.storage
+            .insert(genesis_hash.as_slice(), &0u64.to_be_bytes())
+            .map_err(|e| format!("Failed to index hardcoded genesis: {}", e))?;
+        let height_bytes = bincode::serialize(&0u64).map_err(|e| e.to_string())?;
+        self.storage
+            .insert("chain_height".as_bytes(), height_bytes)
+            .map_err(|e| format!("Failed to save chain_height: {}", e))?;
+        self.storage
+            .flush()
+            .map_err(|e| format!("Failed to flush hardcoded genesis: {}", e))?;
+        self.current_height.store(0, Ordering::Release);
+        // For mainnet: full block reward goes to treasury (no masternode rewards at genesis)
+        if matches!(self.network_type, NetworkType::Mainnet) {
+            self.treasury_deposit(genesis.header.block_reward);
+            tracing::info!(
+                "🏦 Deposited {} TIME to treasury from genesis block reward",
+                genesis.header.block_reward / 100_000_000
+            );
+        }
+        tracing::info!(
+            "🎉 Hardcoded {:?} genesis stored: {}",
+            self.network_type,
+            hex::encode(&genesis_hash[..8])
+        );
+        Ok(())
+    }
+
     /// Initialize blockchain - verify local chain or generate genesis dynamically
     pub async fn initialize_genesis(&self) -> Result<(), String> {
         use crate::block::genesis::GenesisBlock;
@@ -840,7 +881,7 @@ impl Blockchain {
                     .and_then(|_| GenesisBlock::verify_checkpoint(&genesis, self.network_type))
                 {
                     tracing::error!(
-                        "❌ Local genesis block is invalid: {} - will regenerate dynamically",
+                        "❌ Local genesis block is invalid: {} — replacing with hardcoded genesis",
                         e
                     );
                     tracing::error!("🚨 WARNING: This will DELETE all {} blocks!", height);
@@ -849,8 +890,8 @@ impl Blockchain {
                     self.clear_all_blocks().await;
                     self.current_height.store(0, Ordering::Release);
 
-                    // Genesis will be generated dynamically when masternodes register
-                    return Ok(());
+                    // Store hardcoded genesis so we have a consistent base
+                    return self.store_hardcoded_genesis();
                 }
                 tracing::info!("✅ Genesis block structure valid");
             } else {
@@ -903,7 +944,7 @@ impl Blockchain {
                     .and_then(|_| GenesisBlock::verify_checkpoint(&genesis, self.network_type))
                 {
                     tracing::error!(
-                        "❌ Local genesis is invalid: {} - will regenerate dynamically",
+                        "❌ Local genesis is invalid: {} — replacing with hardcoded genesis",
                         e
                     );
 
@@ -912,7 +953,9 @@ impl Blockchain {
                     let _ = self.storage.remove(genesis.hash().as_slice());
                     let _ = self.storage.flush();
                     self.current_height.store(0, Ordering::Release);
-                    return Ok(());
+
+                    // Store hardcoded genesis so we have a consistent base
+                    return self.store_hardcoded_genesis();
                 }
             }
             self.current_height.store(0, Ordering::Release);
@@ -920,43 +963,9 @@ impl Blockchain {
             return Ok(());
         }
 
-        // No local blockchain - on testnet use hardcoded genesis; on mainnet wait for masternodes
-        match self.network_type {
-            NetworkType::Testnet if crate::constants::genesis::TESTNET_GENESIS_HASH.is_some() => {
-                tracing::info!(
-                    "📋 No genesis found — creating from hardcoded testnet genesis data"
-                );
-                let genesis = GenesisBlock::testnet_genesis();
-                GenesisBlock::verify_checkpoint(&genesis, self.network_type)?;
-
-                let genesis_hash = genesis.hash();
-                let genesis_bytes = bincode::serialize(&genesis)
-                    .map_err(|e| format!("Failed to serialize hardcoded genesis: {}", e))?;
-                self.storage
-                    .insert("block_0".as_bytes(), genesis_bytes)
-                    .map_err(|e| format!("Failed to store hardcoded genesis: {}", e))?;
-                self.storage
-                    .insert(genesis_hash.as_slice(), &0u64.to_be_bytes())
-                    .map_err(|e| format!("Failed to index hardcoded genesis: {}", e))?;
-                let height_bytes = bincode::serialize(&0u64).map_err(|e| e.to_string())?;
-                self.storage
-                    .insert("chain_height".as_bytes(), height_bytes)
-                    .map_err(|e| format!("Failed to save chain_height: {}", e))?;
-                self.storage
-                    .flush()
-                    .map_err(|e| format!("Failed to flush hardcoded genesis: {}", e))?;
-                self.current_height.store(0, Ordering::Release);
-                tracing::info!(
-                    "🎉 Hardcoded testnet genesis stored: {}",
-                    hex::encode(&genesis_hash[..8])
-                );
-            }
-            _ => {
-                tracing::info!(
-                    "📋 No genesis block found — will be generated dynamically when masternodes register"
-                );
-            }
-        }
+        // No local blockchain — store hardcoded genesis for both networks
+        tracing::info!("📋 No genesis found — creating from hardcoded {:?} genesis data", self.network_type);
+        self.store_hardcoded_genesis()?;
         Ok(())
     }
 
@@ -7191,11 +7200,15 @@ impl Blockchain {
             // locking every later node out of their share.  We enforce the same floor
             // here that generate_dynamic_genesis() enforces on production.
             //
+            // Exception: a treasury-only genesis (empty masternode_rewards) is the
+            // hardcoded genesis format — the full reward goes to the treasury pool and
+            // block 1 is where masternodes first receive rewards.  This is valid.
+            //
             // We check BOTH the header tier count AND the actual reward recipients.
             // The rewards list is the ground-truth participant set — a genesis with
             // only one reward address is a single-node capture regardless of what
             // the tier header claims.
-            {
+            if !block.masternode_rewards.is_empty() {
                 const MIN_GENESIS_MASTERNODES: u32 = 3;
                 let mn_count = block.header.masternode_tiers.total();
                 let reward_count = block.masternode_rewards.len() as u32;

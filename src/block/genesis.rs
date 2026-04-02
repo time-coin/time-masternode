@@ -66,7 +66,7 @@ impl GenesisBlock {
     pub fn genesis_timestamp(network: NetworkType) -> i64 {
         match network {
             NetworkType::Testnet => 1764547200, // 2025-12-01T00:00:00Z - FIXED for determinism
-            NetworkType::Mainnet => 1775001601, // 2026-04-01T00:00:01Z - network reset (v1.4.5)
+            NetworkType::Mainnet => 1775001600, // 2026-04-01T00:00:00Z - FIXED for determinism
         }
     }
 
@@ -169,6 +169,47 @@ impl GenesisBlock {
                 ("165.232.154.150".to_string(), 10_000_000_000),
                 ("69.167.168.176".to_string(), 0),
             ],
+            time_attestations: vec![],
+            consensus_participants_bitmap: vec![],
+            liveness_recovery: Some(false),
+        }
+    }
+
+    /// Returns the hardcoded mainnet genesis block.
+    ///
+    /// The full 100 TIME block reward goes to the treasury pool — no masternode
+    /// rewards at genesis.  Block 1 is the first block with masternode reward
+    /// distribution; nodes have ~10 minutes (one block interval) to connect
+    /// before block 1 is eligible to be produced.
+    ///
+    /// timestamp: 1775001600 = 2026-04-01T00:00:00Z
+    pub fn mainnet_genesis() -> Block {
+        Block {
+            header: BlockHeader {
+                version: 1,
+                height: 0,
+                timestamp: 1775001600, // 2026-04-01T00:00:00Z
+                previous_hash: [0u8; 32],
+                merkle_root: [0u8; 32],
+                leader: "".to_string(),
+                attestation_root: [0u8; 32],
+                masternode_tiers: MasternodeTierCounts {
+                    free: 0,
+                    bronze: 0,
+                    silver: 0,
+                    gold: 0,
+                },
+                block_reward: 10_000_000_000, // 100 TIME → treasury pool
+                total_fees: 0,
+                active_masternodes_bitmap: vec![],
+                liveness_recovery: Some(false),
+                vrf_output: [0u8; 32],
+                vrf_proof: vec![],
+                vrf_score: 0,
+                producer_signature: vec![],
+            },
+            transactions: vec![],
+            masternode_rewards: vec![], // full reward to treasury pool; no masternode distribution
             time_attestations: vec![],
             consensus_participants_bitmap: vec![],
             liveness_recovery: Some(false),
@@ -304,5 +345,20 @@ mod tests {
         );
         assert!(GenesisBlock::verify_structure(&genesis).is_ok());
         assert!(GenesisBlock::verify_checkpoint(&genesis, crate::NetworkType::Testnet).is_ok());
+    }
+
+    #[test]
+    fn test_mainnet_genesis_hash() {
+        let genesis = GenesisBlock::mainnet_genesis();
+        let hash = hex::encode(genesis.hash());
+        assert_eq!(
+            hash, "84ef74a8860ef3540e52b2bc30f74c6b0cd22a3822286e4ec4fcaf1e3c60c0d1",
+            "Hardcoded mainnet genesis must produce the canonical checkpoint hash"
+        );
+        assert!(GenesisBlock::verify_structure(&genesis).is_ok());
+        assert!(GenesisBlock::verify_rewards(&genesis).is_ok());
+        assert_eq!(genesis.header.timestamp, 1775001600);
+        assert!(genesis.masternode_rewards.is_empty(), "Mainnet genesis must have no masternode rewards");
+        assert!(GenesisBlock::verify_checkpoint(&genesis, crate::NetworkType::Mainnet).is_ok());
     }
 }

@@ -10,8 +10,10 @@ pub mod genesis {
     pub const TESTNET_GENESIS_HASH: Option<&str> =
         Some("866273966c0f380e3f71360d4cd59933f2e8c936b02f4c2774b9fd0e913f0ebb");
 
-    /// Mainnet genesis block hash (set before mainnet launch)
-    pub const MAINNET_GENESIS_HASH: Option<&str> = None;
+    /// Mainnet genesis block hash — treasury-only genesis (v1.4.9)
+    /// 100 TIME → treasury pool; masternodes first rewarded in block 1
+    pub const MAINNET_GENESIS_HASH: Option<&str> =
+        Some("84ef74a8860ef3540e52b2bc30f74c6b0cd22a3822286e4ec4fcaf1e3c60c0d1");
 }
 
 /// Blockchain protocol constants
