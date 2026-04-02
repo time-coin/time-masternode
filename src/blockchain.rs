@@ -6535,6 +6535,31 @@ impl Blockchain {
             ));
         }
 
+        // REWARD-HIJACK GUARD: refuse to vote for proposals with fewer than 3
+        // unique addresses receiving a POSITIVE payout.  Checking here (before
+        // voting) is critical — a proposal that passes the vote but is then
+        // rejected by add_block() leaves all honest nodes permanently stuck at
+        // height 0, unable to advance.
+        if block.header.height >= 1 {
+            const MIN_PAID_RECIPIENTS: usize = 3;
+            let paid: std::collections::HashSet<&str> = block
+                .masternode_rewards
+                .iter()
+                .filter(|(_, amt)| *amt > 0)
+                .map(|(a, _)| a.as_str())
+                .collect();
+            if paid.len() < MIN_PAID_RECIPIENTS {
+                if !producer_addr.is_empty() {
+                    self.record_reward_violation(producer_addr).await;
+                }
+                return Err(format!(
+                    "Proposal rejected: block {} has only {} paid recipient(s), need ≥{}. \
+                     Not voting for reward-hijack proposal.",
+                    block.header.height, paid.len(), MIN_PAID_RECIPIENTS
+                ));
+            }
+        }
+
         // Run the pool distribution check with 0 fees as a baseline.
         // If the check fails, record a violation and reject.
         if let Err(e) = self.validate_pool_distribution(block, 0).await {
