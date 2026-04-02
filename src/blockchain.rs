@@ -1283,6 +1283,115 @@ impl Blockchain {
         Ok(())
     }
 
+    /// Replace our genesis block with a peer's genesis if its hash is lower (convergence rule).
+    ///
+    /// During the genesis election window (while height == 0 and no blocks have been built on
+    /// top of genesis), nodes gossip their candidate genesis blocks.  Whichever candidate has
+    /// the lexicographically-lowest SHA-256 hash wins — all nodes converge on the same block
+    /// regardless of which masternodes each of them saw when they first produced their own
+    /// candidate.
+    ///
+    /// Returns Ok(true) if the genesis was replaced, Ok(false) if ours is already ≤ theirs.
+    pub async fn replace_genesis_if_lower(&self, candidate: Block) -> Result<bool, String> {
+        use crate::block::genesis::GenesisBlock;
+
+        // Only operates at height 0 (no blocks built on genesis yet)
+        if self.current_height.load(Ordering::Acquire) > 0 {
+            return Ok(false);
+        }
+
+        // Basic structural validation
+        GenesisBlock::verify_structure(&candidate)
+            .map_err(|e| format!("Candidate genesis structure invalid: {}", e))?;
+        GenesisBlock::verify_timestamp(&candidate, self.network_type)
+            .map_err(|e| format!("Candidate genesis timestamp invalid: {}", e))?;
+
+        // ≥3 unique reward recipients (same rule as block 1+)
+        let unique_recipients: std::collections::HashSet<&str> = candidate
+            .masternode_rewards
+            .iter()
+            .map(|(a, _)| a.as_str())
+            .collect();
+        if unique_recipients.len() < 3 {
+            return Err(format!(
+                "Candidate genesis has only {} unique reward recipient(s), need ≥3",
+                unique_recipients.len()
+            ));
+        }
+
+        let candidate_hash = candidate.hash();
+
+        // Get our current genesis hash (if any)
+        let our_hash = match self.get_block_by_height(0).await {
+            Ok(ours) => ours.hash(),
+            Err(_) => {
+                // We don't have a genesis yet — just store theirs via the normal path
+                return Ok(false);
+            }
+        };
+
+        // If our hash is already lower-or-equal, keep ours
+        if our_hash <= candidate_hash {
+            return Ok(false);
+        }
+
+        // Candidate has a lower hash — replace
+        tracing::info!(
+            "🔀 Genesis convergence: replacing our genesis {} with lower-hash {} from peer",
+            hex::encode(&our_hash[..8]),
+            hex::encode(&candidate_hash[..8])
+        );
+
+        // Remove old genesis from storage
+        let _ = self.storage.remove("block_0".as_bytes());
+        let _ = self.storage.remove(our_hash.as_slice());
+        // Clear UTXOs (old genesis rewards are now invalid)
+        if let Err(e) = self.utxo_manager.clear_all().await {
+            tracing::warn!("⚠️ Failed to clear UTXOs during genesis replacement: {:?}", e);
+        }
+
+        // Store new genesis
+        let genesis_bytes = bincode::serialize(&candidate)
+            .map_err(|e| format!("Failed to serialize candidate genesis: {}", e))?;
+        self.storage
+            .insert("block_0".as_bytes(), genesis_bytes)
+            .map_err(|e| format!("Failed to store candidate genesis: {}", e))?;
+        self.storage
+            .insert(candidate_hash.as_slice(), &0u64.to_be_bytes())
+            .map_err(|e| format!("Failed to index candidate genesis: {}", e))?;
+
+        let height_bytes = bincode::serialize(&0u64).map_err(|e| e.to_string())?;
+        self.storage
+            .insert("chain_height".as_bytes(), height_bytes)
+            .map_err(|e| format!("Failed to save chain_height after genesis replacement: {}", e))?;
+        self.storage
+            .flush()
+            .map_err(|e| format!("Failed to flush genesis replacement: {}", e))?;
+
+        // Recreate UTXOs for new genesis rewards
+        for (vout, (address, amount)) in candidate.masternode_rewards.iter().enumerate() {
+            if *amount == 0 || address.is_empty() {
+                continue;
+            }
+            let utxo = UTXO {
+                outpoint: OutPoint {
+                    txid: candidate_hash,
+                    vout: vout as u32,
+                },
+                value: *amount,
+                script_pubkey: address.as_bytes().to_vec(),
+                address: address.clone(),
+            };
+            let _ = self.utxo_manager.add_utxo(utxo).await;
+        }
+
+        tracing::info!(
+            "✅ Genesis replaced: new canonical genesis is {}",
+            hex::encode(&candidate_hash[..8])
+        );
+        Ok(true)
+    }
+
     /// Verify chain integrity, find missing blocks
     /// Returns a list of missing block heights that need to be downloaded
     pub async fn verify_chain_integrity(&self) -> Vec<u64> {

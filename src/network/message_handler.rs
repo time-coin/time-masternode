@@ -2251,6 +2251,24 @@ impl MessageHandler {
             // Mark peer as genesis-compatible by resetting any fork errors
             context.peer_registry.reset_fork_errors(&self.peer_ip);
         } else {
+            let our_height = context.blockchain.get_height();
+
+            if our_height == 0 {
+                // Still at genesis height — genesis convergence is still possible.
+                // Request the peer's genesis block so we can compare hashes and keep
+                // whichever is lower (deterministic tie-break; see replace_genesis_if_lower).
+                info!(
+                    "🔀 [{}] Genesis hash differs from peer {} at height 0 — requesting \
+                     their genesis for convergence (ours: {}, theirs: {})",
+                    self.direction,
+                    self.peer_ip,
+                    hex::encode(&our_genesis_hash[..8]),
+                    hex::encode(&peer_genesis_hash[..8])
+                );
+                return Ok(Some(crate::network::message::NetworkMessage::RequestGenesis));
+            }
+
+            // height > 0: we have blocks built on our genesis and are fully committed to it.
             warn!(
                 "🚫 [{}] Genesis hash MISMATCH with peer {} - INCOMPATIBLE!",
                 self.direction, self.peer_ip
@@ -2339,19 +2357,51 @@ impl MessageHandler {
             return Ok(None);
         }
 
-        // Check if we already have genesis
-        if context.blockchain.get_block_by_height(0).await.is_ok() {
-            debug!(
-                "⏭️ [{}] Ignoring genesis announcement (already have genesis) from {}",
-                self.direction, self.peer_ip
-            );
-            return Ok(None);
-        }
-
         info!(
             "📦 [{}] Received genesis announcement from {}",
             self.direction, self.peer_ip
         );
+
+        // Check if we already have genesis
+        if context.blockchain.get_block_by_height(0).await.is_ok() {
+            let our_height = context.blockchain.get_height();
+
+            if our_height > 0 {
+                // We've built blocks on our genesis — we're committed.
+                debug!(
+                    "⏭️ [{}] Ignoring genesis announcement (chain at height {}) from {}",
+                    self.direction, our_height, self.peer_ip
+                );
+                return Ok(None);
+            }
+
+            // height == 0: still in genesis election window.
+            // Try to converge: replace ours if their hash is lower.
+            match context.blockchain.replace_genesis_if_lower(block.clone()).await {
+                Ok(true) => {
+                    info!(
+                        "🔀 [{}] Genesis replaced with lower-hash from {} — broadcasting",
+                        self.direction, self.peer_ip
+                    );
+                    if let Some(broadcast_tx) = &context.broadcast_tx {
+                        let _ = broadcast_tx.send(NetworkMessage::GenesisAnnouncement(block));
+                    }
+                }
+                Ok(false) => {
+                    debug!(
+                        "⏭️ [{}] Kept our genesis (already lower-or-equal hash) — ignoring peer {}",
+                        self.direction, self.peer_ip
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️ [{}] Candidate genesis from {} rejected: {}",
+                        self.direction, self.peer_ip, e
+                    );
+                }
+            }
+            return Ok(None);
+        }
 
         // Verify basic genesis structure
         use crate::block::genesis::GenesisBlock;
