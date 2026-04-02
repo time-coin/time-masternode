@@ -102,6 +102,10 @@ pub struct PeerConnectionRegistry {
     // Peers currently undergoing genesis verification.
     // Prevents multiple concurrent GetBlockHash(0) requests to the same peer.
     pending_genesis_checks: Arc<dashmap::DashSet<String>>,
+    // Tracks when we last attempted a genesis check for each peer (IP → Instant).
+    // After a timeout we don't retry for GENESIS_CHECK_COOLDOWN_SECS to avoid
+    // permanently flooding old-code nodes that never respond to GetBlockHash(0).
+    genesis_check_last_attempt: Arc<dashmap::DashMap<String, std::time::Instant>>,
 }
 
 fn extract_ip(addr: &str) -> &str {
@@ -141,6 +145,7 @@ impl PeerConnectionRegistry {
             peer_load: DashMap::new(),
             genesis_confirmed_peers: Arc::new(RwLock::new(HashSet::new())),
             pending_genesis_checks: Arc::new(dashmap::DashSet::new()),
+            genesis_check_last_attempt: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -435,17 +440,34 @@ impl PeerConnectionRegistry {
     }
 
     /// Attempt to claim a genesis verification slot for this peer.
-    /// Returns true if the caller should proceed with verification (slot was free).
-    /// Returns false if another task is already verifying this peer (skip to avoid flooding).
+    /// Returns true if the caller should proceed with verification (slot was free and not in
+    /// cooldown). Returns false if another task is already running or the peer was recently
+    /// checked and timed out (prevents permanent flooding of old-code nodes).
     pub fn claim_genesis_check(&self, peer_ip: &str) -> bool {
+        const GENESIS_CHECK_COOLDOWN_SECS: u64 = 300; // 5 minutes between retries after timeout
         let ip_only = extract_ip(peer_ip);
+        // Enforce cooldown: skip if we already tried and the peer didn't respond
+        if let Some(last) = self.genesis_check_last_attempt.get(ip_only) {
+            if last.elapsed().as_secs() < GENESIS_CHECK_COOLDOWN_SECS {
+                return false;
+            }
+        }
         self.pending_genesis_checks.insert(ip_only.to_string())
     }
 
     /// Release the genesis verification slot for this peer (call when verification completes).
+    /// Records the attempt timestamp so cooldown applies on timeout/failure.
     pub fn release_genesis_check(&self, peer_ip: &str) {
         let ip_only = extract_ip(peer_ip);
         self.pending_genesis_checks.remove(ip_only);
+        self.genesis_check_last_attempt
+            .insert(ip_only.to_string(), std::time::Instant::now());
+    }
+
+    /// Clear the genesis check cooldown for a peer (called when peer reconnects or is confirmed).
+    pub fn clear_genesis_check_cooldown(&self, peer_ip: &str) {
+        let ip_only = extract_ip(peer_ip);
+        self.genesis_check_last_attempt.remove(ip_only);
     }
 
     /// Reset fork error count for a peer (called when blocks are successfully added)
@@ -1066,6 +1088,8 @@ impl PeerConnectionRegistry {
         pings.remove(peer_ip);
         // Remove genesis confirmation so reconnecting peer is re-verified
         self.genesis_confirmed_peers.write().await.remove(&ip_only);
+        // Clear cooldown on disconnect so the peer gets a fresh check on reconnect
+        self.clear_genesis_check_cooldown(&ip_only);
         tracing::debug!(
             "🧹 Cleared stale chain tip data for disconnected peer {}",
             peer_ip
