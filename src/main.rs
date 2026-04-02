@@ -2448,6 +2448,7 @@ async fn main() {
                     let unique_recipients: std::collections::HashSet<&str> = block1
                         .masternode_rewards
                         .iter()
+                        .filter(|(_, amt)| *amt > 0)
                         .map(|(addr, _)| addr.as_str())
                         .collect();
                     if unique_recipients.len() < 3 {
