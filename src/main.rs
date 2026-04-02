@@ -3598,10 +3598,23 @@ async fn main() {
                                 // (prepare_weight >= 1), so require weight > 1 for networks
                                 // with more than 2 validators. This prevents solo block
                                 // production when no other node has confirmed the block.
+                                //
+                                // EXTENDED DEADLOCK OVERRIDE: after 15+ consecutive consensus
+                                // timeouts (~150s) with no external votes, the other validators
+                                // are likely offline or running old code that doesn't participate
+                                // in BFT voting. At that point treat effective_validator_count as
+                                // ≤2 so solo fallback is allowed.  This preserves safety for
+                                // normal operation while restoring liveness when the voting
+                                // quorum is permanently unavailable.
+                                let effective_validator_count = if leader_attempt >= 15 {
+                                    validator_count.min(2)
+                                } else {
+                                    validator_count
+                                };
                                 let min_weight_for_fallback: u64 =
-                                    if validator_count <= 2 { 0 } else { 2 };
+                                    if effective_validator_count <= 2 { 0 } else { 2 };
                                 let should_fallback = prepare_weight >= min_weight_for_fallback
-                                    && (prepare_weight > 1 || validator_count <= 2);
+                                    && (prepare_weight > 1 || effective_validator_count <= 2);
 
                                 if should_fallback {
                                     tracing::warn!(
