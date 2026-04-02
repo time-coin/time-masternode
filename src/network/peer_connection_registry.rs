@@ -378,29 +378,31 @@ impl PeerConnectionRegistry {
                 hash: None,
             }) => {
                 tracing::warn!(
-                    "⚠️ Peer {} has no genesis block - skipping compatibility check",
+                    "🚫 Peer {} has no genesis block - treating as incompatible",
                     ip_only
                 );
-                // Can't verify, assume compatible for now
-                true
+                // Peer has no genesis — cannot be on our chain; exclude from fork resolution
+                false
             }
             Ok(other) => {
                 tracing::warn!(
-                    "⚠️ Unexpected response from {} for genesis hash: {:?}",
+                    "⚠️ Unexpected response from {} for genesis hash: {:?} - treating as incompatible",
                     ip_only,
                     other.message_type()
                 );
-                // Can't verify, assume compatible for now
-                true
+                // Unexpected response — cannot confirm compatibility; exclude from fork resolution
+                false
             }
             Err(e) => {
                 tracing::warn!(
-                    "⚠️ Failed to get genesis hash from {}: {} - assuming compatible",
+                    "🚫 Failed to get genesis hash from {}: {} - treating as incompatible",
                     ip_only,
                     e
                 );
-                // Can't verify, assume compatible for now
-                true
+                // Timeout or channel error — cannot confirm compatibility; exclude from fork resolution
+                // Do NOT assume compatible: an unresponsive peer on a different chain causes
+                // endless reorg loops (genesis mismatch detected only after downloading all blocks).
+                false
             }
         }
     }
