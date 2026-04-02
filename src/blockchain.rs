@@ -9538,24 +9538,31 @@ impl Blockchain {
             const MIN_PREFLIGHT_RECIPIENTS: usize = 3;
             for blk in alternate_blocks.iter() {
                 if blk.header.height >= 1 {
-                    let unique: std::collections::HashSet<&str> = blk
+                    // CRITICAL: filter amt > 0 so zero-amount padding entries don't count.
+                    // An attacker can send [(attacker, 95T), (dummy1, 0), (dummy2, 0)] to pass
+                    // a naive unique-address count while routing the full reward to one address.
+                    // Without this filter the pre-flight passes, rollback fires, then add_block
+                    // rejects it — leaving the node stranded at the ancestor height.
+                    let paid: std::collections::HashSet<&str> = blk
                         .masternode_rewards
                         .iter()
+                        .filter(|(_, amt)| *amt > 0)
                         .map(|(a, _)| a.as_str())
                         .collect();
-                    if unique.len() < MIN_PREFLIGHT_RECIPIENTS {
+                    if paid.len() < MIN_PREFLIGHT_RECIPIENTS {
                         tracing::warn!(
-                            "🛡️ Reorg pre-flight: block {} has only {} unique reward recipient(s), \
-                             need ≥{} — aborting reorg without touching current chain",
+                            "🛡️ Reorg pre-flight: block {} has only {} paid reward recipient(s) \
+                             (need ≥{}) — zero-amount padding detected, aborting reorg without \
+                             touching current chain",
                             blk.header.height,
-                            unique.len(),
+                            paid.len(),
                             MIN_PREFLIGHT_RECIPIENTS
                         );
                         return Err(format!(
                             "Block {} rejected: only {} unique reward recipient(s), need \
-                             ≥{MIN_PREFLIGHT_RECIPIENTS}. Produced by a node with outdated code.",
+                             ≥{MIN_PREFLIGHT_RECIPIENTS}. Zero-amount padding does not count.",
                             blk.header.height,
-                            unique.len()
+                            paid.len()
                         ));
                     }
                 }
