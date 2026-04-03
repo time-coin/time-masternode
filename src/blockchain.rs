@@ -225,6 +225,12 @@ pub struct Blockchain {
     /// This implements BFT-style finality: confirmed blocks are irreversible.
     /// Reset to 0 by revert_to_after_genesis(); advanced by add_block().
     last_locally_confirmed_height: Arc<AtomicU64>,
+    /// Tracks when the finality lock first started blocking a specific reorg attempt.
+    /// Stores `(common_ancestor_height, when_first_blocked)`.
+    /// After FINALITY_LOCK_ESCAPE_SECS, the peer threshold is lowered so a node
+    /// stuck on a minority fork can escape even when peer counts are low.
+    #[allow(clippy::type_complexity)]
+    finality_lock_blocked_since: Arc<RwLock<Option<(u64, std::time::Instant)>>>,
 }
 
 impl Blockchain {
@@ -337,6 +343,7 @@ impl Blockchain {
             pending_sync_blocks: Arc::new(RwLock::new(BTreeMap::new())),
             blacklist: Arc::new(RwLock::new(None)),
             last_locally_confirmed_height: Arc::new(AtomicU64::new(loaded_height)),
+            finality_lock_blocked_since: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -9469,82 +9476,122 @@ impl Blockchain {
                     );
 
                     // MINORITY FORK RECOVERY: If the finality lock would block this
-                    // reorg and a supermajority of connected peers support the
-                    // alternative chain, the node is provably on a minority fork
-                    // (e.g. caused by BFT voting during a period of degraded
-                    // connectivity). Auto-lower the finality lock to the common
-                    // ancestor so the reorg can proceed.
+                    // reorg and enough peers-ahead-of-us support the alternative
+                    // chain, the node is provably on a minority fork (e.g. caused
+                    // by BFT voting during degraded connectivity).
+                    // Auto-lower the finality lock to the common ancestor.
                     //
-                    // Requirements (conservative thresholds):
-                    //  • common_ancestor < last_confirmed (lock would fire)
-                    //  • ≥ MIN_PEERS_FINALITY_OVERRIDE distinct peers support
-                    //    the alternative tip
-                    //  • supporting peers > 50 % of all peers whose tips are known
+                    // Peer counting: only peers with tip_h > our_height are counted.
+                    // Peers at our height cannot tell us which chain is canonical —
+                    // they may also be stuck on the same minority fork.
                     //
-                    // This is safe because:
-                    //  1. We already validated the entire block chain above.
-                    //  2. The supermajority requirement matches BFT safety margins.
-                    //  3. The finality lock only protected blocks produced during
-                    //     the minority period — those blocks are now provably wrong.
+                    // Two override paths:
+                    //  A) Normal supermajority: ≥ MIN_PEERS_FINALITY_OVERRIDE ahead
+                    //     peers AND > 50 % of ahead peers support the alternative tip.
+                    //  B) Escape hatch: finality lock has been blocking the SAME
+                    //     common ancestor for ≥ FINALITY_LOCK_ESCAPE_SECS seconds
+                    //     AND ≥ MIN_PEERS_FINALITY_ESCAPE ahead peers are visible.
+                    //     Prevents an infinite resolution loop when few peers report
+                    //     their tips (e.g. only 7/24 responding) yet the peer chain
+                    //     is clearly longer and fully validated.
                     {
                         const MIN_PEERS_FINALITY_OVERRIDE: usize = 5;
+                        const FINALITY_LOCK_ESCAPE_SECS: u64 = 300; // 5 minutes
+                        const MIN_PEERS_FINALITY_ESCAPE: usize = 2;
                         let last_confirmed =
                             self.last_locally_confirmed_height.load(Ordering::Acquire);
 
                         if common_ancestor < last_confirmed {
-                            // Check if a supermajority of peers support this chain.
+                            // Count only peers whose tip is strictly above our height.
                             let peer_registry_guard = self.peer_registry.read().await;
                             let should_override = if let Some(registry) =
                                 peer_registry_guard.as_ref()
                             {
                                 let compatible_peers = registry.get_compatible_peers().await;
                                 let mut supporting = 0usize;
-                                let mut total = 0usize;
+                                let mut total_ahead = 0usize;
                                 for pip in &compatible_peers {
-                                    if let Some((tip_h, tip_hash)) =
+                                    if let Some((tip_h, _)) =
                                         registry.get_peer_chain_tip(pip).await
                                     {
-                                        total += 1;
-                                        // A peer "supports" the alternative chain if it
-                                        // reports exactly the same tip OR a strictly longer
-                                        // chain (meaning it's ahead of us on the same fork).
-                                        if (tip_h == peer_tip_height && tip_hash == peer_tip_hash)
-                                            || tip_h > our_height
-                                        {
+                                        if tip_h > our_height {
+                                            total_ahead += 1;
                                             supporting += 1;
                                         }
                                     }
                                 }
-                                let supermajority = total > 0
-                                    && supporting >= MIN_PEERS_FINALITY_OVERRIDE
-                                    && supporting * 2 > total;
 
-                                if supermajority {
+                                // How long has the finality lock been blocking this exact ancestor?
+                                let blocked_secs = {
+                                    let guard = self.finality_lock_blocked_since.read().await;
+                                    guard
+                                        .as_ref()
+                                        .filter(|(a, _)| *a == common_ancestor)
+                                        .map(|(_, t)| t.elapsed().as_secs())
+                                        .unwrap_or(0)
+                                };
+
+                                let normal_override = total_ahead > 0
+                                    && supporting >= MIN_PEERS_FINALITY_OVERRIDE
+                                    && supporting * 2 > total_ahead;
+
+                                let escape_override = blocked_secs >= FINALITY_LOCK_ESCAPE_SECS
+                                    && supporting >= MIN_PEERS_FINALITY_ESCAPE
+                                    && total_ahead > 0;
+
+                                if normal_override {
                                     warn!(
-                                        "⚠️  MINORITY FORK DETECTED: {}/{} peers support alternative \
-                                         chain (ancestor {} < confirmed {}). \
+                                        "⚠️  MINORITY FORK DETECTED: {}/{} ahead peers support \
+                                         alternative chain (ancestor {} < confirmed {}). \
                                          Auto-resetting finality lock to {} to rejoin canonical chain.",
-                                        supporting,
-                                        total,
-                                        common_ancestor,
-                                        last_confirmed,
-                                        common_ancestor
+                                        supporting, total_ahead,
+                                        common_ancestor, last_confirmed, common_ancestor
+                                    );
+                                } else if escape_override {
+                                    warn!(
+                                        "⚠️  FINALITY LOCK ESCAPE: Stuck on ancestor {} for {}s. \
+                                         {}/{} ahead peers support alternative chain (escape threshold). \
+                                         Auto-resetting finality lock to {} to rejoin canonical chain.",
+                                        common_ancestor, blocked_secs,
+                                        supporting, total_ahead, common_ancestor
                                     );
                                 }
-                                supermajority
+                                normal_override || escape_override
                             } else {
                                 false
                             };
                             drop(peer_registry_guard);
 
                             if should_override {
+                                // Clear escape timer — reorg is now proceeding.
+                                *self.finality_lock_blocked_since.write().await = None;
                                 self.last_locally_confirmed_height
                                     .store(common_ancestor, Ordering::Release);
                             } else if common_ancestor < last_confirmed {
-                                // Not enough peer support to override finality.
+                                // Not enough peer support yet. Record when we first got
+                                // blocked for this ancestor so the escape hatch can fire.
+                                {
+                                    let mut guard =
+                                        self.finality_lock_blocked_since.write().await;
+                                    match guard.as_ref() {
+                                        None => {
+                                            *guard = Some((
+                                                common_ancestor,
+                                                std::time::Instant::now(),
+                                            ));
+                                        }
+                                        Some((a, _)) if *a != common_ancestor => {
+                                            *guard = Some((
+                                                common_ancestor,
+                                                std::time::Instant::now(),
+                                            ));
+                                        }
+                                        _ => {} // Same ancestor — keep existing timer.
+                                    }
+                                }
                                 warn!(
                                     "🚫 Finality lock prevents reorg to ancestor {} (confirmed {}). \
-                                     Not enough peers ({} required) support the alternative chain.",
+                                     Not enough ahead peers ({} required) support the alternative chain.",
                                     common_ancestor, last_confirmed, MIN_PEERS_FINALITY_OVERRIDE
                                 );
                                 *self.fork_state.write().await = ForkResolutionState::None;
@@ -10258,6 +10305,7 @@ impl Clone for Blockchain {
             pending_sync_blocks: self.pending_sync_blocks.clone(),
             blacklist: self.blacklist.clone(),
             last_locally_confirmed_height: self.last_locally_confirmed_height.clone(),
+            finality_lock_blocked_since: self.finality_lock_blocked_since.clone(),
         }
     }
 }
